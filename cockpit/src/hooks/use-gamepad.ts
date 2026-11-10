@@ -231,10 +231,11 @@ export function usePadStatus(): PadStatus {
   };
 }
 
-/** The controller cell's words (spec `controls.pad.*`) and whether they read
- *  as good (true), bad (false) or neutral (null). */
+/** The controller cell's words (spec `controls.no_controller` with no pad,
+ *  else `controls.pad.*`) and whether they read as good (true), bad (false)
+ *  or neutral (null). */
 export function padStatusText(pad: PadStatus): { text: string; ok: boolean | null } {
-  if (!pad.connected) return { text: specText("controls.pad.none"), ok: null };
+  if (!pad.connected) return { text: specText("controls.no_controller"), ok: null };
   const battery = pad.batteryPct !== null ? ` ${Math.round(pad.batteryPct)}%` : "";
   if (pad.native) return { text: specText("controls.pad.native", { battery }), ok: true };
   return pad.standard

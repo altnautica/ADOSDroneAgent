@@ -1,13 +1,12 @@
 // Pure state mapping for the Feed's safety band: reach badge, arm state,
-// link, video, battery and the preflight checks the cockpit can evaluate.
-// Unknown is always a dash, never a fabricated value.
+// link, video and battery. The pre-flight checks live in the shared
+// `@/shared/hud/preflight`. Unknown is always a dash, never a fabricated value.
 
 import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
-import { batteryLowPct, batteryReading } from "@/shared/hud/battery";
+import { batteryReading } from "@/shared/hud/battery";
 import { DASH } from "@/shared/format";
 import type { AgentProfile } from "@/shared/use-profile";
 import type { VideoTransportSnapshot } from "@/shared/video-transport";
-import type { HomePoint } from "@/stores/flight-store";
 
 export type ReachBadge = "DIRECT" | "LAN" | "VIA GROUND";
 
@@ -64,30 +63,6 @@ export function batteryLabel(battery: BatteryHealth | null, t: VehicleState | nu
   return r.timeToReserveS !== null ? `${Math.round(r.pct)}% ${fmtClock(r.timeToReserveS)}` : `${Math.round(r.pct)}%`;
 }
 
-export interface PreflightCheck {
-  id: string;
-  label: string;
-  ok: boolean;
-}
-
-/** The preflight checks this cockpit can evaluate from what the agent
- *  reports. EKF health is not on the telemetry wire, so it is not listed. */
-export function preflightChecks(i: {
-  telemetry: VehicleState | null;
-  battery: BatteryHealth | null;
-  live: boolean;
-  home: HomePoint | null;
-}): PreflightCheck[] {
-  const fix = i.telemetry?.gps?.fix_type;
-  const reading = batteryReading(i.battery, i.telemetry);
-  const low = batteryLowPct(i.battery);
-  return [
-    { id: "link", label: "Vehicle link fresh", ok: i.live },
-    { id: "gps", label: "GPS fix 3D or better", ok: i.live && typeof fix === "number" && fix >= 3 },
-    { id: "battery", label: "Battery above the low band", ok: reading !== null && reading.pct > low },
-    { id: "home", label: "Home position set", ok: i.home !== null },
-  ];
-}
 
 /** Seconds since an ISO stamp, or null when absent or unparseable. */
 export function secondsSince(iso: string | null | undefined, nowMs: number): number | null {

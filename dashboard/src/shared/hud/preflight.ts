@@ -4,6 +4,7 @@
 // fault twice). EKF health is not on the telemetry wire, so it is not listed.
 
 import { batteryLowPct, batteryReading, type BatteryHealthInput, type FcBatteryInput } from "./battery";
+import { EKF_FLAG } from "./nav-source";
 
 export interface PreflightCheck {
   id: string;
@@ -11,13 +12,33 @@ export interface PreflightCheck {
   ok: boolean;
 }
 
+/** The telemetry fields the home check reads: the FC's HOME_POSITION and
+ *  the last EKF_STATUS_REPORT flags. */
+export interface HomeTelemetry {
+  home?: { lat_e7?: number | null; lon_e7?: number | null; local_ned?: unknown } | null;
+  ekf?: { flags?: number | null } | null;
+}
+
 export interface PreflightInputs {
-  telemetry: (FcBatteryInput & { gps?: { fix_type?: number | null } | null }) | null;
+  telemetry: (FcBatteryInput & HomeTelemetry & { gps?: { fix_type?: number | null } | null }) | null;
   battery: BatteryHealthInput | null;
   /** Vehicle telemetry is live (see `vehicle-live`). */
   live: boolean;
-  /** The home point, or null while none is known. */
-  home: object | null;
+}
+
+/** The flight controller has a home on the ground: it reported a
+ *  HOME_POSITION with a position, or its EKF has an absolute horizontal
+ *  position, which needs an EKF origin (the FC sets home from it). */
+export function fcHomeSet(t: HomeTelemetry | null | undefined): boolean {
+  const h = t?.home;
+  if (h && typeof h === "object") {
+    const lat = h.lat_e7;
+    const lon = h.lon_e7;
+    if (typeof lat === "number" && typeof lon === "number" && (lat !== 0 || lon !== 0)) return true;
+    if (Array.isArray(h.local_ned)) return true;
+  }
+  const flags = t?.ekf?.flags;
+  return typeof flags === "number" && (flags & EKF_FLAG.POS_H_ABS) !== 0;
 }
 
 /** The checks, in checklist order. */
@@ -29,7 +50,7 @@ export function preflightChecks(i: PreflightInputs): PreflightCheck[] {
     { id: "link", label: "Vehicle link fresh", ok: i.live },
     { id: "gps", label: "GPS fix 3D or better", ok: i.live && typeof fix === "number" && fix >= 3 },
     { id: "battery", label: "Battery above the low band", ok: reading !== null && reading.pct > low },
-    { id: "home", label: "Home position set", ok: i.home !== null },
+    { id: "home", label: "Home position set", ok: fcHomeSet(i.telemetry) },
   ];
 }
 

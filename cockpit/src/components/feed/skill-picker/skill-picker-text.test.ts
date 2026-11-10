@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import { padStatusText, type PadStatus } from "@/hooks/use-gamepad";
 import { PICKER_TABS } from "@/lib/skill-picker-model";
+import { specText } from "@/shared/hud/spec-text";
 
 const read = (rel: string) => readFileSync(path.resolve(__dirname, rel), "utf8");
 
@@ -27,8 +28,9 @@ describe("skill picker text", () => {
 describe("controller cell text", () => {
   const pad = (over: Partial<PadStatus>): PadStatus => ({ connected: true, name: null, standard: true, batteryPct: null, native: false, ...over });
 
-  it("reads the spec's controls.pad words", () => {
-    expect(padStatusText(pad({ connected: false }))).toEqual({ text: "No pad", ok: null });
+  it("reads the spec's controls.pad words, and controls.no_controller with no pad", () => {
+    expect(padStatusText(pad({ connected: false }))).toEqual({ text: specText("controls.no_controller"), ok: null });
+    expect(padStatusText(pad({ connected: false })).text).toBe("No controller");
     expect(padStatusText(pad({ native: true, batteryPct: 81.6 }))).toEqual({ text: "Native 82%", ok: true });
     expect(padStatusText(pad({}))).toEqual({ text: "Pad", ok: true });
     expect(padStatusText(pad({ batteryPct: 40 }))).toEqual({ text: "Pad 40%", ok: true });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { armLabel, batteryLabel, linkLabel, preflightChecks, reachBadge, videoLabel } from "@/lib/safety-band";
+import { armLabel, batteryLabel, linkLabel, reachBadge, videoLabel } from "@/lib/safety-band";
 import type { GsStatus } from "@/lib/types";
 
 describe("safety band mapping", () => {
@@ -29,20 +29,5 @@ describe("safety band mapping", () => {
     expect(videoLabel({ state: "failed", transport: null, highLatency: false, error: null, width: null, height: null })).toBe(
       "NO VIDEO",
     );
-  });
-
-  it("evaluates preflight from real readings only", () => {
-    const checks = preflightChecks({ telemetry: null, battery: null, live: false, home: null });
-    expect(checks.every((c) => !c.ok)).toBe(true);
-    const ok = preflightChecks({
-      telemetry: {
-        gps: { fix_type: 3, satellites: 12, eph: null, epv: null },
-        battery: { voltage: 16, current: null, remaining: 80, temperature: null },
-      },
-      battery: null,
-      live: true,
-      home: { lat: 1, lon: 2 },
-    });
-    expect(ok.map((c) => c.ok)).toEqual([true, true, true, true]);
   });
 });

@@ -58,7 +58,7 @@ export function homePill(i: HomeStatusInputs): PillSummary {
     video: null,
     armedAtLastLive: i.armedAtLastLive,
   });
-  const checks = preflightChecks({ telemetry: i.telemetry, battery: i.battery, live: i.live, home: i.telemetry?.home ?? null });
+  const checks = preflightChecks({ telemetry: i.telemetry, battery: i.battery, live: i.live });
   return pillSummary(
     pillAlerts({
       alerts,

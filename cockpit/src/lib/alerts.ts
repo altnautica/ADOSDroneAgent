@@ -6,7 +6,7 @@ import type { LucideIcon } from "lucide-react";
 import { BatteryLow, BatteryWarning, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
 
 import { linkDiagView } from "@/lib/link-diag";
-import type { PreflightCheck } from "@/lib/safety-band";
+import type { PreflightCheck } from "@/shared/hud/preflight";
 import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { baseAlerts, controllerLost, pilotFailsafe, sortAlerts, type BaseAlert, type BaseAlertInputs } from "@/shared/hud/status-pill";

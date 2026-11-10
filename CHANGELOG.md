@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.98] - 2026-11-10
+
+### Fixed
+
+- Cockpit and dashboard: the pre-flight "Home position set" check passes as soon as the flight controller reports a home position or its EKF has an origin, so it clears on the ground instead of waiting for the first arm.
+- Cockpit: the emergency stop sheet reads "Emergency stop", the kill warning and "Emergency stop · hold 3 s" from the shared texts, counts down while held, and stops the motors when the 3 s hold completes, with no second confirm step.
+- Cockpit: the controller cell says "No controller" when no controller is connected.
+- Cockpit: the alert list is headed "Alerts", shows each alert's text above its source, and marks the severity with the shared ✕ / ⚠ / ℹ glyphs.
+- Cockpit: on the local-frame minimap, "No local position" sits clear of the origin crosshair.
+
 ## [0.109.97] - 2026-11-10
 
 ### Fixed

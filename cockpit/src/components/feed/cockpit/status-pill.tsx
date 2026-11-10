@@ -9,9 +9,9 @@ import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
 import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
 import { pillWiring } from "@/lib/alerts";
-import { chromeStyle, severityColor } from "@/lib/chrome-tokens";
+import { chromeStyle, severityColor, severityIcon } from "@/lib/chrome-tokens";
 import { HIT_AREA, severityTextColor } from "@/lib/flight-layout";
-import { preflightChecks } from "@/lib/safety-band";
+import { preflightChecks } from "@/shared/hud/preflight";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
 import { pillAlerts, pillSummary, type PillAlert, type PillSeverity } from "@/shared/hud/status-pill";
@@ -36,7 +36,6 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
   const fcStatus = pilot?.statustext;
   const telemetry = useFlightStore((s) => s.telemetry);
   const live = useFlightStore((s) => s.live);
-  const home = useFlightStore((s) => s.home);
   const battery = useStatusStore((s) => s.battery);
   const statusStale = useStatusStore((s) => s.stale);
   const prearm = telemetry?.prearm;
@@ -52,7 +51,7 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
     nowMs: now,
     statusStale,
     armed: telemetry?.armed,
-    checks: preflightChecks({ telemetry, battery, live, home }),
+    checks: preflightChecks({ telemetry, battery, live }),
     alerts,
   });
   const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus, ...wiring }), acked);
@@ -120,7 +119,7 @@ function AlertList({
       panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)), top: rect.bottom + 8 }}
     >
       <div className="flex max-h-[60vh] flex-col gap-[4px] overflow-y-auto p-[8px]" data-testid="status-pill-list">
-        <div id={titleId} className="chrome-label px-[4px] uppercase tracking-wide">
+        <div id={titleId} className="chrome-label px-[4px]" data-testid="status-pill-list-title">
           {specText("cockpit.alerts.title")}
         </div>
         {alerts.length === 0 ? (
@@ -129,18 +128,28 @@ function AlertList({
             {specText("cockpit.status.ok")}
           </div>
         ) : (
-          alerts.map((a) => {
-            const AIcon = SEVERITY_ICON[a.severity];
-            return (
-              <div key={a.id} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
-                <AIcon className="chrome-icon mt-[1px] shrink-0" style={{ color: severityColor(a.severity) }} aria-hidden />
-                <div className="min-w-0">
-                  <div className="chrome-label">{specText(`cockpit.status.source.${a.source}`)}</div>
-                  <div style={a.severity === "critical" ? { color: severityTextColor("critical") } : undefined}>{a.text}</div>
+          alerts.map((a) => (
+            // Text first, its source under it; the glyph is the spec's
+            // severity icon in the severity colour.
+            <div key={a.id} data-testid="alert-item" data-severity={a.severity} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
+              <span
+                data-testid="alert-item-icon"
+                className="chrome-icon mt-[1px] flex shrink-0 items-center justify-center font-bold leading-none"
+                style={{ color: severityColor(a.severity) }}
+                aria-hidden
+              >
+                {severityIcon(a.severity)}
+              </span>
+              <div className="min-w-0">
+                <div data-testid="alert-item-text" style={a.severity === "critical" ? { color: severityTextColor("critical") } : undefined}>
+                  {a.text}
+                </div>
+                <div data-testid="alert-item-source" className="chrome-label">
+                  {specText(`cockpit.status.source.${a.source}`)}
                 </div>
               </div>
-            );
-          })
+            </div>
+          ))
         )}
       </div>
     </Overlay>

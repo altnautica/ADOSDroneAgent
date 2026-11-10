@@ -72,8 +72,9 @@ jobs:
 
       # Pointer, hit-test and flow checks against the built bundle in headless
       # Chromium: the first press on STOP lands on STOP (with the status list
-      # and with every flight-screen sheet open), STOP sends a kill only after
-      # its full 3 s hold and confirm, the pad's kill and RTH combos complete
+      # and with every flight-screen sheet open), the STOP sheet reads the spec
+      # texts and sends a kill only after its full 3 s hold, the alert list
+      # puts each item's text above its source, the pad's kill and RTH combos complete
       # with a sheet open, the gimbal recentre button takes a mouse click, a
       # flick off the gimbal pad leaves no rate command running, the kiosk's
       # banners, alert cards and layer chips never overlap, a stalled pilot

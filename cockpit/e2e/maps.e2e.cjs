@@ -144,6 +144,18 @@ async function localCase(browser) {
   console.log("PASS local-frame map: right-click opens the Fly Here hold (lat/lon through the FC origin)");
   void sent;
   await ctx.close();
+  // With no local position the empty text sits clear of the origin crosshair.
+  for (const [width, height] of [[1280, 800], [1920, 1080]]) {
+    const empty = await open(browser, { pilot: FLYING, fix: 0, local: false, width, height });
+    await empty.page.waitForSelector('[data-testid="local-minimap-empty"]', { timeout: 8000 });
+    const text = await box(empty.page, '[data-testid="local-minimap-empty"]');
+    const cross = await box(empty.page, '[data-testid="local-minimap-origin"]');
+    const overlap = text.x < cross.x + cross.w && cross.x < text.x + text.w && text.y < cross.y + cross.h && cross.y < text.y + text.h;
+    await empty.page.screenshot({ path: path.join(SHOTS, `local-map-empty-${width}x${height}.png`) });
+    assert.ok(!overlap, `the empty text ${JSON.stringify(text)} crosses the crosshair ${JSON.stringify(cross)}`);
+    await empty.ctx.close();
+  }
+  console.log("PASS local-frame map: 'No local position' clear of the origin crosshair at 1280 and 1920");
 }
 
 async function groundCase(browser) {

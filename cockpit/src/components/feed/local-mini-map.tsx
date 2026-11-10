@@ -22,7 +22,7 @@ import { useOccupancyImages } from "@/hooks/use-occupancy-images";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { fcOrigin, flyHerePosition, localToLatLon } from "@/lib/fly-here";
 import { freshLocalPosition, localDrone, localSceneInput, localTarget, panBy, screenToLocal } from "@/lib/local-minimap";
-import { latLonToEN } from "@/lib/minimap-geometry";
+import { emptyTextTop, latLonToEN, ORIGIN_CROSS_ARM_PX } from "@/lib/minimap-geometry";
 import { cn } from "@/lib/utils";
 import { mapToScreen } from "@/shared/hud/local-frame";
 import { buildLocalScene, DEFAULT_LOCAL_ZOOM, stepZoom, viewCentre, wheelZoom } from "@/shared/hud/local-scene";
@@ -180,9 +180,9 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
               <circle key={i} cx={p[0]} cy={p[1]} r={1.1} />
             ))}
           </g>
-          <g className="text-muted-foreground" stroke="currentColor" strokeWidth={1}>
-            <line x1={scene.origin.sx - 4} y1={scene.origin.sy} x2={scene.origin.sx + 4} y2={scene.origin.sy} />
-            <line x1={scene.origin.sx} y1={scene.origin.sy - 4} x2={scene.origin.sx} y2={scene.origin.sy + 4} />
+          <g className="text-muted-foreground" stroke="currentColor" strokeWidth={1} data-testid="local-minimap-origin">
+            <line x1={scene.origin.sx - ORIGIN_CROSS_ARM_PX} y1={scene.origin.sy} x2={scene.origin.sx + ORIGIN_CROSS_ARM_PX} y2={scene.origin.sy} />
+            <line x1={scene.origin.sx} y1={scene.origin.sy - ORIGIN_CROSS_ARM_PX} x2={scene.origin.sx} y2={scene.origin.sy + ORIGIN_CROSS_ARM_PX} />
           </g>
           {scene.target ? (
             <g
@@ -215,7 +215,12 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
       ) : null}
 
       {!scene?.drone ? (
-        <div className="absolute inset-0 flex items-center justify-center px-[4px] text-center text-muted-foreground" style={{ fontSize: textPx }}>
+        // Kept clear of the origin crosshair, below it (or above it).
+        <div
+          data-testid="local-minimap-empty"
+          className="absolute inset-x-0 px-[4px] text-center leading-[1.25] text-muted-foreground"
+          style={{ fontSize: textPx, top: emptyTextTop(scene ? scene.origin.sy : null, h, textPx * 2.5) }}
+        >
           {specText("minimap.no_local_position")}
         </div>
       ) : null}

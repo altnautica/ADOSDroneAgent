@@ -274,6 +274,9 @@ export interface VehicleState {
   /** The last EKF_STATUS_REPORT `flags` and its age when the snapshot was
    *  taken; null until the FC sent one (PX4 never does). */
   ekf?: { flags: number; age_ms: number } | null;
+  /** The FC's HOME_POSITION (degE7, and its NED offset from the EKF
+   *  origin); absent until the FC reported one. */
+  home?: { lat_e7?: number | null; lon_e7?: number | null; local_ned?: number[] | null } | null;
   /** The last LOCAL_POSITION_NED (metres, m/s) and its age; null until the FC
    *  sent one. With no GNSS this is the only position the FC has. */
   local_position?: {

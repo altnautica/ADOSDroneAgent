@@ -5,9 +5,9 @@
 //                class and the kiosk;
 //   stop-sheets  the same with every flight-screen sheet open, each sheet
 //                starting below the top bar;
-//   stop-hold    with a sheet open, STOP opens the 3 s hold-to-confirm: a
-//                1 s press sends nothing, a 3.2 s hold reaches the confirm
-//                step and its confirm sends exactly one kill;
+//   stop-hold    with a sheet open, STOP opens the canonical STOP sheet
+//                (spec title, body and hold label): a 1 s press counts
+//                down and sends nothing, a 3.2 s hold sends exactly one kill;
 //   pad-safety   with a sheet open, a pad holding L2+R2+Circle for the hold
 //                time sends one kill and Options+Circle held sends one RTH.
 
@@ -41,6 +41,22 @@ async function stopCases(browser) {
     assert.ok(box.y >= 0 && box.y + Math.min(box.height, 24) <= vp.height, `${vp.name}: the list is inside the window`);
     assert.equal(await hits(page, list), true, `${vp.name}: the list is drawn on top`);
     assert.equal(await hits(page, STOP), true, `${vp.name}: STOP reachable with the list open`);
+    // One list layout on every surface: heading "Alerts" as written, each
+    // item's text above its source label, the spec's severity glyph.
+    const layout = await page.$eval(list, (el) => {
+      const title = el.querySelector('[data-testid="status-pill-list-title"]');
+      const items = [...el.querySelectorAll('[data-testid="alert-item"]')].map((it) => ({
+        icon: it.querySelector('[data-testid="alert-item-icon"]').textContent,
+        textY: it.querySelector('[data-testid="alert-item-text"]').getBoundingClientRect().top,
+        sourceY: it.querySelector('[data-testid="alert-item-source"]').getBoundingClientRect().top,
+      }));
+      return { title: title.innerText, items };
+    });
+    assert.equal(layout.title, "Alerts", `${vp.name}: the list heading`);
+    for (const it of layout.items) {
+      assert.ok(["✕", "⚠", "ℹ"].includes(it.icon), `${vp.name}: a spec severity glyph (${it.icon})`);
+      assert.ok(it.textY < it.sourceY, `${vp.name}: the text is above its source label`);
+    }
     await page.screenshot({ path: path.join(SHOTS, `pill-open-${vp.name}.png`) });
     // One real press on STOP with the list open reaches STOP, and closes the list.
     await page.$eval(STOP, (el) => {
@@ -136,38 +152,47 @@ async function openModeSheet(page) {
   await sheetSettled(page);
 }
 
-/** With the Mode sheet open, STOP opens Emergency stop's 3 s hold: released
- *  after 1 s nothing is sent and the confirm step does not show; held for
- *  3.2 s the confirm step shows, and its confirm sends exactly one kill. */
+/** With the Mode sheet open, STOP opens the canonical STOP sheet: spec
+ *  title, kill warning and hold label, with no second confirm. Released after
+ *  1 s it counts down and sends nothing; held for 3.2 s it sends exactly one
+ *  kill and closes. */
 async function stopHoldCase(browser) {
+  const text = require("../src/shared/cockpit-spec/setup-strings.json").strings;
   const sim = { pilot: PILOT_AIR, airborne: true };
   const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
   const kills = () => sentCount(sim, "kill", "killswitch");
   await openModeSheet(page);
   await page.locator(STOP).click();
-  const sheet = page.locator(SHEET, { hasText: "Emergency stop" });
+  const sheet = page.locator(SHEET, { hasText: text["cockpit.estop"] });
   await sheet.waitFor({ state: "visible", timeout: 2000 });
   await sheetSettled(page);
-  const hold = sheet.getByRole("button", { name: /^Hold to confirm \(3\.0 s\)/ });
-  const final = page.getByTestId("confirm-final");
+  assert.equal((await page.getByTestId("stop-sheet-title").textContent()).trim(), text["cockpit.estop"]);
+  assert.equal((await page.getByTestId("stop-sheet-body").textContent()).trim(), text["confirm.kill.message"]);
+  const hold = page.getByTestId("stop-sheet-hold");
+  assert.equal((await hold.textContent()).trim(), text["stop.hold_label"]);
+  assert.equal(await page.getByTestId("confirm-final").count(), 0, "no second confirm step");
+  await page.screenshot({ path: path.join(SHOTS, "stop-sheet.png") });
 
-  await holdOn(page, hold, 1000);
+  const b = await hold.boundingBox();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(1000);
+  const counting = (await hold.textContent()).trim();
+  assert.match(counting, /^Keep holding · \d\.\d s$/, `the hold counts down while held: ${counting}`);
+  await page.screenshot({ path: path.join(SHOTS, "stop-sheet-holding.png") });
+  await page.mouse.up();
   await page.waitForTimeout(600);
-  assert.equal(await final.count(), 0, "a 1 s press does not reach the confirm step");
   assert.equal(kills(), 0, `a 1 s press sends nothing (sent ${JSON.stringify(sim.sent)}, commands ${JSON.stringify(sim.commands)})`);
 
   await debugOnFail(page, "stop-hold", async () => {
     await holdOn(page, hold, 3200);
-    await final.waitFor({ state: "visible", timeout: 1000 });
+    await until(page, "the kill", () => kills() >= 1, 3000);
   });
-  await page.screenshot({ path: path.join(SHOTS, "stop-hold-confirm.png") });
-  assert.equal(kills(), 0, "the completed hold asks for the confirm before sending");
-  await final.click();
-  await until(page, "the kill", () => kills() >= 1, 3000);
   await page.waitForTimeout(800);
   assert.equal(kills(), 1, `exactly one kill (sent ${JSON.stringify(sim.sent)}, commands ${JSON.stringify(sim.commands)})`);
+  await sheet.waitFor({ state: "detached", timeout: 2000 });
   await ctx.close();
-  console.log("STOP: a 1 s press sends nothing; the full 3 s hold and its confirm send exactly one kill");
+  console.log("STOP: the spec sheet counts down, a 1 s press sends nothing; the full 3 s hold sends exactly one kill");
 }
 
 /** Hold pad buttons (modifiers first, in order) for `ms`, then release them

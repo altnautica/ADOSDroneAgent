@@ -1,8 +1,11 @@
 // The confirm sheet for every non-tap skill, on the shared sheet. One sheet,
 // several input paths: press-and-hold (touch/pointer), a held controller
 // button or Enter, and a long-press of the panel's activate button. The hold
-// time is the spec's (`builtins.json` `confirm.ms`); a `hold_confirm` skill
-// (Emergency stop) asks for an explicit confirm once its hold completes.
+// time is the spec's (`builtins.json` `confirm.ms`). The emergency stop (a
+// `hold_confirm` skill) is the canonical STOP sheet: title `cockpit.estop`,
+// body `confirm.kill.message`, one hold button labelled `stop.hold_label`
+// that counts down (`hold.keep_holding`) while held, and fires once the hold
+// completes. No second confirm step.
 
 import { useEffect, useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
@@ -13,7 +16,9 @@ import { useSkillContext } from "@/hooks/use-skill-context";
 import { LAUNCH } from "@/lib/cockpit-flow";
 import { executeSkill } from "@/lib/skill-runner";
 import { resolveSkillState } from "@/lib/skills";
+import { stopHoldText, stopSheetBody, stopSheetTitle } from "@/lib/stop-sheet";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { useConfirmStore } from "@/stores/confirm-store";
 
 export function SkillConfirmSheet() {
@@ -24,7 +29,6 @@ export function SkillConfirmSheet() {
 
 function ConfirmSheet() {
   const pending = useConfirmStore((s) => s.pending)!;
-  const toConfirmStage = useConfirmStore((s) => s.toConfirmStage);
   const heldSince = useConfirmStore((s) => s.heldSince);
   const panelNonce = useConfirmStore((s) => s.panelConfirmNonce);
   const cancel = useConfirmStore((s) => s.cancel);
@@ -32,7 +36,7 @@ function ConfirmSheet() {
   const setHeld = useConfirmStore((s) => s.setHeld);
   const ctx = useSkillContext();
 
-  const { skill, altitudeM, stage } = pending;
+  const { skill, altitudeM } = pending;
   const holdMs = skill.confirm.ms;
   const state = resolveSkillState(skill, ctx);
   const [pointerSince, setPointerSince] = useState<number | null>(null);
@@ -49,12 +53,6 @@ function ConfirmSheet() {
   const fire = () => {
     if (firedRef.current) return;
     firedRef.current = true;
-    if (skill.confirm.kind === "hold_confirm" && stage === "hold") {
-      toConfirmStage();
-      firedRef.current = false;
-      setPointerSince(null);
-      return;
-    }
     execute();
   };
 
@@ -110,55 +108,50 @@ function ConfirmSheet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [since, holdMs]);
 
-  const shownProgress = since === null ? 0 : progress;
+  const holding = since !== null;
+  const shownProgress = holding ? progress : 0;
   const danger = skill.confirm.kind === "hold_confirm";
 
-  const confirmControl =
-    stage === "confirm" ? (
-      <button
-        type="button"
-        onClick={execute}
-        data-testid="confirm-final"
-        className="flex min-h-[3.4rem] w-full items-center justify-center rounded-lg bg-err/70 text-[0.95rem] font-semibold text-on-status"
-      >
-        {`Confirm: ${skill.label}`}
-      </button>
-    ) : (
-      <button
-        type="button"
-        onPointerDown={(e) => {
-          e.currentTarget.setPointerCapture?.(e.pointerId);
-          setPointerSince(performance.now());
-        }}
-        onPointerUp={() => setPointerSince(null)}
-        onPointerCancel={() => setPointerSince(null)}
-        onPointerLeave={() => setPointerSince(null)}
-        className={cn(
-          "relative flex min-h-[3.4rem] w-full touch-none select-none items-center justify-center overflow-hidden rounded-lg font-semibold",
-          danger ? "bg-err/25 text-err" : "bg-primary/20 text-surface-foreground",
-        )}
-      >
-        <span
-          className={cn("absolute inset-y-0 left-0", danger ? "bg-err/45" : "bg-primary/45")}
-          style={{ width: `${shownProgress * 100}%` }}
-          aria-hidden
-        />
-        <span className="relative text-[0.9rem]">{`Hold to confirm (${(holdMs / 1000).toFixed(1)} s)`}</span>
-      </button>
-    );
+  const confirmControl = (
+    <button
+      type="button"
+      data-testid={danger ? "stop-sheet-hold" : undefined}
+      aria-label={danger ? specText("stop.hold_label") : undefined}
+      onPointerDown={(e) => {
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+        setPointerSince(performance.now());
+      }}
+      onPointerUp={() => setPointerSince(null)}
+      onPointerCancel={() => setPointerSince(null)}
+      onPointerLeave={() => setPointerSince(null)}
+      className={cn(
+        "relative flex min-h-[3.4rem] w-full touch-none select-none items-center justify-center overflow-hidden rounded-lg font-semibold",
+        danger ? "bg-err/25 text-err" : "bg-primary/20 text-surface-foreground",
+      )}
+    >
+      <span
+        className={cn("absolute inset-y-0 left-0", danger ? "bg-err/45" : "bg-primary/45")}
+        style={{ width: `${shownProgress * 100}%` }}
+        aria-hidden
+      />
+      <span className="relative text-[0.9rem]">
+        {danger ? stopHoldText(holding, holdMs, progress) : `Hold to confirm (${(holdMs / 1000).toFixed(1)} s)`}
+      </span>
+    </button>
+  );
 
   return (
     <Sheet
       title={
-        <span className="flex items-center gap-[0.4rem]">
+        <span className="flex items-center gap-[0.4rem]" data-testid={danger ? "stop-sheet-title" : undefined}>
           {danger ? <ShieldAlert className="h-[1.2rem] w-[1.2rem] text-err" aria-hidden /> : null}
-          {skill.label}
+          {danger ? stopSheetTitle() : skill.label}
         </span>
       }
       onDismiss={cancel}
       danger={danger}
       initialFocus={confirmRef}
-      closeLabel="Cancel"
+      closeLabel={specText("setup.action.cancel")}
       hints={[
         { command: "activate", label: "Hold to confirm" },
         { command: "back", label: "Cancel" },
@@ -173,8 +166,8 @@ function ConfirmSheet() {
       }
     >
       {danger ? (
-        <p className="mb-[0.6rem] text-[0.8rem] text-err">
-          Motors stop immediately and an airborne vehicle falls.
+        <p className="mb-[0.6rem] text-[0.8rem] text-err" data-testid="stop-sheet-body">
+          {stopSheetBody()}
         </p>
       ) : null}
       {skill.takesAltitude ? (

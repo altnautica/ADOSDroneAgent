@@ -163,6 +163,7 @@ function telemetryFor(airborne) {
     attitude: { roll: 0, pitch: 0, yaw: 0 },
     position: { lat: 12.97, lon: 77.59, alt_rel: airborne ? 12 : 0, heading: 70 },
     velocity: { groundspeed: 0, climb: 0 }, gps: { fix_type: 3, satellites: 14 },
+    home: { lat_e7: 129700000, lon_e7: 775900000, local_ned: [0, 0, 0] },
     prearm: [], last_update: new Date().toISOString(),
   };
 }

@@ -14,7 +14,7 @@ import { usePadStatus } from "@/hooks/use-gamepad";
 import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
 import { checklistPassable, fcPrearmItem, storageItem, type ChecklistItem } from "@/lib/cockpit-flow";
-import { preflightChecks } from "@/lib/safety-band";
+import { preflightChecks } from "@/shared/hud/preflight";
 import { apiFetch } from "@/shared/api-fetch";
 import type { AgentHeartbeat } from "@/shared/api/types";
 import { specText } from "@/shared/hud/spec-text";
@@ -45,7 +45,6 @@ export function PreflightSheet() {
   const pilot = stamped?.data ?? null;
   const telemetry = useFlightStore((s) => s.telemetry);
   const live = useFlightStore((s) => s.live);
-  const home = useFlightStore((s) => s.home);
   const battery = useStatusStore((s) => s.battery);
   const pad = usePadStatus();
   const storage = useStoragePct();
@@ -53,7 +52,7 @@ export function PreflightSheet() {
   const items: ChecklistItem[] = pilotReadinessItems(stamped, now);
   const prearm = fcPrearmItem(telemetry?.prearm);
   if (prearm) items.push(prearm);
-  for (const c of preflightChecks({ telemetry, battery, live, home })) {
+  for (const c of preflightChecks({ telemetry, battery, live })) {
     items.push({ id: c.id, label: c.label, state: c.ok ? "pass" : c.id === "link" || c.id === "battery" ? "fail" : "warn" });
   }
   if (pilot?.controlMode === "ados") {

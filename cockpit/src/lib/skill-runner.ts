@@ -326,7 +326,7 @@ export function requestSkill(skill: Skill, ctx: SkillContext, gamepadButton: num
 /**
  * A cockpit action bound to a skill (a controller binding or a chord):
  *   press   — gate, then fire a tap skill or open the confirm sheet; on an
- *             open sheet for the same skill, start its hold (or confirm);
+ *             open sheet for the same skill, start its hold;
  *   hold    — a hold the controller timed completed: that hold is the
  *             confirmation, so the skill is sent at once (gated as a
  *             request) and its open sheet, if any, closes;
@@ -342,8 +342,7 @@ export function runSkillAction(skill: Skill, phase: ActionPhase, ctx: SkillConte
   }
   if (phase === "press") {
     if (open) {
-      if (open.stage === "confirm") confirm.panelConfirm();
-      else confirm.setHeld(true);
+      confirm.setHeld(true);
       return;
     }
     if (requestSkill(skill, ctx) && heldPress && useConfirmStore.getState().pending?.skill.id === skill.id) {

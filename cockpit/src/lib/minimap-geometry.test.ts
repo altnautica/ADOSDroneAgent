@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   computeMapView,
+  emptyTextTop,
+  ORIGIN_CROSS_ARM_PX,
   svgTextUnits,
   topBarInset,
   distanceMeters,
@@ -126,5 +128,26 @@ describe("minimap chrome", () => {
     // 11 px on a 140 px card map and on a 736 px full map.
     expect(svgTextUnits(11, 140, 100) * (140 / 100)).toBeCloseTo(11, 9);
     expect(svgTextUnits(11, 736, 100) * (736 / 100)).toBeCloseTo(11, 9);
+  });
+});
+
+describe("emptyTextTop", () => {
+  const clear = (top: number, textH: number, sy: number) =>
+    top >= sy + ORIGIN_CROSS_ARM_PX || top + textH <= sy - ORIGIN_CROSS_ARM_PX;
+
+  it("keeps the empty text clear of the origin crosshair", () => {
+    // The card minimap at 1280: origin at the centre of a 132 px box.
+    const top = emptyTextTop(66, 132, 28);
+    expect(clear(top, 28, 66)).toBe(true);
+    expect(top + 28).toBeLessThanOrEqual(132);
+  });
+
+  it("goes above the crosshair when there is no room below", () => {
+    const top = emptyTextTop(110, 132, 28);
+    expect(top + 28).toBeLessThanOrEqual(110 - ORIGIN_CROSS_ARM_PX);
+  });
+
+  it("centres when no crosshair is drawn", () => {
+    expect(emptyTextTop(null, 100, 20)).toBe(40);
   });
 });

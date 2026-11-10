@@ -134,3 +134,18 @@ export function topBarInset(
 export function svgTextUnits(px: number, boxPx: number, view: number): number {
   return boxPx > 0 ? (px * view) / boxPx : px;
 }
+
+/** Half the length of the local minimap's origin crosshair arm (px). */
+export const ORIGIN_CROSS_ARM_PX = 4;
+
+/** The top (px) of the local minimap's empty-state text, kept clear of the
+ *  origin crosshair: just below it, or above it when there is no room below.
+ *  `originSy` is the crosshair's y, null when none is drawn (the text then
+ *  centres); `textH` is the text block's height, room for two lines. */
+export function emptyTextTop(originSy: number | null, boxH: number, textH: number): number {
+  if (originSy === null) return Math.max(0, (boxH - textH) / 2);
+  const gap = ORIGIN_CROSS_ARM_PX + 6;
+  const below = originSy + gap;
+  if (below + textH <= boxH) return below;
+  return Math.max(0, originSy - gap - textH);
+}

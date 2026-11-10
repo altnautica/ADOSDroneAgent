@@ -22,6 +22,8 @@ export interface ChromeTokens {
   severity_ok: string;
   severity_warning: string;
   severity_critical: string;
+  /** The alert list's item glyph per severity. */
+  severity_icon: { critical: string; warning: string; info: string };
   stop_bg: string;
   stop_text: string;
   type: {
@@ -73,4 +75,10 @@ export function chromeStyle(t: ChromeTokens = CHROME_TOKENS): CSSProperties {
 /** The severity colour of a status-pill severity. */
 export function severityColor(s: "ok" | "warning" | "critical", t: ChromeTokens = CHROME_TOKENS): string {
   return s === "critical" ? t.severity_critical : s === "warning" ? t.severity_warning : t.severity_ok;
+}
+
+/** The alert list's item glyph (`chrome.severity_icon`): ✕ critical,
+ *  ⚠ warning, ℹ anything else. */
+export function severityIcon(s: string, t: ChromeTokens = CHROME_TOKENS): string {
+  return s === "critical" ? t.severity_icon.critical : s === "warning" ? t.severity_icon.warning : t.severity_icon.info;
 }

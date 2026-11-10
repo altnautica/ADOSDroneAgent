@@ -11,8 +11,8 @@ import tokensJson from "@/shared/cockpit-spec/tokens.json";
 export type BuiltinArmRequirement = "any" | "disarmed" | "armed" | "armed_landed" | "disarmed_or_landed";
 
 export interface BuiltinConfirm {
-  /** `tap` fires at once; `hold` needs `ms` of press; `hold_confirm` is a
-   *  hold followed by an explicit confirm (kill). */
+  /** `tap` fires at once; `hold` needs `ms` of press; `hold_confirm` is the
+   *  emergency stop's hold, shown in the STOP sheet (no second confirm). */
   kind: "tap" | "hold" | "hold_confirm";
   ms: number;
 }
