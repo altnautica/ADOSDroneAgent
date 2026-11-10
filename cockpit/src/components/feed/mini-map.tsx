@@ -109,8 +109,8 @@ export function MiniMap({ className }: { className?: string } = {}) {
         <div className="absolute inset-x-0 bottom-0" style={{ top: insetTop }}>
           {local ? <LocalMiniMap scale={scale} inCard={zoned} /> : <GlobalMiniMap scale={scale} inCard={zoned} />}
           <div
-            // The card's frame draws its title top-left; a full map keeps
-            // the top-right free for the video PiP.
+            // The card's frame draws its title top-left, so the card keeps
+            // these top-right; a full map keeps them top-left.
             className={cn("pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start gap-[4px] px-[4px]", zoned ? "justify-end" : "justify-start")}
             style={{ fontSize: labelPx }}
             data-testid="minimap-header"

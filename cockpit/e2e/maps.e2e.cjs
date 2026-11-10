@@ -52,7 +52,9 @@ async function open(browser, { pilot, fix, local, width = 1280, height = 800 }) 
   });
   const sent = [];
   await page.routeWebSocket(/\/api\/v1\/pilot\/stream/, (ws) => {
-    const push = setInterval(() => ws.send(JSON.stringify({ kind: "pilot", ts_ms: Date.now(), data: pilot })), 100);
+    // Closing the context does not always close the mocked socket: unref the
+    // timer so it never keeps the run alive.
+    const push = setInterval(() => ws.send(JSON.stringify({ kind: "pilot", ts_ms: Date.now(), data: pilot })), 100).unref();
     ws.onMessage((m) => sent.push(String(m)));
     ws.onClose(() => clearInterval(push));
   });
@@ -111,12 +113,14 @@ async function flyHereCases(browser) {
   const header = await box(page, '[data-zone="stage"] [data-testid="minimap-header"]');
   const north = await box(page, '[data-zone="stage"] [data-testid="minimap-north"]');
   await page.screenshot({ path: path.join(SHOTS, "fix-N-AuditAgent2-10-map-view.png") });
-  const pipBox = await box(page, '[data-testid="video-pip"]');
-  const label = await page.$eval('[data-zone="stage"] [data-testid="minimap-header"]', (e) => {
+  // Nothing drawn over the frame label (top bar, video inset, columns): the
+  // topmost element there belongs to the map (the label ignores pointers).
+  const labelOnTop = await page.$eval('[data-zone="stage"] [data-testid="minimap-header"]', (e) => {
     const r = e.firstElementChild.getBoundingClientRect();
-    return { x: r.left, y: r.top, w: r.width, h: r.height };
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return hit !== null && e.closest('[data-testid="minimap"]').contains(hit);
   });
-  assert.ok(label.x + label.w <= pipBox.x || label.y >= pipBox.y + pipBox.h, `frame label clear of the PiP: ${JSON.stringify(label)} ${JSON.stringify(pipBox)}`);
+  assert.ok(labelOnTop, "the frame label is not covered");
   assert.ok(header.y >= bar.y + bar.h, `frame labels under the top bar: header ${JSON.stringify(header)} bar ${JSON.stringify(bar)}`);
   assert.ok(north.y >= bar.y + bar.h, `north mark under the top bar: ${JSON.stringify(north)} bar ${JSON.stringify(bar)}`);
   const northPx = north.h;
