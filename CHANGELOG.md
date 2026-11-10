@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.69] - 2026-11-10
+
+### Changed
+
+- Cockpit: contextual tips point at flight-screen controls one at a time, never while armed and never over STOP; Settings gains Reset tips.
+- Cockpit: the controller tour is a non-modal card driven by the pad that waits until the aircraft is landed, with a replay row in Controls settings.
+- Cockpit: shell error banners wrap to two lines instead of clipping.
+
 ## [0.109.68] - 2026-11-10
 
 ### Changed
