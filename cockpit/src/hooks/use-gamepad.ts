@@ -38,6 +38,7 @@ import {
 import { pilotFeedback, playPattern, playPulse, type FeedbackView } from "@/lib/pad/rumble";
 import type { NavCommand } from "@/nav/navigator";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { specText } from "@/shared/hud/spec-text";
 import { useControlsStore } from "@/stores/controls-store";
 import { useInputStore, type PadSample } from "@/stores/input-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
@@ -312,4 +313,15 @@ export function usePadStatus(): PadStatus {
     batteryPct: station?.batteryPct ?? null,
     native,
   };
+}
+
+/** The controller cell's words (spec `controls.pad.*`) and whether they read
+ *  as good (true), bad (false) or neutral (null). */
+export function padStatusText(pad: PadStatus): { text: string; ok: boolean | null } {
+  if (!pad.connected) return { text: specText("controls.pad.none"), ok: null };
+  const battery = pad.batteryPct !== null ? ` ${Math.round(pad.batteryPct)}%` : "";
+  if (pad.native) return { text: specText("controls.pad.native", { battery }), ok: true };
+  return pad.standard
+    ? { text: specText("controls.pad.connected", { battery }), ok: true }
+    : { text: specText("controls.pad.not_standard"), ok: false };
 }

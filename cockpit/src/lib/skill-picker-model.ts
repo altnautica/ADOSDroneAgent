@@ -2,13 +2,14 @@
 // Tweak panel's visible parameters and the D-pad step of one parameter.
 
 import type { ParamValue, PluginSkillCategory, Skill, SkillParam } from "@/lib/skills";
+import { specText } from "@/shared/hud/spec-text";
 
-export const PICKER_TABS: readonly { id: PluginSkillCategory; label: string }[] = [
-  { id: "behavior", label: "Behaviors" },
-  { id: "camera", label: "Camera" },
-  { id: "navigation", label: "Navigation" },
-  { id: "utility", label: "Utility" },
-];
+const TAB_IDS: readonly PluginSkillCategory[] = ["behavior", "camera", "navigation", "utility"];
+
+export const PICKER_TABS: readonly { id: PluginSkillCategory; label: string }[] = TAB_IDS.map((id) => ({
+  id,
+  label: specText(`skill.picker.tab.${id}`),
+}));
 
 /** Skills of one tab grouped under their plugin's name, in install order. */
 export function groupByPlugin(skills: readonly Skill[]): { plugin: string; skills: Skill[] }[] {

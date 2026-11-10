@@ -1,5 +1,5 @@
 // The skill picker , bottom-right of the grid. The chip
-// shows the active skill and its state, or "Skills". Opening it shows a sheet
+// shows the active skill and its state, or the picker's title. Opening it shows a sheet
 // with Behaviors / Camera / Navigation / Utility tabs; each plugin's skills sit
 // under its name (one plugin, many entries). Selecting a skill gives its Tweak
 // panel (the skill's parameters as steppers and segmented choices), then GO;
@@ -29,6 +29,7 @@ import {
 } from "@/lib/skills";
 import { groupByPlugin, paramValues, PICKER_TABS, stepParam, visibleParams } from "@/lib/skill-picker-model";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useConfirmStore } from "@/stores/confirm-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
@@ -109,7 +110,7 @@ function ParamRow({ skill, param, focused }: { skill: Skill; param: SkillParam; 
           onClick={() => c.set(!(c.value === true))}
           className={cn("min-h-[48px] rounded-lg border px-[0.7rem] text-[0.8rem]", c.value === true ? "border-primary bg-primary/25" : "border-border")}
         >
-          {c.value === true ? "On" : "Off"}
+          {specText(c.value === true ? "skill.param.on" : "cockpit.level.off")}
         </button>
       )}
     </div>
@@ -143,12 +144,12 @@ function SkillTweak({ skill, focusedParam, onBack }: { skill: Skill; focusedPara
               avoid === "clear" ? "border-ok/60 text-ok" : avoid === "detour" ? "border-warn text-warn" : "border-err text-err",
             )}
           >
-            {avoid === "clear" ? "CLEAR" : avoid === "detour" ? "AVOIDING" : avoid === "blocked" ? "BLOCKED" : "AVOIDANCE OFF"}
+            {specText(avoid === "clear" ? "skill.avoid.clear" : avoid === "detour" ? "skill.avoid.detour" : avoid === "blocked" ? "skill.avoid.blocked" : "pilot.avoid.off")}
           </span>
         ) : null}
       </div>
       {!state.enabled && state.reason ? <p className="text-[0.8rem] text-err">{state.reason}</p> : null}
-      {state.stale ? <p className="text-[0.8rem] text-warn">last seen {state.lastSeenS ?? "?"} s</p> : null}
+      {state.stale ? <p className="text-[0.8rem] text-warn">{specText("skill.last_seen", { n: state.lastSeenS ?? "?" })}</p> : null}
       <div className="flex flex-col gap-[0.2rem]">
         {params.map((p, i) => (
           <ParamRow key={p.key} skill={skill} param={p} focused={i === focusedParam} />
@@ -157,7 +158,7 @@ function SkillTweak({ skill, focusedParam, onBack }: { skill: Skill; focusedPara
       <div className="flex gap-[0.4rem] pt-[0.3rem]">
         {state.active ? (
           <button type="button" onClick={() => void stopSkill(skill)} className="min-h-[56px] flex-1 rounded-lg border border-err bg-err/20 text-[0.95rem] font-semibold text-err">
-            Stop
+            {specText("skill.stop")}
           </button>
         ) : (
           <button
@@ -167,7 +168,7 @@ function SkillTweak({ skill, focusedParam, onBack }: { skill: Skill; focusedPara
             onClick={() => requestSkill(skill, ctx)}
             className={cn("min-h-[56px] flex-1 rounded-lg border border-primary bg-primary/30 text-[0.95rem] font-semibold disabled:opacity-45", state.pending && "outline-dashed outline-2 outline-primary")}
           >
-            {state.pending ? "Starting…" : "GO"}
+            {specText(state.pending ? "skill.starting" : "skill.go")}
           </button>
         )}
       </div>
@@ -220,7 +221,7 @@ export function SkillPicker() {
       registerCockpitActions([
         {
           id: "picker.left",
-          label: "Skill picker: previous",
+          label: specText("skill.pad.previous"),
           group: "skills",
           run: (p) => {
             if (p !== "press") return;
@@ -231,7 +232,7 @@ export function SkillPicker() {
         },
         {
           id: "picker.right",
-          label: "Skill picker: next",
+          label: specText("skill.pad.next"),
           group: "skills",
           run: (p) => {
             if (p !== "press") return;
@@ -242,7 +243,7 @@ export function SkillPicker() {
         },
         ...([1, -1] as const).map((dir) => ({
           id: dir === 1 ? "param.up" : "param.down",
-          label: dir === 1 ? "Parameter up" : "Parameter down",
+          label: specText(dir === 1 ? "skill.pad.param_up" : "skill.pad.param_down"),
           group: "skills" as const,
           run: (p: string) => {
             if (p !== "press") return;
@@ -262,7 +263,7 @@ export function SkillPicker() {
         })),
         {
           id: "skill.go",
-          label: "Select / GO",
+          label: specText("skill.pad.select"),
           group: "skills",
           run: (p) => {
             if (p !== "press") return;
@@ -274,7 +275,7 @@ export function SkillPicker() {
         },
         {
           id: "skill.stop",
-          label: "Stop skill / back",
+          label: specText("skill.pad.stop"),
           group: "skills",
           run: (p) => {
             if (p !== "press") return;
@@ -305,15 +306,17 @@ export function SkillPicker() {
         style={active ? { borderColor: STATE_COLORS.skill, background: `color-mix(in srgb, ${STATE_COLORS.skill} 20%, transparent)` } : undefined}
       >
         <Puzzle className="chrome-icon shrink-0" aria-hidden />
-        <span className="truncate font-semibold">{active ? active.label : "Skills"}</span>
+        <span className="truncate font-semibold">{active ? active.label : specText("skill.picker.title")}</span>
         {active ? (
           <span className="chrome-label shrink-0 font-mono">
-            {activeState?.stale ? `ACTIVE (stale ${activeState.lastSeenS ?? "?"} s)` : (activeState?.badge ?? "ACTIVE")}
+            {activeState?.stale
+              ? specText("skill.active_stale_age", { n: activeState.lastSeenS ?? "?" })
+              : (activeState?.badge ?? specText("skill.active"))}
           </span>
         ) : null}
       </button>
       {open ? (
-        <Sheet title="Skills" onDismiss={() => setOpen(false)}>
+        <Sheet title={specText("skill.picker.title")} onDismiss={() => setOpen(false)}>
           {sel ? (
             <SkillTweak skill={sel} focusedParam={paramFocus} onBack={() => setSelected(null)} />
           ) : (
@@ -335,7 +338,7 @@ export function SkillPicker() {
                   </button>
                 ))}
               </div>
-              {inTab.length === 0 ? <p className="text-[0.85rem] text-muted-foreground">No skills in this tab.</p> : null}
+              {inTab.length === 0 ? <p className="text-[0.85rem] text-muted-foreground">{specText("skill.picker.empty")}</p> : null}
               {groupByPlugin(inTab).map((g) => (
                 <section key={g.plugin} className="py-[0.3rem]">
                   <h3 className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted-foreground">{g.plugin}</h3>
@@ -351,13 +354,14 @@ export function SkillPicker() {
                             aria-disabled={!st.enabled && !st.active}
                             className={cn(
                               "flex min-h-[48px] w-full items-center gap-[0.5rem] rounded-lg border px-[0.6rem] text-left text-[0.85rem] aria-disabled:opacity-60",
-                              st.active ? "border-[#22D3EE] bg-[#22D3EE]/15" : "border-border",
+                              !st.active && "border-border",
                               focused && "outline outline-2 outline-primary",
                               st.stale && "opacity-60",
                             )}
+                            style={st.active ? { borderColor: STATE_COLORS.skill, background: `color-mix(in srgb, ${STATE_COLORS.skill} 15%, transparent)` } : undefined}
                           >
                             <span className="flex-1">{s.label}</span>
-                            {st.active ? <span className="font-mono text-[0.7rem]">{st.stale ? "ACTIVE (stale)" : "ACTIVE"}</span> : null}
+                            {st.active ? <span className="font-mono text-[0.7rem]">{specText(st.stale ? "skill.active_stale" : "skill.active")}</span> : null}
                             {!st.enabled && st.reason ? <span className="text-[0.7rem] text-muted-foreground">{st.reason}</span> : null}
                           </button>
                         </li>
