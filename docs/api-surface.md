@@ -101,6 +101,9 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/telemetry` |  |
 | GET | `/api/time` |  |
 | GET | `/api/v1/battery` |  |
+| GET | `/api/v1/camera/mavlink` |  |
+| POST | `/api/v1/camera/mavlink/capture` |  |
+| POST | `/api/v1/camera/mavlink/zoom` |  |
 | GET | `/api/v1/clock` |  |
 | GET | `/api/v1/dashboard/snapshot` |  |
 | GET | `/api/v1/diagnostics` |  |
@@ -267,7 +270,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-242 native routes.
+245 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

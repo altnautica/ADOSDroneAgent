@@ -29,7 +29,7 @@ use super::*;
 /// A re-open that fails on a RETRY is not a 503: the first frame did reach the
 /// socket, so the honest outcome is `NoAck` (sent, no ACK observed) rather than
 /// "no MAVLink connection".
-pub(super) async fn send_awaiting_ack(
+pub(crate) async fn send_awaiting_ack(
     client: &MavlinkIpcClient,
     base_long: &COMMAND_LONG_DATA,
     cfg: &AckConfig,
@@ -174,7 +174,7 @@ pub(super) fn statustext_of(frame: &[u8]) -> Option<String> {
 }
 
 /// The human name for a `MAV_RESULT` value (common.xml).
-pub(super) fn mav_result_name(result: u8) -> &'static str {
+pub(crate) fn mav_result_name(result: u8) -> &'static str {
     match result {
         0 => "ACCEPTED",
         1 => "TEMPORARILY_REJECTED",

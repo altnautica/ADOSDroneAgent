@@ -217,6 +217,9 @@ pub struct AppState {
     /// serve. The daemon feeds it from the plugin host's event export; a state
     /// built without that reader serves every kind as `null`.
     pub nav: crate::routes::nav::NavHub,
+    /// The MAVLink cameras that answered `CAMERA_INFORMATION`, which the
+    /// `/api/v1/camera/mavlink*` routes list and address.
+    pub mavlink_cameras: crate::routes::camera_mavlink::MavlinkCameras,
 }
 
 /// The aux response listener's shutdown handles.
@@ -289,6 +292,7 @@ impl AppState {
             ))),
             plugins,
             nav: crate::routes::nav::NavHub::new(),
+            mavlink_cameras: Default::default(),
         }
     }
 

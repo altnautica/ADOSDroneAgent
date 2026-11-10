@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.73] - 2026-11-10
+
+### Added
+
+- The agent API lists the vehicle's MAVLink cameras and sends image capture and zoom: `GET /api/v1/camera/mavlink` asks every component for `CAMERA_INFORMATION` and answers `{cameras: [{component_id, vendor, model, flags, can_capture_image, can_zoom, ...}]}` (empty when none answer); `POST /api/v1/camera/mavlink/capture {component_id}` sends `MAV_CMD_IMAGE_START_CAPTURE` for one image and `POST /api/v1/camera/mavlink/zoom {component_id, type: step|continuous|range, value}` sends `MAV_CMD_SET_CAMERA_ZOOM`; both answer `{ok, result, component_id}` with the camera's `MAV_RESULT` name or `TIMEOUT`.
+
 ## [0.109.72] - 2026-11-10
 
 ### Changed

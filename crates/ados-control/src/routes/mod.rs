@@ -14,6 +14,7 @@
 
 pub mod battery;
 pub mod camera_config;
+pub mod camera_mavlink;
 pub mod can;
 pub mod cloud_link;
 pub mod command;

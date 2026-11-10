@@ -134,7 +134,7 @@ use crate::ipc::{FrameRead, MavlinkIpcClient};
 use crate::routes::detail;
 use crate::state::{AppState, FcIdentity};
 
-mod ack;
+pub(crate) mod ack;
 mod build;
 use ack::*;
 use build::*;
@@ -171,8 +171,8 @@ const SIMPLE_COMMANDS: &[(&str, &str)] = &[
 /// The source identity stamped on every command frame: the agent/companion
 /// identity the router uses on its own FC send path (defaults 1/191), so a
 /// command from this surface is wire-identical to one the router sent.
-const SOURCE_SYSTEM_ID: u8 = 1;
-const SOURCE_COMPONENT_ID: u8 = 191;
+pub(crate) const SOURCE_SYSTEM_ID: u8 = 1;
+pub(crate) const SOURCE_COMPONENT_ID: u8 = 191;
 
 /// Default takeoff altitude in metres when the request carries no `args[0]`.
 const DEFAULT_TAKEOFF_ALT_M: f32 = 10.0;
@@ -262,22 +262,22 @@ const PX4_MODE_NUMBERS: &[(&str, u8, u8)] = &[
 ];
 
 // ── MAV_RESULT numeric values (common.xml) ──────────────────────────────────
-const MAV_RESULT_ACCEPTED: u8 = 0;
-const MAV_RESULT_IN_PROGRESS: u8 = 5;
+pub(crate) const MAV_RESULT_ACCEPTED: u8 = 0;
+pub(crate) const MAV_RESULT_IN_PROGRESS: u8 = 5;
 
 /// Timing + retry policy for the `COMMAND_ACK` correlation. Injectable so a test
 /// can drive short bounds; the route uses [`AckConfig::default`].
 #[derive(Debug, Clone, Copy)]
-struct AckConfig {
+pub(crate) struct AckConfig {
     /// How long to wait for an ACK after each send before resending.
-    base_timeout: Duration,
+    pub(crate) base_timeout: Duration,
     /// How many resends to attempt (with `confirmation++`) after the first send
     /// times out. `0` sends exactly once.
-    retries: u32,
+    pub(crate) retries: u32,
     /// The extended wait after an `IN_PROGRESS` ACK — the command was accepted
     /// and is executing, so the route waits longer for a final result and does
     /// not resend.
-    inprogress_timeout: Duration,
+    pub(crate) inprogress_timeout: Duration,
 }
 
 impl Default for AckConfig {
@@ -292,7 +292,7 @@ impl Default for AckConfig {
 
 /// The outcome of a correlated command send.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum AckOutcome {
+pub(crate) enum AckOutcome {
     /// A `COMMAND_ACK` matching this command arrived. Carries the `MAV_RESULT`
     /// and, for a non-accepted result, any `STATUSTEXT` seen alongside it (the
     /// human-readable reason ArduPilot reports for a denial).
