@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.58] - 2026-11-10
+
+### Changed
+
+- Cockpit: flight command results and refusals read in plain words from the shared cockpit spec (for example "Return home: Denied", "Resume did not respond", "Still flying; land first") instead of raw result names and codes.
+
 ## [0.109.57] - 2026-11-10
 
 ### Changed
