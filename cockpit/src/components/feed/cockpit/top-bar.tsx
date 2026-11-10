@@ -17,13 +17,24 @@ import { NavSourceChip } from "@/components/feed/nav-source-chip";
 import { Overlay } from "@/components/ui/overlay";
 import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
 import { padStatusText, usePadStatus } from "@/hooks/use-gamepad";
-import { useFreshPilot, usePilot } from "@/hooks/use-pilot";
+import { useNow } from "@/hooks/use-now";
+import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
-import { pillAlertStale, pillStale } from "@/lib/alerts";
+import { pillWiring } from "@/lib/alerts";
 import { chromeStyle, severityColor } from "@/lib/chrome-tokens";
 import { BUILTIN_LAYERS, layerFlag } from "@/lib/cockpit-view";
-import { barFull, HIT_AREA, movedItems, TOP_BAR_OVERFLOW, type TopBarOverflowItem } from "@/lib/flight-layout";
-import { fmtClock, linkLabel } from "@/lib/safety-band";
+import {
+  barFull,
+  HIT_AREA,
+  linkCell,
+  linkDetail,
+  movedItems,
+  reserveText,
+  severityTextColor,
+  TOP_BAR_OVERFLOW,
+  type TopBarOverflowItem,
+} from "@/lib/flight-layout";
+import { fmtClock, preflightChecks } from "@/lib/safety-band";
 import { requestSkill } from "@/lib/skill-runner";
 import { BUILTIN_SKILL_BY_ID } from "@/lib/skills";
 import { cn } from "@/lib/utils";
@@ -68,7 +79,7 @@ function BatteryItem({ compact }: { compact: boolean }) {
   }
   const low = reservePct ?? BATTERY_LOW_PCT;
   const severity: PillSeverity = r.pct <= low ? "critical" : r.pct <= low + 10 ? "warning" : "ok";
-  const color = severity === "ok" ? undefined : severityColor(severity);
+  const color = severity === "ok" ? undefined : severityTextColor(severity);
   return (
     <span className="flex shrink-0 items-center gap-[6px] whitespace-nowrap" aria-label={label} data-zone="battery">
       <span className="relative h-[11px] w-[26px] rounded-[3px] border border-[var(--fs-text-dim)]" aria-hidden>
@@ -88,9 +99,9 @@ function BatteryItem({ compact }: { compact: boolean }) {
       <span className="font-semibold" style={{ color }}>
         {Math.round(r.pct)}%
       </span>
-      {!compact && r.timeToReserveS !== null ? (
-        <span className="chrome-dim" aria-label={specText("cockpit.battery.time_left", { time: fmtClock(r.timeToReserveS) })}>
-          {fmtClock(r.timeToReserveS)}
+      {r.timeToReserveS !== null ? (
+        <span className="chrome-dim" aria-label={reserveText(fmtClock(r.timeToReserveS), false)} data-testid="battery-to-reserve">
+          {reserveText(fmtClock(r.timeToReserveS), compact)}
         </span>
       ) : null}
     </span>
@@ -98,18 +109,24 @@ function BatteryItem({ compact }: { compact: boolean }) {
 }
 
 /** The status pill: "All systems OK", the one alert, or "<n> warnings",
- *  flashing on a new alert until the list is opened. Items read from the
- *  pilot frame (readiness, the FC's status texts) stay listed once that
- *  frame is stale, drawn dimmed and never as live; a pill reporting only
- *  stale items dims. `fit`: every movable item is in the Menu, so the pill
- *  truncates with an ellipsis. */
+ *  flashing on a new alert until the list is opened. The shared rules also
+ *  read the pilot frame's age (no or a stale frame never reads OK, and drops
+ *  what that frame said), whether the agent answers, a lost controller, and
+ *  on the ground the pre-flight checklist's failing items. `fit`: every
+ *  movable item is in the Menu, so the pill truncates with an ellipsis. */
 function StatusPill({ compact, fit }: { compact: boolean; fit: boolean }) {
   const alerts = useCockpitAlerts();
-  const pilot = usePilot()?.data;
-  const pilotFresh = useFreshPilot() !== null;
+  const stamped = usePilot();
+  const pilot = stamped?.data;
+  const now = useNow(500);
   const readiness = pilot?.readiness ?? [];
   const fcStatus = pilot?.statustext;
-  const prearm = useFlightStore((s) => s.telemetry?.prearm);
+  const telemetry = useFlightStore((s) => s.telemetry);
+  const live = useFlightStore((s) => s.live);
+  const home = useFlightStore((s) => s.home);
+  const battery = useStatusStore((s) => s.battery);
+  const statusStale = useStatusStore((s) => s.stale);
+  const prearm = telemetry?.prearm;
   const storagePct = useStatusStore((s) => s.status?.system?.disk_pct ?? null);
   const acked = useStatusPillStore((s) => s.acked);
   const ack = useStatusPillStore((s) => s.ack);
@@ -117,8 +134,15 @@ function StatusPill({ compact, fit }: { compact: boolean; fit: boolean }) {
   const [rect, setRect] = useState<DOMRect | null>(null);
   const pillRef = useRef<HTMLButtonElement>(null);
   const open = rect !== null;
-  const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus }), acked);
-  const dim = pillStale(summary.alerts, pilotFresh);
+  const wiring = pillWiring({
+    pilot: stamped,
+    nowMs: now,
+    statusStale,
+    armed: telemetry?.armed,
+    checks: preflightChecks({ telemetry, battery, live, home }),
+    alerts,
+  });
+  const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus, ...wiring }), acked);
   const color = severityColor(summary.severity);
   const Icon = SEVERITY_ICON[summary.severity];
 
@@ -132,13 +156,11 @@ function StatusPill({ compact, fit }: { compact: boolean; fit: boolean }) {
         aria-expanded={open}
         data-zone="status_pill"
         data-severity={summary.severity}
-        data-stale={dim || undefined}
         className={cn(
           HIT_AREA,
           "flex min-h-[36px] min-w-[44px] items-center gap-[6px] rounded-full border px-[10px] font-semibold",
           fit ? "min-w-0 shrink" : "shrink-0",
-          summary.flashing && !dim && "chrome-pill-flash",
-          dim && "opacity-55",
+          summary.flashing && "chrome-pill-flash",
         )}
         style={{ color, borderColor: `${color}80` }}
       >
@@ -150,7 +172,7 @@ function StatusPill({ compact, fit }: { compact: boolean; fit: boolean }) {
         )}
       </button>
       {rect ? (
-        <AlertList rect={rect} alerts={summary.alerts} pilotFresh={pilotFresh} ack={ack} onClose={() => setRect(null)} />
+        <AlertList rect={rect} alerts={summary.alerts} ack={ack} onClose={() => setRect(null)} />
       ) : null}
     </>
   );
@@ -163,13 +185,11 @@ function StatusPill({ compact, fit }: { compact: boolean; fit: boolean }) {
 function AlertList({
   rect,
   alerts,
-  pilotFresh,
   ack,
   onClose,
 }: {
   rect: DOMRect;
   alerts: readonly PillAlert[];
-  pilotFresh: boolean;
   ack: (ids: string[]) => void;
   onClose: () => void;
 }) {
@@ -198,17 +218,12 @@ function AlertList({
         ) : (
           alerts.map((a) => {
             const AIcon = SEVERITY_ICON[a.severity];
-            const stale = pillAlertStale(a, pilotFresh);
             return (
-              <div
-                key={a.id}
-                className={cn("flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]", stale && "opacity-55")}
-                data-stale={stale || undefined}
-              >
+              <div key={a.id} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
                 <AIcon className="chrome-icon mt-[1px] shrink-0" style={{ color: severityColor(a.severity) }} aria-hidden />
                 <div className="min-w-0">
                   <div className="chrome-label">{specText(`cockpit.status.source.${a.source}`)}</div>
-                  <div>{a.text}</div>
+                  <div style={a.severity === "critical" ? { color: severityTextColor("critical") } : undefined}>{a.text}</div>
                 </div>
               </div>
             );
@@ -231,20 +246,41 @@ function ControllerItem() {
   );
 }
 
-/** The link: its icon, and its text unless that has moved into the Menu. */
+/** The link: the newest vehicle frame's age (`top_bar.link`), its icon
+ *  coloured by the spec's age thresholds, and its text unless that has moved
+ *  into the Menu. A press opens the link popover with the RSSI. */
 function LinkItem({ text }: { text: boolean }) {
-  const status = useStatusStore((s) => s.status);
-  const [, setTick] = useState(0);
-  // The link label carries an age; re-read it once a second.
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const label = linkLabel(status);
+  const ageS = useStatusStore((s) => s.status?.heartbeat_age_s);
+  const rssi = useStatusStore((s) => s.status?.link?.rssi_dbm);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const cell = linkCell(typeof ageS === "number" ? ageS * 1000 : null);
+  const detail = linkDetail(rssi);
   return (
-    <Item icon={Radio} label={specText("cockpit.link.named", { label })} zone="link">
-      {text ? <span>{label}</span> : null}
-    </Item>
+    <span className="flex shrink-0 items-center" data-zone="link" data-severity={cell.severity}>
+      <button
+        type="button"
+        onClick={(e) => setRect(rect ? null : e.currentTarget.getBoundingClientRect())}
+        aria-label={specText("cockpit.link.named", { label: cell.text })}
+        aria-expanded={rect !== null}
+        className={cn(HIT_AREA, "flex h-[40px] items-center gap-[6px] whitespace-nowrap rounded-[var(--fs-radius-sm)] px-[4px] hover:bg-white/10")}
+      >
+        <Radio className="chrome-icon" style={{ color: severityColor(cell.severity) }} aria-hidden data-testid="link-icon" />
+        {text ? <span style={cell.severity === "critical" ? { color: severityTextColor("critical") } : undefined}>{cell.text}</span> : null}
+      </button>
+      {rect ? (
+        <Overlay
+          onDismiss={() => setRect(null)}
+          scrim="clear"
+          panelClassName="chrome-panel chrome-bar-text w-[220px] p-[10px]"
+          panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.left, window.innerWidth - 228)), top: rect.bottom + 8 }}
+        >
+          <div data-testid="link-popover" className="flex flex-col gap-[4px]">
+            <div>{cell.text}</div>
+            {detail ? <div className="chrome-dim">{detail}</div> : null}
+          </div>
+        </Overlay>
+      ) : null}
+    </span>
   );
 }
 
@@ -379,6 +415,8 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
       aria-label={specText("cockpit.top_bar")}
       data-zone="top_bar"
       data-moved={[...moved].join(" ")}
+      // The chip's width is capped at a fraction of the bar in `cqw`.
+      style={{ containerType: "inline-size" }}
       className="chrome-panel chrome-bar-text pointer-events-auto flex h-full w-full items-center gap-[6px] overflow-x-clip p-[4px] pl-[6px]"
     >
       <div ref={row} className="flex min-w-0 flex-1 items-center gap-[12px] overflow-x-clip">

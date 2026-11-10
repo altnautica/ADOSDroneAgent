@@ -1,7 +1,8 @@
 import { BatteryLow, BatteryWarning, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
 import { describe, expect, it } from "vitest";
 
-import { computeAlerts, pillAlertStale, pillStale, type AlertInputs } from "@/lib/alerts";
+import { computeAlerts, pillWiring, type AlertInputs } from "@/lib/alerts";
+import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { pillAlerts } from "@/shared/hud/status-pill";
 
 function inputs(over: Partial<AlertInputs> = {}): AlertInputs {
@@ -30,26 +31,43 @@ describe("cockpit alerts", () => {
   });
 });
 
-describe("status pill items from a stale pilot frame", () => {
-  const alerts = pillAlerts({
-    alerts: [],
-    readiness: [{ id: "position", ok: false, severity: "block", msg: "No position estimate" }],
-    prearm: undefined,
-    storagePct: null,
-    fcStatus: [{ severity: 4, text: "EKF variance", ageMs: 100 }],
-  });
-  const battery = pillAlerts({ alerts: [{ id: "batt_low", level: "warning", title: "Battery low" }], readiness: [], prearm: undefined, storagePct: null });
+describe("the status pill's pilot, agent, controller and pre-flight inputs", () => {
+  const pilot = (over: Partial<PilotState> = {}) => ({ at: 1000, data: { holdReason: null, armed: false, landed: true, ...over } as PilotState });
+  const checks = [
+    { id: "link", label: "Vehicle link fresh", ok: false },
+    { id: "gps", label: "GPS fix 3D or better", ok: false },
+    { id: "home", label: "Home position set", ok: false },
+    { id: "battery", label: "Battery above the low band", ok: true },
+  ];
+  const base = { pilot: pilot(), nowMs: 1500, statusStale: false, armed: false, checks, alerts: [] };
 
-  it("stay listed but dim once the frame is stale", () => {
-    expect(alerts.map((a) => pillAlertStale(a, true))).toEqual([false, false]);
-    expect(alerts.map((a) => pillAlertStale(a, false))).toEqual([true, true]);
-    expect(pillStale(alerts, false)).toBe(true);
-    expect(pillStale(alerts, true)).toBe(false);
+  it("passes the pilot frame's age, null with no pilot state", () => {
+    expect(pillWiring(base).pilotAgeMs).toBe(500);
+    expect(pillWiring({ ...base, pilot: null }).pilotAgeMs).toBeNull();
   });
 
-  it("never dim what does not come from the pilot", () => {
-    expect(pillAlertStale(battery[0], false)).toBe(false);
-    expect(pillStale([...alerts, ...battery], false)).toBe(false);
-    expect(pillStale([], false)).toBe(false);
+  it("never reads OK with no pilot state, and drops a stale frame's readiness", () => {
+    const readiness = [{ id: "position", ok: false, severity: "block" as const, msg: "No position estimate" }];
+    const none = pillAlerts({ alerts: [], readiness, prearm: undefined, storagePct: null, ...pillWiring({ ...base, pilot: null, checks: [] }) });
+    expect(none.map((a) => a.id)).toEqual(["pilot_not_answering"]);
+    const stale = pillAlerts({ alerts: [], readiness, prearm: undefined, storagePct: null, ...pillWiring({ ...base, nowMs: 3000, checks: [] }) });
+    expect(stale.map((a) => a.id)).toEqual(["pilot_not_answering"]);
+  });
+
+  it("calls the agent unreachable while its status poll fails", () => {
+    expect(pillWiring(base).agentReachable).toBe(true);
+    expect(pillWiring({ ...base, statusStale: true }).agentReachable).toBe(false);
+  });
+
+  it("raises a lost controller only in the air", () => {
+    expect(pillWiring({ ...base, pilot: pilot({ holdReason: "controller-lost", armed: true, landed: false }) }).controllerLost).toBe(true);
+    expect(pillWiring({ ...base, pilot: pilot({ holdReason: "controller-lost" }) }).controllerLost).toBe(false);
+  });
+
+  it("lists failing pre-flight items on the ground only, never twice", () => {
+    expect(pillWiring(base).preflightFailing.map((c) => c.id)).toEqual(["link", "gps", "home"]);
+    const covered = pillWiring({ ...base, alerts: [{ id: "link_lost", level: "critical", title: "Link lost" }, { id: "gps_no_3d", level: "warning", title: "No 3D fix" }] });
+    expect(covered.preflightFailing.map((c) => c.id)).toEqual(["home"]);
+    expect(pillWiring({ ...base, armed: true }).preflightFailing).toEqual([]);
   });
 });

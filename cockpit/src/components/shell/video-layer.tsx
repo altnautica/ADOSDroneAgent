@@ -6,10 +6,10 @@
 // reticle or the horizon mark), in the spec's words and never an exception's
 // text.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useWidthClass } from "@/hooks/use-width-class";
-import { classScale, VIDEO_NOTE_TOP } from "@/lib/flight-layout";
+import { classScale, VIDEO_NOTE_TOP, videoNote } from "@/lib/flight-layout";
 import { specText } from "@/shared/hud/spec-text";
 import { useVideoTransport } from "@/shared/use-video-transport";
 import type { VideoTransportSnapshot } from "@/shared/video-transport";
@@ -35,7 +35,9 @@ export function VideoLayer({
   onSnapshot?: (snapshot: VideoTransportSnapshot) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const snapshot = useVideoTransport(videoRef, { order: ORDER, whepUrl, hlsUrl, reconnectKey });
+  // A press on the note's Retry dials again.
+  const [retries, setRetries] = useState(0);
+  const snapshot = useVideoTransport(videoRef, { order: ORDER, whepUrl, hlsUrl, reconnectKey: `${reconnectKey ?? ""}#${retries}` });
   const setVideo = useFeedStore((s) => s.setVideo);
   const ownsStore = onSnapshot === undefined;
 
@@ -47,12 +49,7 @@ export function VideoLayer({
 
   const k = classScale(useWidthClass().widthClass);
 
-  const message =
-    snapshot.state === "connecting"
-      ? "Connecting to feed…"
-      : snapshot.state === "failed"
-        ? specText("camera.no_video")
-        : null;
+  const note = videoNote(snapshot.state, whepUrl !== "" || hlsUrl !== "");
 
   return (
     <div className="absolute inset-0 z-0 bg-letterbox">
@@ -63,7 +60,7 @@ export function VideoLayer({
         muted
         playsInline
       />
-      {message ? (
+      {note ? (
         // The inset has no centre marks: its note stays centred.
         <div
           className={ownsStore ? "absolute inset-x-0 flex justify-center" : "absolute inset-0 flex items-center justify-center"}
@@ -71,10 +68,21 @@ export function VideoLayer({
           data-testid="video-note"
         >
           <span
-            className="rounded-md bg-hud-glass-strong text-hud-ink-2"
-            style={{ fontSize: `${14 * k}px`, lineHeight: `${18 * k}px`, padding: `${8 * k}px ${14 * k}px` }}
+            className="pointer-events-auto flex items-center rounded-md bg-hud-glass-strong text-hud-ink-2"
+            style={{ fontSize: `${14 * k}px`, lineHeight: `${18 * k}px`, padding: `${8 * k}px ${14 * k}px`, gap: `${10 * k}px` }}
           >
-            {message}
+            {note.text}
+            {note.retry ? (
+              <button
+                type="button"
+                onClick={() => setRetries((n) => n + 1)}
+                className="rounded-md border border-hud-hair font-semibold text-hud-ink"
+                style={{ minHeight: 48, padding: `0 ${12 * k}px` }}
+                data-testid="video-retry"
+              >
+                {specText("video.state.retry")}
+              </button>
+            ) : null}
           </span>
         </div>
       ) : null}

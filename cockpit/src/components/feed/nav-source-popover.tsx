@@ -44,14 +44,15 @@ export default function NavSourcePopover({
       const res = await sendCommand("ekfsourceset", [set]);
       const ack = res.ack;
       if (ack?.observed && !ack.accepted) {
-        toast.err(`Set ${set} refused`, ackText(ack));
+        toast.err(specText("nav_source.set_refused", { n: set }), ackText(ack));
       } else {
         setCommandedSet(set);
-        if (ack?.observed) toast.ok(`EKF source set ${set} active`);
-        else toast.info(`EKF source set ${set} sent`, "No acknowledgement from the flight controller.");
+        if (ack?.observed) toast.ok(specText("nav_source.set_active", { n: set }));
+        // "sent" rather than "active": the flight controller has not acknowledged it.
+        else toast.info(specText("nav_source.set_sent", { n: set }));
       }
     } catch (e) {
-      toastFromError(e, `Set ${set} not sent`);
+      toastFromError(e, specText("nav_source.set_not_sent", { n: set }));
     } finally {
       setBusy(false);
     }
@@ -67,7 +68,7 @@ export default function NavSourcePopover({
         <table className="w-full border-collapse font-mono text-[0.8rem]">
           <thead>
             <tr className="text-left text-muted-foreground">
-              <th className="py-[0.2rem] font-medium">Set</th>
+              <th className="py-[0.2rem] font-medium">{specText("nav_source.set")}</th>
               {EKF_AXES.map((a) => (
                 <th key={a} className="py-[0.2rem] font-medium">
                   {a}
@@ -85,37 +86,37 @@ export default function NavSourcePopover({
                     {sourceWord(a, params?.[`EK3_SRC${s}_${a}`])}
                   </td>
                 ))}
-                <td className="py-[0.3rem] text-right font-semibold">{s === result.activeSet ? "ACTIVE" : ""}</td>
+                <td className="py-[0.3rem] text-right font-semibold">{s === result.activeSet ? specText("nav_source.active") : ""}</td>
               </tr>
             ))}
           </tbody>
         </table>
         <dl className="grid grid-cols-[auto_1fr] gap-x-[0.8rem] gap-y-[0.2rem] font-mono text-[0.8rem]">
-          <dt className="text-muted-foreground">Ext nav</dt>
+          <dt className="text-muted-foreground">{specText("nav_source.ext_nav")}</dt>
           <dd>
             {nav?.extnavHealth ? nav.extnavHealth.toUpperCase() : "—"}
             {nav?.odomRateHz != null ? ` · ${nav.odomRateHz.toFixed(1)} Hz` : ""}
           </dd>
-          <dt className="text-muted-foreground">GPS</dt>
+          <dt className="text-muted-foreground">{specText("nav_source.gps")}</dt>
           <dd>
-            {gps?.fix_type != null ? `fix ${gps.fix_type}` : "—"}
-            {gps?.satellites != null ? ` · ${gps.satellites} sats` : ""}
-            {gps?.eph != null ? ` · hdop ${gps.eph.toFixed(1)}` : ""}
+            {gps?.fix_type != null ? specText("nav_source.fix", { n: gps.fix_type }) : "—"}
+            {gps?.satellites != null ? ` · ${specText("nav_source.sats", { n: gps.satellites })}` : ""}
+            {gps?.eph != null ? ` · ${specText("nav_source.hdop", { v: gps.eph.toFixed(1) })}` : ""}
           </dd>
-          <dt className="text-muted-foreground">EKF</dt>
+          <dt className="text-muted-foreground">{specText("nav_source.ekf")}</dt>
           <dd>{ekfFlagWords(flags)}</dd>
         </dl>
         {nav?.mode === "external_nav" ? (
-          <p className="text-muted-foreground">Vision-nav switches sets automatically; a manual switch may be overridden.</p>
+          <p className="text-muted-foreground">{specText("nav_source.auto_note")}</p>
         ) : null}
         <div className="flex flex-wrap gap-[0.5rem]">
           {EKF_SETS.map((s) => (
-            <HoldButton key={s} disabled={busy || !live} onFired={() => void switchSet(s)} label={`Hold to use set ${s}`}>
-              Use set {s}
+            <HoldButton key={s} disabled={busy || !live} onFired={() => void switchSet(s)} label={specText("nav_source.hold_use_set", { n: s })}>
+              {specText("nav_source.use_set", { n: s })}
             </HoldButton>
           ))}
         </div>
-        {!live ? <p className="text-warn">No live flight controller telemetry.</p> : null}
+        {!live ? <p className="text-warn">{specText("nav_source.no_fc")}</p> : null}
       </div>
     </Sheet>
   );

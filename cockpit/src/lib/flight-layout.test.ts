@@ -4,11 +4,20 @@ import { describe, expect, it } from "vitest";
 
 import layersJson from "@/shared/cockpit-spec/layers.json";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
+import { chromeStyle } from "@/lib/chrome-tokens";
 import { gridMeasures, widthClassFor } from "@/lib/cockpit-layout";
 import { BUILTIN_LAYERS, COCKPIT_VIEWS, effectiveLayers, LAYER_LEVELS } from "@/lib/cockpit-view";
 import {
   barFull,
   CENTRE_MARK_REACH_U,
+  CHIP_MAX_FRAC,
+  labelPx,
+  linkCell,
+  linkDetail,
+  reserveText,
+  severityTextColor,
+  TEXT_CRITICAL,
+  videoNote,
   classScale,
   FLIGHT_PX,
   flightLayout,
@@ -204,8 +213,8 @@ describe("the top bar's controls", () => {
     expect(HIT_AREA).toContain(`before:w-[max(100%,${TOUCH_MIN_PX}px)]`);
     // The bar is as tall as the hit areas it hosts.
     expect(FLIGHT_PX.barH).toBeGreaterThanOrEqual(TOUCH_MIN_PX);
-    // The pill, the layer level and its ▾, Menu and STOP; the chip and its inline button; the nav-source chip.
-    expect(bar.match(/cn\(\s*HIT_AREA/g)?.length).toBe(5);
+    // The pill, the link, the layer level and its ▾, Menu and STOP; the chip and its inline button; the nav-source chip.
+    expect(bar.match(/cn\(\s*HIT_AREA/g)?.length).toBe(6);
     expect(chip.match(/cn\(HIT_AREA/g)?.length).toBe(2);
     expect(nav).toMatch(/HIT_AREA/);
     // The layer menu's ▾ is itself 48 px wide.
@@ -233,7 +242,7 @@ describe("the top bar's controls", () => {
     // One overlay at a time; Escape, controller back and a press outside close the newest.
     expect(bar).not.toContain("createPortal");
     expect(bar).not.toContain("useDismiss");
-    expect(bar.match(/<Overlay\b/g)?.length).toBe(2);
+    expect(bar.match(/<Overlay\b/g)?.length).toBe(3);
     expect(bar).toContain('data-testid="status-pill-list"');
   });
 });
@@ -252,5 +261,74 @@ describe("the no-picture note", () => {
   it("is sized in px × the class scale", () => {
     expect(classScale("tv")).toBe(layoutJson.classes.tv.scale);
     expect(classScale("medium")).toBe(1);
+  });
+});
+
+describe("the top bar's cells from the spec", () => {
+  const bar = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/top-bar.tsx"), "utf8");
+  const chip = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/flight-state-chip.tsx"), "utf8");
+
+  it("the link cell reads the frame age and colours its icon by 3000/10000 ms", () => {
+    expect(linkCell(420)).toEqual({ text: "0.4 s", severity: "ok" });
+    expect(linkCell(2999).severity).toBe("ok");
+    expect(linkCell(3000)).toEqual({ text: "3.0 s", severity: "warning" });
+    expect(linkCell(9999).severity).toBe("warning");
+    expect(linkCell(12_400)).toEqual({ text: "12 s", severity: "critical" });
+    expect(linkCell(null)).toEqual({ text: "No link", severity: "critical" });
+    expect(linkDetail(-71.6)).toBe("RSSI -72 dBm");
+    expect(linkDetail(undefined)).toBeNull();
+    expect(bar).not.toContain("linkLabel");
+    expect(bar).toContain('data-testid="link-popover"');
+  });
+
+  it("battery reads its time to the reserve, short while the bar is short", () => {
+    expect(reserveText("4:05", false)).toBe("4:05 to reserve");
+    expect(reserveText("4:05", true)).toBe("4:05 RES");
+    expect(bar).toContain("reserveText(fmtClock(r.timeToReserveS), compact)");
+  });
+
+  it("critical text, panel and STOP colours come from the chrome tokens", () => {
+    expect(TEXT_CRITICAL).toBe("#FF8A80");
+    expect(severityTextColor("critical")).toBe(TEXT_CRITICAL);
+    expect(chromeStyle()).toMatchObject({ "--fs-panel-bg": "#080A0EC8", "--fs-stop-bg": "#C81E1E" });
+    const stack = readFileSync(path.resolve(__dirname, "../components/feed/alert-stack.tsx"), "utf8");
+    expect(stack).toContain("TEXT_CRITICAL");
+  });
+
+  it("a tv label is never below label_min_px", () => {
+    expect(labelPx(11, "tv")).toBe(16);
+    expect(labelPx(14, "tv")).toBeCloseTo(14 * 1.33);
+    expect(labelPx(11, "medium")).toBe(11);
+  });
+
+  it("the alert stack and the nav-source popover draw their words from the spec", () => {
+    const stack = readFileSync(path.resolve(__dirname, "../components/feed/alert-stack.tsx"), "utf8");
+    expect(stack).toContain("alert.level.");
+    for (const w of ['"Critical"', '"Warning"', '"Advisory"']) expect(stack, w).not.toContain(w);
+    const pop = readFileSync(path.resolve(__dirname, "../components/feed/nav-source-popover.tsx"), "utf8");
+    for (const w of ['"ACTIVE"', ">Set<", ">Ext nav<", ">GPS<", ">EKF<", "Use set {s}", "refused`", "sats`", "No live flight controller"]) {
+      expect(pop, w).not.toContain(w);
+    }
+  });
+
+  it("the chip is capped at max_frac of the bar with its full text on hover and tap", () => {
+    expect(CHIP_MAX_FRAC).toBe(0.4);
+    expect(chip).toContain("${CHIP_MAX_FRAC * 100}cqw");
+    expect(bar).toContain('containerType: "inline-size"');
+    expect(chip).toContain("title={full}");
+    expect(chip).toContain('data-testid="flight-state-chip-full"');
+  });
+});
+
+describe("the no-picture note's words", () => {
+  it("come from video.state with a retry cue", () => {
+    expect(videoNote("connecting")).toEqual({ text: "Connecting to video…", retry: false });
+    expect(videoNote("failed")).toEqual({ text: "Video failed", retry: true });
+    expect(videoNote("frozen")).toEqual({ text: "Picture frozen", retry: true });
+    expect(videoNote("live")).toBeNull();
+    expect(videoNote("connecting", false)).toEqual({ text: "No video source", retry: false });
+    const video = readFileSync(path.resolve(__dirname, "../components/shell/video-layer.tsx"), "utf8");
+    expect(video).not.toContain("Connecting to feed");
+    expect(video).toContain('specText("video.state.retry")');
   });
 });

@@ -6,28 +6,26 @@
 
 import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
 import { useWidthClass } from "@/hooks/use-width-class";
-import { classScale } from "@/lib/flight-layout";
+import { classScale, labelPx, TEXT_CRITICAL } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import type { AlertLevel } from "@/shared/hud/status-pill";
 
 const MAX_VISIBLE = 3;
 
 const LEVEL_STYLE: Record<AlertLevel, string> = {
-  critical: "border-err bg-err/20 text-err alert-flash-critical",
+  critical: "border-err bg-err/20 alert-flash-critical",
   warning: "border-warn bg-warn/15 text-warn alert-pulse-warning",
   advisory: "border-hud-hair bg-hud-glass text-hud-ink",
 };
 
-const LEVEL_LABEL: Record<AlertLevel, string> = {
-  critical: "Critical",
-  warning: "Warning",
-  advisory: "Advisory",
-};
+const levelLabel = (level: AlertLevel) => specText(`alert.level.${level}`);
 
 export function AlertStack() {
   const alerts = useCockpitAlerts();
   // Sized in px × the class scale: the stack sits outside the scaled zones.
-  const k = classScale(useWidthClass().widthClass);
+  const { widthClass } = useWidthClass();
+  const k = classScale(widthClass);
   const px = (n: number) => `${n * k}px`;
   const visible = alerts.slice(0, MAX_VISIBLE);
   const critical = visible.filter((a) => a.level === "critical");
@@ -39,18 +37,18 @@ export function AlertStack() {
       <div
         key={a.id}
         className={cn("flex items-center rounded-lg border-2 backdrop-blur-hud", LEVEL_STYLE[a.level])}
-        style={{ maxWidth: px(560), gap: px(8), padding: `${px(6)} ${px(12)}` }}
+        style={{ maxWidth: px(560), gap: px(8), padding: `${px(6)} ${px(12)}`, color: a.level === "critical" ? TEXT_CRITICAL : undefined }}
       >
         <Icon className="shrink-0" style={{ width: px(20), height: px(20) }} aria-hidden />
         <div className="min-w-0">
           <div className="font-semibold leading-tight" style={{ fontSize: px(14) }}>
-            <span className="uppercase tracking-wide" style={{ fontSize: px(11), marginRight: px(6) }}>
-              {LEVEL_LABEL[a.level]}
+            <span className="uppercase tracking-wide" style={{ fontSize: `${labelPx(11, widthClass)}px`, marginRight: px(6) }}>
+              {levelLabel(a.level)}
             </span>
             {a.title}
           </div>
           {a.detail ? (
-            <div className="truncate text-hud-ink-2" style={{ fontSize: px(12) }}>
+            <div className="truncate text-hud-ink-2" style={{ fontSize: `${labelPx(12, widthClass)}px` }}>
               {a.detail}
             </div>
           ) : null}

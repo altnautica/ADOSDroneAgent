@@ -13,6 +13,8 @@ import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { leftColumnLabelsAt, type GridMeasures } from "@/lib/cockpit-layout";
 import type { CockpitView } from "@/lib/cockpit-view";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
+import tokensJson from "@/shared/cockpit-spec/tokens.json";
+import { specText } from "@/shared/hud/spec-text";
 
 export interface Rect {
   x: number;
@@ -39,6 +41,9 @@ export type TopBarOverflowItem = "controller" | "nav_source" | "link_text" | "li
 
 interface TopBarSpec {
   overflow: { to_menu_order: TopBarOverflowItem[]; never_move: string[] };
+  chip: { max_frac: number };
+  link: { text: string; never: string; detail: string; icon_color: { ok_below_ms: number; warning_below_ms: number } };
+  battery: { time_to_reserve: { text: string; short: string } };
 }
 
 const TOP_BAR_SPEC = layoutJson.zones.find((z) => z.id === "top_bar") as unknown as TopBarSpec;
@@ -60,6 +65,42 @@ export function barFull(count: number): boolean {
   return count >= TOP_BAR_OVERFLOW.length;
 }
 
+/** The widest the flight-state chip draws, as a fraction of the bar
+ *  (`top_bar.chip.max_frac`); past it the text ends in an ellipsis and the
+ *  full text shows on hover or tap (`chip.full_text`). */
+export const CHIP_MAX_FRAC: number = TOP_BAR_SPEC.chip.max_frac;
+
+/** The link cell (`top_bar.link`): the newest vehicle frame's age in the
+ *  spec's words, and the icon's severity by its thresholds. */
+export function linkCell(ageMs: number | null): { text: string; severity: "ok" | "warning" | "critical" } {
+  const l = TOP_BAR_SPEC.link;
+  if (ageMs === null || !Number.isFinite(ageMs)) return { text: specText(l.never), severity: "critical" };
+  const s = ageMs / 1000;
+  const severity = ageMs < l.icon_color.ok_below_ms ? "ok" : ageMs < l.icon_color.warning_below_ms ? "warning" : "critical";
+  return { text: specText(l.text, { s: s < 10 ? s.toFixed(1) : String(Math.round(s)) }), severity };
+}
+
+/** The link popover's detail line (RSSI), or null without a reading. */
+export function linkDetail(rssiDbm: number | null | undefined): string | null {
+  return typeof rssiDbm === "number" && Number.isFinite(rssiDbm) ? specText("cockpit.link.rssi", { v: `${Math.round(rssiDbm)} dBm` }) : null;
+}
+
+/** Time to the battery reserve (`top_bar.battery.time_to_reserve`): the
+ *  short form while the bar is short of room. */
+export function reserveText(t: string, short: boolean): string {
+  const r = TOP_BAR_SPEC.battery.time_to_reserve;
+  return specText(short ? r.short : r.text, { t });
+}
+
+/** Text in a critical state (`tokens.json` `chrome.text_critical`), lighter
+ *  than the critical fill so it reads on the dark panel. */
+export const TEXT_CRITICAL: string = tokensJson.chrome.text_critical;
+
+/** The colour of text at a severity: critical text uses `TEXT_CRITICAL`. */
+export function severityTextColor(s: "ok" | "warning" | "critical"): string {
+  return s === "critical" ? TEXT_CRITICAL : s === "warning" ? CHROME_TOKENS.severity_warning : CHROME_TOKENS.severity_ok;
+}
+
 /** The smallest hit area of a flight-screen control, CSS px
  *  (`layout.json` `touch_target.min`). */
 export const TOUCH_MIN_PX: number = layoutJson.touch_target.min;
@@ -75,6 +116,24 @@ export const HIT_AREA =
  *  text drawn outside a scaled zone is sized px × this. */
 export function classScale(widthClass: keyof typeof layoutJson.classes): number {
   return layoutJson.classes[widthClass]?.scale ?? 1;
+}
+
+/** A label's size in CSS px outside a scaled zone: `base` × the class scale,
+ *  never below the class's `label_min_px` (a television reads from across
+ *  the room). */
+export function labelPx(base: number, widthClass: keyof typeof layoutJson.classes): number {
+  const cls: { label_min_px?: number } = layoutJson.classes[widthClass] ?? {};
+  return Math.max(base * classScale(widthClass), cls.label_min_px ?? 0);
+}
+
+/** The no-picture note in the spec's words (`video.state.*`), and whether it
+ *  offers a retry; null while the picture plays. */
+export function videoNote(state: "connecting" | "live" | "frozen" | "failed", hasSource = true): { text: string; retry: boolean } | null {
+  if (!hasSource) return { text: specText("video.state.no_source"), retry: false };
+  if (state === "connecting") return { text: specText("video.state.connecting"), retry: false };
+  if (state === "frozen") return { text: specText("video.state.frozen"), retry: true };
+  if (state === "failed") return { text: specText("video.state.failed"), retry: true };
+  return null;
 }
 
 /** How far below the stage centre the no-picture note starts, in the centre
