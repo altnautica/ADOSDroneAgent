@@ -943,7 +943,8 @@ async fn targets_the_latched_fc_system_id() {
 
 #[test]
 fn reposition_is_a_command_int_do_reposition_at_full_precision() {
-    let (c, body) = reposition_command(&[json!(12.971_598_7), json!(-77.594_562_3), json!(25.5)]).unwrap();
+    let (c, body) =
+        reposition_command(&[json!(12.971_598_7), json!(-77.594_562_3), json!(25.5)]).unwrap();
     let c = addressed_int(c, target());
     assert_eq!(c.command, MavCmd::MAV_CMD_DO_REPOSITION);
     assert_eq!(c.frame, MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT);
@@ -953,7 +954,8 @@ fn reposition_is_a_command_int_do_reposition_at_full_precision() {
     assert_eq!((c.target_system, c.target_component), target());
     assert_eq!(body["cmd"], json!("reposition"));
     // A numeric string reads the same as a number.
-    let (s, _) = reposition_command(&[json!("12.9715987"), json!("-77.5945623"), json!("25.5")]).unwrap();
+    let (s, _) =
+        reposition_command(&[json!("12.9715987"), json!("-77.5945623"), json!("25.5")]).unwrap();
     assert_eq!((s.x, s.y, s.z), (c.x, c.y, c.z));
     // The frame round-trips through the v2 encoding the send path uses.
     let header = MavHeader {
@@ -966,7 +968,10 @@ fn reposition_is_a_command_int_do_reposition_at_full_precision() {
     let MavMessage::COMMAND_INT(back) = back else {
         panic!("expected COMMAND_INT");
     };
-    assert_eq!((back.x, back.y, back.command), (c.x, c.y, MavCmd::MAV_CMD_DO_REPOSITION));
+    assert_eq!(
+        (back.x, back.y, back.command),
+        (c.x, c.y, MavCmd::MAV_CMD_DO_REPOSITION)
+    );
 }
 
 #[test]
@@ -991,10 +996,16 @@ fn reposition_refuses_every_unflyable_point() {
         let err = reposition_command(&args).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST, "arg {i} = {bad}");
     }
-    assert_eq!(reposition_command(&ok[..2]).unwrap_err().status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        reposition_command(&ok[..2]).unwrap_err().status,
+        StatusCode::BAD_REQUEST
+    );
     // The spec's launch range bounds it, both ends included.
     for alt in [1, 120] {
-        assert!(reposition_command(&[json!(0), json!(0), json!(alt)]).is_ok(), "{alt} m");
+        assert!(
+            reposition_command(&[json!(0), json!(0), json!(alt)]).is_ok(),
+            "{alt} m"
+        );
     }
 }
 
@@ -1010,8 +1021,14 @@ async fn reposition_reaches_the_latched_fc_as_a_command_int() {
         rd.read_exact(&mut hdr).await.unwrap();
         let mut body = vec![0u8; u32::from_be_bytes(hdr) as usize];
         rd.read_exact(&mut body).await.unwrap();
-        let ack = ack_frame(7, MavCmd::MAV_CMD_DO_REPOSITION, MavResult::MAV_RESULT_ACCEPTED);
-        wr.write_all(&encode_record(1, &ack).unwrap()).await.unwrap();
+        let ack = ack_frame(
+            7,
+            MavCmd::MAV_CMD_DO_REPOSITION,
+            MavResult::MAV_RESULT_ACCEPTED,
+        );
+        wr.write_all(&encode_record(1, &ack).unwrap())
+            .await
+            .unwrap();
         let _ = wr.flush().await;
         tokio::spawn(async move {
             let mut sink = [0u8; 256];
@@ -1043,7 +1060,9 @@ async fn reposition_reaches_the_latched_fc_as_a_command_int() {
     };
     assert_eq!((sent.target_system, sent.target_component), (7, 1));
     assert_eq!((sent.x, sent.y, sent.z), (473_977_420, 85_455_940, 30.0));
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"], json!("ok"), "{body}");
     assert_eq!(body["ack"]["accepted"], json!(true), "{body}");
@@ -1054,7 +1073,9 @@ async fn reposition_refuses_a_bad_point_before_any_send() {
     let dir = tempfile::tempdir().unwrap();
     // No socket at all: a refusal must come before the send would 503.
     let state = state_with_socket(dir.path(), dir.path().join("absent.sock"));
-    state.state.set_snapshot_for_test(json!({"fc_connected": true, "autopilot": 3}));
+    state
+        .state
+        .set_snapshot_for_test(json!({"fc_connected": true, "autopilot": 3}));
     let resp = execute_command(
         State(state),
         Json(CommandRequest {

@@ -374,7 +374,9 @@ pub async fn execute_command(
     // `reposition` carries a global position, so it is a COMMAND_INT.
     if cmd == "reposition" {
         return match reposition_command(&req.args) {
-            Ok((frame, body)) => send_and_report(&state, &cmd, &addressed_int(frame, target), body).await,
+            Ok((frame, body)) => {
+                send_and_report(&state, &cmd, &addressed_int(frame, target), body).await
+            }
             Err(err) => err.into_response(),
         };
     }
@@ -393,7 +395,12 @@ pub async fn execute_command(
 /// Send an addressed command and correlate the FC's COMMAND_ACK on a dedicated
 /// socket connection into `body`. An absent MAVLink socket or a broken write
 /// means no live FC link → 503.
-async fn send_and_report<C: AckedCommand>(state: &AppState, cmd: &str, frame: &C, mut body: Value) -> Response {
+async fn send_and_report<C: AckedCommand>(
+    state: &AppState,
+    cmd: &str,
+    frame: &C,
+    mut body: Value,
+) -> Response {
     match send_awaiting_ack(&state.mavlink, frame, &AckConfig::default()).await {
         Ok(outcome) => {
             merge_ack(&mut body, &outcome);

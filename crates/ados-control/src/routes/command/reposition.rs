@@ -48,12 +48,17 @@ fn number(args: &[Value], i: usize, name: &str) -> Result<f64, CommandError> {
         Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
         _ => None,
     };
-    v.filter(|v| v.is_finite())
-        .ok_or_else(|| bad(format!("reposition needs a finite {name} (args: [lat, lon, alt_m])")))
+    v.filter(|v| v.is_finite()).ok_or_else(|| {
+        bad(format!(
+            "reposition needs a finite {name} (args: [lat, lon, alt_m])"
+        ))
+    })
 }
 
 /// Build the unaddressed `DO_REPOSITION` and the success body, or a 400.
-pub(super) fn reposition_command(args: &[Value]) -> Result<(COMMAND_INT_DATA, Value), CommandError> {
+pub(super) fn reposition_command(
+    args: &[Value],
+) -> Result<(COMMAND_INT_DATA, Value), CommandError> {
     let lat = number(args, 0, "latitude")?;
     let lon = number(args, 1, "longitude")?;
     let alt = number(args, 2, "height")?;
@@ -65,7 +70,9 @@ pub(super) fn reposition_command(args: &[Value]) -> Result<(COMMAND_INT_DATA, Va
     }
     let (min, max) = *ALT_RANGE_M;
     if !(min..=max).contains(&alt) {
-        return Err(bad(format!("height {alt} m is outside {min}..{max} m above home")));
+        return Err(bad(format!(
+            "height {alt} m is outside {min}..{max} m above home"
+        )));
     }
     let frame = COMMAND_INT_DATA {
         param1: DEFAULT_SPEED,
