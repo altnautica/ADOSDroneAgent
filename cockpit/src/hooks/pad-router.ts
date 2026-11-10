@@ -91,6 +91,12 @@ export class PadRouter {
    *  command on release, and only while this says the press stayed a plain
    *  tap (no combo partner went down, no safety hold ran). */
   private cleanTap = new Map<number, boolean>();
+  /** A capture (the controller tour, "Press a control") holds the pad. */
+  private captured = false;
+  /** Buttons held through the end of a capture: the bindings ignore them
+   *  until they come up, so a press the capture took never fires a binding
+   *  or completes a hold afterwards. */
+  private heldThrough = new Set<number>();
 
   constructor(
     private bindings: readonly PadBinding[],
@@ -139,6 +145,7 @@ export class PadRouter {
     this.dispatch(this.safety.reset());
     this.was = [];
     this.cleanTap.clear();
+    this.heldThrough.clear();
   }
 
   /** The poller stopped. */
@@ -157,7 +164,23 @@ export class PadRouter {
     this.was = pressed;
     publishGamepadButtons(pressed);
     if (pressed.some((p, i) => p && !was[i])) input.setSource("gamepad");
-    if (input.capture) return;
+    if (input.capture) {
+      // The bindings lose the pad: every release they owe fires now, and a
+      // hold in progress is dropped rather than timed on through the capture.
+      if (!this.captured) {
+        this.captured = true;
+        this.dispatch(this.engine.reset());
+        this.dispatch(this.safety.reset());
+        useInputStore.setState({ holds: [], gimbalRateDps: 0 });
+        this.cleanTap.clear();
+      }
+      return;
+    }
+    if (this.captured) {
+      this.captured = false;
+      this.heldThrough = new Set(pressed.flatMap((p, i) => (p ? [i] : [])));
+    }
+    for (const i of this.heldThrough) if (!pressed[i]) this.heldThrough.delete(i);
 
     const next = this.deps.route();
     if (next !== this.route) {
@@ -178,7 +201,7 @@ export class PadRouter {
       return;
     }
 
-    const frame = padFrame(sample, now);
+    const frame = padFrame(this.heldThrough.size === 0 ? sample : this.withoutHeldThrough(sample), now);
     const ctx = this.deps.context();
     const active = this.route === "flight" ? this.engine : this.safety;
     const events = active.step(frame, ctx);
@@ -218,6 +241,18 @@ export class PadRouter {
       }
     }
     if (!safetyBusy && !memberHeld) this.stickNav(sample, now);
+  }
+
+  /** The sample as the bindings see it: buttons held through a capture's end
+   *  read as up. */
+  private withoutHeldThrough(s: PadSample): PadSample {
+    const up = (i: number | undefined) => i !== undefined && this.heldThrough.has(i);
+    return {
+      ...s,
+      pressed: s.pressed.map((p, i) => p && !this.heldThrough.has(i)),
+      l2: up(BUTTON_INDEX.l2) ? 0 : s.l2,
+      r2: up(BUTTON_INDEX.r2) ? 0 : s.r2,
+    };
   }
 
   /** The left stick moves the menu focus, repeating while held. */

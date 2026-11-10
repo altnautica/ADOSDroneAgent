@@ -4,12 +4,14 @@
 // persistent browser profile. The queue is the shared engine
 // (`@/shared/hud/tips`); this store remembers, and runs one flight-screen
 // open's session: when it opened, the tip on screen, the last dismissal and
-// the tips hidden unseen on this open.
+// the tips auto-dismissed unseen on this open (a tip hidden by a banner, a
+// sheet or the tour goes back to the queue).
 
 import { create } from "zustand";
 
 import {
   dismissTip,
+  hiddenThisOpenAfter,
   nextTip,
   onFlightScreenOpen,
   resetTips,
@@ -114,7 +116,7 @@ export const useTipsStore = create<TipsStore>((set, get) => {
       if (d.kind === "show" && s.shownTipId !== d.tipId) set({ session: { ...s, shownTipId: d.tipId, shownAtMs: nowMs } });
       else if (d.kind === "hide") {
         if (d.markSeen) commit(dismissTip(get().tips, d.tipId));
-        set({ session: hide(s, nowMs, d.markSeen ? null : d.tipId) });
+        set({ session: hide(s, nowMs, hiddenThisOpenAfter(d) ? d.tipId : null) });
       }
       return d;
     },

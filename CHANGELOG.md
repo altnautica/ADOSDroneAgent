@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.97] - 2026-11-10
+
+### Fixed
+
+- Cockpit: when the controller tour or "Press a control" starts capturing the controller, any held binding gets its release at once and a hold in progress is dropped, so a hold never completes on time spent captured.
+- Cockpit: a tip hidden for a moment by a banner, a sheet, a menu or the tour goes back to the head of the queue and shows again after the gap, so the status pill tip is no longer skipped in favour of the flight-state chip tip. Only an auto-dismissed tip waits for the next open.
+
 ## [0.109.96] - 2026-11-10
 
 ### Fixed

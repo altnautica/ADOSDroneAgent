@@ -2,7 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import tipsJson from "../cockpit-spec/tips.json";
 import tipsCases from "./fixtures/tips-cases.json";
-import { dismissTip, nextTip, onFlightScreenOpen, placeTip, resetTips, TIPS, type TipDecision, type TipRect, type TipsContext, type TipsState } from "./tips";
+import {
+  dismissTip,
+  hiddenThisOpenAfter,
+  nextTip,
+  onFlightScreenOpen,
+  placeTip,
+  resetTips,
+  TIPS,
+  type TipDecision,
+  type TipRect,
+  type TipsContext,
+  type TipsState,
+} from "./tips";
 
 const R = tipsJson.rules;
 const ANCHORS = Object.fromEntries(tipsJson.tips.map((t) => [t.anchor, true]));
@@ -84,6 +96,17 @@ describe("tips queue", () => {
       markSeen: false,
       reason: "not_allowed",
     });
+  });
+
+  it("lists only an auto-dismissed tip as hidden for this open; a banner hide requeues it", () => {
+    const autoHide = nextTip(fresh, ctx({ shownTipId: "status_pill", shownAtMs: 1000 }), 1000 + R.auto_dismiss_ms);
+    expect(hiddenThisOpenAfter(autoHide)).toBe(true);
+    const bannerHide = nextTip(fresh, ctx({ shownTipId: "status_pill", shownAtMs: 1000, alertBannerVisible: true }), 2000);
+    expect(bannerHide).toMatchObject({ kind: "hide", reason: "not_allowed" });
+    expect(hiddenThisOpenAfter(bannerHide)).toBe(false);
+    expect(hiddenThisOpenAfter(nextTip(fresh, ctx({ armed: true, shownTipId: "status_pill", shownAtMs: 1000 }), 2000))).toBe(false);
+    // Back at the head of the queue, after the gap.
+    expect(nextTip(fresh, ctx({ lastDismissedAtMs: 2000 }), 2000 + R.gap_between_ms)).toMatchObject({ kind: "show", tipId: "status_pill" });
   });
 
   it("fires the conditional triggers", () => {

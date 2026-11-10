@@ -90,6 +90,15 @@ describe("tips store", () => {
     expect(tips().tick(ground(), 100_000 + FIRST)).toMatchObject({ kind: "show", tipId: "status_pill" });
   });
 
+  it("a banner hides the tip for a moment; it shows again after the gap, ahead of the next tip", () => {
+    tips().flightScreenOpened(0);
+    expect(tips().tick(ground(), FIRST)).toMatchObject({ kind: "show", tipId: "status_pill" });
+    expect(tips().tick(ground({ alertBannerVisible: true }), FIRST + 500)).toMatchObject({ kind: "hide", tipId: "status_pill", reason: "not_allowed" });
+    expect(tips().tick(ground(), FIRST + 750)).toEqual({ kind: "wait", tipId: "status_pill", atMs: FIRST + 500 + GAP });
+    expect(tips().tick(ground(), FIRST + 500 + GAP)).toMatchObject({ kind: "show", tipId: "status_pill" });
+    expect(tips().tips.seen).toEqual([]);
+  });
+
   it("waits while a sheet, a menu or the controller tour is up, and skips an absent anchor", () => {
     tips().flightScreenOpened(0);
     expect(tips().tick(ground({ sheetOrMenuOpen: true }), FIRST).kind).toBe("none");

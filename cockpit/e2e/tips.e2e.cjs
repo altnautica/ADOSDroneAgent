@@ -7,11 +7,13 @@
 //   BASE=http://127.0.0.1:4286/cockpit/ NODE_PATH=<dir containing playwright-core> \
 //     CHROME=<chromium path> SHOTS=<screenshot dir> node e2e/tips.e2e.cjs
 //
-// On a fresh localStorage: the status-pill tip shows after the first delay
-// beside the pill; STOP stays the topmost element at its centre; "Got it"
-// brings the flight-state chip tip after the gap; arming hides the tip and no
-// tip shows for 30 s; a reload shows none of the seen tips; Settings › Reset
-// tips brings the first tip back on the next Feed open.
+// On a fresh localStorage: the status-pill tip is the first tip, shown after
+// the first delay just below the bar beside the pill; STOP stays the topmost
+// element at its centre; "Got it" brings the flight-state chip tip after the
+// gap; arming hides the tip and no tip shows for 30 s; a reload shows none of
+// the seen tips; Settings › Reset tips brings the first tip back on the next
+// Feed open; a banner hides it, and it comes back after the gap once the
+// banner clears.
 
 const { chromium } = require("playwright-core");
 const assert = require("node:assert/strict");
@@ -94,12 +96,14 @@ function rectOf(page, selector) {
   });
 }
 
-/** Wait up to `ms` for a tip with `id`; returns when it showed, ms after `from`. */
+/** Wait up to `ms` for a tip with `id`, the first tip to show in that time:
+ *  another tip showing first fails. */
 async function waitTip(page, id, ms) {
   const start = Date.now();
   while (Date.now() - start < ms) {
     const t = await tipNow(page);
     if (t && t.id === id) return t;
+    assert.equal(t, null, `tip ${t?.id} showed before ${id}`);
     await page.waitForTimeout(100);
   }
   throw new Error(`tip ${id} did not show within ${ms} ms`);
@@ -143,7 +147,8 @@ async function tipsCase(browser) {
   await page.waitForSelector("[data-zone=status_pill]", { timeout: 10000 });
   const opened = Date.now();
 
-  // (1) The first tip shows after the first delay, beside the status pill.
+  // (1) The first tip, and no other before it, shows after the first delay
+  // just below the top bar beside the status pill.
   assert.equal(await tipNow(page), null, "no tip before the first delay");
   const first = await waitTip(page, "status_pill", RULES.first_delay_ms + 3000);
   const firstAfter = Date.now() - opened;
@@ -151,8 +156,11 @@ async function tipsCase(browser) {
   assert.ok(first.text.includes(STRINGS["tips.status_pill"]), first.text);
   assert.equal(STRINGS["tips.status_pill"], "Warnings collect here. Select to see them.");
   const pill = await rectOf(page, "[data-zone=status_pill]");
+  const bar = await rectOf(page, "[data-zone=top_bar]");
   assert.ok(gap(first, pill) <= 32, `tip ${JSON.stringify(first)} is beside the pill ${JSON.stringify(pill)}`);
-  for (const zone of ["[data-zone=stop]", "[data-zone=left_column]", '[data-testid="flight-state-chip"]', "[data-zone=top_bar]"]) {
+  assert.ok(first.y >= bar.y + bar.h && first.y - (bar.y + bar.h) <= 16, `tip ${JSON.stringify(first)} sits just below the bar ${JSON.stringify(bar)}`);
+  assert.ok(first.x < pill.x + pill.w && pill.x < first.x + first.w, `tip ${JSON.stringify(first)} is under the pill ${JSON.stringify(pill)}`);
+  for (const zone of ["[data-zone=stop]", "[data-zone=left_column]", '[data-testid="flight-state-chip"]', "[data-zone=top_bar]", "[data-zone=alert_stack]"]) {
     assert.ok(!overlaps(first, await rectOf(page, zone)), `tip covers ${zone}`);
   }
   await page.screenshot({ path: path.join(SHOTS, "fix-TIPS.png") });
@@ -219,9 +227,15 @@ async function tipsCase(browser) {
     assert.ok(Date.now() < hideBy, "tip still shown beside an alert banner");
     await page.waitForTimeout(100);
   }
+  // (8) Once the banner clears, the same tip comes back after the gap, ahead
+  // of the next one: a banner does not use it up.
   await page.evaluate(() => document.getElementById("e2e-banner").remove());
+  const requeued = await waitTip(page, "status_pill", RULES.gap_between_ms + 3000);
+  assert.ok(gap(requeued, await rectOf(page, "[data-zone=status_pill]")) <= 32, `requeued tip ${JSON.stringify(requeued)} is beside the pill`);
   await ctx.close();
-  console.log(`tips: first after ${firstAfter} ms, next after ${gapMs} ms, none while armed, seen kept on reload, reset brings them back, hidden under a banner`);
+  console.log(
+    `tips: first after ${firstAfter} ms, next after ${gapMs} ms, none while armed, seen kept on reload, reset brings them back, hidden under a banner, back after it clears`,
+  );
 }
 
 (async () => {
