@@ -28,7 +28,7 @@ pub(super) struct Needs {
     pub autonomy: u16,
     pub flight: u16,
     pub gps: u16,
-    /// The trend charts may show (they never do on stale readings).
+    /// The trend charts may show (only while the flight readings are live).
     pub charts: bool,
 }
 

@@ -1,5 +1,6 @@
 // The node profile and ground-station role as words (the `access.profileGate`
-// labels the dashboard's profile gate already uses), never the wire ids.
+// labels the dashboard's profile gate already uses), never the wire ids. An id
+// outside the set reads "Unrecognised".
 
 const PROFILE_KEYS = {
   drone: "access.profileGate.profileDrone",
@@ -17,9 +18,9 @@ const ROLE_KEYS = {
 } as const;
 
 export function profileWordKey(profile: string | null | undefined) {
-  return PROFILE_KEYS[profile as keyof typeof PROFILE_KEYS] ?? "access.profileGate.profileOther";
+  return PROFILE_KEYS[profile as keyof typeof PROFILE_KEYS] ?? "panels.state.unrecognised";
 }
 
 export function roleWordKey(role: string | null | undefined) {
-  return ROLE_KEYS[role as keyof typeof ROLE_KEYS] ?? "access.profileGate.profileOther";
+  return ROLE_KEYS[role as keyof typeof ROLE_KEYS] ?? "panels.state.unrecognised";
 }

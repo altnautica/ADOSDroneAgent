@@ -150,3 +150,33 @@ fn a_list_refresh_keeps_the_selection_and_detail_scroll() {
     app.command(crate::keymap::Command::Up);
     assert_eq!(app.tabs.extensions.detail_scroll, 0);
 }
+
+#[test]
+fn the_state_age_shows_only_when_this_clock_can_measure_it() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let topic_line = |app: &mut App, ts_ms: i64| {
+        put(
+            app,
+            ResourceId::PluginState(ID.into()),
+            json!({"follow.state": {"payload": {"active": true}, "ts_ms": ts_ms}}),
+        );
+        let screen = draw(app, 120, 40);
+        screen
+            .lines()
+            .find(|l| l.contains("follow.state"))
+            .unwrap_or_else(|| panic!("no state topic\n{screen}"))
+            .to_string()
+    };
+    let mut app = fixture();
+    // Same host, same clock: the age reads.
+    assert!(topic_line(&mut app, now - 3_000).contains("3 s ago"));
+    // Older than the agent ever serves, or from the future: not an age.
+    assert!(!topic_line(&mut app, 5).contains("ago"));
+    assert!(!topic_line(&mut app, now + 60_000).contains("ago"));
+    // Another host's clock: not comparable with this one.
+    app.core.target = crate::args::Target::from_host(None, "drone.example", 8080);
+    assert!(!topic_line(&mut app, now - 3_000).contains("ago"));
+}

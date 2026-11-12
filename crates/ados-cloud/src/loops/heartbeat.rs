@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use super::sidecars::*;
 use crate::heartbeat::{HeartbeatPayload, RadioBlock, RemoteAccess};
+use ados_protocol::vision_detector::LiveDetector;
 
 /// Heartbeat cadence: a 5 s base sleep, as the receiver expects.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -75,12 +76,11 @@ pub struct HeartbeatBase {
     pub board_soc: String,
     pub board_arch: String,
     /// NPU throughput (TOPS) from the board sidecar; 0 when the board has no NPU.
-    /// Feeds the perception-tier decision on the cloud beacon.
+    /// The beacon's raw `hasAccelerator` hardware declaration.
     pub board_npu_tops: f64,
-    /// The board profile declares CPU-ONNX local inference (an NPU-less but
-    /// CPU-strong board runs the detector on-board). Feeds the perception-tier
-    /// decision alongside `board_npu_tops`; false on an older board sidecar.
-    pub board_local_inference: bool,
+    /// Where the vision engine's live backend runs its detector, read this tick
+    /// with the same query `/api/status` makes. Feeds the perception tier.
+    pub live_detector: LiveDetector,
 }
 
 /// Build the heartbeat wire object from the native base plus an optional
@@ -185,13 +185,15 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         }
     };
     // The perception tier this node runs on: the canonical ados_offload::pick_tier
-    // decision from the board's local compute path (an NPU, or the profile-declared
-    // CPU-ONNX detector) + the live offload-link the reconciler writes (a paired,
-    // reachable workstation flips compute_node_paired + bearer_acceptable true and
-    // names the target). Absent / stale ⇒ no link ⇒ an NPU board reads `local`, a
-    // CPU-detector board `cpu` and one without any path `none`; the offload target
-    // stays absent until a workstation is actually paired. Fed identically to
-    // /api/status via `TierInputs::for_drone`.
+    // decision from the detector the vision engine actually runs (an accelerator
+    // backend, the CPU ONNX backend, or none) + the live offload-link the
+    // reconciler writes (a paired, reachable workstation flips
+    // compute_node_paired + bearer_acceptable true and names the target). A
+    // board declaration alone never sets the tier: a declared NPU with no live
+    // detector reads `none`, and one running the ONNX backend reads `cpu`. The
+    // offload target stays absent until a workstation is actually paired. Fed
+    // identically to /api/status: the same live detector read and the same
+    // `TierInputs::for_drone` call.
     let has_accelerator = base.board_npu_tops > 0.0;
     let offload_link = ados_protocol::offload_link::read_offload_link(now_epoch_ms());
     let (link_paired, link_bearer_ok) = offload_link
@@ -199,8 +201,8 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         .map(|l| (l.paired, l.bearer_acceptable))
         .unwrap_or((false, false));
     let perception_tier = ados_offload::pick_tier(&ados_offload::TierInputs::for_drone(
-        has_accelerator,
-        base.board_local_inference,
+        base.live_detector == LiveDetector::Accelerator,
+        base.live_detector == LiveDetector::Cpu,
         link_paired,
         link_bearer_ok,
     ))

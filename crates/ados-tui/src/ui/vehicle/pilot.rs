@@ -177,12 +177,17 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
     // Who holds the sticks, in the dashboard's words.
     if let Some(label) = &p.input_label {
         let text = spec_text("flow.sticks_with", &[("label", label)]);
-        out.push((stale(kv_text(t, "Sticks", LABEL, text)), false));
+        let row = spec_text("cockpit.row.sticks", &[]);
+        out.push((stale(kv_text(t, &row, LABEL, text)), false));
     }
     if let Some(available) = i.gimbal {
         let value = if available {
             Span::styled(
-                format!("{} takes rate commands", core.sym.ok),
+                format!(
+                    "{} {}",
+                    core.sym.ok,
+                    spec_text("cockpit.gimbal.takes_rates", &[])
+                ),
                 Style::default().fg(t.success()),
             )
         } else {

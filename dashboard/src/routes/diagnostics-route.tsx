@@ -17,7 +17,7 @@ import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useNow } from "@/hooks/use-now";
 import { useResource } from "@/hooks/use-resource";
 import { liveData } from "@/lib/freshness";
-import { serviceStateLabel, serviceStateTone } from "@/lib/state-labels";
+import { serviceStateLabel, serviceStateTone, tempSensorLabel } from "@/lib/state-labels";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtNum } from "@/shared/format";
 import { rebootAgent } from "@/shared/api/setup-actions";
@@ -218,7 +218,7 @@ export function DiagnosticsRoute() {
               ? `${fmtNum(firstTemp[1], 0)}°C`
               : "—"
           }
-          sub={firstTemp ? firstTemp[0] : ""}
+          sub={firstTemp ? tempSensorLabel(firstTemp[0]) : ""}
           tone={
             firstTemp && firstTemp[1] > 80
               ? "err"

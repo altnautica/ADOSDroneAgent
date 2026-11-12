@@ -58,8 +58,9 @@ export const NATIVE_ACTIONS: Readonly<Record<string, true>> = {
 
 export interface EngineContext {
   pickerOpen: boolean;
-  /** `pilot.landed`, or null when unknown (treated as on the ground). */
-  landed: boolean | null;
+  /** Known to be on the ground; an unknown state is false (possibly
+   *  airborne). */
+  landed: boolean;
   rthActive: boolean;
   vehicleVtol: boolean;
   /** A ground station's native input owns the safety actions (pause, RTH,
@@ -122,9 +123,9 @@ export function whenSatisfied(when: WhenCondition | null, ctx: EngineContext, fr
     case "picker_closed":
       return !ctx.pickerOpen;
     case "on_ground":
-      return ctx.landed !== false;
+      return ctx.landed;
     case "airborne":
-      return ctx.landed === false;
+      return !ctx.landed;
     case "rth_active":
       return ctx.rthActive;
     case "not_rth":

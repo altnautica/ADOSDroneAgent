@@ -9,8 +9,8 @@ describe("profile words", () => {
   it("maps profile and role ids to their labels, unknown to unrecognised", () => {
     expect(profileWordKey("ground_station")).toBe("access.profileGate.profileGroundStation");
     expect(roleWordKey("receiver")).toBe("access.profileGate.roleReceiver");
-    expect(profileWordKey("toaster")).toBe("access.profileGate.profileOther");
-    expect(roleWordKey("mystery")).toBe("access.profileGate.profileOther");
+    expect(profileWordKey("toaster")).toBe("panels.state.unrecognised");
+    expect(roleWordKey("mystery")).toBe("panels.state.unrecognised");
   });
 
   it("Settings › Profile shows the words, not `ground_station / role receiver`", () => {

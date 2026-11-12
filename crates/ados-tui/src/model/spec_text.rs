@@ -26,10 +26,15 @@ static STRINGS: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
 });
 
 /// Arg names whose values are keys of their own.
-const ARG_KEYS: [(&str, &str); 2] = [
+const ARG_KEYS: [(&str, &str); 3] = [
     ("source", "pilot.banner.source."),
     ("action", "pilot.link_loss_action."),
+    ("profile", "pilot.profile."),
 ];
+
+/// Arg names whose key lookup ignores case: the pilot sends the profile in
+/// upper case (`NORMAL`) while its keys are the lower-case wire values.
+const CASELESS_ARGS: [&str; 1] = ["profile"];
 
 /// Whether the spec carries `key`.
 pub fn has_spec_text(key: &str) -> bool {
@@ -37,21 +42,27 @@ pub fn has_spec_text(key: &str) -> bool {
 }
 
 /// A string by key with `{arg}` filled; an unknown key reads as itself. A
-/// missing arg fills as empty; `profile` and `mode` read upper case; a
-/// `source` or `action` value that names a key of its own reads as that key.
+/// missing arg fills as empty; `mode` (an FC mode name) reads upper case; a
+/// `source`, `action` or `profile` value that names a key of its own reads as
+/// that key.
 pub fn spec_text(key: &str, args: &[(&str, &str)]) -> String {
     let Some(template) = STRINGS.get(key) else {
         return key.to_string();
     };
     fill_placeholders(template, |name| {
         let v = args.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)?;
+        let lookup = if CASELESS_ARGS.contains(&name) {
+            v.to_lowercase()
+        } else {
+            v.to_string()
+        };
         let own = ARG_KEYS
             .iter()
             .find(|(arg, _)| *arg == name)
-            .and_then(|(_, prefix)| STRINGS.get(&format!("{prefix}{v}")));
+            .and_then(|(_, prefix)| STRINGS.get(&format!("{prefix}{lookup}")));
         Some(match own {
             Some(text) => text.clone(),
-            None if name == "profile" || name == "mode" => v.to_uppercase(),
+            None if name == "mode" => v.to_uppercase(),
             None => v.to_string(),
         })
     })
@@ -104,6 +115,31 @@ mod tests {
         assert_eq!(
             spec_text("flow.link_loss.countdown", &[("action", "Hold")]),
             "Link lost: Hold in  s"
+        );
+    }
+
+    #[test]
+    fn banners_and_status_lines_read_in_sentence_case() {
+        // The pilot sends the profile upper case; it reads as the profile's label.
+        assert_eq!(
+            spec_text("pilot.banner.ados_control", &[("profile", "NORMAL")]),
+            "ADOS has control · Pilot Normal"
+        );
+        assert_eq!(
+            spec_text("pilot.banner.ados_control", &[("profile", "sport")]),
+            "ADOS has control · Pilot Sport"
+        );
+        assert_eq!(
+            spec_text("pilot.banner.controller_lost", &[]),
+            "Controller lost · Holding"
+        );
+        assert_eq!(
+            spec_text("pilot.banner.obstacle_close", &[]),
+            "Obstacle close · Holding"
+        );
+        assert_eq!(
+            spec_text("map.panel.stale", &[("s", "4")]),
+            "Stale · last report 4 s ago"
         );
     }
 

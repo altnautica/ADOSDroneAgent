@@ -75,6 +75,58 @@ function referencedKeys(): Map<string, string> {
   return refs;
 }
 
+// A literal t("ns.key") call must pass every {{variable}} its string
+// interpolates: i18next leaves a missing one in the text verbatim. A call
+// whose options are not an object literal (a spread variable) is not judged.
+function argumentText(text: string, from: number): string | null {
+  let depth = 1;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (c === "(" || c === "{" || c === "[") depth++;
+    else if (c === ")" || c === "}" || c === "]") {
+      depth--;
+      if (depth === 0) return text.slice(from, i);
+    }
+  }
+  return null;
+}
+
+function interpolated(key: string): string[] {
+  const forms = [lookup(key), lookup(`${key}_one`), lookup(`${key}_other`)];
+  const vars = new Set<string>();
+  for (const s of forms) {
+    if (typeof s !== "string") continue;
+    for (const m of s.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)/g)) vars.add(m[1]);
+  }
+  return [...vars];
+}
+
+function missingVariables(): string[] {
+  const out: string[] = [];
+  const call = /\bt\(\s*["'`]([^"'`$]+)["'`]\s*([,)])/g;
+  for (const root of ROOTS) {
+    for (const file of sourceFiles(root)) {
+      const text = readFileSync(file, "utf8");
+      const rel = path.relative(REPO, file);
+      for (const m of text.matchAll(call)) {
+        const vars = interpolated(m[1]);
+        if (vars.length === 0) continue;
+        let args = "";
+        if (m[2] === ",") {
+          const rest = argumentText(text, (m.index ?? 0) + m[0].length);
+          if (rest === null) continue;
+          args = rest.trim();
+          if (!args.startsWith("{") || /\.\.\./.test(args)) continue;
+        }
+        for (const v of vars) {
+          if (!new RegExp(`\\b${v}\\b`).test(args)) out.push(`${m[1]} needs {{${v}}} (${rel})`);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 describe("locales/en.json", () => {
   it("defines every key the source references", () => {
     const missing = [...referencedKeys()]
@@ -86,5 +138,9 @@ describe("locales/en.json", () => {
   it("references at least one key per namespace", () => {
     const used = new Set([...referencedKeys().keys()].map((k) => k.split(".")[0]));
     expect([...namespaces].filter((ns) => !used.has(ns))).toEqual([]);
+  });
+
+  it("passes every variable a referenced string interpolates", () => {
+    expect(missingVariables()).toEqual([]);
   });
 });

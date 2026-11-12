@@ -43,7 +43,11 @@ describe("the toast bus", () => {
   it("words an armed refusal the same way on every screen", () => {
     const err = new ApiError("409 Vehicle is armed", 409, { error: "E_ARMED", override: "force" });
     const seen = capture(() => toastFromError(err, "Could not save."));
-    expect(seen[0].message).toBe("Refused: the vehicle is armed. Disarm first.");
+    // The guard also refuses when no flight controller reports the arm state,
+    // so the text names that case and how to clear it on a bench.
+    expect(seen[0].message).toBe(
+      "Refused: the vehicle is armed or its arm state is unknown. Disarm it, or connect the flight controller so it reports disarmed.",
+    );
   });
 
   it("falls back to the given wording for an unknown throw", () => {

@@ -13,7 +13,7 @@ import { resourceQueryOptions, useResource } from "@/hooks/use-resource";
 import { useNodeProfile } from "@/hooks/use-node-profile";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useConfig } from "@/hooks/use-config";
-import { loraSourceLabel } from "@/lib/state-labels";
+import { loraSourceLabel, loraTransportLabel } from "@/lib/state-labels";
 import {
   CRSF_STATUS_PATH,
   LORA_BEACONS_PATH,
@@ -169,7 +169,7 @@ export function LoraView({
           {status.region ? t("lora.source", { source: loraSourceLabel(status.region.source) }) : t("lora.regionUnset")}
         </span>
         <span className="font-mono text-xs">
-          {t("lora.module", { transport: status.transport ?? "—", band: status.module_band ?? "—" })}
+          {t("lora.module", { transport: status.transport ? loraTransportLabel(status.transport) : "—", band: status.module_band ?? "—" })}
         </span>
         {status.channel && (
           <span className="font-mono text-xs">{t("lora.channel", { freq: status.channel.freq_mhz.toFixed(3) })}</span>

@@ -11,7 +11,7 @@ import {
   LAUNCH_STEPS,
   launchRunning,
   launchStepText,
-  launchStepUpper,
+  launchStepName,
   lowBatteryLine,
   mavResultText,
   modeHoldLabel,
@@ -94,10 +94,10 @@ describe("launch sequence and the chip", () => {
       expect(launchRunning(sequence)).toBe(facts.launchStep !== null);
       if (launchRunning(sequence)) {
         const chip = flightStateChip({ ...facts, owner: "pilot" });
-        expect(chip.text).toBe(`Taking off · ${launchStepUpper(sequence.step)}`);
+        expect(chip.text).toBe(`Taking off · ${launchStepName(sequence.step)}`);
       }
     }
-    expect(launchStepUpper("takeoff")).toBe("CLIMB");
+    expect(launchStepName("takeoff")).toBe("Climb");
   });
 });
 

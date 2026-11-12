@@ -11,7 +11,7 @@ import { fmtBitrate, fmtNum } from "@/shared/format";
 import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 import { cn } from "@/lib/utils";
 import { wfbStateLabel } from "@/lib/state-labels";
-import { videoIdleDetailKey } from "@/lib/video-page";
+import { cameraVideoUrls, videoIdleDetailKey } from "@/lib/video-page";
 import { VideoDetections } from "@/components/panels/video-detections";
 import { CameraSelect, GimbalBadge, LayerToggles, VideoLayers } from "@/components/panels/video-layers";
 import { useResource } from "@/hooks/use-resource";
@@ -71,8 +71,12 @@ export function VideoPanel() {
   const [snapshotAt, setSnapshotAt] = useState<Date | null>(null);
   const [snapshotError, setSnapshotError] = useState(false);
 
-  const whepUrl = status.data?.video?.whep_url ?? "";
-  const hlsUrl = status.data?.video?.hls_url ?? "";
+  // The transport follows the camera choice, so the detections and layers
+  // drawn over the picture belong to the camera shown.
+  const { whepUrl, hlsUrl } = cameraVideoUrls(
+    { whepUrl: status.data?.video?.whep_url ?? "", hlsUrl: status.data?.video?.hls_url ?? "" },
+    cameraId,
+  );
   const v = snap.data?.video;
   const codec = v?.codec ?? "";
   const w = v?.width ?? 0;
@@ -117,7 +121,7 @@ export function VideoPanel() {
     order,
     whepUrl,
     hlsUrl,
-    reconnectKey: String(retryToken),
+    reconnectKey: `${retryToken}:${cameraId}`,
     enabled: playing,
   });
   // The screen stays awake only while a feed is being shown.

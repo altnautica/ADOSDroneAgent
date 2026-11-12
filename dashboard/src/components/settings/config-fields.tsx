@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { toggleView } from "@/lib/config-toggle";
 import { useConfig } from "@/hooks/use-config";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { putConfigChecked } from "@/shared/api/apply-actions";
 import { toast, toastFromError } from "@/shared/api/toast";
 
@@ -161,6 +162,7 @@ export function ConfigNumberField({
 
   const shown = draft ?? current;
   const dirty = draft !== null && draft !== current;
+  useDirtyGuard(dirty || saving);
 
   function validate(raw: string): string | null {
     const trimmed = raw.trim();
@@ -255,6 +257,7 @@ export function ConfigTextField({
 
   const shown = draft ?? current;
   const dirty = draft !== null && draft !== current;
+  useDirtyGuard(dirty || saving);
 
   async function save() {
     if (!dirty || saving) return;

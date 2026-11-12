@@ -153,8 +153,9 @@ pub struct Dashboard {
     /// [`Dashboard::merge_services`]). Both 0 until `/api/status/full` answers.
     pub services_running: usize,
     pub services_total: usize,
-    /// The first unit that should be up and is not, by name.
-    pub first_failed: Option<String>,
+    /// The first unit that should be up and is not, with its state in words
+    /// (`ados-video restarting`).
+    pub first_down: Option<String>,
     pub next_action: String,
     /// Percent of on-board storage used (`/api/status/full`
     /// `health.disk_percent`, a ground station's `system.disk_pct`).

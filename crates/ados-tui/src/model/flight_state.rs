@@ -86,12 +86,24 @@ struct Secondary {
 }
 
 #[derive(Debug, Deserialize)]
+struct Labelled {
+    values: Vec<String>,
+    labels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModeSheet {
+    profile: Labelled,
+}
+
+#[derive(Debug, Deserialize)]
 struct Spec {
     rules: Vec<Rule>,
     fc_mode_classes: FcModeClasses,
     secondary: Secondary,
     hold_reason_labels: BTreeMap<String, String>,
     stale_after_ms: u64,
+    mode_sheet: ModeSheet,
 }
 
 static SPEC: LazyLock<Spec> = LazyLock::new(|| {
@@ -256,17 +268,37 @@ fn fmt_eta(s: Option<f64>) -> String {
     }
 }
 
-/// A launch step's name, upper case (`flow.launch.step.*`, `after` read as
-/// its label). The take-off step reads as its action
+/// A launch step's name as the spec words it (`flow.launch.step.*`, `after`
+/// read as its label). The take-off step reads as its action
 /// (`chip.launch_step.takeoff`), so the chip never repeats "take off".
-fn launch_step_upper(step: Option<&str>) -> String {
+fn launch_step_name(step: Option<&str>) -> String {
     let key = match step {
         None => return String::new(),
         Some("after") => "flow.launch.step.after_label".to_string(),
         Some("takeoff") => "chip.launch_step.takeoff".to_string(),
         Some(s) => format!("flow.launch.step.{s}"),
     };
-    spec_text(&key, &[]).to_uppercase()
+    spec_text(&key, &[])
+}
+
+/// A word that starts a chip part, with a capital first letter.
+fn capital_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// A profile as the mode sheet labels it (`mode_sheet.profile`), "Normal"
+/// when none is reported; an unknown value reads with a capital first letter.
+fn profile_label(profile: Option<&str>) -> String {
+    let value = profile.unwrap_or("normal");
+    let sheet = &SPEC.mode_sheet.profile;
+    match sheet.values.iter().position(|v| v == value) {
+        Some(i) => sheet.labels[i].clone(),
+        None => capital_first(value),
+    }
 }
 
 fn num(v: Option<f64>) -> String {
@@ -280,9 +312,9 @@ fn fill(template: &str, f: &ChipFacts) -> String {
     let filled = fill_placeholders(template, |key| {
         Some(match key {
             "first_block_msg" => f.first_block_msg.clone().unwrap_or_default(),
-            "profile_upper" => f.profile.as_deref().unwrap_or("normal").to_uppercase(),
-            "skill_label_upper" => f.skill_label.as_deref().unwrap_or("SKILL").to_uppercase(),
-            "mode_detail" => f.mode_detail.clone().unwrap_or_else(|| "ACTIVE".into()),
+            "profile" => profile_label(f.profile.as_deref()),
+            "skill_label" => capital_first(f.skill_label.as_deref().unwrap_or("Skill")),
+            "mode_detail" => f.mode_detail.clone().unwrap_or_else(|| "Active".into()),
             "dist_m" => num(f.dist_m),
             "home_dist_m" => num(f.home_dist_m),
             "setup_step" => f.setup_step.as_deref().unwrap_or("").to_uppercase(),
@@ -290,7 +322,7 @@ fn fill(template: &str, f: &ChipFacts) -> String {
             "total" => num(f.total),
             "eta" => fmt_eta(f.eta_s),
             "fc_mode_name_upper" => f.fc_mode_name.as_deref().unwrap_or("—").to_uppercase(),
-            "step" => launch_step_upper(f.launch_step.as_deref()),
+            "step" => launch_step_name(f.launch_step.as_deref()),
             _ => return None,
         })
     });

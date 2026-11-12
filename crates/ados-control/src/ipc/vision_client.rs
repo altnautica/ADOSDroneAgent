@@ -34,11 +34,11 @@ pub const VISION_SOCKET_NAME: &str = "vision.sock";
 /// under a millisecond; this exists purely for the pathological case where the
 /// engine accepts the connection and then never replies. That case is not an
 /// I/O error, so without a bound it is an unbounded hang rather than a failure.
-/// It matters because this client is no longer only on the infrequent designate
-/// path: `/api/status` and `/api/status/full` call it on every poll, and the
-/// GCS polls those continuously, so one wedged-but-alive engine would stall
-/// every poller indefinitely. A timeout surfaces as [`VisionError::Io`], which
-/// the status path already degrades to `false` and the designate route to a 503.
+/// It matters because this client is not only on the infrequent designate
+/// path: the vision status and capability routes call it on every poll, so one
+/// wedged-but-alive engine would stall every poller indefinitely. A timeout
+/// surfaces as [`VisionError::Io`], which those routes and the designate route
+/// map to a 503.
 const VISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The default vision socket path, honouring `ADOS_RUN_DIR` like the other IPC

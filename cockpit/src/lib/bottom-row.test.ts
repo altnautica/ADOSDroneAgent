@@ -35,11 +35,11 @@ describe("the bottom row's AGL against a stalled pilot", () => {
   const pilot = (at: number) => ({ data: { aglM: 12.5, aglSource: "rangefinder" as const }, at });
 
   it("shows the pilot's height while the frame is fresh", () => {
-    expect(rowAgl(pilot(1000), null, 1000 + CHIP_STALE_AFTER_MS)).toEqual({ m: 12.5, mark: null, stale: false });
+    expect(rowAgl(pilot(1000), null, 999 + CHIP_STALE_AFTER_MS)).toEqual({ m: 12.5, mark: null, stale: false });
   });
 
-  it("dims to a dash once the pilot frame is older than stale_after_ms", () => {
-    expect(rowAgl(pilot(1000), { aglM: 9, aglSource: "baro" }, 1001 + CHIP_STALE_AFTER_MS)).toEqual({ m: null, mark: null, stale: true });
+  it("dims to a dash once the pilot frame is stale_after_ms old", () => {
+    expect(rowAgl(pilot(1000), { aglM: 9, aglSource: "baro" }, 1000 + CHIP_STALE_AFTER_MS)).toEqual({ m: null, mark: null, stale: true });
   });
 
   it("falls back to the follow kind only when no pilot runs", () => {

@@ -151,6 +151,18 @@ describe("LayerEngine", () => {
     expect(calls.texts).not.toContain("WP4 · 120 m · 0:42");
   });
 
+  it("holds a layer fresh below 2000 ms and stale from 2000 ms", () => {
+    const masks: number[] = [];
+    const { store } = setup({ onChips: (m) => masks.push(m) });
+    store.putAr(ar, clock);
+    store.putObstacles(obstacles, clock);
+    frame(1999);
+    expect(masks).toEqual([]);
+    frame(1);
+    expect(masks).toHaveLength(1);
+    expect(chipTexts(masks[0])).toEqual(["Obstacles unavailable", "AR unavailable"]);
+  });
+
   it("hands the chips to the host instead of painting them under its banners", () => {
     const masks: number[] = [];
     const { store, engine, calls } = setup({ onChips: (m) => masks.push(m) });

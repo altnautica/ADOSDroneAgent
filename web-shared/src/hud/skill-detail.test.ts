@@ -17,8 +17,8 @@ describe("owning skill detail from the plugin state", () => {
   it("reads the skill's state topic from the manifest and its echoed parameters", () => {
     const topic = skillStateTopic(detail, "follow");
     expect(topic).toBe("follow.state");
-    expect(skillDetailFromState({ "follow.state": { payload: { follow_mode: "orbit", orbit_radius_m: 8 } } }, topic)).toBe("ORBIT 8 m");
-    expect(skillDetailFromState({ "follow.state": { payload: { follow_mode: "follow", follow_distance_m: 6.25 } } }, topic)).toBe("FOLLOW 6.3 m");
+    expect(skillDetailFromState({ "follow.state": { payload: { follow_mode: "orbit", orbit_radius_m: 8 } } }, topic)).toBe("Orbit 8 m");
+    expect(skillDetailFromState({ "follow.state": { payload: { follow_mode: "follow", follow_distance_m: 6.25 } } }, topic)).toBe("Follow 6.3 m");
   });
 
   it("is null for an unknown skill or a missing topic", () => {

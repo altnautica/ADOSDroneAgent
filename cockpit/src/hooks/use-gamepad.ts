@@ -30,9 +30,11 @@ import { BUTTON_INDEX } from "@/lib/pad/ds4-map";
 import type { EngineContext } from "@/lib/pad/gesture-engine";
 import { pilotFeedback, playPattern, type FeedbackView } from "@/lib/pad/rumble";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { specText } from "@/shared/hud/spec-text";
 import { overlayOpen } from "@/stores/cockpit-ui-store";
 import { useControlsStore } from "@/stores/controls-store";
+import { useFlightStore } from "@/stores/flight-store";
 import { useInputStore, type PadSample } from "@/stores/input-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -86,8 +88,10 @@ function sampleOf(pad: Gamepad): PadSample {
   };
 }
 
-function pilotNow(): PilotState | null {
-  return useNavStreamStore.getState().pilot?.data ?? null;
+/** The pilot state while it is fresh (shared `pilotFresh`), else null. */
+function freshPilotNow(): PilotState | null {
+  const p = useNavStreamStore.getState().pilot;
+  return p !== null && pilotFresh(p.at, Date.now()) ? p.data : null;
 }
 
 /** The ground station flies the sticks and the safety buttons natively. On a
@@ -98,14 +102,16 @@ export function nativeInputActive(): boolean {
   return c.stationKiosk && (c.groundInput === null || c.groundInput.nativeSticks === true);
 }
 
-/** What the gesture engine's conditions read. A pilot whose landed state is
- *  unknown (its FC link is down) counts as airborne, so the on-ground
- *  gestures stay off; with no pilot at all it is null. */
+/** What the gesture engine's conditions read, from a fresh pilot state only.
+ *  A pilot whose landed state is unknown (its FC link is down) counts as
+ *  airborne, so the on-ground gestures stay off; with no fresh pilot the
+ *  vehicle is on the ground only while live telemetry reports it disarmed. */
 export function engineContext(): EngineContext {
-  const p = pilotNow();
+  const p = freshPilotNow();
+  const flight = useFlightStore.getState();
   return {
     pickerOpen: useInputStore.getState().pickerOpen,
-    landed: p ? p.landed === true : null,
+    landed: p ? p.landed === true : flight.live && !flight.stale && flight.telemetry?.armed === false,
     rthActive: rthModeActive(p?.fcModeName),
     vehicleVtol: p?.vehicleClass === "vtol",
     nativeSafety: nativeInputActive(),

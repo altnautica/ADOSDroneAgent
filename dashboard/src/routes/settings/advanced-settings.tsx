@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useConfig } from "@/hooks/use-config";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { advancedSectionSchema, postApply } from "@/shared/api/apply-actions";
 import { issueMessage } from "@/lib/validation-message";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -39,6 +40,7 @@ export function AdvancedSettings() {
   useEffect(() => {
     if (read) setBoardOverride(initialOverride);
   }, [read, initialOverride]);
+  useDirtyGuard(boardOverride !== initialOverride || busy);
 
   async function applyLogLevel(next: LogLevel) {
     const previous = logLevel;

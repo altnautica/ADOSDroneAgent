@@ -51,17 +51,17 @@ describe("chip GOTO distance", () => {
 
 describe("chip inputs", () => {
   it("builds the facts from the pilot state and what sits beside it", () => {
-    const f = chipInputs(pilot, 10_500, 10_000, { ...ctx, homeDistM: 30, localPos: { x: 9, y: 0.5 }, arFrame: ar, arAgeMs: 100, modeDetail: "ORBIT 8 m" });
+    const f = chipInputs(pilot, 10_500, 10_000, { ...ctx, homeDistM: 30, localPos: { x: 9, y: 0.5 }, arFrame: ar, arAgeMs: 100, modeDetail: "Orbit 8 m" });
     expect(f.ageMs).toBe(500);
     expect(f.distM).toBeCloseTo(5, 6);
     expect(f.etaS).toBe(42);
     expect(f.homeDistM).toBe(30);
-    expect(f.modeDetail).toBe("ORBIT 8 m");
-    expect(flightStateChip(f).text).toBe("FOLLOW · ORBIT 8 m");
+    expect(f.modeDetail).toBe("Orbit 8 m");
+    expect(flightStateChip(f).text).toBe("Follow · Orbit 8 m");
   });
 
   it("uses the skill detail only while a skill owns", () => {
-    expect(chipInputs(wire({ owner: "pilot" }), 0, 0, { ...ctx, modeDetail: "ORBIT 8 m" }).modeDetail).toBeNull();
+    expect(chipInputs(wire({ owner: "pilot" }), 0, 0, { ...ctx, modeDetail: "Orbit 8 m" }).modeDetail).toBeNull();
   });
 
   it("drives the Transition chip from the pilot kind", () => {

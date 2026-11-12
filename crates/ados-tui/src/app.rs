@@ -282,6 +282,9 @@ impl Core {
             Some("Update runs on the companion computer; not available remotely")
         } else if self.update_available().is_some() {
             None
+        } else if self.dash().is_none() {
+            // No snapshot yet: nothing to compare the latest version with.
+            Some("Installed version not known yet")
         } else if self.latest_version().is_some() {
             Some("Already up to date")
         } else {

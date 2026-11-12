@@ -7,6 +7,7 @@ import { BottomDock } from "./bottom-dock";
 import { Header } from "./header";
 import { Sidebar } from "./sidebar";
 import { RouteFallback } from "@/components/route-fallback";
+import { DirtyGuardHost } from "@/hooks/use-dirty-guard";
 import { onToast, type ToastMessage } from "@/shared/api/toast";
 import { useUiStore } from "@/stores/ui-store";
 
@@ -24,6 +25,7 @@ export function AppShell() {
   useEffect(() => onToast(showToast), []);
   return (
     <div className="flex flex-col min-h-dvh">
+      <DirtyGuardHost />
       <Header />
       <div className="flex-1 flex">
         <Sidebar />

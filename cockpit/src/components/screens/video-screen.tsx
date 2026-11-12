@@ -58,6 +58,8 @@ function changedFieldNames(patch: object | null): ("wfb.tuning.preset" | "wfb.tu
 }
 
 const FEC_OPTIONS = FEC_RATIOS.map(([k, n]) => `${k}/${n}`);
+/** The tuning pickers' value for a field the agent did not report. */
+const NOT_REPORTED = "";
 
 export function VideoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
   const { t } = useTranslation();
@@ -118,13 +120,21 @@ export function VideoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
       .finally(() => setBusy(false));
   };
 
+  // A field the agent did not report reads "Not reported" (NOT_REPORTED) until
+  // the operator picks a value: never a made-up current value.
   const fecValue = draft.fec
     ? `${draft.fec[0]}/${draft.fec[1]}`
     : radio?.fecK != null && radio?.fecN != null
       ? `${radio.fecK}/${radio.fecN}`
-      : FEC_OPTIONS[0];
-  const presetValue = draft.preset ?? (LINK_PRESETS.find((p) => p === radio?.preset) ?? LINK_PRESETS[1]);
-  const mcsValue = String(draft.mcs ?? radio?.mcs ?? 0);
+      : NOT_REPORTED;
+  const presetValue = draft.preset ?? LINK_PRESETS.find((p) => p === radio?.preset) ?? NOT_REPORTED;
+  const mcs = draft.mcs ?? radio?.mcs;
+  const mcsValue = mcs == null ? NOT_REPORTED : String(mcs);
+  const adaptiveValue = draft.auto ?? cfg?.adaptive ?? null;
+  const notReported = t("cockpit.video.notReported");
+  /** The options with "Not reported" first while the value is unknown. */
+  const withUnknown = <T extends string>(opts: readonly T[], value: string): readonly (T | typeof NOT_REPORTED)[] =>
+    value === NOT_REPORTED ? [NOT_REPORTED, ...opts] : opts;
 
   let body;
   if (!config.ready && !latency.ready) {
@@ -166,7 +176,7 @@ export function VideoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
           }
         />
         <Row
-          label={t("video.fields.adaptiveFec")}
+          label={t("video.fields.adaptiveBitrate")}
           value={cfg?.adaptive == null ? DASH : cfg.adaptive ? t("video.fields.on") : t("video.fields.off")}
         />
         <Row
@@ -208,10 +218,12 @@ export function VideoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
       <div className="flex flex-col gap-[0.4rem]">
         <SelectSettingRow
           title={t("wfb.tuning.preset")}
-          options={LINK_PRESETS}
+          options={withUnknown(LINK_PRESETS, presetValue)}
           value={presetValue}
-          optionLabel={(p) => t(PRESET_KEYS[p])}
-          onSelect={(preset) => setDraft((d) => ({ ...d, preset }))}
+          optionLabel={(p) => (p === NOT_REPORTED ? notReported : t(PRESET_KEYS[p]))}
+          onSelect={(preset) => {
+            if (preset !== NOT_REPORTED) setDraft((d) => ({ ...d, preset }));
+          }}
           enabled={!busy}
         />
         <SelectSettingRow
@@ -219,10 +231,12 @@ export function VideoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
           options={FEC_OPTIONS.includes(fecValue) ? FEC_OPTIONS : [fecValue, ...FEC_OPTIONS]}
           value={fecValue}
           optionLabel={(o) => {
+            if (o === NOT_REPORTED) return notReported;
             const [k, n] = o.split("/").map(Number);
             return t("wfb.tuning.fecOption", { k, n, redundancy: fecRedundancyPct(k, n) ?? 0 });
           }}
           onSelect={(o) => {
+            if (o === NOT_REPORTED) return;
             const [k, n] = o.split("/").map(Number);
             setDraft((d) => ({ ...d, fec: [k, n] as const }));
           }}
@@ -230,17 +244,33 @@ export function VideoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
         />
         <SelectSettingRow
           title={t("wfb.tuning.mcsRate")}
-          options={MCS_INDICES.map(String)}
+          options={withUnknown(MCS_INDICES.map(String), mcsValue)}
           value={mcsValue}
-          onSelect={(o) => setDraft((d) => ({ ...d, mcs: Number(o) }))}
+          optionLabel={(o) => (o === NOT_REPORTED ? notReported : o)}
+          onSelect={(o) => {
+            if (o !== NOT_REPORTED) setDraft((d) => ({ ...d, mcs: Number(o) }));
+          }}
           enabled={!busy}
         />
-        <SwitchSettingRow
-          title={t("wfb.tuning.adaptive")}
-          checked={draft.auto ?? cfg?.adaptive ?? false}
-          onChange={(auto) => setDraft((d) => ({ ...d, auto }))}
-          enabled={!busy}
-        />
+        {adaptiveValue == null ? (
+          <SelectSettingRow
+            title={t("wfb.tuning.adaptive")}
+            options={[NOT_REPORTED, "on", "off"] as const}
+            value={NOT_REPORTED}
+            optionLabel={(o) => (o === NOT_REPORTED ? notReported : t(`video.fields.${o}`))}
+            onSelect={(o) => {
+              if (o !== NOT_REPORTED) setDraft((d) => ({ ...d, auto: o === "on" }));
+            }}
+            enabled={!busy}
+          />
+        ) : (
+          <SwitchSettingRow
+            title={t("wfb.tuning.adaptive")}
+            checked={adaptiveValue}
+            onChange={(auto) => setDraft((d) => ({ ...d, auto }))}
+            enabled={!busy}
+          />
+        )}
         <div className="text-[0.8rem] text-muted-foreground">
           {block === "noChange"
             ? t("cockpit.video.noChange")

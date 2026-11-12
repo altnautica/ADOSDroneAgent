@@ -8,7 +8,7 @@
 // screen renders framed: the status strip on top, the menu rail (a strip in
 // portrait) beside it and the action bar below.
 
-import { Suspense, lazy, useEffect } from "react";
+import { Suspense, lazy, useEffect, useRef } from "react";
 
 import { ActionBar, type InputStatus } from "@/components/shell/action-bar";
 import { renderProfile, renderProfileClass } from "@/lib/render-profile";
@@ -23,6 +23,7 @@ import { setAuthChallengeHandler } from "@/shared/api-fetch";
 import { useReachStore } from "@/stores/reach-store";
 import { useStatusStore } from "@/stores/status-store";
 import { useStatusPoll } from "@/hooks/use-status-poll";
+import { BoxViewport, useBoxViewport } from "@/hooks/use-width-class";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { getScreen, homeTabFor, tabScreens } from "@/nav/registry";
 import { useNodeIdentity } from "@/shared/use-profile";
@@ -83,6 +84,10 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   // button); a detail screen pushed over it renders framed.
   const onTop = Boolean(screen.fullBleed) && detailStack.length === 0;
   const fullBleed = onTop && flightFullscreen;
+  // The Feed takes its width class from its own box, which beside the menu
+  // rail is narrower than the window.
+  const feedBox = useRef<HTMLElement>(null);
+  const feedViewport = useBoxViewport(feedBox, onTop);
   const ctx: ScreenContext = { dispatch };
   const body = <Suspense fallback={null}>{screen.render(ctx)}</Suspense>;
   const quickMenu = quickMenuOpen ? (
@@ -108,7 +113,9 @@ export function CockpitShell({ input }: { input: InputStatus }) {
         data-shell={fullBleed ? "flight" : "flight-framed"}
       >
         {fullBleed ? null : <MenuRail />}
-        <main className={fullBleed ? "relative h-full w-full" : "relative min-h-0 min-w-0 flex-1"}>{body}</main>
+        <main ref={feedBox} className={fullBleed ? "relative h-full w-full" : "relative min-h-0 min-w-0 flex-1"}>
+          <BoxViewport.Provider value={feedViewport}>{body}</BoxViewport.Provider>
+        </main>
         {quickMenu}
         <DirtyGuardDialog />
       </div>

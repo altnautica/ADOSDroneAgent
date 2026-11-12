@@ -9,7 +9,7 @@ import { parsePilotState } from "@/shared/hud/cockpit-frames";
 import { specText } from "@/shared/hud/spec-text";
 import { useNavStreamStore, type NavStreamState } from "@/stores/nav-stream-store";
 
-import { FC_RECOVERY_MODES } from "@/lib/fc-failsafe";
+import { fcFailsafeForPause, FC_RECOVERY_MODES, forgetCommandedModes } from "@/lib/fc-failsafe";
 import { fcModesFor } from "@/lib/fc-modes";
 import { MODE_SHEET } from "@/lib/cockpit-spec";
 
@@ -59,6 +59,18 @@ describe("a pending pick in the Mode sheet", () => {
     await expect(modeChange(() => sendFcMode("RTL"), hung)).resolves.toEqual({ ok: true });
     expect(hung).toHaveBeenCalledOnce();
     expect(sendCommand).toHaveBeenCalledWith("mode", ["RTL"]);
+  });
+
+  it("lets a pause through while the return it sent awaits its answer", async () => {
+    forgetCommandedModes();
+    let reply: (r: CommandResponse) => void = () => {};
+    vi.mocked(sendCommand).mockReturnValue(new Promise<CommandResponse>((r) => (reply = r)));
+    const sent = sendFcMode("RTL");
+    expect(fcFailsafeForPause({ mode: "RTL", systemStatus: 4 })).toBe(false);
+    reply({ ack: { observed: true, accepted: false, result_name: "DENIED" } });
+    await sent;
+    expect(fcFailsafeForPause({ mode: "RTL", systemStatus: 4 })).toBe(true);
+    forgetCommandedModes();
   });
 });
 

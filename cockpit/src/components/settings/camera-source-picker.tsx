@@ -1,5 +1,6 @@
 // The `video.camera.source` editor: pick one of the cameras the agent
-// detected, or "Other…" to type a device path the scan does not list.
+// detected or a stock csi / usb hint, or "Other…" to type a device path the
+// scan does not list.
 
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -7,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { EmptyNote } from "@/components/ui/data";
 import { OnScreenKeyboard } from "@/components/settings/on-screen-keyboard";
 import { SegmentedPicker } from "@/components/settings/widgets";
-import { cameraSourceOptions, isOtherSource, OTHER_SOURCE } from "@/lib/camera-source";
+import { CAMERA_SOURCE_HINTS, cameraSourceOptions, isOtherSource, OTHER_SOURCE } from "@/lib/camera-source";
 import { getVideoCameras } from "@/lib/video-model";
 import "@/shared/i18n";
 import { useResource } from "@/shared/use-resource";
@@ -20,11 +21,12 @@ export function CameraSourcePicker({ value, onChange }: { value: string; onChang
   const options = cameraSourceOptions(cameras.data ?? []);
   const [otherPicked, setOtherPicked] = useState(false);
   const labels = new Map(options.map((o) => [o.value, o.label]));
-  const typing = otherPicked || options.length === 0 || isOtherSource(value, options);
+  const detected = options.length - CAMERA_SOURCE_HINTS.length;
+  const typing = otherPicked || isOtherSource(value, options);
 
   let note: string | null = null;
   if (cameras.data == null && cameras.error) note = t("cockpit.settingsSections.camera.sourceReadFailed");
-  else if (cameras.data != null && options.length === 0) note = t("cockpit.settingsSections.camera.sourceNone");
+  else if (cameras.data != null && detected === 0) note = t("cockpit.settingsSections.camera.sourceNone");
 
   return (
     <div className="flex flex-col gap-[0.4rem]">

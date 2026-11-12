@@ -87,7 +87,7 @@ type Visibility = "fresh" | "dim" | "hidden";
 function visibility(at: number, has: boolean, now: number): Visibility {
   if (!has) return "hidden";
   const age = now - at;
-  return age > HIDE_AFTER_MS ? "hidden" : age > DIM_AFTER_MS ? "dim" : "fresh";
+  return age >= HIDE_AFTER_MS ? "hidden" : age > DIM_AFTER_MS ? "dim" : "fresh";
 }
 
 const VIS_CODE: Readonly<Record<Visibility, number>> = { fresh: 0, dim: 1, hidden: 2 };

@@ -48,7 +48,7 @@ function buildContext(i: ContextInputs): SkillContext {
           landed: p.data.landed,
           vehicleClass: p.data.vehicleClass,
           fcFailsafe: p.data.fcFailsafe,
-          fresh: i.now - p.at <= PILOT_FRESH_MS,
+          fresh: i.now - p.at < PILOT_FRESH_MS,
         }
       : null,
     pilotLinkOpen: i.pilotLinkOpen,

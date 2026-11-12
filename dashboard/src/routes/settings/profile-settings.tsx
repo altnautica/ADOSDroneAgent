@@ -24,7 +24,7 @@ import type { GroundRole } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
 import { invalidateProfile } from "@/shared/use-profile";
 import { profileLabel, roleLabel } from "@/lib/enum-labels";
-import { type ProfileSuggestion, suggestionDraft, suggestionLabel } from "@/lib/profile-suggestion";
+import { type ProfileSuggestion, suggestionDraft, suggestionIsCurrent, suggestionLabel } from "@/lib/profile-suggestion";
 import { useUiStore } from "@/stores/ui-store";
 
 const SOURCE_KEYS = {
@@ -207,6 +207,7 @@ export function ProfileSettings() {
               <Button
                 size="sm"
                 variant="outline"
+                disabled={suggestionIsCurrent(suggestion, { profile: initialProfile, role: initialRole })}
                 onClick={() => {
                   const draft = suggestionDraft(suggestion, role);
                   setProfile(draft.profile);

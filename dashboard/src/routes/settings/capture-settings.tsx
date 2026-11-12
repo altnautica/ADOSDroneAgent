@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useResource } from "@/hooks/use-resource";
 import { exposureError, gainError } from "@/lib/exposure-draft";
 import { storageStateLabel, storageStateVariant } from "@/lib/state-labels";
@@ -133,6 +134,7 @@ function ExposureCard() {
       draft.gain.trim() !== seed.gain ||
       draft.mode !== seed.mode);
   const valid = draft != null && expErr === null && gainErr === null && draft.mode != null;
+  useDirtyGuard(dirty || busy);
 
   return (
     <Card>

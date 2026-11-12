@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { assignmentRows, showsLongRangeRadio, videoIdleDetailKey } from "@/lib/video-page";
+import { assignmentRows, showsLongRangeRadio, videoIdleDetailKey, cameraVideoUrls } from "@/lib/video-page";
 
 const src = (rel: string) => readFileSync(path.resolve(__dirname, "..", rel), "utf8");
 
@@ -41,5 +41,24 @@ describe("ground-station wording", () => {
   it("names this node, not always a drone, in the Cloud Relay card", () => {
     const panel = src("components/panels/cloud-panel.tsx");
     expect(panel).toContain('t("panels.cloud.relayDisabledSubject", { subject: nodeSubject(profile) })');
+  });
+});
+
+describe("cameraVideoUrls", () => {
+  const primary = { whepUrl: "/whep", hlsUrl: "/hls/main/index.m3u8" };
+
+  it("keeps the advertised URLs for the primary camera", () => {
+    expect(cameraVideoUrls(primary, "main")).toEqual(primary);
+  });
+
+  it("switches both transports to the chosen camera's leg", () => {
+    expect(cameraVideoUrls(primary, "down 2")).toEqual({
+      whepUrl: "/whep?camera=down%202",
+      hlsUrl: "/hls/down%202/index.m3u8",
+    });
+  });
+
+  it("offers no leg for a second camera when the node advertises no video", () => {
+    expect(cameraVideoUrls({ whepUrl: "", hlsUrl: "" }, "down")).toEqual({ whepUrl: "", hlsUrl: "" });
   });
 });

@@ -265,6 +265,25 @@ describe("pause after this cockpit's own return home on the command route", () =
     expect(resolveSkillState(B.pause!, flying("RTL")).enabled).toBe(false);
   });
 
+  it("is allowed while the flight controller flies the return before its answer arrives", async () => {
+    ctxNow.ctx = flying("LOITER");
+    let reply: (r: Response) => void = () => {};
+    vi.stubGlobal("fetch", () => new Promise<Response>((r) => (reply = r)));
+    const run = executeSkill(B.rth!);
+    await vi.waitFor(() => expect(resolveSkillState(B.pause!, flying("RTL")).enabled).toBe(true));
+    // Refused after all: the return the flight controller flies is its own.
+    reply(new Response(JSON.stringify({ status: "ok", ack: { observed: true, accepted: false, result_name: "DENIED" } }), { status: 200 }));
+    await run;
+    expect(resolveSkillState(B.pause!, flying("RTL")).enabled).toBe(false);
+  });
+
+  it("a return the agent could not send claims nothing", async () => {
+    ctxNow.ctx = flying("LOITER");
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: "no flight controller" }), { status: 503 }));
+    await executeSkill(B.rth!);
+    expect(resolveSkillState(B.pause!, flying("RTL")).enabled).toBe(false);
+  });
+
   it("an unanswered return is ours once the flight controller is seen flying it", async () => {
     ctxNow.ctx = flying("LOITER");
     answer({ observed: false });

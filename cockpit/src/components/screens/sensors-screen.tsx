@@ -10,6 +10,7 @@ import { Upload, Wrench } from "lucide-react";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { ActionButton, Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { ListItem } from "@/components/ui/list-item";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { openAircraftSetup } from "@/lib/aircraft-setup";
@@ -32,8 +33,8 @@ export function SensorsScreen() {
   const [rig, setRig] = useState<RigPick>(NO_RIG);
   const fileRef = useRef<HTMLInputElement>(null);
   const profile = useProfile();
-  // A wire word the cockpit labels, else the word as sent.
-  const said = (key: ParseKeys | null, raw: string) => (key ? t(key) : raw);
+  // A wire word as the cockpit labels it; a missing word reads as a dash.
+  const said = (key: ParseKeys | null) => (key ? t(key) : DASH);
 
   const sensors = useResource(useCallback((s: AbortSignal) => getSensors(s), []), POLL_MS);
   const clock = useResource(useCallback((s: AbortSignal) => getClock(s), []), POLL_MS);
@@ -132,13 +133,16 @@ export function SensorsScreen() {
             hub
               ? t("sensors.hubLine", {
                   state: hub.connected ? t("sensors.connected") : t("sensors.disconnected"),
-                  transport: hubLink ? t(hubLink.key, { target: hubLink.target }) : hub.transport,
+                  transport: hubLink ? t(hubLink.key, { target: hubLink.target }) : DASH,
                   crc: hub.crc_errors,
                   dropped: hub.dropped,
                 })
               : t("sensors.notConfigured")
           }
         />
+        {readFailed(clock) ? (
+          <ErrorNote onRetry={clock.refresh}>{t("cockpit.readFailed.clock")}</ErrorNote>
+        ) : (
         <Row
           label={t("sensors.clock")}
           tone={c?.present ? (c.locked ? "ok" : "warn") : "muted"}
@@ -149,18 +153,21 @@ export function SensorsScreen() {
                   state: c.locked ? t("sensors.locked") : t("sensors.unlocked"),
                   sigma: formatSigma(c.sigma_ns),
                 })
-              : t("sensors.notConfigured")
+              : clock.ready
+                ? t("sensors.notConfigured")
+                : t("common.loading")
           }
         />
+        )}
         <Row
           label={t("sensors.gnss")}
           value={
             s.gnss
               ? t("sensors.gnssLine", {
-                  fix: fixWord ? t(`cockpit.gnss.fixLabel.${fixWord}`) : s.gnss.fix,
+                  fix: fixWord ? t(`cockpit.gnss.fixLabel.${fixWord}`) : s.gnss.fix ? t("panels.state.unrecognised") : DASH,
                   sats: s.gnss.sats,
                   hdop: fmtNum(s.gnss.hdop, 1),
-                  rtk: rtkWord ? t(`cockpit.gnss.rtkLabel.${rtkWord}`) : s.gnss.rtk,
+                  rtk: rtkWord ? t(`cockpit.gnss.rtkLabel.${rtkWord}`) : s.gnss.rtk ? t("panels.state.unrecognised") : DASH,
                 })
               : t("sensors.notConfigured")
           }
@@ -174,10 +181,10 @@ export function SensorsScreen() {
             return (
               <ListItem
                 key={row.id}
-                headline={`${said(sensorKindKey(row.kind), row.kind)} · ${row.id}`}
+                headline={`${said(sensorKindKey(row.kind))} · ${row.id}`}
                 supporting={t("cockpit.sensors.streamLine", {
                   role: row.role,
-                  source: said(sensorSourceKey(row.source), row.source),
+                  source: said(sensorSourceKey(row.source)),
                   age: row.age_ms == null ? DASH : t("sensors.ageMs", { ms: fmtNum(row.age_ms, 0) }),
                   sigma: formatSigma(row.sigma_ns),
                 })}

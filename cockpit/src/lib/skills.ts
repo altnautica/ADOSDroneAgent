@@ -14,7 +14,7 @@
 
 import type { FlightCommand } from "@/lib/api";
 import { BUILTINS, type BuiltinConfirm } from "@/lib/cockpit-spec";
-import { fcSideFailsafe, type FcView } from "@/lib/fc-failsafe";
+import { fcFailsafeForPause, type FcView } from "@/lib/fc-failsafe";
 import type { VehicleClass } from "@/shared/hud/cockpit-frames";
 import { refusalText } from "@/shared/hud/refusal";
 
@@ -32,7 +32,7 @@ export const GUARD_WINDOW_MS = 3000;
 
 /** A plugin skill whose manifest sets `confirm: true` needs this hold. */
 export const PLUGIN_CONFIRM_MS = 800;
-/** A pilot state older than this is a stale link (the chip's LINK rule). */
+/** A pilot state this old or older is a stale link (the chip's LINK rule). */
 export const PILOT_FRESH_MS = 2000;
 
 export const VEHICLE_CLASSES: readonly VehicleClass[] = ["multirotor", "fixedwing", "vtol"];
@@ -181,7 +181,7 @@ export interface PilotView {
   vehicleClass: VehicleClass | null;
   /** The flight controller is in its own failsafe return or landing. */
   fcFailsafe?: boolean;
-  /** The pilot state is no older than `PILOT_FRESH_MS`. */
+  /** The pilot state is younger than `PILOT_FRESH_MS`. */
   fresh: boolean;
 }
 
@@ -286,7 +286,7 @@ function resolveBuiltin(skill: Skill, b: BuiltinBinding, ctx: SkillContext): Ski
   // landing. The pilot's flag decides while its state is fresh, and its last
   // known flag holds until a fresh frame clears it; without a fresh pilot the
   // flight controller's own report decides.
-  if (skill.id === "pause" && (pilot?.fcFailsafe || (!pilot?.fresh && fcSideFailsafe(ctx.fc, ctx.now)))) {
+  if (skill.id === "pause" && (pilot?.fcFailsafe || (!pilot?.fresh && fcFailsafeForPause(ctx.fc, ctx.now)))) {
     return disabled(refusalText("failsafe"));
   }
   const noLink = ctx.linkReason ?? refusalText("no_fc");

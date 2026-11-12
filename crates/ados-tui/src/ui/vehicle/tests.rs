@@ -211,7 +211,7 @@ fn the_autonomy_block_shows_who_flies_and_how() {
     );
     let text = draw(&mut app, 120, 40);
     for want in [
-        "State     FOLLOW · ACTIVE",
+        "State     Follow · Active",
         "Mode      ADOS Pilot · Normal",
         "Avoid     Brake · Avoiding 2.4 m",
     ] {
@@ -233,7 +233,7 @@ fn an_old_pilot_kind_is_marked_stale_and_avoid_off_reads_off() {
     land(&mut app, ResourceId::NavStatus, pilot_status(frame, 9000));
     let text = draw(&mut app, 120, 40);
     for want in [
-        "State     LINK (stale)",
+        "State     Link (stale)",
         "Mode      FC Manual · Sport (stale)",
         "Avoid     Avoidance off",
     ] {
@@ -538,7 +538,7 @@ fn the_pilot_panel_reads_its_rows_from_the_spec() {
     );
     let text = draw(&mut app, 160, 48);
     for want in [
-        "State     FOLLOW · ACTIVE",
+        "State     Follow · Active",
         "Avoiding · ADOS Pilot",
         "Mode      ADOS Pilot · Normal",
         "Avoid     Brake · Avoiding 2.4 m",
@@ -606,7 +606,7 @@ fn the_chip_reads_link_from_the_spec_stale_threshold() {
             pilot_status(pilot_frame(), age),
         );
         let text = draw(&mut app, 120, 40);
-        assert!(text.contains("State     LINK (stale)"), "{age} ms\n{text}");
+        assert!(text.contains("State     Link (stale)"), "{age} ms\n{text}");
     }
     land(
         &mut app,
@@ -614,7 +614,7 @@ fn the_chip_reads_link_from_the_spec_stale_threshold() {
         pilot_status(pilot_frame(), 1999),
     );
     let text = draw(&mut app, 120, 40);
-    assert!(text.contains("State     FOLLOW · ACTIVE"), "{text}");
+    assert!(text.contains("State     Follow · Active"), "{text}");
 }
 
 /// The pilot frame with mission, link-loss and alert rows, beside a full
@@ -643,7 +643,7 @@ fn pilot_and_autonomy_fit_a_120_by_40_terminal() {
     // Every pilot row through the alert count, and the autonomy block's
     // first rows, are on screen; whatever is cut is counted, never lost silently.
     for want in [
-        "State     FOLLOW · ACTIVE",
+        "State     Follow · Active",
         "Mode      ADOS Pilot · Normal",
         "Mission",
         "Link loss → Return home",
@@ -731,7 +731,7 @@ fn the_chip_reads_the_owning_skills_detail_from_its_plugin() {
         json!({"follow.state": {"payload": {"follow_mode": "orbit", "orbit_radius_m": 8}}}),
     );
     let text = draw(&mut app, 160, 48);
-    assert!(text.contains("State     FOLLOW · ORBIT 8 m"), "{text}");
+    assert!(text.contains("State     Follow · Orbit 8 m"), "{text}");
 }
 
 #[test]
@@ -801,16 +801,15 @@ fn the_detector_row_counts_the_newest_fresh_batch() {
 }
 
 #[test]
-fn the_odometry_block_shows_the_pose_age_in_spec_words() {
+fn the_pose_row_prints_its_age_once() {
     let mut app = live_app();
     let mut body = nav_status();
     body["nav"]["data"]["pose_age_ms"] = json!(42.0);
     land(&mut app, ResourceId::NavStatus, body);
     let text = draw(&mut app, 160, 48);
-    assert!(
-        row(&text, "Pose      ").contains("Pose age 42 ms"),
-        "{text}"
-    );
+    let pose = row(&text, "Pose      ");
+    assert!(pose.starts_with("Pose      42 ms"), "{text}");
+    assert_eq!(pose.matches("Pose").count(), 1, "{text}");
 }
 
 #[test]
@@ -829,4 +828,130 @@ fn the_pilot_block_names_the_gimbal_once_it_answers() {
         row(&text, "Sticks    ").starts_with("Sticks    Sticks are with"),
         "{text}"
     );
+}
+
+#[test]
+fn the_sticks_and_gimbal_rows_read_their_words_from_the_spec() {
+    use crate::model::spec_text::{has_spec_text, spec_text};
+    for key in ["cockpit.row.sticks", "cockpit.gimbal.takes_rates"] {
+        assert!(has_spec_text(key), "no spec key {key}");
+    }
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 100),
+    );
+    land(&mut app, ResourceId::GimbalRate, json!({"available": true}));
+    let text = draw(&mut app, 160, 48);
+    let sticks = format!("{:<10}", spec_text("cockpit.row.sticks", &[]));
+    assert!(row(&text, &sticks).starts_with(&sticks), "{text}");
+    let gimbal = format!("{:<10}", spec_text("cockpit.gimbal_pad", &[]));
+    assert!(
+        row(&text, &gimbal).contains(&spec_text("cockpit.gimbal.takes_rates", &[])),
+        "{text}"
+    );
+}
+
+/// Land a failed read of `id`, answered with `code` (`None`: no answer).
+fn land_failed(app: &mut App, id: ResourceId, code: Option<u16>) {
+    app.core.res.insert(
+        id.clone(),
+        Slot {
+            value: None,
+            error: Some("read failed".into()),
+            code,
+            error_body: None,
+            at: Instant::now(),
+        },
+    );
+    app.tabs.vehicle.on_resource(&mut app.core, &id);
+}
+
+#[test]
+fn only_a_missing_gimbal_route_reads_unavailable() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 100),
+    );
+    let unavailable = crate::model::spec_text::spec_text("cockpit.unavailable", &[]);
+    for code in [None, Some(401), Some(500), Some(503)] {
+        land_failed(&mut app, ResourceId::GimbalRate, code);
+        let text = draw(&mut app, 160, 48);
+        assert!(!text.contains(&unavailable), "{code:?}\n{text}");
+    }
+    land_failed(&mut app, ResourceId::GimbalRate, Some(404));
+    let text = draw(&mut app, 160, 48);
+    assert!(row(&text, "Gimbal").contains(&unavailable), "{text}");
+}
+
+#[test]
+fn detections_are_read_only_while_a_detector_runs() {
+    let polls_detections = |app: &App| {
+        app.tabs
+            .vehicle
+            .subs(&app.core)
+            .iter()
+            .any(|s| s.id == ResourceId::DetectionsLatest)
+    };
+    let mut app = live_app();
+    assert!(!polls_detections(&app), "no vision status yet");
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(false, false),
+    );
+    assert!(!polls_detections(&app), "detector idle");
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(true, false),
+    );
+    assert!(polls_detections(&app), "detector running");
+    land(
+        &mut app,
+        ResourceId::DetectionsLatest,
+        json!({"available": true, "stale": false, "camera_id": "main",
+               "detections": [{}, {}, {}]}),
+    );
+    assert!(draw(&mut app, 120, 40).contains("3 objects on main"));
+    // The detector stops: its last count goes with it.
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(false, false),
+    );
+    assert!(!polls_detections(&app), "detector stopped");
+    assert!(!draw(&mut app, 120, 40).contains("3 objects"));
+}
+
+#[test]
+fn trend_charts_hide_while_telemetry_fails_or_the_fc_is_down() {
+    let gone = [
+        "Altitude 42.5",
+        "Voltage 16.4",
+        "Current 12.1",
+        "Remaining 87",
+    ];
+    let mut app = live_app();
+    assert!(draw(&mut app, 120, 40).contains("Altitude 42.5 m"));
+    land_failed(&mut app, ResourceId::Telemetry, Some(503));
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("telemetry unavailable"), "{text}");
+    for g in gone {
+        assert!(!text.contains(g), "{g:?} drawn on a failed read\n{text}");
+    }
+
+    let mut app = live_app();
+    land(&mut app, ResourceId::Telemetry, json!({"armed": null}));
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        text.contains("flight controller is not connected"),
+        "{text}"
+    );
+    for g in gone {
+        assert!(!text.contains(g), "{g:?} drawn with the FC down\n{text}");
+    }
 }

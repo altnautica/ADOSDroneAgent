@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { MENU_ORDER, menuEntries, type MenuInputs } from "@/lib/quick-menu-model";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 
-const base: MenuInputs = { onFeed: true, movedCount: 0, cameraCount: 1, panelCount: 0, setupNeeded: false, setupOffered: false, kiosk: false };
+const base: MenuInputs = { onFeed: true, movedCount: 0, cameraCount: 1, panelCount: 0, setupNeeded: false, setupOffered: false, knownOnGround: true, kiosk: false };
 
 describe("the Menu (layout.json menu.order)", () => {
   it("follows the spec's order", () => {
@@ -37,6 +37,13 @@ describe("the Menu (layout.json menu.order)", () => {
     expect(menuEntries({ ...base, setupOffered: true })).toContain("setup");
     expect(menuEntries({ ...base, kiosk: true })).not.toContain("exit");
     expect(menuEntries(base).at(-1)).toBe("exit");
+  });
+
+  it("offers Set up aircraft only while the vehicle is known disarmed on the ground", () => {
+    // Airborne, or the arm state unknown (FC link down, no fresh pilot).
+    expect(menuEntries({ ...base, setupOffered: true, knownOnGround: false })).not.toContain("setup");
+    expect(menuEntries({ ...base, setupNeeded: true, knownOnGround: false })).not.toContain("setup");
+    expect(menuEntries({ ...base, onFeed: false, setupOffered: true, knownOnGround: false })).not.toContain("setup");
   });
 
   it("offers Cameras with more than one leg and leaves the flight entries out off the Feed", () => {

@@ -25,3 +25,13 @@ export function suggestionDraft(
 ): { profile: ApplyProfile; role: GroundRole } {
   return { profile: s.detected, role: s.ground_role_hint ?? draftRole };
 }
+
+/** The suggestion is what the node already runs: applying it would restart
+ *  the agent for nothing. A ground role only counts on a ground station. */
+export function suggestionIsCurrent(
+  s: ProfileSuggestion,
+  current: { profile: ApplyProfile; role: GroundRole },
+): boolean {
+  const draft = suggestionDraft(s, current.role);
+  return draft.profile === current.profile && (draft.profile !== "ground_station" || draft.role === current.role);
+}

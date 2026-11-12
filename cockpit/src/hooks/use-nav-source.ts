@@ -9,11 +9,16 @@ import { loadEkfSourceParams, navSourceInput } from "@/lib/ekf-sources";
 import { resolveNavSource, type NavSourceResult } from "@/shared/hud/nav-source";
 import type { NavState } from "@/shared/hud/nav-types";
 import { useFlightStore } from "@/stores/flight-store";
-import { useNavStreamStore } from "@/stores/nav-stream-store";
+import { useNavStreamStore, type Stamped } from "@/stores/nav-stream-store";
 import { useStatusStore } from "@/stores/status-store";
 
-/** vision-nav's report counts while younger than this (§3). */
+/** vision-nav's report counts while younger than this; from this age it is stale. */
 export const NAV_STATE_FRESH_MS = 2000;
+
+/** vision-nav's report while it counts, else null. */
+export function freshNavState(nav: Stamped<NavState> | null, nowMs: number): NavState | null {
+  return nav && nowMs - nav.at < NAV_STATE_FRESH_MS ? nav.data : null;
+}
 
 /** `loadParams`: read the EKF source sets once per FC link. One always-mounted
  *  reader (the status pill) loads them; the chip, which can move into the
@@ -38,6 +43,6 @@ export function useNavSource(loadParams: boolean): {
     return () => ac.abort();
   }, [loadParams, fcConnected]);
 
-  const freshNav = nav && now - nav.at <= NAV_STATE_FRESH_MS ? nav.data : null;
+  const freshNav = freshNavState(nav, now);
   return { result: resolveNavSource(navSourceInput(telemetry, live, freshNav, lastCommandedSet, params)), freshNav, params };
 }

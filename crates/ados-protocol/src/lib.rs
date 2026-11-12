@@ -64,6 +64,7 @@ pub mod state;
 pub mod tap;
 pub mod units;
 pub mod vision_depth;
+pub mod vision_detector;
 pub mod vision_rpc;
 pub mod vision_status;
 pub mod wfb_status;

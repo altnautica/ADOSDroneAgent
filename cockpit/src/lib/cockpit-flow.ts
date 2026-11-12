@@ -102,11 +102,11 @@ export function launchStepText(step: LaunchStep): string {
   return specText(step === "after" ? "flow.launch.step.after_label" : `flow.launch.step.${step}`);
 }
 
-/** A launch step's name in upper case, as the chip's `launching` rule
- *  writes it ("TAKING OFF · {step}"): the take-off step reads as its action
+/** A launch step's name as the chip's `launching` rule writes it
+ *  ("Taking off · {step}"): the take-off step reads as its action
  *  (`chip.launch_step.takeoff`, "Climb"), so the line matches the chip. */
-export function launchStepUpper(step: LaunchStep): string {
-  return (step === "takeoff" ? specText("chip.launch_step.takeoff") : launchStepText(step)).toUpperCase();
+export function launchStepName(step: LaunchStep): string {
+  return step === "takeoff" ? specText("chip.launch_step.takeoff") : launchStepText(step);
 }
 
 /** A flight controller's command answer in words (`mav_result.*`), any other

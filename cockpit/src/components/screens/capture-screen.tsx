@@ -12,6 +12,7 @@ import { ActionButton, Dot, EmptyNote, ErrorNote, Row, StaleBadge, Tile, TileGri
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { TextSettingRow } from "@/components/ui/setting-row";
 import { captureControls, captureErrorKey, getCaptureState, startBody } from "@/lib/capture-model";
+import { captureStateKey } from "@/lib/screen-words";
 import type { Tone } from "@/lib/tone";
 import { HEALTH_IDS, captureErrorCode, markCapture, startCapture, stopCapture, type HealthLevel } from "@/shared/api/capture";
 import { toastFromError } from "@/shared/api/toast";
@@ -63,10 +64,11 @@ export function CaptureScreen() {
   } else {
     const c = captureControls(state, room, floor, busy);
     const fl = c.floor;
+    const captureWord = captureStateKey(state.state);
     body = (
       <div className="flex flex-col gap-[0.5rem]">
         <TileGrid>
-          <Tile label={t("cockpit.capture.state")} value={t(`capture.state.${state.state}`)} tone={c.recording ? "err" : "muted"} />
+          <Tile label={t("cockpit.capture.state")} value={captureWord ? t(captureWord) : DASH} tone={c.recording ? "err" : "muted"} />
           <Tile label={t("cockpit.capture.duration")} value={c.recording ? fmtDuration(state.duration_s) : DASH} />
           <Tile label={t("cockpit.capture.segment")} value={c.recording ? fmtInt(state.segment) : DASH} />
           <Tile label={t("cockpit.capture.frames")} value={fmtInt(state.frames?.total)} />

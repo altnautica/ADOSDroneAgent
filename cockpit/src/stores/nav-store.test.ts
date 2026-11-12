@@ -1,7 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { TAB_ORDER } from "@/nav/screen-table";
+import { useDirtyStore } from "@/stores/dirty-store";
+import { useFlightStore } from "@/stores/flight-store";
 import { useNavStore } from "@/stores/nav-store";
+import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 /** The tabs a drone shows: the ground-station, visor and compute screens are hidden. */
 const DRONE_HIDDEN = new Set(["mesh", "sources", "uplink", "node", "capture", "gnss", "io"]);
@@ -148,5 +151,56 @@ describe("the profile's home tab", () => {
     useNavStore.getState().goTab("settings");
     const s = useNavStore.getState();
     expect(s.visibleTabs[s.menuFocusIndex]).toBe("settings");
+  });
+});
+
+describe("going back to the Feed with unsaved drafts", () => {
+  beforeEach(() => {
+    reset([...TAB_ORDER], "video", true);
+    useDirtyStore.setState({ owners: ["video-tuning"], pending: null });
+    useNavStreamStore.setState({ pilot: null });
+  });
+  afterEach(() => {
+    useDirtyStore.setState({ owners: [], pending: null });
+    useFlightStore.setState({ telemetry: null, live: false, stale: false });
+  });
+
+  it("goes at once while the vehicle may be flying, keeping the drafts", () => {
+    useFlightStore.setState({ telemetry: { armed: true }, live: true, stale: false });
+    useNavStore.getState().goTab("feed");
+    expect(useNavStore.getState().activeTabId).toBe("feed");
+    expect(useDirtyStore.getState()).toMatchObject({ owners: ["video-tuning"], pending: null });
+  });
+
+  it("goes at once while the arm state is unknown", () => {
+    useNavStore.getState().goTab("feed");
+    expect(useNavStore.getState().activeTabId).toBe("feed");
+  });
+
+  it("goes back from a detail screen over the Feed at once while the vehicle may be flying", () => {
+    reset([...TAB_ORDER], "feed", true);
+    useNavStore.setState({ detailStack: ["controls"] });
+    useNavStore.getState().back();
+    expect(useNavStore.getState().detailStack).toEqual([]);
+  });
+
+  it("drops a leave already parked, so the dialog cannot pull the pilot off the Feed", () => {
+    useFlightStore.setState({ telemetry: { armed: true }, live: true, stale: false });
+    useNavStore.getState().goTab("settings");
+    expect(useDirtyStore.getState().pending).not.toBeNull();
+    useNavStore.getState().goTab("feed");
+    expect(useNavStore.getState().activeTabId).toBe("feed");
+    expect(useDirtyStore.getState().pending).toBeNull();
+  });
+
+  it("still asks on the ground, known disarmed, and for any other screen", () => {
+    useFlightStore.setState({ telemetry: { armed: false }, live: true, stale: false });
+    useNavStore.getState().goTab("feed");
+    expect(useNavStore.getState().activeTabId).toBe("video");
+    expect(useDirtyStore.getState().pending).not.toBeNull();
+    useDirtyStore.setState({ pending: null });
+    useFlightStore.setState({ telemetry: { armed: true }, live: true, stale: false });
+    useNavStore.getState().goTab("settings");
+    expect(useNavStore.getState().activeTabId).toBe("video");
   });
 });

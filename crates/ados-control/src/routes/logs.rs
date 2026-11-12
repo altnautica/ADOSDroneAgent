@@ -12,6 +12,11 @@
 //! `logger` (the row's `target`, else its `source`), applied here for both the
 //! page and the live tail. It is never passed to the store as `source`, which
 //! is an exact match on a column the logger often does not show.
+//!
+//! The page counts and filters only the rows the store returned. When the
+//! store returned every row the route asked for, older rows may lie past that
+//! window, so the page says `truncated: true` and `total` is a lower bound;
+//! with a logger filter the window is the newest [`MAX_LIMIT`] rows.
 
 use axum::extract::Query;
 use axum::response::{IntoResponse, Response};
@@ -110,6 +115,7 @@ async fn logs_from(client: &LogdQueryClient, q: LogsQuery) -> Response {
         })
         .collect();
     let total = entries.len();
+    let truncated = rows.len() as i64 >= want;
     let window: Vec<Value> = entries
         .into_iter()
         .skip(q.offset as usize)
@@ -118,6 +124,7 @@ async fn logs_from(client: &LogdQueryClient, q: LogsQuery) -> Response {
     Json(json!({
         "entries": window,
         "total": total,
+        "truncated": truncated,
         "limit": q.limit,
         "offset": q.offset,
     }))

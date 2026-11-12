@@ -59,7 +59,7 @@ pub struct VehicleTab {
     complete_at: Option<Instant>,
     /// The owning skill's state topic, from its plugin's manifest.
     skill_topic: Option<String>,
-    /// The owning skill's chip detail (`ORBIT 8 m`), from its echoed parameters.
+    /// The owning skill's chip detail (`Orbit 8 m`), from its echoed parameters.
     mode_detail: Option<String>,
     /// When vehicle telemetry was last live, and the arm state then.
     live_at: Option<Instant>,
@@ -89,6 +89,13 @@ impl VehicleTab {
             }
             Some(_) => None,
         }
+    }
+
+    /// Whether the detector runs on any camera.
+    fn detector_running(&self) -> bool {
+        self.detection
+            .as_ref()
+            .is_some_and(|d| !d.detecting.is_empty())
     }
 
     fn charts(&self, f: &mut Frame, area: Rect, core: &Core) {
@@ -134,9 +141,18 @@ impl Tab for VehicleTab {
             Sub::every_ms(ResourceId::Battery, "/api/v1/battery", 2000),
             Sub::every_ms(ResourceId::NavStatus, NAV_STATUS_PATH, 500),
             Sub::every_ms(ResourceId::VisionStatus, VISION_STATUS_PATH, 1000),
-            Sub::every_ms(ResourceId::DetectionsLatest, DETECTIONS_LATEST_PATH, 1000),
             Sub::every_ms(ResourceId::GimbalRate, GIMBAL_RATE_PATH, 10_000),
         ];
+        // The newest batch only while a detector runs: with none running the
+        // engine publishes nothing, and each read waits out its timeout on
+        // the one thread every other subscription shares.
+        if self.detector_running() {
+            subs.push(Sub::every_ms(
+                ResourceId::DetectionsLatest,
+                DETECTIONS_LATEST_PATH,
+                1000,
+            ));
+        }
         // While a skill owns the aircraft: its manifest once (the state
         // topic), then the parameters it echoes, for the chip's detail.
         if let Some((plugin, _)) = self.owner_skill() {
@@ -155,17 +171,20 @@ impl Tab for VehicleTab {
 
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
         let slot = core.slot(id);
-        // An unreachable engine (a 503) is no detector, not the last answer;
-        // a gimbal that does not answer (a 404 on an older agent) takes no rates.
+        // An unreachable engine (a 503) is no detector, not the last answer.
         let good = slot
             .filter(|s| s.error.is_none())
             .and_then(|s| s.value.as_ref());
         match id {
             ResourceId::VisionStatus => {
-                self.detection = good.and_then(Detection::from_status).map(|d| Detection {
-                    seen: self.seen.clone(),
-                    ..d
-                });
+                self.detection = good.and_then(Detection::from_status);
+                // A stopped detector's last count is not a current one.
+                if !self.detector_running() {
+                    self.seen = None;
+                }
+                if let Some(d) = &mut self.detection {
+                    d.seen = self.seen.clone();
+                }
                 return;
             }
             ResourceId::DetectionsLatest => {
@@ -176,10 +195,16 @@ impl Tab for VehicleTab {
                 return;
             }
             ResourceId::GimbalRate => {
-                let failed = slot.is_some_and(|s| s.error.is_some());
-                self.gimbal = good
-                    .map(|v| v.get("available").and_then(serde_json::Value::as_bool) == Some(true))
-                    .or(failed.then_some(false));
+                // A 404 is an agent without the route: no rate commands. Any
+                // other failure (no answer, a 5xx, a refused key) says nothing
+                // about the gimbal, so it reads as unknown.
+                self.gimbal = match slot {
+                    Some(s) if s.error.is_none() => s.value.as_ref().map(|v| {
+                        v.get("available").and_then(serde_json::Value::as_bool) == Some(true)
+                    }),
+                    Some(s) if s.code == Some(404) => Some(false),
+                    _ => None,
+                };
                 return;
             }
             _ => {}
@@ -292,7 +317,7 @@ impl Tab for VehicleTab {
         let pilot_rows = self.pilot_lines(core);
         let packs_hidden = stale.then_some(HIDDEN_STALE);
         // The Pilot block takes its rows first; the trend charts go before
-        // anything else, and never show readings the agent did not refresh.
+        // anything else, and show only while the flight readings are live.
         let (pilot, pilot_min, auto_need) = if packs_hidden.is_some() {
             (3, 3, 3)
         } else {
@@ -313,7 +338,7 @@ impl Tab for VehicleTab {
                 autonomy: auto_need,
                 flight: flight.len() as u16 + 2,
                 gps: gps.len() as u16 + 2,
-                charts: !stale,
+                charts: hidden.is_none(),
             },
         );
         if let Some(r) = plan.attitude {

@@ -19,15 +19,19 @@ export interface RestartPending {
 
 export type RestartPhase = "waiting" | "back" | "timedOut";
 
-/** Where a pending restart stands. The agent is back once it answers after
- *  having gone silent, or with an uptime younger than the request (a restart
- *  between two polls). Until then it waits, and after the timeout it gives up. */
+/** Where a pending restart stands. Only a heartbeat answered after the
+ *  request counts (a cached answer predates the restart). The agent is back
+ *  once such an answer follows a silence, or carries an uptime younger than
+ *  the request (a restart between two polls). Until then it waits; after the
+ *  timeout it gives up. Time the tab spent hidden, when polls pause, does not
+ *  count toward the timeout, and a hidden tab never gives up. */
 export function restartPhase(
   p: RestartPending,
   now: number,
-  heartbeat: { reachable: boolean; uptimeS: number | null },
+  heartbeat: { reachable: boolean; uptimeS: number | null; dataUpdatedAt: number },
+  visibility: { hidden: boolean; hiddenMs: number } = { hidden: false, hiddenMs: 0 },
 ): RestartPhase {
-  if (heartbeat.reachable && heartbeat.uptimeS != null) {
+  if (heartbeat.reachable && heartbeat.uptimeS != null && heartbeat.dataUpdatedAt > p.since) {
     const elapsedS = (now - p.since) / 1000;
     const restarted =
       p.sawDown ||
@@ -35,7 +39,8 @@ export function restartPhase(
       (p.baselineUptimeS != null && heartbeat.uptimeS < p.baselineUptimeS);
     if (restarted) return "back";
   }
-  return now - p.since > RESTART_TIMEOUT_MS ? "timedOut" : "waiting";
+  if (visibility.hidden) return "waiting";
+  return now - p.since - visibility.hiddenMs > RESTART_TIMEOUT_MS ? "timedOut" : "waiting";
 }
 
 /** Whole seconds since the request. */

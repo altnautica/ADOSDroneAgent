@@ -357,10 +357,16 @@ fn the_overview_shows_the_flight_state_chip_and_alert_count() {
     app.tabs.overview.on_resource(&mut app.core, &id);
     let text = draw(&mut app, 120, 40);
     assert!(text.contains("HEALTHY"), "{text}");
-    assert!(text.contains("State     FOLLOW · ACTIVE"), "{text}");
+    assert!(text.contains("State     Follow · Active"), "{text}");
     assert!(text.contains("Alerts    "), "{text}");
     let subs = app.tabs.overview.subs(&app.core);
     assert!(subs.iter().any(|s| s.id == ResourceId::NavStatus));
+
+    // Away and back: the readings it held while hidden are not counted again.
+    app.activate_tab(TabId::Vehicle);
+    app.activate_tab(TabId::Overview);
+    let text = draw(&mut app, 120, 40);
+    assert!(!text.contains("Follow · Active"), "{text}");
 }
 
 #[test]

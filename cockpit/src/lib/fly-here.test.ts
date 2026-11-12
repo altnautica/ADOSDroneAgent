@@ -56,7 +56,11 @@ describe("fly here", () => {
     const p = parsePilotState(c.input.pilot);
     // Only a reported landed or disarmed state is the ground; unknown is possibly airborne.
     const ground = p !== null && c.input.pilot_age_ms < 2000 && (p.landed === true || p.armed === false);
-    expect(mapPickAction(p, c.input.pilot_age_ms, c.input.fc)).toBe(c.expected.route ?? (ground ? "launch" : null));
+    const action = c.expected.route ?? (ground ? "launch" : null);
+    expect(mapPickAction(p, c.input.pilot_age_ms, c.input.fc)).toBe(action);
+    // A pick that does nothing says why, as the shared rule words it.
+    const reason = (c.expected as { reason?: string }).reason ?? null;
+    expect(mapPickRefusal(p, c.input.pilot_age_ms, c.input.fc)).toBe(action === null ? reason : null);
   });
 
   it("reads the FC facts from the fresh pilot state and the vehicle snapshot", () => {

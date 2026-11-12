@@ -23,9 +23,9 @@ export interface FcSetupController {
   status: SetupStatus | null;
   /** True until the first read settles. */
   loading: boolean;
-  /** The setup stream is live: false once it has been closed or silent for
-   *  5 s (the stream keeps alive at 1 Hz), true again on reconnect. Always
-   *  true when the stream is not held open. */
+  /** The setup stream is live: false until a socket opens, false again once
+   *  it has been closed or silent for 5 s (the stream keeps alive at 1 Hz),
+   *  true again on reconnect. Always true when the stream is not held open. */
   streamUp: boolean;
   /** The last failed read, or null. */
   loadError: string | null;
@@ -56,7 +56,7 @@ export interface UseFcSetupOptions {
 export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupController {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [streamUp, setStreamUp] = useState(true);
+  const [streamUp, setStreamUp] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);

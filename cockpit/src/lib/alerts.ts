@@ -6,7 +6,7 @@ import type { LucideIcon } from "lucide-react";
 import { BatteryLow, BatteryWarning, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
 
 import { linkDiagView } from "@/lib/link-diag";
-import type { PreflightCheck } from "@/shared/hud/preflight";
+import { preflightFailing, type PreflightCheck } from "@/shared/hud/preflight";
 import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { baseAlerts, controllerLost, pilotFailsafe, sortAlerts, type BaseAlert, type BaseAlertInputs } from "@/shared/hud/status-pill";
@@ -40,14 +40,6 @@ export function computeAlerts(i: AlertInputs): CockpitAlert[] {
   return sortAlerts(out);
 }
 
-/** Base alerts that already report a pre-flight check's failure, so the
- *  pill never lists the same fault twice. */
-const CHECK_COVERED_BY: Readonly<Record<string, readonly string[]>> = {
-  link: ["link_lost", "link_stale"],
-  gps: ["gps_no_3d"],
-  battery: ["batt_low", "batt_crit"],
-};
-
 /** The pill inputs the cockpit feeds the shared status-pill rules beyond its
  *  alerts: the pilot frame's age (null with no pilot state), whether the
  *  agent answered its last status poll, a lost controller, and on the ground
@@ -68,16 +60,12 @@ export function pillWiring(i: {
   fcFailsafe: boolean;
   failsafeCause: string | null;
 } {
-  const active = new Set(i.alerts.map((a) => a.id));
-  // Unknown arm state (FC link down) counts as possibly airborne.
-  const onGround = i.armed === false;
   return {
     pilotAgeMs: i.pilot ? Math.max(0, i.nowMs - i.pilot.at) : null,
     agentReachable: !i.statusStale,
     controllerLost: controllerLost(i.pilot?.data ?? null),
     ...pilotFailsafe(i.pilot?.data ?? null),
-    preflightFailing: onGround
-      ? i.checks.filter((c) => !c.ok && !(CHECK_COVERED_BY[c.id] ?? []).some((id) => active.has(id))).map((c) => ({ id: c.id, label: c.label }))
-      : [],
+    // Unknown arm state (FC link down) counts as possibly airborne.
+    preflightFailing: preflightFailing(i.checks, i.alerts, i.armed),
   };
 }

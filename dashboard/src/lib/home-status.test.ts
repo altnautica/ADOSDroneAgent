@@ -116,11 +116,12 @@ describe("home status card", () => {
   });
 
   it("lists a failing pre-flight check on the ground, and none in the air", () => {
-    const pilot = parsePilotState({ ...raw, readiness: [], statustext: [] });
+    const pilot = parsePilotState({ ...raw, armed: false, readiness: [], statustext: [] });
     const noHome = { ...groundTel, home: null };
     const pill = homePill({ ...base, pilot, telemetry: noHome });
     expect(pill.alerts.map((a) => [a.id, a.source, a.text])).toEqual([["preflight:home", "preflight", "Home position not set"]]);
-    expect(homePill({ ...base, pilot, telemetry: { ...noHome, armed: true } }).text).toBe("All systems OK");
+    const airborne = parsePilotState({ ...raw, armed: true, readiness: [], statustext: [] });
+    expect(homePill({ ...base, pilot: airborne, telemetry: { ...noHome, armed: true } }).text).toBe("All systems OK");
     // A check a listed base alert already reports is not listed twice.
     const noFix = homePill({ ...base, pilot, telemetry: { ...groundTel, gps: { fix_type: 1 } } });
     expect(noFix.alerts.map((a) => a.id)).toEqual(["preflight:gps"]);
@@ -177,6 +178,24 @@ describe("home status card", () => {
     const noArm = { ...noHome, armed: undefined };
     expect(pillArmed({ pilot: null, telemetry: noArm })).toBeNull();
     expect(pillArmed({ pilot: null, telemetry: noHome })).toBe(false);
+  });
+
+  it("judges the arm state from the fresh pilot frame and live telemetry only", () => {
+    const noHome = { ...groundTel, home: null };
+    // The pilot process stalled on a disarmed frame; the FC armed from RC.
+    const staleDisarmed = parsePilotState({ ...raw, armed: false, readiness: [], statustext: [] });
+    const pill = homePill({
+      ...base,
+      pilot: staleDisarmed,
+      pilotAgeMs: 5_000,
+      telemetry: { ...noHome, armed: true },
+      armSources: { pilot: null, telemetry: { ...noHome, armed: true } },
+    });
+    expect(pill.alerts.filter((a) => a.source === "preflight")).toEqual([]);
+    // Neither source current: unknown, so the pre-flight items stay hidden.
+    expect(pillArmed({ pilot: null, telemetry: null })).toBeNull();
+    const unknown = homePill({ ...base, pilot: staleDisarmed, telemetry: noHome, armSources: { pilot: null, telemetry: null } });
+    expect(unknown.alerts.filter((a) => a.source === "preflight")).toEqual([]);
   });
 
   it("raises the nav-source item from a live EKF report that has lost position", () => {

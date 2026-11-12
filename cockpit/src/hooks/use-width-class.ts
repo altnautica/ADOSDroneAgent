@@ -1,7 +1,9 @@
 // The window width class and orientation, re-read on resize. One listener for
-// the whole app; every subscriber reads the same snapshot.
+// the whole app; every subscriber reads the same snapshot. Inside a box that
+// publishes its own measure (`BoxViewport`, the Feed beside the menu rail),
+// the class and orientation come from that box instead.
 
-import { useSyncExternalStore } from "react";
+import { createContext, useContext, useLayoutEffect, useState, useSyncExternalStore, type RefObject } from "react";
 
 import { widthClassFor, type WidthClass } from "@/lib/cockpit-layout";
 import { isKiosk } from "@/lib/kiosk";
@@ -36,6 +38,37 @@ function subscribe(onChange: () => void): () => void {
   return () => window.removeEventListener("resize", onChange);
 }
 
+/** The viewport of the enclosing box, when one publishes it. */
+export const BoxViewport = createContext<Viewport | null>(null);
+
 export function useWidthClass(): Viewport {
-  return useSyncExternalStore(subscribe, read, () => FALLBACK);
+  const box = useContext(BoxViewport);
+  const win = useSyncExternalStore(subscribe, read, () => FALLBACK);
+  return box ?? win;
+}
+
+/** The width class and orientation of an element's own box, re-measured as
+ *  it resizes; null until measured or while `on` is false. */
+export function useBoxViewport(ref: RefObject<HTMLElement | null>, on: boolean): Viewport | null {
+  const [viewport, setViewport] = useState<Viewport | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!on || !el) {
+      setViewport(null);
+      return;
+    }
+    const measure = (w: number, h: number) =>
+      setViewport((v) => {
+        const widthClass = widthClassFor(w, isKiosk());
+        const portrait = h > w;
+        return v && v.widthClass === widthClass && v.portrait === portrait ? v : { widthClass, portrait };
+      });
+    const r = el.getBoundingClientRect();
+    measure(r.width, r.height);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) => measure(entry.contentRect.width, entry.contentRect.height));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref, on]);
+  return viewport;
 }

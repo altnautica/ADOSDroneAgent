@@ -219,7 +219,8 @@ pub fn installed(core: &Core, install: &Install) -> Vec<Line<'static>> {
                 let ts = entry
                     .get("ts_ms")
                     .and_then(Value::as_i64)
-                    .map(|v| format!("  {}", age_text(v, now_ms())))
+                    .and_then(|v| age_text(v, now_ms(), !core.target.remote))
+                    .map(|age| format!("  {age}"))
                     .unwrap_or_default();
                 out.push(Line::from(vec![
                     Span::styled(format!("  {topic}"), t.accented()),
@@ -345,14 +346,17 @@ fn scalar(v: &Value) -> String {
     }
 }
 
-/// `3 s ago` / `4 min ago` / `2 h ago` for an epoch-ms timestamp.
-fn age_text(ts_ms: i64, now_ms: i64) -> String {
-    let s = ((now_ms - ts_ms) / 1000).max(0);
-    match s {
-        0..=119 => format!("{s} s ago"),
-        120..=7199 => format!("{} min ago", s / 60),
-        _ => format!("{} h ago", s / 3600),
-    }
+/// The oldest age a served state can plausibly have: the route drops a state
+/// older than its staleness window, and the stamp may trail the write it rode
+/// in on and the read that brought it here.
+const MAX_STATE_AGE_MS: i64 = 2 * ados_protocol::paths::PLUGIN_STATE_MAX_AGE_MS as i64;
+
+/// `3 s ago` for the agent's epoch-ms stamp, only when this clock can tell:
+/// the stamp is the agent's wall clock, so only a local agent shares it, and
+/// an age outside what the route ever serves is a clock disagreement.
+fn age_text(ts_ms: i64, now_ms: i64, same_clock: bool) -> Option<String> {
+    let age = now_ms - ts_ms;
+    (same_clock && (0..=MAX_STATE_AGE_MS).contains(&age)).then(|| format!("{} s ago", age / 1000))
 }
 
 fn now_ms() -> i64 {
@@ -386,7 +390,9 @@ mod state_text_tests {
                 "target.label —"
             ]
         );
-        assert_eq!(age_text(1_000, 4_000), "3 s ago");
-        assert_eq!(age_text(0, 600_000), "10 min ago");
+        assert_eq!(age_text(1_000, 4_000, true).as_deref(), Some("3 s ago"));
+        assert_eq!(age_text(1_000, 4_000, false), None);
+        assert_eq!(age_text(0, 600_000, true), None);
+        assert_eq!(age_text(5_000, 4_000, true), None);
     }
 }

@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { acceptPairingCode, acceptRefusal, normalizePairingCode, PAIR_ACTION_GUARD, unpairCloud } from "@/lib/pairing-api";
+import {
+  acceptPairingCode,
+  acceptRefusal,
+  bindCancellable,
+  normalizePairingCode,
+  PAIR_ACTION_GUARD,
+  unpair,
+} from "@/lib/pairing-api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -37,12 +44,68 @@ describe("accept code", () => {
     await expect(acceptPairingCode("123456", "fallback")).resolves.toBeUndefined();
   });
 
-  it("posts the unpair", async () => {
-    const fetchMock = stubFetch({ ok: true });
-    await unpairCloud();
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toContain("/api/pairing/unpair");
-    expect(init.method).toBe("POST");
+});
+
+/** Answers each fetch in turn: `armed` is the agent's 409 armed refusal. */
+function stubSequence(...answers: ("armed" | "ok")[]) {
+  const fetchMock = vi.fn(async () => {
+    const a = answers.shift() ?? "ok";
+    return a === "armed"
+      ? new Response(JSON.stringify({ error: "E_ARMED", message: "Vehicle is armed", override: "force" }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        })
+      : new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+const urls = (m: ReturnType<typeof stubSequence>) => m.mock.calls.map((c) => String((c as unknown[])[0]));
+
+describe("unpair", () => {
+  for (const [target, path] of [
+    ["cloud", "/api/pairing/unpair"],
+    ["rf", "/api/wfb/pair/unpair"],
+  ] as const) {
+    it(`posts the ${target} unpair without force when the agent allows it`, async () => {
+      const fetchMock = stubSequence("ok");
+      const confirm = vi.fn(async () => true);
+      await expect(unpair(target, confirm, async () => null)).resolves.toBe("done");
+      expect(urls(fetchMock)).toEqual([expect.stringMatching(new RegExp(`${path}$`))]);
+      expect(confirm).not.toHaveBeenCalled();
+    });
+
+    it(`asks before repeating a refused ${target} unpair with force`, async () => {
+      const fetchMock = stubSequence("armed", "ok");
+      const confirm = vi.fn(async () => true);
+      await expect(unpair(target, confirm, async () => null)).resolves.toBe("done");
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(urls(fetchMock)[1]).toMatch(new RegExp(`${path}\\?force=1$`));
+    });
+
+    it(`words a declined ${target} unpair from the arm state`, async () => {
+      stubSequence("armed");
+      const no = async () => false;
+      await expect(unpair(target, no, async () => ({ connected: true, armed: true }))).resolves.toBe("armed");
+      stubSequence("armed");
+      await expect(unpair(target, no, async () => null)).resolves.toBe("armedUnknown");
+      // The agent refused, so a snapshot saying disarmed is out of date.
+      stubSequence("armed");
+      await expect(unpair(target, no, async () => ({ connected: false, armed: null }))).resolves.toBe("armedUnknown");
+    });
+  }
+});
+
+describe("bind cancel", () => {
+  it("offers Cancel while the agent reports a waiting bind, from any tab", () => {
+    for (const state of ["opening_tunnel", "waiting_peer"]) {
+      expect(bindCancellable({ state })).toBe(true);
+    }
+    expect(bindCancellable({ phase: "waiting_peer" })).toBe(true);
+    for (const state of ["idle", "transferring_keys", "applying_keys", "paired", "failed", "aborted"]) {
+      expect(bindCancellable({ state })).toBe(false);
+    }
+    expect(bindCancellable(null)).toBe(false);
   });
 });
 

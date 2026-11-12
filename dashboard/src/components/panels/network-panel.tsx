@@ -8,6 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useStatus } from "@/hooks/use-status";
+import { uplinkKindLabel } from "@/lib/state-labels";
 import { fmtDbm } from "@/shared/format";
 
 export function NetworkPanel() {
@@ -30,7 +31,7 @@ export function NetworkPanel() {
       <CardContent className="space-y-2">
         <div className="flex items-baseline justify-between text-sm">
           <span className="text-xs text-muted-foreground">{t("panels.network.uplink")}</span>
-          <span className="font-mono">{uplink ?? "—"}</span>
+          <span className="font-mono">{uplink ? uplinkKindLabel(uplink) : "—"}</span>
         </div>
         <div className="flex items-baseline justify-between text-sm">
           <span className="text-xs text-muted-foreground">{t("panels.network.rssi")}</span>

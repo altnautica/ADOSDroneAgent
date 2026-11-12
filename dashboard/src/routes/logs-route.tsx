@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
+import { ReadErrorCard } from "@/components/read-error-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -17,7 +18,9 @@ import {
   fmtLogTime,
   foldLevel,
   logsPollPath,
+  logsReadFailed,
   openLogStream,
+  scheduleStreamRetry,
   type LiveTail,
   type LogLevel,
   type LogsResponse,
@@ -66,6 +69,12 @@ export function LogsRoute() {
     });
     return () => ctrl.abort();
   }, [level, service, paused, pollFallback]);
+
+  // On the polling fallback, try the stream again on a timer.
+  useEffect(() => {
+    if (paused || !pollFallback) return undefined;
+    return scheduleStreamRetry(() => setPollFallback(false));
+  }, [paused, pollFallback]);
 
   // Tab returns to visible on the polling fallback: try the stream again.
   useEffect(() => {
@@ -149,7 +158,11 @@ export function LogsRoute() {
 
       <Card>
         <CardContent className="p-0">
-          {entries.length === 0 ? (
+          {entries.length === 0 && logsReadFailed({ pollFallback, pollError: logs.isError }) ? (
+            <div className="p-4">
+              <ReadErrorCard message={t("logs.page.readFailed")} onRetry={() => void logs.refetch()} />
+            </div>
+          ) : entries.length === 0 ? (
             <div className="px-4 py-8 flex items-start gap-3 text-sm text-muted-foreground">
               <ScrollText className="h-4 w-4 mt-0.5" />
               <div className="space-y-1">

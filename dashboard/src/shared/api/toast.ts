@@ -46,7 +46,8 @@ export const toast = {
 };
 
 /** Surface an unknown error from a mutation as a readable error toast. An
- *  armed refusal reads as one sentence on every screen; any other refusal
+ *  armed refusal (`E_ARMED`: armed, or the arm state unknown because no flight
+ *  controller reports it) reads as one sentence on every screen; any other refusal
  *  shows the agent's message without the HTTP status number. */
 export function toastFromError(err: unknown, fallback = "Something went wrong."): void {
   if (err instanceof ApiError) {

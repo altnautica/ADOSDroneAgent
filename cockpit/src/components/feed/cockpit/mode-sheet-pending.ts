@@ -6,7 +6,7 @@
 
 import { sendCommand } from "@/lib/api";
 import { mavResultText } from "@/lib/cockpit-flow";
-import { claimCommandedModes, currentFcMode, FC_FAILSAFE_MODES, FC_RECOVERY_MODES } from "@/lib/fc-failsafe";
+import { claimCommandedModes, claimProvisionally, currentFcMode, FC_FAILSAFE_MODES, FC_RECOVERY_MODES } from "@/lib/fc-failsafe";
 import { stopMotionSkills } from "@/lib/skill-runner";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -33,11 +33,13 @@ export function modeChange(run: () => Promise<Outcome>, stop: () => Promise<void
 
 /** Set a flight-controller mode (`POST /api/command` `mode`). A return or
  *  landing sent from here is recorded as this cockpit's, not a failsafe,
- *  once the answer is in (`claimCommandedModes`). */
+ *  once the answer is in (`claimCommandedModes`); until then the Pause gate
+ *  takes it as this cockpit's (`claimProvisionally`). */
 export async function sendFcMode(name: string): Promise<Outcome> {
   const claimed = FC_FAILSAFE_MODES[name] ? [name] : null;
   const modeAtCommand = currentFcMode();
   const sentAt = Date.now();
+  if (claimed) claimProvisionally(claimed, modeAtCommand, sentAt);
   try {
     const r = await sendCommand("mode", [name]);
     if (claimed) claimCommandedModes(claimed, modeAtCommand, r.ack, sentAt);

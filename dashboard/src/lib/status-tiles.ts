@@ -7,7 +7,8 @@ import i18n from "@/shared/i18n";
 
 import { mspVariant } from "@/shared/api/fc-firmware";
 import { summarizeHardware } from "./hardware-summary";
-import { videoStateLabel } from "./state-labels";
+import { cloudModeLabel } from "./enum-labels";
+import { uplinkKindLabel, videoStateLabel } from "./state-labels";
 import type { SetupStatus } from "@/shared/agent-api.generated";
 import type { DashboardSnapshot } from "@/shared/api/types";
 import { fmtBitrate, severityFromState, type Severity } from "@/shared/format";
@@ -128,7 +129,7 @@ export function buildTiles({ snapshot: s, status: cfg, fcVariant, fcReachable, p
   const net: Tile = {
     label: i18n.t("panels.tiles.net"),
     icon: Wifi,
-    value: typeof uplink === "string" ? uplink : "—",
+    value: typeof uplink === "string" && uplink !== "—" ? uplinkKindLabel(uplink) : "—",
     sub: rssi != null ? `${rssi} dBm` : uplink && uplink !== "—" ? i18n.t("panels.tiles.online") : "—",
     severity: uplink && uplink !== "—" ? "ok" : "idle",
   };
@@ -139,7 +140,7 @@ export function buildTiles({ snapshot: s, status: cfg, fcVariant, fcReachable, p
   const cld: Tile = {
     label: i18n.t("panels.tiles.cld"),
     icon: Cloud,
-    value: cloudMode ?? "—",
+    value: cloudMode ? cloudModeLabel(cloudMode) : "—",
     sub: cloudMode === "local" ? i18n.t("panels.tiles.noRelay") : cloudMode ? i18n.t("panels.tiles.relayConfigured") : "—",
     severity: "idle",
   };

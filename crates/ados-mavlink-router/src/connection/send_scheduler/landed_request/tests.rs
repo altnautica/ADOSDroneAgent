@@ -13,7 +13,7 @@ use crate::param_cache::ParamCache;
 use crate::state::VehicleState;
 
 #[test]
-fn requests_once_per_link_up_after_the_grace() {
+fn requests_after_the_grace_and_not_again_inside_the_cadence() {
     let t0 = Instant::now();
     let mut r = LandedStateRequest::default();
     assert!(!r.due(false, false, t0), "no link");
@@ -27,8 +27,11 @@ fn requests_once_per_link_up_after_the_grace() {
         r.due(true, false, t0 + LANDED_STATE_GRACE),
         "absent after the grace"
     );
-    assert!(!r.due(true, false, t0 + LANDED_STATE_GRACE * 4), "once");
-    // A link drop and a new link-up decide again.
+    assert!(
+        !r.due(true, false, t0 + LANDED_STATE_GRACE * 4),
+        "inside the re-request cadence"
+    );
+    // A link drop and a new link-up start a fresh grace.
     assert!(!r.due(false, false, t0 + LANDED_STATE_GRACE * 5));
     let t1 = t0 + LANDED_STATE_GRACE * 6;
     assert!(!r.due(true, false, t1));
@@ -40,11 +43,36 @@ fn never_requests_while_it_arrives() {
     let t0 = Instant::now();
     let mut r = LandedStateRequest::default();
     assert!(!r.due(true, true, t0));
-    // Settled for this link-up even if it later stops.
-    assert!(!r.due(true, false, t0 + LANDED_STATE_GRACE * 2));
+    assert!(!r.due(true, true, t0 + LANDED_STATE_GRACE * 2));
+    assert!(!r.due(true, true, t0 + LANDED_STATE_REREQUEST * 2));
 }
 
-/// A linked FC of `profile` whose link-up the request state saw 10 s ago.
+#[test]
+fn a_message_still_absent_is_asked_for_again_on_a_slow_cadence() {
+    let every = LANDED_STATE_REREQUEST;
+    let t0 = Instant::now();
+    let mut r = LandedStateRequest::default();
+    assert!(!r.due(true, false, t0));
+    let first = t0 + LANDED_STATE_GRACE;
+    assert!(r.due(true, false, first));
+    assert!(!r.due(true, false, first + every - Duration::from_millis(1)));
+    assert!(r.due(true, false, first + every), "still absent: ask again");
+    assert!(!r.due(true, false, first + every + Duration::from_secs(1)));
+}
+
+#[test]
+fn a_message_that_arrives_then_stops_is_requested() {
+    // An FC that reboots inside the heartbeat timeout drops its intervals
+    // without a link drop: the message arrives at link-up, then stops.
+    let t0 = Instant::now();
+    let mut r = LandedStateRequest::default();
+    assert!(!r.due(true, true, t0));
+    let stopped = t0 + Duration::from_secs(10);
+    assert!(!r.due(true, false, stopped), "the grace restarts");
+    assert!(r.due(true, false, stopped + LANDED_STATE_GRACE));
+}
+
+/// A linked FC of `profile` on which the message has been absent for 10 s.
 async fn linked(
     profile: &str,
 ) -> (
@@ -67,7 +95,7 @@ async fn linked(
     conn.landed_state_req
         .lock()
         .unwrap()
-        .linked_since(Instant::now() - Duration::from_secs(10));
+        .absent_since(Instant::now() - Duration::from_secs(10));
     (conn, rx)
 }
 
@@ -84,12 +112,12 @@ fn intervals(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<(u32, f32)> {
 }
 
 #[tokio::test]
-async fn link_up_without_the_message_requests_it_at_1_hz_once() {
+async fn a_live_link_without_the_message_requests_it_at_1_hz() {
     let (conn, rx) = linked("ground-station").await;
     conn.tick_landed_state_request().await;
     assert_eq!(intervals(&rx), vec![(245, 1_000_000.0)]);
     conn.tick_landed_state_request().await;
-    assert!(intervals(&rx).is_empty(), "sent once per link-up");
+    assert!(intervals(&rx).is_empty(), "not again inside the cadence");
 }
 
 #[tokio::test]

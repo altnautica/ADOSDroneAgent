@@ -18,4 +18,12 @@ describe("mobile nav drawer", () => {
     expect(src).not.toMatch(/@radix-ui\/react-dialog/);
     expect(src).toMatch(/lazy\(\(\) =>\s*import\("@\/components\/layout\/mobile-nav-drawer"\)/);
   });
+
+  it("keeps a drawer that fails to load or render to itself", () => {
+    const src = read("sidebar.tsx");
+    // A local boundary around the lazy drawer: a failed chunk costs the menu,
+    // not the page behind it.
+    expect(src).toMatch(/<ErrorBoundary[^>]*fallback=[\s\S]*?<Suspense fallback=\{null\}>\s*<MobileNavDrawer \/>/);
+    expect(src).toContain('t("layout.drawerFailed")');
+  });
 });

@@ -79,6 +79,14 @@ describe("the status pill's pilot, agent, controller and pre-flight inputs", () 
     expect(pillWiring({ ...base, armed: true }).preflightFailing).toEqual([]);
   });
 
+  it("words each failing pre-flight item as the failure, not the passing label", () => {
+    const covered = pillWiring({ ...base, alerts: [{ id: "link_lost", level: "critical", title: "Link lost" }] });
+    expect(covered.preflightFailing).toEqual([
+      { id: "gps", label: "GPS fix below 3D" },
+      { id: "home", label: "Home position not set" },
+    ]);
+  });
+
   it("lists no pre-flight items while the arm state is unknown (FC link down)", () => {
     expect(pillWiring({ ...base, armed: undefined }).preflightFailing).toEqual([]);
   });

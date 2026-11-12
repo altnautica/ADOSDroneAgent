@@ -1,6 +1,7 @@
 // The in-app dirty guard. A screen holding unsaved drafts registers itself
-// here; the navigator asks before leaving (back, tab switch), and while any
-// draft exists the leave is parked and the shell shows a dialog. Discarding
+// here; the navigator asks before leaving (back, tab switch; never for the
+// Feed while the vehicle may be flying), and while any draft exists the leave
+// is parked and the shell shows a dialog. Discarding
 // clears every draft and runs the parked leave; keeping editing drops it.
 //
 // Browser tab close and reload are covered separately by `beforeunload` in

@@ -61,49 +61,6 @@ fn perception_fields_never_claims_a_detector_without_a_live_backend() {
 }
 
 #[test]
-fn the_list_models_reply_names_where_the_detector_runs() {
-    let reply = |backend: Option<&str>, capable: Option<bool>| {
-        let mut map = Vec::new();
-        if let Some(b) = backend {
-            map.push((rmpv::Value::from("backend"), rmpv::Value::from(b)));
-        }
-        if let Some(c) = capable {
-            map.push((
-                rmpv::Value::from("backend_inference_capable"),
-                rmpv::Value::Boolean(c),
-            ));
-        }
-        rmpv::Value::Map(map)
-    };
-    assert_eq!(
-        detector_from_reply(&reply(Some("onnx"), Some(true))),
-        LiveDetector::Cpu
-    );
-    assert_eq!(
-        detector_from_reply(&reply(Some("rknn"), Some(true))),
-        LiveDetector::Accelerator
-    );
-    assert_eq!(
-        detector_from_reply(&reply(Some("hailo"), Some(true))),
-        LiveDetector::Accelerator
-    );
-    // The mock and an unavailable backend run no real inference.
-    assert_eq!(
-        detector_from_reply(&reply(Some("mock"), Some(false))),
-        LiveDetector::Off
-    );
-    assert_eq!(
-        detector_from_reply(&reply(Some("onnx"), Some(false))),
-        LiveDetector::Off
-    );
-    assert_eq!(
-        detector_from_reply(&reply(Some("onnx"), None)),
-        LiveDetector::Off
-    );
-    assert_eq!(detector_from_reply(&rmpv::Value::Nil), LiveDetector::Off);
-}
-
-#[test]
 fn telemetry_strips_the_four_runtime_extras() {
     let snapshot = json!({
         "armed": true,

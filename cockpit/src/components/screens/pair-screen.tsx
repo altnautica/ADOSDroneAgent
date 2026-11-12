@@ -28,8 +28,9 @@ import { readFailed } from "@/lib/read-failed";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { TextSettingRow } from "@/components/ui/setting-row";
 import { fmtCountdown } from "@/lib/format-status";
-import { acceptPairingCode, normalizePairingCode, PAIR_ACTION_GUARD, unpairCloud } from "@/lib/pairing-api";
-import { armedRefusalText } from "@/lib/radio-gate";
+import { useArmedConfirm } from "@/components/settings/sections/section-hooks";
+import { acceptPairingCode, bindCancellable, normalizePairingCode, PAIR_ACTION_GUARD, unpair } from "@/lib/pairing-api";
+import { getArmedReading } from "@/lib/radio-gate";
 import type { Tone } from "@/lib/tone";
 import { apiFetch } from "@/shared/api-fetch";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -164,7 +165,21 @@ function UnpairAction({
   return <ActionButton label={label} icon={Unlink} variant="danger" onClick={onFired} disabled={disabled} full />;
 }
 
-function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: () => void }) {
+/** The arm state for wording a declined unpair; null when it cannot be read. */
+const readArmed = () => getArmedReading().catch(() => null);
+
+function CloudOwner({
+  info,
+  failed,
+  onChanged,
+  confirmArmed,
+}: {
+  info: PairingInfo | null;
+  /** The owner read failed with nothing to show. */
+  failed: boolean;
+  onChanged: () => void;
+  confirmArmed: () => Promise<boolean>;
+}) {
   const { t } = useTranslation();
   const profile = useProfile();
   const [code, setCode] = useState("");
@@ -196,17 +211,12 @@ function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: 
       });
   };
 
-  const unpair = () => {
+  const unpairOwner = () => {
     if (busy) return;
     setBusy("unpair");
-    unpairCloud()
-      .then(() => toast.ok(t("cockpit.pair.unpaired")))
-      .catch((err: unknown) => {
-        // The agent refuses unpair while armed; say so rather than a status code.
-        const refusal = armedRefusalText(err);
-        if (refusal != null) toast.err(t("cockpit.radio.refused"), refusal);
-        else toastFromError(err, t("pairing.page.unpairFailed"));
-      })
+    unpair("cloud", confirmArmed, readArmed)
+      .then((res) => (res === "done" ? toast.ok(t("cockpit.pair.unpaired")) : toast.err(t(`cockpit.radio.${res}`))))
+      .catch((err: unknown) => toastFromError(err, t("pairing.page.unpairFailed")))
       .finally(() => {
         setBusy(null);
         onChanged();
@@ -220,7 +230,11 @@ function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: 
         {t("pairing.page.blurb", { subject })}
       </p>
       {info == null ? (
-        <EmptyNote>{t("pairing.page.loading")}</EmptyNote>
+        failed ? (
+          <ErrorNote onRetry={onChanged}>{t("cockpit.readFailed.pairing")}</ErrorNote>
+        ) : (
+          <EmptyNote>{t("pairing.page.loading")}</EmptyNote>
+        )
       ) : (
         <>
           <Row
@@ -244,7 +258,7 @@ function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: 
             gate={PAIR_ACTION_GUARD.cloudUnpair}
             label={t("cockpit.pair.unpairOwner")}
             guardLabel={t("cockpit.pair.holdToUnpair")}
-            onFired={unpair}
+            onFired={unpairOwner}
             disabled={busy !== null}
           />
           <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("pairing.confirm.description")}</p>
@@ -321,6 +335,7 @@ export function PairScreen() {
   );
 
   const [busy, setBusy] = useState<null | "pair" | "unpair">(null);
+  const armedConfirm = useArmedConfirm();
 
   const startBind = async () => {
     if (busy) return;
@@ -355,8 +370,9 @@ export function PairScreen() {
     if (busy) return;
     setBusy("unpair");
     try {
-      await apiFetch("/api/wfb/pair/unpair", { method: "POST", body: {} });
-      toast.ok(t("cockpit.pair.rfUnpaired", { peer }));
+      const res = await unpair("rf", armedConfirm.confirm, readArmed);
+      if (res === "done") toast.ok(t("cockpit.pair.rfUnpaired", { peer }));
+      else toast.err(t(`cockpit.radio.${res}`));
     } catch (err) {
       toastFromError(err, t("pairing.page.unpairFailed"));
     } finally {
@@ -395,7 +411,7 @@ export function PairScreen() {
       ) : null}
 
       <div className="flex flex-col gap-[0.15rem]">
-        <CloudOwner info={info.data} onChanged={info.refresh} />
+        <CloudOwner info={info.data} failed={readFailed(info)} onChanged={info.refresh} confirmArmed={armedConfirm.confirm} />
 
         <SectionHeader>{t("cockpit.pair.rfLink")}</SectionHeader>
         {!rfKnown ? (
@@ -451,7 +467,7 @@ export function PairScreen() {
                 busy={busy === "pair"}
                 full
               />
-              {busy === "pair" ? (
+              {busy === "pair" || bindCancellable(bind.data) ? (
                 <div className="mt-[0.3rem]">
                   <ActionButton label={t("cockpit.pair.bindCancel")} icon={X} onClick={() => void cancelBind()} full />
                 </div>
@@ -467,6 +483,7 @@ export function PairScreen() {
         <p className="mb-[0.2rem] px-[0.15rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.browserAccessNote")}</p>
         <SetUpAccess />
       </div>
+      {armedConfirm.dialog}
     </ConsoleScaffold>
   );
 }

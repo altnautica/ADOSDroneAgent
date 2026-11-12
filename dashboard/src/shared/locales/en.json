@@ -6,7 +6,7 @@
     "loading": "Loading…",
     "dash": "—",
     "refusedFallback": "This device refused the request.",
-    "armedRefused": "Refused: the vehicle is armed. Disarm first.",
+    "armedRefused": "Refused: the vehicle is armed or its arm state is unknown. Disarm it, or connect the flight controller so it reports disarmed.",
     "back": "Back"
   },
   "nav": {
@@ -56,6 +56,8 @@
     "msp": "MSP"
   },
   "layout": {
+    "drawerFailed": "Could not open the menu.",
+    "reload": "Reload",
     "restart": {
       "rebooting": "Rebooting the companion computer… ({{seconds}} s)",
       "restarting": "Restarting the agent for the new profile… ({{seconds}} s)",
@@ -256,7 +258,20 @@
       "loraSource": {
         "loraRegion": "set as a region",
         "country": "from the country"
-      }
+      },
+      "tempSensor": {
+        "cpu": "CPU",
+        "soc": "SoC",
+        "gpu": "GPU",
+        "nvme": "NVMe drive",
+        "board": "Board sensor"
+      },
+      "loraTransport": {
+        "e22": "E22 module",
+        "meshtastic": "Meshtastic",
+        "loopback": "Loopback (test)"
+      },
+      "uplinkNone": "None"
     },
     "tiles": {
       "fc": "FC",
@@ -569,7 +584,8 @@
       "setPrimaryFailed": "Could not set the primary controller.",
       "primaryTitle": "Make {{name}} the primary controller?",
       "primaryBody": "RC input moves to this controller.",
-      "armedRefused": "Disarm first: the vehicle is armed."
+      "armedRefused": "Disarm first: the vehicle is armed.",
+      "armedUnknown": "The vehicle's arm state is not known yet. The primary controller changes once it reports disarmed."
     },
     "bluetooth": {
       "title": "Bluetooth",
@@ -1638,7 +1654,8 @@
       "title": "Agent logs",
       "blurb": "Live tail of the agent's structured logger. Filter by level or logger name.",
       "resume": "Resume",
-      "pause": "Pause"
+      "pause": "Pause",
+      "readFailed": "Could not read the logs: the live stream and the poll both failed."
     },
     "filter": {
       "level": "Level",
@@ -1910,7 +1927,8 @@
       "noChange": "Pick a preset, FEC, MCS or adaptive setting to stage a change.",
       "pending": "Staged: {{changes}}. Slide to apply to the live radio.",
       "slideApply": "Slide to apply link tuning",
-      "discard": "Discard changes"
+      "discard": "Discard changes",
+      "notReported": "Not reported"
     },
     "radio": {
       "armed": "The vehicle is armed. Radio changes are locked until it disarms.",
@@ -2316,7 +2334,7 @@
       "mavlink": { "title": "MAVLink", "summary": "Flight-controller link", "armedNotice": "The vehicle is armed. A change to the flight-controller link needs your confirmation and can drop the link in flight.", "unknownNotice": "The vehicle's arm state is unknown. If it is armed, the node asks for confirmation before changing the flight-controller link.", "pendingPrompt": "Change {{field}} to {{value}}? This can drop the flight-controller link.", "fire": "Apply change", "hold": "Hold to apply" },
       "security": { "title": "Security", "summary": "PIN, API key and auth", "groupKey": "API key", "groupPin": "Dashboard PIN", "groupAuth": "Authentication", "rotate": "Rotate key", "rotateGuard": "Hold to rotate", "rotateFailed": "Could not rotate the API key.", "rotateNoKey": "The node answered the rotation without a new key.", "clearKey": "Clear key", "clearKeyGuard": "Hold to clear", "keyCleared": "Operator API key cleared. The pairing key still works.", "clearKeyGuardOwn": "Hold to clear; PIN next", "clearKeyOwn": "This panel signs in with the operator key. Clearing it signs the panel out, and it falls back to the dashboard PIN.", "clearKeyMaybeOwn": "This panel may be signing in with the operator key. If so, clearing it signs the panel out, and it falls back to the dashboard PIN.", "keyClearedOwn": "Operator API key cleared. This panel signed in with it, so enter the dashboard PIN to continue.", "clearKeyFailed": "Could not clear the API key.", "keyHint": "Rotating replaces the operator key in security.api.api_key, and this panel switches to the new one. Clearing removes it. The pairing key never changes here. Both work only on a direct reach of the node, not through a relay.", "newKeyTitle": "New API key", "newKeyBody": "Copy it now: the node does not show it again. This panel already uses it.", "rotatedAt": "Rotated {{at}}", "copy": "Copy", "copied": "Key copied.", "copyFailed": "Could not copy. Select the key and copy it by hand.", "done": "Done", "pinSetHere": "A PIN gates off-box access to this panel. Change or clear it below.", "pinNotSetHere": "No PIN is set, so off-box visitors need the agent key. Set one below.", "currentPin": "Current PIN", "problemCurrent": "Enter the current PIN.", "problemSame": "The new PIN is the same as the current one.", "changePin": "Change PIN", "changePinGuard": "Hold to change", "setPinGuard": "Hold to set", "pinChanged": "PIN changed.", "pinSaved": "PIN set.", "pinPeerLocked": "Too many attempts from this panel. Try again later.", "clearPin": "Clear PIN", "clearPinGuard": "Hold to clear", "pinCleared": "PIN cleared. Open sessions end when a new PIN is set.", "clearPinFailed": "Could not clear the PIN.", "wsEnforceSlide": "Slide to enforce" },
       "vision": { "title": "Vision", "summary": "Detection backend and threshold" },
-      "camera": { "title": "Camera", "summary": "Orientation and flip", "sourceOther": "Other…", "sourcePick": "Detected cameras", "sourceNone": "No cameras detected. Enter a device path.", "sourceReadFailed": "Could not read the camera list. Enter a device path." },
+      "camera": { "title": "Camera", "summary": "Orientation and flip", "sourceOther": "Other…", "sourcePick": "Detected cameras", "sourceNone": "No cameras detected. Enter a device path.", "sourceReadFailed": "Could not read the camera list. Enter a device path.", "hintCsi": "First CSI camera", "hintUsb": "First USB camera" },
       "capture": { "title": "Capture", "summary": "Exposure and storage", "exposureFailed": "Could not update the exposure.", "storageFailed": "Could not read the capture storage." },
       "sensors": { "title": "Sensors", "summary": "Sensor rig and clock", "chooseFile": "Choose file", "noFile": "No file chosen", "rigReady": "{{name}} parsed as a JSON object, ready to replace the current rig.", "rigGuard": "Hold to replace" },
       "swarm": { "title": "Swarm", "summary": "Swarm role and formation", "enableSlide": "Slide to turn the swarm runtime on" },
@@ -2398,7 +2416,10 @@
       "logs": "Could not read the agent log.",
       "btPaired": "Could not read the paired devices.",
       "status": "Could not read the agent status.",
-      "config": "Could not read the configuration."
+      "config": "Could not read the configuration.",
+      "pairing": "Could not read the cloud pairing state.",
+      "recording": "Could not read the recorder state.",
+      "clock": "Could not read the sensor clock."
     },
     "stale": "Stale",
     "link": {

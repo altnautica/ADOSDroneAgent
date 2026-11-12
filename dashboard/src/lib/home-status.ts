@@ -49,6 +49,10 @@ export interface HomeStatusInputs {
   agentReachable: boolean;
   /** The fresh vision-nav state, or null when absent or stale. */
   nav?: NavState | null;
+  /** Where the arm state is judged: the fresh pilot frame and live
+   *  telemetry only (null when stale or not live). A kept frame may say
+   *  disarmed long after the FC armed. Defaults to `pilot` and `telemetry`. */
+  armSources?: Pick<HomeStatusInputs, "pilot" | "telemetry">;
 }
 
 /** The arm state the pill reads: the pilot frame's (null while the FC is
@@ -93,6 +97,7 @@ export function homePill(i: HomeStatusInputs): PillSummary {
     armedAtLastLive: i.armedAtLastLive,
   });
   const checks = preflightChecks({ telemetry: i.telemetry, battery: i.battery, live: i.live });
+  const armed = pillArmed(i.armSources ?? i);
   return pillSummary(
     pillAlerts({
       alerts,
@@ -104,8 +109,8 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       agentReachable: i.agentReachable,
       controllerLost: controllerLost(i.pilot),
       ...pilotFailsafe(i.pilot),
-      preflightFailing: preflightFailing(checks, alerts, i.telemetry?.armed),
-      armed: pillArmed(i),
+      preflightFailing: preflightFailing(checks, alerts, armed),
+      armed,
       navSource: homeNavSource(i),
     }),
     new Set(),

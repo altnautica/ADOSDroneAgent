@@ -101,3 +101,49 @@ const LORA_SOURCE: Record<string, ParseKeys> = { "lora.region": "panels.state.lo
 export function loraSourceLabel(source: string | null | undefined): string {
   return pick(LORA_SOURCE, source);
 }
+
+const TEMP_SENSOR: Record<string, ParseKeys> = {
+  cpu_thermal: "panels.state.tempSensor.cpu",
+  "cpu-thermal": "panels.state.tempSensor.cpu",
+  coretemp: "panels.state.tempSensor.cpu",
+  k10temp: "panels.state.tempSensor.cpu",
+  soc_thermal: "panels.state.tempSensor.soc",
+  "soc-thermal": "panels.state.tempSensor.soc",
+  gpu_thermal: "panels.state.tempSensor.gpu",
+  "gpu-thermal": "panels.state.tempSensor.gpu",
+  nvme: "panels.state.tempSensor.nvme",
+};
+
+/** The temperature sensor the agent names (a kernel thermal zone or hwmon
+ *  driver); any other sensor reads as a board sensor. */
+export function tempSensorLabel(sensor: string | null | undefined): string {
+  const key = sensor ? TEMP_SENSOR[sensor.toLowerCase()] : undefined;
+  return i18n.t(key ?? "panels.state.tempSensor.board");
+}
+
+const UPLINK_KIND: Record<string, ParseKeys> = {
+  eth: "uplink.leg.ethernet",
+  ethernet: "uplink.leg.ethernet",
+  wifi: "uplink.leg.wifi",
+  cellular: "uplink.leg.cellular",
+  usb: "uplink.leg.usb",
+  "usb-tether": "uplink.leg.usb",
+  ap: "uplink.leg.ap",
+  none: "panels.state.uplinkNone",
+};
+
+/** The uplink the node reaches the internet over. */
+export function uplinkKindLabel(kind: string | null | undefined): string {
+  return pick(UPLINK_KIND, kind);
+}
+
+const LORA_TRANSPORT: Record<string, ParseKeys> = {
+  e22: "panels.state.loraTransport.e22",
+  meshtastic: "panels.state.loraTransport.meshtastic",
+  loopback: "panels.state.loraTransport.loopback",
+};
+
+/** The LoRa radio driver the service runs. */
+export function loraTransportLabel(transport: string | null | undefined): string {
+  return pick(LORA_TRANSPORT, transport);
+}

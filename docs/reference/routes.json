@@ -1652,7 +1652,7 @@
       "notes": "relay-forbidden",
       "path": "/api/v1/ground-station/wfb/pair/{device_id}",
       "public": false,
-      "relay_forbidden": false,
+      "relay_forbidden": true,
       "served_by": "native",
       "websocket": false
     },
@@ -1949,7 +1949,7 @@
       "notes": "relay-forbidden",
       "path": "/api/v1/security/api-key/rotate",
       "public": false,
-      "relay_forbidden": false,
+      "relay_forbidden": true,
       "served_by": "native",
       "websocket": false
     },
@@ -2102,7 +2102,7 @@
       "notes": "relay-forbidden",
       "path": "/api/v1/setup/profile/redetect",
       "public": false,
-      "relay_forbidden": false,
+      "relay_forbidden": true,
       "served_by": "residual",
       "websocket": false
     },
@@ -2516,7 +2516,7 @@
       "notes": "relay-forbidden",
       "path": "/api/wfb/pair/local-bind/cancel",
       "public": false,
-      "relay_forbidden": false,
+      "relay_forbidden": true,
       "served_by": "native",
       "websocket": false
     },

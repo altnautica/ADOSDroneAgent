@@ -41,7 +41,7 @@ export function rowAgl(
   follow: { aglM: number | null; aglSource: "rng" | "baro" | null } | null,
   nowMs: number,
 ): RowAgl {
-  if (pilot && nowMs - pilot.at > CHIP_STALE_AFTER_MS) return { m: null, mark: null, stale: true };
+  if (pilot && nowMs - pilot.at >= CHIP_STALE_AFTER_MS) return { m: null, mark: null, stale: true };
   return { ...bottomRowAgl(pilot?.data ?? null, follow), stale: false };
 }
 

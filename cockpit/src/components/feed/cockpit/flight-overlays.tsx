@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { HoldButton } from "@/components/ui/hold-button";
 import { sticksElsewhere, useFreshPilot } from "@/hooks/use-pilot";
 import { useNow } from "@/hooks/use-now";
-import { bannerSeverity, holdMs, launchRunning, launchStepUpper, lowBatteryLine, visibleBanner, voicePrompt, type BannerSeverity } from "@/lib/cockpit-flow";
+import { bannerSeverity, holdMs, launchRunning, launchStepName, lowBatteryLine, visibleBanner, voicePrompt, type BannerSeverity } from "@/lib/cockpit-flow";
 import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/shared/hud/link-loss";
@@ -88,7 +88,7 @@ export function FlightOverlays() {
           className="chrome-panel pointer-events-auto flex items-center gap-[12px] px-[14px] py-[6px]"
         >
           <span className="text-[15px] font-semibold">
-            {specText("chip.taking_off", { step: launchStepUpper(seq.step) })}
+            {specText("chip.taking_off", { step: launchStepName(seq.step) })}
           </span>
           <button
             type="button"

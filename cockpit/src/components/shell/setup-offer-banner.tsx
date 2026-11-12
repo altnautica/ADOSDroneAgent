@@ -55,8 +55,12 @@ export function SetupOfferBanner() {
   }, [profile]);
 
   const uid = setupOfferUid(status, offered, tourAirborne(pilot, telemetryArmed));
-  // The Menu offers the same setup while this offer stands.
-  useEffect(() => setOfferUid(uid), [uid, setOfferUid]);
+  // The Menu offers the same setup while this offer stands, and only while
+  // the banner is mounted to keep it current (the Feed has no banner).
+  useEffect(() => {
+    setOfferUid(uid);
+    return () => setOfferUid(null);
+  }, [uid, setOfferUid]);
   if (!uid || onSetup) return null;
   const button = "touch-target shrink-0 rounded-[var(--fs-radius-sm)] border font-semibold";
   return (

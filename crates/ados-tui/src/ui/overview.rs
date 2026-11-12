@@ -36,6 +36,12 @@ impl Tab for OverviewTab {
         ]
     }
 
+    /// Readings from before the Overview was last shown are not counted:
+    /// the copy starts empty and fills from the reads that follow.
+    fn on_activate(&mut self, _core: &mut Core) {
+        self.flight = VehicleTab::default();
+    }
+
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
         self.flight.on_resource(core, id);
     }

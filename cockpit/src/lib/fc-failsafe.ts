@@ -47,6 +47,8 @@ interface Commanded {
 }
 
 let commanded: Commanded | null = null;
+/** A return or landing this cockpit sent whose answer is not in yet. */
+let provisional: { modes: ReadonlySet<string>; at: number } | null = null;
 let unsubscribe: (() => void) | null = null;
 
 /** Track one observed flight-controller mode against the last command. An
@@ -85,10 +87,28 @@ export function claimCommandedModes(
   ack: { observed?: boolean; accepted?: boolean } | null | undefined,
   at: number,
 ): void {
+  dropProvisionalClaim(at);
   const before = modeAtCommand?.toUpperCase() ?? null;
   if (before !== null && modes.some((m) => m.toUpperCase() === before)) return;
   if (ack?.observed && !ack.accepted) return;
   noteCommandedModes(modes, at);
+}
+
+/** Record, as it goes out at `at`, a return or landing this cockpit is
+ *  sending, until its answer settles the claim (`claimCommandedModes`) or the
+ *  send fails outright (`dropProvisionalClaim`). Only the Pause gate reads it
+ *  (`fcFailsafeForPause`), so a brake is not refused as fighting a failsafe
+ *  while the flight controller already flies this cockpit's own command. A
+ *  mode the flight controller was already in stays its own. */
+export function claimProvisionally(modes: readonly string[], modeAtCommand: string | null | undefined, at: number): void {
+  const before = modeAtCommand?.toUpperCase() ?? null;
+  if (before !== null && modes.some((m) => m.toUpperCase() === before)) return;
+  provisional = { modes: new Set(modes.map((m) => m.toUpperCase())), at };
+}
+
+/** Drop the provisional claim made at `at`, if it still stands. */
+export function dropProvisionalClaim(at: number): void {
+  if (provisional?.at === at) provisional = null;
 }
 
 /** The flight controller's mode right now (null when not reported). */
@@ -99,6 +119,7 @@ export function currentFcMode(): string | null {
 /** Forget the last command (tests). */
 export function forgetCommandedModes(): void {
   commanded = null;
+  provisional = null;
 }
 
 /** Whether the flight controller is in its own failsafe by what it reports. */
@@ -109,4 +130,16 @@ export function fcSideFailsafe(fc: FcView | null | undefined, now = Date.now()):
   if (fc.systemStatus === MAV_STATE_CRITICAL || fc.systemStatus === MAV_STATE_EMERGENCY) return true;
   if (mode === null || !FC_FAILSAFE_MODES[mode]) return false;
   return !(commanded?.entered === true && commanded.modes.has(mode));
+}
+
+/** The Pause gate's read of the flight controller's own failsafe: as
+ *  `fcSideFailsafe`, except that a return or landing this cockpit sent within
+ *  the window, whose answer is not in yet, is taken as its own. A critical
+ *  heartbeat is a failsafe whatever was sent. */
+export function fcFailsafeForPause(fc: FcView | null | undefined, now = Date.now()): boolean {
+  if (!fcSideFailsafe(fc, now)) return false;
+  if (fc!.systemStatus === MAV_STATE_CRITICAL || fc!.systemStatus === MAV_STATE_EMERGENCY) return true;
+  const mode = fc!.mode?.toUpperCase() ?? null;
+  const pending = provisional !== null && now - provisional.at <= COMMANDED_MODE_WINDOW_MS;
+  return !(pending && mode !== null && provisional!.modes.has(mode));
 }

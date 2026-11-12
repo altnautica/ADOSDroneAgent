@@ -1,5 +1,5 @@
 // The flight-state chip's detail for the skill that owns the aircraft
-// (`ORBIT 8 m`). The cockpit reads the skill's echoed parameters from its
+// (`Orbit 8 m`). The cockpit reads the skill's echoed parameters from its
 // extension store; the dashboard reads the skill's state topic from the
 // plugin's GCS manifest (`GET /api/plugins/{id}`), then the parameters the
 // plugin echoes on that topic (`GET /api/plugins/{id}/state`). Both end in
@@ -10,12 +10,12 @@ function isObj(v: unknown): v is Record<string, unknown> {
 }
 
 /** The chip's mode detail from a running skill's echoed parameters:
- *  follow-me's `ORBIT 8 m` / `FOLLOW 6 m`; null when nothing is known. */
+ *  follow-me's `Orbit 8 m` / `Follow 6 m`; null when nothing is known. */
 export function skillDetail(echo: Readonly<Record<string, unknown>> | null | undefined): string | null {
   if (!isObj(echo)) return null;
   const metres = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? ` ${Math.round(v * 10) / 10} m` : "");
-  if (echo.follow_mode === "orbit") return `ORBIT${metres(echo.orbit_radius_m)}`;
-  if (echo.follow_mode === "follow") return `FOLLOW${metres(echo.follow_distance_m)}`;
+  if (echo.follow_mode === "orbit") return `Orbit${metres(echo.orbit_radius_m)}`;
+  if (echo.follow_mode === "follow") return `Follow${metres(echo.follow_distance_m)}`;
   return null;
 }
 

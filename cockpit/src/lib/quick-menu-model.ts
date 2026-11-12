@@ -1,7 +1,8 @@
 // The Menu's entries in the cockpit spec's order (`layout.json` `menu.order`):
 // the top-bar items the bar has moved here (only those actually hidden),
 // View, Cameras, Layers, Pre-flight, Flight modes, Controls, Extension
-// panels, Set up aircraft (only while setup is needed), Settings and Exit
+// panels, Set up aircraft (only while setup is needed or offered, and the
+// vehicle is known disarmed on the ground), Settings and Exit
 // (to the node dashboard; the kiosk has none). Off the flight screen the
 // flight entries have nothing to act on and are left out.
 
@@ -38,6 +39,9 @@ export interface MenuInputs {
   setupNeeded: boolean;
   /** The one-time setup offer stands (the shell banner shows it). */
   setupOffered: boolean;
+  /** The vehicle is known disarmed on the ground (an unknown arm state counts
+   *  as airborne); Set up aircraft is offered only then. */
+  knownOnGround: boolean;
   kiosk: boolean;
 }
 
@@ -52,7 +56,7 @@ export function menuEntries(i: MenuInputs): MenuEntryId[] {
       case "extension_panels":
         return i.panelCount > 0;
       case "setup":
-        return i.setupNeeded || i.setupOffered;
+        return i.knownOnGround && (i.setupNeeded || i.setupOffered);
       case "exit":
         return !i.kiosk;
       default:

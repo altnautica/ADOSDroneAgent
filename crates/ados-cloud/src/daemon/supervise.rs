@@ -15,7 +15,7 @@ pub(super) const BOARD_SIDECAR_VERSION: u16 = 1;
 /// to "unknown"/0/"" when the file is absent or malformed — the same degraded
 /// shape the loop emitted before, but truthful whenever the board has been
 /// detected (the normal case once the API service has served one status).
-pub(super) fn board_base() -> (String, i64, String, String, f64, bool) {
+pub(super) fn board_base() -> (String, i64, String, String, f64) {
     let parsed: Option<serde_json::Value> = std::fs::read_to_string(BOARD_SIDECAR)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
@@ -42,19 +42,12 @@ pub(super) fn board_base() -> (String, i64, String, String, f64, bool) {
         .and_then(|o| o.get("npu_tops"))
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
-    // The board profile's CPU-ONNX local-inference declaration; absent on an
-    // older sidecar ⇒ false (the perception tier is unchanged there).
-    let local_inference = obj
-        .and_then(|o| o.get("has_local_inference"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
     (
         s("name").unwrap_or_else(|| "unknown".to_string()),
         tier,
         s("soc").unwrap_or_default(),
         s("arch").unwrap_or_default(),
         npu_tops,
-        local_inference,
     )
 }
 
@@ -94,14 +87,14 @@ pub(super) fn spawn_heartbeat(
                         continue;
                     }
                     let api_key = api_key.expect("should_emit gates on api_key being Some");
-                    let (
-                        board_name,
-                        board_tier,
-                        board_soc,
-                        board_arch,
-                        board_npu_tops,
-                        board_local_inference,
-                    ) = board_base();
+                    let (board_name, board_tier, board_soc, board_arch, board_npu_tops) =
+                        board_base();
+                    // Where the vision engine's detector runs, read live the way
+                    // `/api/status` reads it, so both report the same tier.
+                    let live_detector = ados_protocol::vision_detector::query_live_detector(
+                        &ados_protocol::paths::run_dir().join(ados_protocol::paths::VISION_SOCK),
+                    )
+                    .await;
                     // The profile in WIRE form. Posting the internal form told
                     // the cloud `ground_station` or `auto`, neither of which the
                     // fleet view classifies.
@@ -116,7 +109,7 @@ pub(super) fn spawn_heartbeat(
                         board_soc,
                         board_arch,
                         board_npu_tops,
-                        board_local_inference,
+                        live_detector,
                     };
                     // Live status (resources + FC link + service fleet) built in
                     // Rust from the real sources each tick, folded over the base.

@@ -238,7 +238,11 @@ mod tests {
         )
         .unwrap();
         apply_line(&hub, dir.path(), line);
-        assert_eq!(hub.status_body()["nav"]["data"]["pose_age_ms"], 118.0);
+        // The reported age plus the few ms since the sidecar was written.
+        let served = hub.status_body()["nav"]["data"]["pose_age_ms"]
+            .as_f64()
+            .unwrap();
+        assert!((118.0..1_118.0).contains(&served), "{served}");
 
         apply_line(
             &hub,

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ControllerTour } from "@/components/controls/controller-tour";
 import { useControlsStore } from "@/stores/controls-store";
+import { useFlightStore } from "@/stores/flight-store";
 import { useInputStore } from "@/stores/input-store";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -50,6 +51,8 @@ beforeEach(async () => {
   Object.assign(window, { innerWidth: 580, innerHeight: 360 });
   useControlsStore.setState({ tourSeen: false });
   useInputStore.setState({ pad: null, padAnnounced: true });
+  // On the ground: the tour waits while the arm state is unknown.
+  useFlightStore.setState({ telemetry: { armed: false } });
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);

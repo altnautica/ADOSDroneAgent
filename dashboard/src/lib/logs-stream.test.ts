@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   EMPTY_TAIL,
+  STREAM_RETRY_MS,
+  logsReadFailed,
+  scheduleStreamRetry,
   LOG_LEVELS,
   appendToTail,
   fmtLogTime,
@@ -62,5 +65,31 @@ describe("live tail", () => {
 
   it("builds the poll path from the filters", () => {
     expect(logsPollPath("WARN", " ados ")).toBe("/api/logs?limit=200&level=WARN&service=ados");
+  });
+});
+
+describe("log stream fallback", () => {
+  it("reports a read failure when the stream is refused and the poll fails", () => {
+    expect(logsReadFailed({ pollFallback: true, pollError: true })).toBe(true);
+    // The poll answering, or the stream up, is not a failure.
+    expect(logsReadFailed({ pollFallback: true, pollError: false })).toBe(false);
+    expect(logsReadFailed({ pollFallback: false, pollError: true })).toBe(false);
+  });
+
+  it("tries the stream again on a timer while on the polling fallback", () => {
+    vi.useFakeTimers();
+    try {
+      let retries = 0;
+      const stop = scheduleStreamRetry(() => retries++);
+      vi.advanceTimersByTime(STREAM_RETRY_MS - 1);
+      expect(retries).toBe(0);
+      vi.advanceTimersByTime(1);
+      expect(retries).toBe(1);
+      stop();
+      vi.advanceTimersByTime(STREAM_RETRY_MS * 3);
+      expect(retries).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -7,9 +7,12 @@ import {
   gnssBaseLabel,
   gnssFixLabel,
   loraSourceLabel,
+  loraTransportLabel,
   serviceStateLabel,
   serviceStateTone,
   storageStateLabel,
+  tempSensorLabel,
+  uplinkKindLabel,
   videoStateLabel,
   wfbStateLabel,
 } from "@/lib/state-labels";
@@ -71,5 +74,27 @@ describe("form and posture words", () => {
     expect(cloudModeLabel("self_hosted")).not.toContain("_");
     expect(nodeSubject("ground_station")).toBe("ground station");
     expect(src("routes/settings/cloud-settings.tsx")).toContain("values={{ mode: cloudModeLabel(mode) }}");
+  });
+});
+
+describe("sensor, uplink and radio codes read as words", () => {
+  it("names the temperature sensor, the uplink kind and the LoRa transport", () => {
+    expect(tempSensorLabel("cpu_thermal")).toBe("CPU");
+    expect(tempSensorLabel("gpu-thermal")).toBe("GPU");
+    expect(tempSensorLabel("acpitz")).toBe("Board sensor");
+    expect(uplinkKindLabel("eth")).toBe("Ethernet");
+    expect(uplinkKindLabel("usb-tether")).toBe("USB tether");
+    expect(uplinkKindLabel("wwan0")).toBe("Unrecognised");
+    expect(loraTransportLabel("e22")).toBe("E22 module");
+    expect(loraTransportLabel("meshtastic")).toBe("Meshtastic");
+  });
+
+  it("shows the words, not the codes, on the diagnostics, tiles, network and LoRa surfaces", () => {
+    expect(src("routes/diagnostics-route.tsx")).toContain("tempSensorLabel(firstTemp[0])");
+    const tiles = src("lib/status-tiles.ts");
+    expect(tiles).toContain("uplinkKindLabel(");
+    expect(tiles).toContain("cloudModeLabel(cloudMode)");
+    expect(src("components/panels/network-panel.tsx")).toContain("uplinkKindLabel(uplink)");
+    expect(src("components/panels/lora-panel.tsx")).toContain("loraTransportLabel(status.transport)");
   });
 });

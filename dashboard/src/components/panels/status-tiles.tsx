@@ -108,13 +108,14 @@ function VehicleStatus() {
   // The lines are live values: each reads only a source that is still live,
   // and the pilot, follow and nav frames only while fresh.
   const fresh = freshNavFrames(nav.data, nav.dataUpdatedAt, now);
-  const pill = homePill({ ...inputs, nav: fresh.nav });
+  const liveTelemetry = liveData(tel, VEHICLE_TELEMETRY_POLL_MS, now) ?? null;
+  const pill = homePill({ ...inputs, nav: fresh.nav, armSources: { pilot: fresh.pilot, telemetry: liveTelemetry } });
   const poseAge = poseAgeText(fresh.nav);
   const lines = homeStatusLines({
     ...inputs,
     pilot: fresh.pilot,
     follow: fresh.follow,
-    telemetry: liveData(tel, VEHICLE_TELEMETRY_POLL_MS, now) ?? null,
+    telemetry: liveTelemetry,
     battery: liveData(battery, BATTERY_POLL_MS, now) ?? null,
   });
   return (

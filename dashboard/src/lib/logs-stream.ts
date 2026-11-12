@@ -172,3 +172,19 @@ export async function openLogStream(
   }
   if (!signal.aborted) handlers.onClosed();
 }
+
+/** How long the page stays on the polling fallback before it tries the
+ *  stream again. */
+export const STREAM_RETRY_MS = 15_000;
+
+/** Call `retry` once after `STREAM_RETRY_MS`; the returned function cancels. */
+export function scheduleStreamRetry(retry: () => void, ms: number = STREAM_RETRY_MS): () => void {
+  const id = setTimeout(retry, ms);
+  return () => clearTimeout(id);
+}
+
+/** The logs cannot be read: the stream is down (refused or dropped) and the
+ *  polling fallback fails too. Not "no entries". */
+export function logsReadFailed(i: { pollFallback: boolean; pollError: boolean }): boolean {
+  return i.pollFallback && i.pollError;
+}

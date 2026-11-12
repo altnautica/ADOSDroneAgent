@@ -119,7 +119,7 @@ function JobList({
     <div className="flex flex-col gap-[0.2rem] pr-[0.4rem]">
       {jobs.map((j) => {
         const stateKey = jobStateKey(j.state);
-        const state = stateKey ? t(stateKey) : j.state;
+        const state = stateKey ? t(stateKey) : DASH;
         return (
         <ListItem
           key={j.id}
@@ -186,7 +186,7 @@ function SessionList({ sessions }: { sessions: OffloadSession[] }) {
         return (
         <ListItem
           key={s.id}
-          headline={`${s.id} · ${stateKey ? t(stateKey) : s.state}`}
+          headline={`${s.id} · ${stateKey ? t(stateKey) : DASH}`}
           supporting={t("cockpit.node.sessionDetail", {
             camera: s.cameraId ?? DASH,
             frames: fmtInt(s.framesProcessed),

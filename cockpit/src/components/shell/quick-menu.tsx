@@ -28,6 +28,7 @@ import { preflightTally, usePreflightItems } from "@/hooks/use-preflight-items";
 import { useRoster } from "@/hooks/use-roster";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { VIEW_LABELS } from "@/lib/cockpit-view";
+import { knownOnGround } from "@/lib/controller-tour";
 import { mountablePanels } from "@/lib/extensions";
 import { feedCameras } from "@/lib/feed-legs";
 import { menuTextPx, movedItems } from "@/lib/flight-layout";
@@ -40,6 +41,7 @@ import { useNodeIdentity } from "@/shared/use-profile";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
+import { useFlightStore } from "@/stores/flight-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import { useSetupOfferStore } from "@/stores/setup-offer-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -118,8 +120,20 @@ export function QuickMenu() {
   const setupNeeded = pilot?.readiness.some((r) => r.id === "setup_needed" && !r.ok) ?? false;
   const setupOffered = useSetupOfferStore((s) => s.uid !== null);
   const closeSetupOffer = useSetupOfferStore((s) => s.close);
+  const telemetryLive = useFlightStore((s) => s.live && !s.stale);
+  const telemetryArmed = useFlightStore((s) => s.telemetry?.armed ?? null);
+  const onGround = knownOnGround(pilot, { live: telemetryLive, armed: telemetryArmed });
 
-  const entries = menuEntries({ onFeed, movedCount, cameraCount: cameras.length, panelCount: panels.length, setupNeeded, setupOffered, kiosk });
+  const entries = menuEntries({
+    onFeed,
+    movedCount,
+    cameraCount: cameras.length,
+    panelCount: panels.length,
+    setupNeeded,
+    setupOffered,
+    knownOnGround: onGround,
+    kiosk,
+  });
   const shown = panels.find(({ ext, p }) => `${ext.pluginId}:${p.id}` === openPanel) ?? null;
   const sheet = (id: "preflight" | "mode") => {
     closeQuickMenu();

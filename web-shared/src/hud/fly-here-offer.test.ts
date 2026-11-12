@@ -59,14 +59,17 @@ describe("fly here offer", () => {
     expect(reason(null, 0, { ...guided, guided: false })).toBe("not_guided");
     expect(reason(null, 0, { ...guided, landed: true })).toBe("landed");
     expect(reason(null, 0)).toBeUndefined();
-    // An unknown arm state is possibly airborne: never "landed".
-    expect(flyHereOffered({ ...pilot, armed: null, landed: null }, 100)).toEqual({ route: null });
+    // An unknown arm state is possibly airborne: never "landed". A fresh pilot
+    // with no arm state has no flight controller link, and says so.
+    expect(flyHereOffered({ ...pilot, armed: null, landed: null }, 100)).toEqual({ route: null, reason: "no_fc_link" });
+    expect(reason({ ...pilot, armed: null, landed: null, controlMode: "fc_manual" }, 100)).toBe("no_fc_link");
+    expect(reason({ ...pilot, armed: null, landed: null }, 100, { ...guided, guided: false })).toBe("not_guided");
   });
 
   it("words every reason by a refusal key", () => {
     expect(specText("refusal.not_guided")).toBe("Fly here needs GUIDED on the flight controller");
     expect(specText("refusal.pilot_stale")).toBe("Pilot not answering");
-    for (const r of ["failsafe", "landed", "pilot_stale", "control_mode", "not_guided"] satisfies FlyHereReason[]) {
+    for (const r of ["failsafe", "landed", "pilot_stale", "control_mode", "not_guided", "no_fc_link"] satisfies FlyHereReason[]) {
       expect(hasSpecText(`refusal.${r}`), r).toBe(true);
     }
   });

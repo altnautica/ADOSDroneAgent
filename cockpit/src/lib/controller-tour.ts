@@ -18,10 +18,12 @@ export function tourStage(padReported: boolean, padAnnounced: boolean, seen: boo
 
 /** Whether the vehicle is (possibly) in the air: from the live pilot state,
  *  unless it reports disarmed or landed (an unknown arm state counts as
- *  airborne), else (no live pilot) the heartbeat's arm state. */
+ *  airborne), else (no live pilot) the heartbeat's arm state, where an
+ *  unknown arm state (the agent withholds it while the flight controller link
+ *  is down) also counts as airborne. */
 export function tourAirborne(pilot: { armed: boolean | null; landed: boolean | null } | null, telemetryArmed: boolean | null | undefined): boolean {
   if (pilot) return pilot.armed !== false && pilot.landed !== true;
-  return telemetryArmed === true;
+  return telemetryArmed !== false;
 }
 
 /** The tips' arm inputs. From the live pilot: its arm state as reported,
@@ -40,18 +42,26 @@ export function tipsArmState(
   return { armed: telemetryArmed === true, airborne: telemetryArmed !== false };
 }
 
-/** Whether the tour card may capture the pad (so Cross does not also start a
- *  skill): only while the vehicle is known to be on the ground and disarmed,
- *  from a fresh pilot state reporting landed and disarmed or, with no fresh
+/** Whether the vehicle is known to be on the ground and disarmed: from a
+ *  fresh pilot state reporting disarmed and not flying or, with no fresh
  *  pilot, live telemetry reporting disarmed. An unknown arm state (cockpit
- *  loaded mid-flight before the first frame, link down) counts as airborne:
- *  the card shows without capturing, so kill, RTH, pause and arm stay live. */
-export function tourCapturesPad(
+ *  loaded mid-flight before the first frame, link down) counts as airborne. */
+export function knownOnGround(
   pilot: { armed: boolean | null; landed: boolean | null } | null,
   telemetry: { live: boolean; armed: boolean | null | undefined },
 ): boolean {
   if (pilot) return pilot.armed === false && pilot.landed !== false;
   return telemetry.live && telemetry.armed === false;
+}
+
+/** Whether the tour card may capture the pad (so Cross does not also start a
+ *  skill): only while the vehicle is known on the ground and disarmed. Else
+ *  the card shows without capturing, so kill, RTH, pause and arm stay live. */
+export function tourCapturesPad(
+  pilot: { armed: boolean | null; landed: boolean | null } | null,
+  telemetry: { live: boolean; armed: boolean | null | undefined },
+): boolean {
+  return knownOnGround(pilot, telemetry);
 }
 
 /** The card's buttons, in focus order: Next (Done on the last card), Skip. */

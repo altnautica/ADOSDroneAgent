@@ -156,3 +156,24 @@ def test_check_exits_1_on_drift(er, tmp_path, monkeypatch, capsys):
     cli.write_text(cli.read_text("utf-8").replace('"cli"', '"cli-planted"'), "utf-8")
     assert er.main(["--check", "--out", str(tmp_path)]) == 1
     assert "cli.json" in capsys.readouterr().err
+
+
+def test_relay_forbidden_covers_paths_beneath_a_denied_route(er, monkeypatch):
+    # The relay gate denies a listed path and everything beneath it, so a
+    # route under a denied subtree must read relay-forbidden too.
+    gas = er._load_api_surface()
+    monkeypatch.setattr(
+        gas,
+        "native_routes",
+        lambda: [
+            ("POST", "/api/wfb/pair/local-bind"),
+            ("POST", "/api/wfb/pair/local-bind/cancel"),
+            ("POST", "/api/wfb/pair/local-binder"),
+        ],
+    )
+    monkeypatch.setattr(gas, "residual_routes", lambda: [])
+    monkeypatch.setattr(er, "_load_api_surface", lambda: gas)
+    rows = {r["path"]: r for r in er.emit_routes()["routes"]}
+    assert rows["/api/wfb/pair/local-bind"]["relay_forbidden"] is True
+    assert rows["/api/wfb/pair/local-bind/cancel"]["relay_forbidden"] is True
+    assert rows["/api/wfb/pair/local-binder"]["relay_forbidden"] is False

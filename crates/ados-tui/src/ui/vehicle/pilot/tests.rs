@@ -88,7 +88,7 @@ fn the_rows_dim_once_the_pilot_ages_past_the_threshold_between_reads() {
     // No new read for 500 ms: the 1.8 s old frame is now 2.3 s old.
     app.core.now += Duration::from_millis(500);
     let text = draw(&mut app, 160, 48);
-    assert!(text.contains("State     LINK (stale)"), "{text}");
+    assert!(text.contains("State     Link (stale)"), "{text}");
     for prefix in ROWS {
         assert!(
             row(&text, prefix).contains("(stale)"),
@@ -117,7 +117,7 @@ fn current_alerts_never_read_as_stale_with_the_pilot_kind() {
     // The pilot stalls: its rows dim, but the battery alert is current.
     app.core.now += Duration::from_millis(500);
     let text = draw(&mut app, 160, 48);
-    assert!(text.contains("State     LINK (stale)"), "{text}");
+    assert!(text.contains("State     Link (stale)"), "{text}");
     let block = alert_block(&text);
     assert!(
         block.iter().any(|l| l.contains("Battery critical")),
@@ -132,7 +132,7 @@ fn current_alerts_never_read_as_stale_with_the_pilot_kind() {
 fn the_rows_read_the_spec_threshold_as_stale() {
     let mut app = app_with_pilot(1_999);
     let text = draw(&mut app, 160, 48);
-    assert!(!text.contains("State     LINK"), "1999 ms is fresh\n{text}");
+    assert!(!text.contains("State     Link"), "1999 ms is fresh\n{text}");
     for prefix in ROWS {
         assert!(
             !row(&text, prefix).contains("(stale)"),
@@ -143,7 +143,7 @@ fn the_rows_read_the_spec_threshold_as_stale() {
     // One more millisecond: the frame is 2000 ms old, the threshold itself.
     app.core.now += Duration::from_millis(1);
     let text = draw(&mut app, 160, 48);
-    assert!(text.contains("State     LINK (stale)"), "{text}");
+    assert!(text.contains("State     Link (stale)"), "{text}");
     for prefix in ROWS {
         assert!(
             row(&text, prefix).contains("(stale)"),

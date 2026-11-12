@@ -11,7 +11,7 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { Dot, EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
 import { meshViewKind } from "@/lib/ground-station";
 import { roleWordKey } from "@/lib/profile-words";
 import type { Tone } from "@/lib/tone";
@@ -65,12 +65,10 @@ export function MeshScreen() {
   const role = status?.role;
   const health = status?.mesh;
   const current = role?.current ?? mesh.data?.role ?? null;
-  // A role the mesh names as a word; one outside the set shows as sent.
-  const roleText = (r: string | null | undefined) => {
-    if (r == null) return DASH;
-    return r === "direct" || r === "relay" || r === "receiver" ? t(roleWordKey(r)) : r;
-  };
-  const meshCapable = role?.mesh_capable ?? false;
+  // A role as a word; one outside the set reads unrecognised.
+  const roleText = (r: string | null | undefined) => (r == null ? DASH : t(roleWordKey(r)));
+  // Null until the status read names it: never a definite "no".
+  const meshCapable = role?.mesh_capable ?? null;
   const state = mesh.data;
   const kind = meshViewKind({ data: state, httpStatus: mesh.status, error: mesh.error, role: current });
 
@@ -85,7 +83,7 @@ export function MeshScreen() {
   if (kind === "not-in-mesh") {
     body = <EmptyNote>{t("cockpit.mesh.direct")}</EmptyNote>;
   } else if (kind === "error") {
-    body = <EmptyNote>{t("panels.mesh.readError")}</EmptyNote>;
+    body = <ErrorNote onRetry={mesh.refresh}>{t("panels.mesh.readError")}</ErrorNote>;
   } else if (kind === "loading") {
     body = <EmptyNote>{t("panels.mesh.loading")}</EmptyNote>;
   } else if (kind === "no-snapshot") {
@@ -163,7 +161,7 @@ export function MeshScreen() {
         <Row
           label={t("cockpit.mesh.capable")}
           left={<Dot tone={meshCapable ? "ok" : "muted"} />}
-          value={meshCapable ? t("cockpit.mesh.yes") : t("cockpit.mesh.no")}
+          value={meshCapable == null ? DASH : meshCapable ? t("cockpit.mesh.yes") : t("cockpit.mesh.no")}
         />
         {role?.supported?.length ? (
           <Row label={t("cockpit.mesh.supported")} value={role.supported.map(roleText).join(" · ")} mono={false} />

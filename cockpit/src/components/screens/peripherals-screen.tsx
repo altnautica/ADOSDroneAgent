@@ -37,7 +37,7 @@ export function PeripheralsScreen() {
         <p className="mb-[0.3rem] text-[0.8rem] text-muted-foreground">{t("peripherals.page.blurb")}</p>
         {items.map((p) => {
           const stateKey = peripheralStateKey(p);
-          const stateText = stateKey ? t(stateKey) : p.state;
+          const stateText = t(stateKey);
           const since = p.lastSeen !== null ? sinceParts(p.lastSeen) : null;
           return (
             <ListItem

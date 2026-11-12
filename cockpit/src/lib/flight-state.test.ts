@@ -37,15 +37,16 @@ const base: ChipFacts = {
 };
 
 describe("flight-state chip (flight-state.json rules)", () => {
-  it("reads Pilot · <PROFILE> in blue with the control mode below", () => {
+  it("reads Pilot · <Profile> in blue with the control mode below", () => {
     const c = flightStateChip(base);
-    expect(c.text).toBe("Pilot · NORMAL");
+    expect(c.text).toBe("Pilot · Normal");
+    expect(flightStateChip({ ...base, profile: "sport" }).text).toBe("Pilot · Sport");
     expect(c.color).toBe("#2979FF");
     expect(c.secondary.map((l) => l.text)).toContain("ADOS Pilot");
   });
 
-  it("dims to LINK when the pilot state is older than 2 s", () => {
-    expect(flightStateChip({ ...base, ageMs: 2500 })).toMatchObject({ text: "LINK", dim: true });
+  it("dims to Link when the pilot state is older than 2 s", () => {
+    expect(flightStateChip({ ...base, ageMs: 2500 })).toMatchObject({ text: "Link", dim: true });
   });
 
   it("shows Not ready with the first blocker and the setup link", () => {
@@ -55,10 +56,12 @@ describe("flight-state chip (flight-state.json rules)", () => {
   });
 
   it("shows the skill and its detail in cyan", () => {
-    expect(flightStateChip({ ...base, owner: "skill", skillLabel: "Follow-Me", modeDetail: "ORBIT 8 m" })).toMatchObject({
-      text: "FOLLOW-ME · ORBIT 8 m",
+    expect(flightStateChip({ ...base, owner: "skill", skillLabel: "Follow-Me", modeDetail: "Orbit 8 m" })).toMatchObject({
+      text: "Follow-Me · Orbit 8 m",
       color: "#22D3EE",
     });
+    // A skill id sent as its label starts with a capital, sentence case.
+    expect(flightStateChip({ ...base, owner: "skill", skillLabel: "follow-me", modeDetail: null }).text).toBe("Follow-me · Active");
   });
 
   it("follows the mission states", () => {

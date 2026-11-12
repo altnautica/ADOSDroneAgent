@@ -18,21 +18,23 @@ impl Dashboard {
         };
         let units = services.iter().filter_map(|svc| {
             let state = svc.get("state").and_then(Value::as_str)?;
+            let sub = svc.get("sub_state").and_then(Value::as_str).unwrap_or("");
             let name = svc.get("name").and_then(Value::as_str).unwrap_or("");
-            (!matches!(state, "inactive" | "idle")).then_some((name, state))
+            (!matches!(state, "inactive" | "idle")).then_some((name, state, sub))
         });
         let (mut total, mut running) = (0, 0);
-        let mut first_failed = None;
-        for (name, state) in units {
+        let mut first_down = None;
+        for (name, state, sub) in units {
             total += 1;
             running += usize::from(state == "active");
-            if state != "active" && first_failed.is_none() && !name.is_empty() {
-                first_failed = Some(name.trim_end_matches(".service").to_string());
+            if state != "active" && first_down.is_none() && !name.is_empty() {
+                let name = name.trim_end_matches(".service");
+                first_down = Some(format!("{name} {}", down_word(state, sub)));
             }
         }
         self.services_total = total;
         self.services_running = running;
-        self.first_failed = first_failed;
+        self.first_down = first_down;
     }
 
     /// What makes the verdict DEGRADED, in words, for the line under it:
@@ -41,8 +43,8 @@ impl Dashboard {
         if self.health() != Health::Degraded {
             return None;
         }
-        Some(match &self.first_failed {
-            Some(name) => format!("{name} failed"),
+        Some(match &self.first_down {
+            Some(cause) => cause.clone(),
             None if self.services_running < self.services_total => format!(
                 "{} of {} services down",
                 self.services_total - self.services_running,
@@ -50,6 +52,18 @@ impl Dashboard {
             ),
             None => "flight controller lost".to_string(),
         })
+    }
+}
+
+/// A unit that should be up and is not, by its systemd ActiveState (and, for
+/// `activating`, its SubState): only `failed` reads as failed.
+fn down_word<'a>(state: &'a str, sub: &str) -> &'a str {
+    match state {
+        "activating" if sub == "auto-restart" => "restarting",
+        "activating" => "starting",
+        "deactivating" => "stopping",
+        "maintenance" => "in maintenance",
+        other => other,
     }
 }
 
@@ -100,8 +114,16 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_or_restarting_unit_degrades_the_verdict() {
-        for (state, sub) in [("failed", "failed"), ("activating", "auto-restart")] {
+    fn a_unit_that_is_down_degrades_the_verdict_and_is_worded_by_its_state() {
+        for (state, sub, cause) in [
+            ("failed", "failed", "ados-video failed"),
+            ("activating", "auto-restart", "ados-video restarting"),
+            ("activating", "start", "ados-video starting"),
+            ("deactivating", "stop-sigterm", "ados-video stopping"),
+            ("reloading", "reload", "ados-video reloading"),
+            ("maintenance", "dead", "ados-video in maintenance"),
+            ("refreshing", "running", "ados-video refreshing"),
+        ] {
             let mut dash = Dashboard::from_status(&setup_status());
             dash.merge_services(&json!({"services": [
                 row("ados-control", "active", "running"),
@@ -109,7 +131,7 @@ mod tests {
             ]}));
             assert_eq!((dash.services_running, dash.services_total), (1, 2));
             assert_eq!(dash.health(), Health::Degraded, "{state}");
-            assert_eq!(dash.health_cause().as_deref(), Some("ados-video failed"));
+            assert_eq!(dash.health_cause().as_deref(), Some(cause), "{state}");
         }
     }
 

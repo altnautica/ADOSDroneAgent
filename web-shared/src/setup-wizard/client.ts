@@ -107,7 +107,8 @@ const STREAM_SILENT_MS = 5000;
  * socket. `onOpen` fires on each (re)connect, so the caller can re-read the
  * full status it may have missed. `onUp` reports the stream up on each open
  * and down on each close, or when no socket opened within the silence window
- * (the watchdog closes a socket silent that long). Returns the stop function.
+ * (the watchdog drops a socket silent that long, reports down and redials at
+ * once, without waiting for its close event). Returns the stop function.
  */
 export function openSetupStream(
   onFrame: (frame: SetupFrame) => void,
@@ -121,11 +122,6 @@ export function openSetupStream(
   let delay = STREAM_RETRY_MIN_MS;
   const abort = new AbortController();
 
-  const armWatchdog = () => {
-    window.clearTimeout(watchdog);
-    watchdog = window.setTimeout(() => socket?.close(), STREAM_SILENT_MS);
-  };
-
   const scheduleRedial = () => {
     if (stopped || retry !== undefined) return;
     retry = window.setTimeout(() => {
@@ -133,6 +129,26 @@ export function openSetupStream(
       void dial();
     }, delay);
     delay = Math.min(STREAM_RETRY_MAX_MS, delay * 2);
+  };
+
+  // A silent socket is dead now: on a dead link the browser fires `close`
+  // only after its closing handshake times out, so report down and redial
+  // here rather than from that late event.
+  const dropSilent = () => {
+    const ws = socket;
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    socket = null;
+    onUp?.(false);
+    ws.close();
+    scheduleRedial();
+  };
+
+  const armWatchdog = () => {
+    window.clearTimeout(watchdog);
+    watchdog = window.setTimeout(dropSilent, STREAM_SILENT_MS);
   };
 
   async function dial(): Promise<void> {

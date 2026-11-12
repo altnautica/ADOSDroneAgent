@@ -181,7 +181,7 @@ def emit_routes() -> dict[str, Any]:
             "served_by": served_by,
             "public": (method, path) in gas.UNAUTHENTICATED,
             "websocket": method == "WS",
-            "relay_forbidden": path in gas.RELAY_FORBIDDEN,
+            "relay_forbidden": any(gas.relay_covers(d, path) for d in gas.RELAY_FORBIDDEN),
             "notes": note or None,
         }
 

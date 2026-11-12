@@ -79,6 +79,11 @@ describe("resolveNavSource", () => {
     expect(run({ ekf: null })).toMatchObject({ label: "NAV —" });
   });
 
+  it("holds the EKF report fresh below 2000 ms and stale from 2000 ms", () => {
+    expect(run({ ekf: { flags: 2 + 16, ageMs: 1999 } }).label).not.toBe("NAV —");
+    expect(run({ ekf: { flags: 2 + 16, ageMs: 2000 } })).toMatchObject({ label: "NAV —", word: null, tone: "muted" });
+  });
+
   it("GPS quality rows", () => {
     const base = { ekf: { flags: 2 + 16, ageMs: 0 }, params: { EK3_SRC1_POSXY: 3 } };
     expect(run({ ...base, gps: { fixType: 2, satellites: 5 } })).toMatchObject({ word: "NO FIX", tone: "crit" });

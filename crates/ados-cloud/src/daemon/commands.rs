@@ -98,7 +98,7 @@ pub(super) async fn beacon_register_once(
     api_key: &str,
     code_expires_at: Option<i64>,
 ) {
-    let (board_name, board_tier, _soc, _arch, _npu, _local_inf) = board_base();
+    let (board_name, board_tier, _soc, _arch, _npu) = board_base();
     let inputs = beacon::BeaconInputs {
         device_id: config.agent.device_id.clone(),
         pairing_code: code.to_string(),

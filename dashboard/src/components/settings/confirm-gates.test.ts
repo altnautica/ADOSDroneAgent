@@ -18,10 +18,11 @@ describe("confirm before a write that cuts a link", () => {
     expect(src).toMatch(/if \(!next\) \{\s*setPendingDisable\(true\);/);
   });
 
-  it("Make primary confirms and is refused while armed", () => {
+  it("Make primary confirms and is refused while armed or unknown", () => {
     const src = read("routes/io-route.tsx");
     expect(src).not.toMatch(/onClick=\{\(\) => void makePrimary/);
-    expect(src).toMatch(/if \(armed\) \{\s*toast\.err\(t\("io\.gamepads\.armedRefused"\)\);\s*return;/);
+    expect(src).toMatch(/if \(block\) \{\s*toast\.err\(blockText\);\s*return;/);
+    expect(src).toContain("setPrimaryPad(deviceId,");
   });
 
   it("GNSS base survey and off confirm with the RTCM targets", () => {

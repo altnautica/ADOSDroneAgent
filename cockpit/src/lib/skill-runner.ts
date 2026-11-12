@@ -28,7 +28,7 @@ import { create } from "zustand";
 import { skillContextNow } from "@/hooks/use-skill-context";
 import { CommandTimeoutError, sendCommand } from "@/lib/api";
 import type { ActionPhase } from "@/lib/cockpit-actions";
-import { claimCommandedModes, FC_LAND_MODES, FC_RETURN_MODES } from "@/lib/fc-failsafe";
+import { claimCommandedModes, claimProvisionally, dropProvisionalClaim, FC_LAND_MODES, FC_RETURN_MODES } from "@/lib/fc-failsafe";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
@@ -86,10 +86,12 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
   }
   const args = skill.takesAltitude && altitudeM != null ? [altitudeM] : [];
   // A return or landing sent from here is this cockpit's, not a failsafe,
-  // once the answer is in (`claimCommandedModes`).
+  // once the answer is in (`claimCommandedModes`); until then the Pause gate
+  // takes it as this cockpit's (`claimProvisionally`).
   const claimed = b.command === "rtl" ? FC_RETURN_MODES : b.command === "land" ? FC_LAND_MODES : null;
   const modeAtCommand = skillContextNow().fc?.mode ?? null;
   const sentAt = Date.now();
+  if (claimed) claimProvisionally(claimed, modeAtCommand, sentAt);
   let res;
   try {
     res = await sendCommand(b.command, args);
@@ -97,6 +99,7 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
     // The command route refuses with a status, not a code: 503 is no flight
     // controller link, 400 a value it does not take.
     if (e instanceof ApiError && (e.status === 503 || e.status === 400)) {
+      if (claimed) dropProvisionalClaim(sentAt);
       report({ text: `${skill.label}: ${refusalText(e.status === 503 ? "no_fc" : "bad_args")}`, kind: "err" });
       return;
     }

@@ -9,13 +9,17 @@
 import { create } from "zustand";
 
 import { offerCommand } from "@/lib/command-stack";
+import { knownOnGround } from "@/lib/controller-tour";
 import {
   DEFAULT_TAB_ID,
   type NavCommand,
   type ScreenAction,
 } from "@/nav/navigator";
-import { TAB_ORDER } from "@/nav/screen-table";
+import { SCREEN_TABLE, TAB_ORDER } from "@/nav/screen-table";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { useDirtyStore } from "@/stores/dirty-store";
+import { useFlightStore } from "@/stores/flight-store";
+import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 const PERSIST_KEY = "ados-cockpit-active-tab";
 
@@ -40,6 +44,28 @@ function persistTab(id: string): void {
   } catch {
     // no-op
   }
+}
+
+/** Whether `id` is the flight screen (the full-bleed Feed). */
+function isFlightScreen(id: string): boolean {
+  return SCREEN_TABLE.some((m) => m.id === id && m.fullBleed === true);
+}
+
+/** Leave for the flight screen through the dirty guard, unless the vehicle
+ *  may be flying (anything but known disarmed on the ground, an unknown arm
+ *  state included): then the pilot gets the Feed at once, the drafts are left
+ *  as they are, and a leave already parked behind the dialog is dropped so
+ *  its answer cannot pull the pilot back off the Feed. */
+function leaveForFlight(leave: () => void): void {
+  const pilot = useNavStreamStore.getState().pilot;
+  const flight = useFlightStore.getState();
+  const fresh = pilot !== null && pilotFresh(pilot.at, Date.now()) ? pilot.data : null;
+  if (knownOnGround(fresh, { live: flight.live && !flight.stale, armed: flight.telemetry?.armed ?? null })) {
+    useDirtyStore.getState().requestLeave(leave);
+    return;
+  }
+  useDirtyStore.getState().keepEditing();
+  leave();
 }
 
 function tabIndex(id: string): number {
@@ -177,6 +203,7 @@ export const useNavStore = create<NavState>((set, get) => ({
     };
     // Leaving the current screen with unsaved drafts asks first (dirty-store).
     if (s0.activeTabId === id && s0.detailStack.length === 0) go();
+    else if (isFlightScreen(id)) leaveForFlight(go);
     else useDirtyStore.getState().requestLeave(go);
   },
 
@@ -185,10 +212,11 @@ export const useNavStore = create<NavState>((set, get) => ({
   },
 
   back: () => {
-    if (get().detailStack.length === 0) return;
-    useDirtyStore.getState().requestLeave(() =>
-      set((s) => (s.detailStack.length > 0 ? { detailStack: s.detailStack.slice(0, -1) } : {})),
-    );
+    const { detailStack, activeTabId } = get();
+    if (detailStack.length === 0) return;
+    const pop = () => set((s) => (s.detailStack.length > 0 ? { detailStack: s.detailStack.slice(0, -1) } : {}));
+    if (detailStack.length === 1 && isFlightScreen(activeTabId)) leaveForFlight(pop);
+    else useDirtyStore.getState().requestLeave(pop);
   },
 
   setMenuFocus: (index) => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { TOUR_CARDS, tourAirborne, tourCapturesPad, tourCardRect, tourPadCommand, tourStage, tourStep } from "@/lib/controller-tour";
+import { knownOnGround, TOUR_CARDS, tourAirborne, tourCapturesPad, tourCardRect, tourPadCommand, tourStage, tourStep } from "@/lib/controller-tour";
 
 function overlaps(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): boolean {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
@@ -25,7 +25,11 @@ describe("first-connect controller tour", () => {
     // No live pilot state: the heartbeat's arm state decides.
     expect(tourAirborne(null, true)).toBe(true);
     expect(tourAirborne(null, false)).toBe(false);
-    expect(tourAirborne(null, null)).toBe(false);
+  });
+
+  it("counts an unknown arm state with no live pilot as possibly airborne", () => {
+    expect(tourAirborne(null, null)).toBe(true);
+    expect(tourAirborne(null, undefined)).toBe(true);
   });
 
   it("waits while airborne on every screen, not only the flight screen", () => {
@@ -100,6 +104,18 @@ describe("first-connect controller tour", () => {
     const clear = tourCardRect(580, 360, { ...avoid, alertStack: null }, 360, 300, 120);
     expect(clear.y).toBeGreaterThanOrEqual(topBar.h + 12);
     expect(overlaps(clear, topBar)).toBe(false);
+  });
+});
+
+describe("known on the ground and disarmed", () => {
+  it("only from a disarmed pilot that has not reported flying, or live disarmed telemetry", () => {
+    expect(knownOnGround({ armed: false, landed: true }, { live: false, armed: null })).toBe(true);
+    expect(knownOnGround(null, { live: true, armed: false })).toBe(true);
+    // Airborne, or the arm state unknown.
+    expect(knownOnGround({ armed: true, landed: false }, { live: true, armed: true })).toBe(false);
+    expect(knownOnGround({ armed: null, landed: null }, { live: true, armed: false })).toBe(false);
+    expect(knownOnGround(null, { live: false, armed: false })).toBe(false);
+    expect(knownOnGround(null, { live: true, armed: null })).toBe(false);
   });
 });
 

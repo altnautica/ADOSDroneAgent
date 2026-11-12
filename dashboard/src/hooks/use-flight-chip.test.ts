@@ -21,7 +21,7 @@ describe("dashboard flight-state chip", () => {
   it("reads the nav-status pilot entry through the cockpit chip rules", () => {
     const chip = navStatusChip(base);
     expect(chip).not.toBeNull();
-    expect(chip!.text).toContain("FOLLOW");
+    expect(chip!.text).toContain("Follow");
     expect(chip!.dim).toBe(false);
   });
 
@@ -31,7 +31,7 @@ describe("dashboard flight-state chip", () => {
     expect(navStatusChip({ ...base, body: undefined })).toBeNull();
   });
 
-  it("ages the last frame after a failed read so the chip turns LINK, never null", () => {
+  it("ages the last frame after a failed read so the chip turns Link, never null", () => {
     // The body is the last one received; reads failed for 5 s since.
     const chip = navStatusChip({ ...base, nowMs: base.receivedAtMs + 5_000 });
     expect(chip).not.toBeNull();
@@ -44,9 +44,9 @@ describe("dashboard flight-state chip", () => {
       ...base,
       body: { pilot: { age_ms: 100, data: skillPilot } },
       telemetry: { home_distance: 120, local_position: null },
-      modeDetail: "ORBIT 8 m",
+      modeDetail: "Orbit 8 m",
     });
-    expect(JSON.stringify(chip)).toContain("ORBIT 8 m");
+    expect(JSON.stringify(chip)).toContain("Orbit 8 m");
   });
 
   it("measures the goal distance only from a local position at most 2 s old", () => {

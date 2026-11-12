@@ -30,6 +30,7 @@ import { startRecording, stopRecording } from "@/lib/api";
 import { fmtBytes, fmtClock, fmtGb, fmtMb } from "@/lib/format-status";
 import { maxTemp, parseServices, restartVerdict, serviceTone, shortServiceName } from "@/lib/system-ops";
 import { profileWordKey, roleWordKey } from "@/lib/profile-words";
+import { serviceStateKey } from "@/lib/screen-words";
 import { prettify } from "@/lib/settings-schema";
 import { apiFetch } from "@/shared/api-fetch";
 import { rebootAgent } from "@/shared/api/setup-actions";
@@ -144,12 +145,18 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
   const pendingReboot = useConfigStore((s) => s.pendingRebootPaths);
   const [recordBusy, setRecordBusy] = useState(false);
 
+  const serviceWord = (v: string | null | undefined) => {
+    const key = serviceStateKey(v);
+    return key ? t(key) : DASH;
+  };
+
   const r = sys.data;
   const box = status?.system;
   const temp = maxTemp(r?.temperatures) ?? box?.temp_c ?? null;
   const board = diag.data?.board;
   const inventory = services.data;
-  const isRecording = recording.data?.recording ?? status?.recording ?? false;
+  // Null while neither the recorder nor the status has said: never "idle".
+  const isRecording = recording.data?.recording ?? status?.recording ?? null;
 
   const restartService = async (name: string) => {
     if (restarting) return;
@@ -298,6 +305,13 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
         {hasRecorder ? (
           <>
             <SectionHeader>{t("cockpit.system.recording")}</SectionHeader>
+            {isRecording == null ? (
+              readFailed(recording) ? (
+                <ErrorNote onRetry={recording.refresh}>{t("cockpit.readFailed.recording")}</ErrorNote>
+              ) : (
+                <EmptyNote>{t("common.loading")}</EmptyNote>
+              )
+            ) : (
             <div className="flex items-center gap-[0.5rem]">
               <Dot tone={isRecording ? "err" : "muted"} />
               <span className="flex-1 truncate text-[0.85rem] text-surface-foreground">
@@ -311,6 +325,7 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
                 busy={recordBusy}
               />
             </div>
+            )}
             {recording.data?.items?.length ? (
               <div className="mt-[0.2rem] flex flex-col gap-[0.15rem]">
                 {recording.data.items.slice(0, 4).map((it, i) => (
@@ -331,8 +346,7 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[0.82rem] text-surface-foreground">{shortServiceName(s.name)}</div>
                 <div className="truncate text-[0.75rem] text-muted-foreground">
-                  {s.state ?? DASH}
-                  {s.sub_state && s.sub_state !== s.state ? ` · ${s.sub_state}` : ""}
+                  {serviceWord(s.state)}
                   {s.memory_mb != null ? ` · ${fmtMb(s.memory_mb)}` : ""}
                 </div>
               </div>

@@ -90,9 +90,9 @@ impl BidVector {
             };
         }
         let base = n_tasks * BID_BYTES_PER_TASK;
-        for a in 0..n_agents {
+        for (a, s) in out.s.iter_mut().enumerate().take(n_agents) {
             let at = base + a * BID_BYTES_PER_AGENT;
-            out.s[a] = u16::from_be_bytes([bytes[at], bytes[at + 1]]);
+            *s = u16::from_be_bytes([bytes[at], bytes[at + 1]]);
         }
         Some(out)
     }

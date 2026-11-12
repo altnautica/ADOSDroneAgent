@@ -6,6 +6,45 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.113] - 2026-11-13
+
+### Fixed
+
+- Cockpit: the status pill words a failing pre-flight item as the failure ("Home position not set"), not the passing label.
+- Cockpit: the controller tour and the Menu's "Set up aircraft" show only while the vehicle is known disarmed on the ground. An unknown arm state counts as possibly airborne.
+- Cockpit: Pause is no longer refused as a failsafe while this cockpit's own Return home or Land waits for its answer.
+- Cockpit: going back to the Feed never waits behind the unsaved-changes dialog unless the vehicle is known disarmed on the ground.
+- Cockpit: with no fresh pilot state, a controller's Triangle-hold maps to Land, not Take off.
+- Cockpit: the Feed's width class comes from its own box beside the menu rail.
+- Cockpit: a pose, navigation or pilot report 2000 ms old counts as stale everywhere.
+- Cockpit: cloud and radio unpair ask before repeating a refusal with force, and the refusal names the arm state once. "Cancel bind" shows whenever the agent reports a waiting bind. Unknown states, roles and profiles read "Unrecognised". Failed reads on the Pair, Sensors, Mesh, System and Video screens show an error with Retry instead of a made-up state. The Video status tab says "adaptive bitrate", and the camera source picker lists the csi and usb hints.
+- Dashboard: the radio-link card names the peer instead of showing a literal placeholder.
+- Dashboard: the camera selector switches the video along with its overlays.
+- Dashboard: the status pill reads the arm state from a fresh pilot frame and live telemetry only.
+- Dashboard: making a gamepad primary is held back while the arm state is unknown, and asks before forcing.
+- Dashboard: a refused log stream with a failed poll shows a read error, and the stream retries on a timer.
+- Dashboard: the restart banner judges only heartbeats answered after the request, and pauses its timeout while the tab is hidden.
+- Dashboard: the unsaved-changes guard covers every settings draft. "Apply suggestion" is disabled when nothing would change. Sensor, uplink and LoRa codes read as words. The navigation drawer recovers from its own load failure.
+- Shared: the flight-setup stream reports down and redials as soon as the link goes silent, and starts as down.
+- Shared: Fly Here explains a missing flight-controller link instead of staying silent.
+- Shared: the armed refusal says "armed or its arm state is unknown".
+- Shared: flight-state chips and banners use sentence case ("Link", "Pilot · Normal", "Taking off · Climb", "Controller lost · Holding").
+- TUI: detections are polled only while a detector runs, so a slow read cannot hold up the vehicle readings.
+- TUI: only a missing gimbal route reads as unavailable.
+- TUI: the trend charts hide while telemetry fails or the flight controller is down.
+- TUI: the Overview drops old vehicle data when it is reopened.
+- TUI: `u` no longer claims "Already up to date" before the installed version is known.
+- TUI: a restarting service is not called failed.
+- TUI: the Pose row prints its age once.
+- TUI: extension state ages are shown only when this clock can measure them.
+- The cloud heartbeat's perception tier comes from the same live detector read as `/api/status`.
+- `pose_age_ms` grows with the time since the report and is dropped once 2000 ms old.
+- The router asks again every 30 s for a missing `EXTENDED_SYS_STATE`, including after the message stops.
+- `/api/logs` with a logger filter reports `truncated` when the store window filled.
+- The route reference marks every relay-forbidden route by the gate's prefix rule.
+- The `pilot` contract is version 2: `armed` and `landed` are null while the flight-controller link is down.
+- `ados-swarm` passes the current clippy lints.
+
 ## [0.109.112] - 2026-11-13
 
 ### Fixed

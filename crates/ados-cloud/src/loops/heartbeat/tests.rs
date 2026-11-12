@@ -90,7 +90,7 @@ fn base() -> HeartbeatBase {
         board_soc: "rk3582".to_string(),
         board_arch: "aarch64".to_string(),
         board_npu_tops: 6.0,
-        board_local_inference: false,
+        live_detector: LiveDetector::Off,
     }
 }
 
@@ -283,10 +283,14 @@ fn the_advertised_reach_is_omitted_rather_than_blanked() {
 
 #[test]
 fn cloud_beacon_carries_the_perception_tier() {
-    // The base() board is an NPU part (6 TOPS), so the beacon reports the
-    // accelerator + a `local` tier (pick_tier). The offload target is absent
-    // (null-stripped) until a workstation is paired.
-    let v = build_payload(&base(), None);
+    // An NPU board (6 TOPS) whose accelerator backend runs: the beacon reports
+    // the accelerator + a `local` tier (pick_tier). The offload target is
+    // absent (null-stripped) until a workstation is paired.
+    let board = HeartbeatBase {
+        live_detector: LiveDetector::Accelerator,
+        ..base()
+    };
+    let v = build_payload(&board, None);
     let obj = v.as_object().unwrap();
     assert_eq!(obj["npuTops"], 6.0);
     assert_eq!(obj["hasAccelerator"], true);
@@ -298,17 +302,40 @@ fn cloud_beacon_carries_the_perception_tier() {
 }
 
 #[test]
-fn a_cpu_detector_board_beacons_the_cpu_tier() {
-    // No NPU, but the profile declares the in-process CPU detector: the
-    // beacon reports the same `cpu` tier `/api/status` does, never `none`.
+fn an_npu_board_running_the_onnx_backend_beacons_cpu() {
+    // The board declares an NPU, but the engine runs the CPU ONNX backend:
+    // the detector runs on the CPU, so the beacon says `cpu` as
+    // `/api/status` does, not the declaration's `local`.
+    let board = HeartbeatBase {
+        live_detector: LiveDetector::Cpu,
+        ..base()
+    };
+    let v = build_payload(&board, None);
+    assert_eq!(v["hasAccelerator"], true);
+    assert_eq!(v["perceptionTier"], "cpu");
+}
+
+#[test]
+fn a_cpu_board_with_vision_stopped_beacons_none() {
+    // An NPU-less board whose profile declares the CPU detector, with the
+    // vision engine stopped: no detector runs, so the tier is `none`.
     let board = HeartbeatBase {
         board_npu_tops: 0.0,
-        board_local_inference: true,
+        live_detector: LiveDetector::Off,
         ..base()
     };
     let v = build_payload(&board, None);
     assert_eq!(v["hasAccelerator"], false);
-    assert_eq!(v["perceptionTier"], "cpu");
+    assert_eq!(v["perceptionTier"], "none");
+}
+
+#[test]
+fn a_declared_npu_without_a_live_detector_beacons_none() {
+    // base() declares a 6 TOPS NPU, but no detector is running: the tier
+    // follows the live detector, as `/api/status` does, never the declaration.
+    let v = build_payload(&base(), None);
+    assert_eq!(v["hasAccelerator"], true);
+    assert_eq!(v["perceptionTier"], "none");
 }
 
 #[test]

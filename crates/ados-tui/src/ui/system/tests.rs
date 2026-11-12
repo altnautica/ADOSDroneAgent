@@ -147,3 +147,14 @@ fn update_without_a_known_update_is_dim_and_says_why_on_press() {
     let last = app.core.toasts.history().last().map(|t| t.text.clone());
     assert_eq!(last.as_deref(), Some("Already up to date"));
 }
+
+#[test]
+fn update_with_no_installed_version_known_does_not_say_up_to_date() {
+    // No snapshot yet: the installed version is unknown.
+    let app = test_app();
+    *app.core.latest.lock().unwrap() = Some("0.99.108".into());
+    assert_eq!(
+        app.core.update_refusal(),
+        Some("Installed version not known yet")
+    );
+}

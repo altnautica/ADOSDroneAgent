@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { COMMANDED_MODE_WINDOW_MS, fcSideFailsafe, forgetCommandedModes, noteCommandedModes } from "@/lib/fc-failsafe";
+import {
+  claimCommandedModes,
+  claimProvisionally,
+  COMMANDED_MODE_WINDOW_MS,
+  fcFailsafeForPause,
+  fcSideFailsafe,
+  forgetCommandedModes,
+  noteCommandedModes,
+} from "@/lib/fc-failsafe";
 import { BUILTIN_SKILL_BY_ID, resolveSkillState, type SkillContext } from "@/lib/skills";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -54,5 +62,30 @@ describe("the flight controller's own failsafe, read from its mode and heartbeat
   it("never lets a pause through a critical heartbeat, commanded or not", () => {
     noteCommandedModes(["RTL"], T0);
     expect(fcSideFailsafe({ mode: "RTL", systemStatus: 5 }, T0 + 100)).toBe(true);
+  });
+});
+
+describe("the Pause gate's read while a sent return awaits its answer", () => {
+  const rtl = { mode: "RTL", systemStatus: 4 };
+
+  it("takes the return as this cockpit's until the answer, and only for the Pause gate", () => {
+    claimProvisionally(["RTL"], "LOITER", T0);
+    expect(fcFailsafeForPause(rtl, T0 + 500)).toBe(false);
+    expect(fcSideFailsafe(rtl, T0 + 500)).toBe(true);
+    // Past the window the claim lapses.
+    expect(fcFailsafeForPause(rtl, T0 + COMMANDED_MODE_WINDOW_MS + 1)).toBe(true);
+  });
+
+  it("drops the claim on a refusal, and never makes one for a mode already flown", () => {
+    claimProvisionally(["RTL"], "LOITER", T0);
+    claimCommandedModes(["RTL"], "LOITER", { observed: true, accepted: false }, T0);
+    expect(fcFailsafeForPause(rtl, T0 + 500)).toBe(true);
+    claimProvisionally(["RTL"], "RTL", T0);
+    expect(fcFailsafeForPause(rtl, T0 + 500)).toBe(true);
+  });
+
+  it("still refuses on a critical heartbeat", () => {
+    claimProvisionally(["RTL"], "LOITER", T0);
+    expect(fcFailsafeForPause({ mode: "RTL", systemStatus: 6 }, T0 + 100)).toBe(true);
   });
 });

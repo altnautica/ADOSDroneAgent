@@ -8,11 +8,15 @@ import { engineContext, feedbackView } from "@/hooks/use-gamepad";
 import { tipsArmState, tourAirborne } from "@/lib/controller-tour";
 import { whenSatisfied } from "@/lib/pad/gesture-engine";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 const PILOT = { owner: "idle", controlMode: "ados", readiness: [{ id: "fc_profile", ok: false, severity: "block", msg: "" }], holdReason: null, linkLossInS: null, skill: null } as unknown as PilotState;
 
-afterEach(() => useNavStreamStore.getState().clear());
+afterEach(() => {
+  useNavStreamStore.getState().clear();
+  useFlightStore.setState({ telemetry: null, live: false, stale: false });
+});
 
 describe("an unknown arm state on the controller", () => {
   it("reads as armed in the pad's feedback, with the blocking items critical", () => {
@@ -30,6 +34,33 @@ describe("an unknown arm state on the controller", () => {
     expect(whenSatisfied("airborne", ctx, {} as never)).toBe(true);
     useNavStreamStore.setState({ pilot: { data: { ...PILOT, armed: false, landed: true }, at: Date.now() } });
     expect(whenSatisfied("on_ground", engineContext(), {} as never)).toBe(true);
+  });
+});
+
+describe("the controller's gestures with no fresh pilot", () => {
+  const onGround = () => whenSatisfied("on_ground", engineContext(), {} as never);
+  const airborne = () => whenSatisfied("airborne", engineContext(), {} as never);
+
+  it("counts an unknown arm state as airborne, so Triangle-hold lands rather than takes off", () => {
+    expect(onGround()).toBe(false);
+    expect(airborne()).toBe(true);
+    useFlightStore.setState({ telemetry: { armed: true } });
+    expect(onGround()).toBe(false);
+  });
+
+  it("reads on the ground from live telemetry reporting disarmed", () => {
+    useFlightStore.setState({ telemetry: { armed: false }, live: true, stale: false });
+    expect(onGround()).toBe(true);
+    expect(airborne()).toBe(false);
+    useFlightStore.setState({ stale: true });
+    expect(onGround()).toBe(false);
+  });
+
+  it("ignores a stale pilot frame's landed state", () => {
+    useNavStreamStore.setState({ pilot: { data: { ...PILOT, armed: false, landed: true }, at: Date.now() - 10_000 } });
+    useFlightStore.setState({ telemetry: { armed: true } });
+    expect(onGround()).toBe(false);
+    expect(airborne()).toBe(true);
   });
 });
 

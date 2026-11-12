@@ -117,6 +117,57 @@ async fn the_logger_filter_is_a_contains_match_on_the_shown_logger() {
     }
 }
 
+/// The page a `service=pilot` read returns when the store answers `rows`.
+async fn pilot_page(rows: Vec<Value>) -> Value {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("logd.sock");
+    let body = json!({ "data": rows }).to_string();
+    let store = fake_store(
+        &path,
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    let q = LogsQuery {
+        level: None,
+        service: Some("pilot".to_string()),
+        limit: 50,
+        offset: 0,
+    };
+    let resp = logs_from(&LogdQueryClient::new(path), q).await;
+    store.await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn a_logger_filter_over_a_full_store_window_says_it_is_truncated() {
+    // The store returned as many rows as the route may ask for, so older
+    // matches may exist past the window and `total` is a lower bound.
+    let target = |i: i64| {
+        if i % 2 == 0 {
+            "ados_pilot"
+        } else {
+            "ados_video"
+        }
+    };
+    let full: Vec<Value> = (0..MAX_LIMIT)
+        .map(|i| row(i, "info", target(i), "m"))
+        .collect();
+    let v = pilot_page(full).await;
+    assert_eq!(v["total"], MAX_LIMIT / 2);
+    assert_eq!(v["truncated"], true, "{}", v["truncated"]);
+
+    // A shorter answer is the whole store: every match was counted.
+    let (pilot, video) = pilot_and_video_rows();
+    let v = pilot_page(vec![pilot, video]).await;
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["truncated"], false);
+}
+
 #[tokio::test]
 async fn the_live_tail_applies_the_same_logger_filter() {
     let dir = tempfile::tempdir().unwrap();

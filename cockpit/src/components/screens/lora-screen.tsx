@@ -39,6 +39,7 @@ import {
 } from "@/shared/api/lora";
 import { regionFromConfig } from "@/shared/api/region";
 import { toast, toastFromError } from "@/shared/api/toast";
+import { DASH } from "@/shared/format";
 import "@/shared/i18n";
 import { useProfile } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
@@ -117,7 +118,7 @@ function RuleRow({ rule }: { rule: LoraRule }) {
 export function LoraScreen() {
   const { t } = useTranslation();
   // A wire word the cockpit labels, else the word as sent.
-  const said = (key: ParseKeys | null, raw: string) => (key ? t(key) : raw);
+  const said = (key: ParseKeys | null) => (key ? t(key) : DASH);
   const profile = useProfile();
   const [busy, setBusy] = useState(false);
 
@@ -201,13 +202,13 @@ export function LoraScreen() {
           hint={
             status.region
               ? t("cockpit.lora.regionHint", {
-                  source: said(loraSourceKey(status.region.source), status.region.source),
+                  source: said(loraSourceKey(status.region.source)),
                   plan: status.region.plan_id,
                 })
               : t("lora.regionUnset")
           }
           value={t("lora.module", {
-            transport: status.transport ? said(loraTransportKey(status.transport), status.transport) : "--",
+            transport: status.transport ? said(loraTransportKey(status.transport)) : "--",
             band: status.module_band ?? "--",
           })}
         />
@@ -241,7 +242,7 @@ export function LoraScreen() {
               ? t("cockpit.lora.regionOption", {
                   name: r.name,
                   code: r.code,
-                  rules: r.rules.length ? r.rules.map((x) => said(loraRuleKey(x), x)).join(", ") : t("lora.notVerified"),
+                  rules: r.rules.length ? r.rules.map((x) => said(loraRuleKey(x))).join(", ") : t("lora.notVerified"),
                   module: r.supported_by_module ? "" : t("lora.moduleCannot"),
                 })
               : code;

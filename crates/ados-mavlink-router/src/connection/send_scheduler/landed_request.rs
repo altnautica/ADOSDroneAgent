@@ -1,67 +1,78 @@
-//! The one EXTENDED_SYS_STATE interval request per FC link-up.
+//! The EXTENDED_SYS_STATE interval request while the message is absent.
 //!
 //! The landed state the snapshot publishes comes from EXTENDED_SYS_STATE,
 //! which not every firmware streams by default. A stream table that already
-//! asks for it owns its rate; otherwise, when the FC link comes up and the
-//! message has not arrived within [`LANDED_STATE_GRACE`], the router asks for
-//! it once at 1 Hz. The request is fire-and-forget: a NACK or a missing
-//! COMMAND_ACK leaves `landed_state` null and nothing else.
+//! asks for it owns its rate; otherwise, when the FC link is up and the
+//! message has been absent for [`LANDED_STATE_GRACE`], the router asks for it
+//! at 1 Hz, and asks again every [`LANDED_STATE_REREQUEST`] while it stays
+//! absent. That covers an FC that reboots inside the heartbeat timeout (its
+//! intervals reset without a link drop), a request the FC dropped, and a
+//! message that arrived at link-up and then stopped. The request is
+//! fire-and-forget: a NACK or a missing COMMAND_ACK leaves `landed_state`
+//! null and nothing else.
 
 use std::time::{Duration, Instant};
 
 use super::{stream_rates, FcConnection};
 use crate::state::MSG_EXTENDED_SYS_STATE;
 
-/// How long after link-up EXTENDED_SYS_STATE may stay unseen before it is
+/// How long EXTENDED_SYS_STATE may stay unseen on a live link before it is
 /// requested: an FC that streams it by default has sent one by then.
 pub(crate) const LANDED_STATE_GRACE: Duration = Duration::from_secs(3);
+
+/// How often the request repeats while the message stays absent.
+pub(crate) const LANDED_STATE_REREQUEST: Duration = Duration::from_secs(30);
 
 /// 1 Hz, as a SET_MESSAGE_INTERVAL interval in microseconds.
 const LANDED_STATE_INTERVAL_US: f32 = 1_000_000.0;
 
-/// Per-link-up decision state.
+/// Request state for the current link-up.
 #[derive(Debug, Default)]
 pub(crate) struct LandedStateRequest {
-    /// When the current link-up was first seen; `None` while the link is down.
-    linked_at: Option<Instant>,
-    /// The decision for this link-up is made (requested, or seen arriving).
-    settled: bool,
+    /// Since when the message has been absent on a live link; `None` while
+    /// the link is down or the message arrives.
+    absent_since: Option<Instant>,
+    /// When it was last requested on this link-up.
+    requested_at: Option<Instant>,
 }
 
 impl LandedStateRequest {
     /// Whether to request EXTENDED_SYS_STATE now. `linked` is the FC link
     /// state, `arriving` whether a fresh report is held. A link drop resets
-    /// the decision, so the next link-up (an FC reboot drops its intervals)
-    /// decides again.
+    /// the state, so the next link-up starts a fresh grace.
     pub(crate) fn due(&mut self, linked: bool, arriving: bool, now: Instant) -> bool {
         if !linked {
             *self = Self::default();
             return false;
         }
-        if self.settled {
-            return false;
-        }
         if arriving {
-            self.settled = true;
+            self.absent_since = None;
             return false;
         }
-        let since = *self.linked_at.get_or_insert(now);
+        let since = *self.absent_since.get_or_insert(now);
         if now.saturating_duration_since(since) < LANDED_STATE_GRACE {
             return false;
         }
-        self.settled = true;
+        if self
+            .requested_at
+            .is_some_and(|at| now.saturating_duration_since(at) < LANDED_STATE_REREQUEST)
+        {
+            return false;
+        }
+        self.requested_at = Some(now);
         true
     }
 
     #[cfg(test)]
-    pub(crate) fn linked_since(&mut self, at: Instant) {
-        self.linked_at = Some(at);
+    pub(crate) fn absent_since(&mut self, at: Instant) {
+        self.absent_since = Some(at);
     }
 }
 
 impl FcConnection {
-    /// Ask the FC for EXTENDED_SYS_STATE at 1 Hz once per link-up when it is
-    /// not arriving and the active stream table does not already request it.
+    /// Ask the FC for EXTENDED_SYS_STATE at 1 Hz while it is not arriving and
+    /// the active stream table does not already request it, at most once per
+    /// [`LANDED_STATE_REREQUEST`].
     pub async fn tick_landed_state_request(&self) {
         if !self.transport_open() {
             return;
@@ -79,7 +90,7 @@ impl FcConnection {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .due(linked, arriving, now);
         if due {
-            tracing::info!("requesting EXTENDED_SYS_STATE at 1 Hz: not arriving after link-up");
+            tracing::info!("requesting EXTENDED_SYS_STATE at 1 Hz: not arriving on a live link");
             self.send_message_interval(MSG_EXTENDED_SYS_STATE, LANDED_STATE_INTERVAL_US)
                 .await;
         }

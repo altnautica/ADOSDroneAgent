@@ -10,6 +10,7 @@ import { ReadErrorCard } from "@/components/read-error-card";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { useResource } from "@/hooks/use-resource";
 import { useVehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
+import { primaryBlock, setPrimaryPad } from "@/lib/io-primary";
 import { apiFetch } from "@/shared/api-fetch";
 import { toast, toastFromError } from "@/shared/api/toast";
 
@@ -65,7 +66,10 @@ export function IoRoute() {
   const [pairingMac, setPairingMac] = useState<string | null>(null);
   const [primaryBusy, setPrimaryBusy] = useState<string | null>(null);
   const [primaryTarget, setPrimaryTarget] = useState<{ id: string; name: string } | null>(null);
-  const armed = useVehicleTelemetry().data?.armed === true;
+  const [armedPrompt, setArmedPrompt] = useState<{ resolve: (ok: boolean) => void } | null>(null);
+  // Armed or unknown both block: an unknown arm state may be airborne.
+  const block = primaryBlock(useVehicleTelemetry().data?.armed);
+  const blockText = block === "armed" ? t("io.gamepads.armedRefused") : t("io.gamepads.armedUnknown");
 
   const gamepads = useResource<GamepadsResponse>(
     "io-gamepads",
@@ -121,17 +125,18 @@ export function IoRoute() {
     }
   };
 
-  // Moving the primary moves RC input: confirmed, and refused while armed.
+  // Moving the primary moves RC input: confirmed, and refused while armed or
+  // while the arm state is unknown.
   const makePrimary = async (deviceId: string) => {
-    if (armed) {
-      toast.err(t("io.gamepads.armedRefused"));
+    if (block) {
+      toast.err(blockText);
       return;
     }
     setPrimaryBusy(deviceId);
     try {
-      await apiFetch("/api/v1/ground-station/gamepads/primary", {
-        method: "PUT",
-        body: { device_id: deviceId },
+      await setPrimaryPad(deviceId, () => {
+        setPrimaryTarget(null);
+        return new Promise<boolean>((resolve) => setArmedPrompt({ resolve }));
       });
       await gamepads.refetch();
     } catch (err) {
@@ -345,9 +350,23 @@ export function IoRoute() {
           if (!open) setPrimaryTarget(null);
         }}
         title={t("io.gamepads.primaryTitle", { name: primaryTarget?.name ?? "" })}
-        description={armed ? t("io.gamepads.armedRefused") : t("io.gamepads.primaryBody")}
+        description={block ? blockText : t("io.gamepads.primaryBody")}
         confirmLabel={t("io.gamepads.makePrimary")}
         onConfirm={() => (primaryTarget ? makePrimary(primaryTarget.id) : undefined)}
+      />
+      <ConfirmDialog
+        open={armedPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            armedPrompt?.resolve(false);
+            setArmedPrompt(null);
+          }
+        }}
+        title={t("settings.profile.armedTitle")}
+        description={t("settings.shared.armedOverride")}
+        confirmLabel={t("io.gamepads.makePrimary")}
+        destructive
+        onConfirm={() => armedPrompt?.resolve(true)}
       />
     </PageShell>
   );

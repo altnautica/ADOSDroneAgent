@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useConfig } from "@/hooks/use-config";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { putConfigChecked } from "@/shared/api/apply-actions";
 import {
@@ -80,6 +81,7 @@ function ApplyField({
 
   const value = draft ?? current;
   const dirty = draft !== null && draft !== current;
+  useDirtyGuard(dirty || saving);
   const error = dirty && validate ? validate(value) : null;
 
   async function apply() {

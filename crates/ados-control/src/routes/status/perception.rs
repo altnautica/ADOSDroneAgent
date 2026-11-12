@@ -1,24 +1,8 @@
 //! The perception capability and tier the status routes report.
 
 use super::*;
-use crate::ipc::VisionIpcClient;
-
-/// The vision engine's backend name for its in-process ONNX runtime: the
-/// detector runs on the companion's CPU.
-const CPU_BACKEND: &str = "onnx";
-
-/// Where the vision engine's live backend runs the detector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LiveDetector {
-    /// No detector runs: the engine is unreachable (vision disabled, not up
-    /// yet, or mid-restart), or its backend runs no real inference (the mock,
-    /// or an unavailable backend).
-    Off,
-    /// A real backend on an accelerator (an NPU or accelerator sidecar).
-    Accelerator,
-    /// The in-process ONNX backend: the detector runs on the CPU.
-    Cpu,
-}
+use crate::ipc::vision_client::default_vision_socket;
+pub(crate) use ados_protocol::vision_detector::LiveDetector;
 
 /// Derive the perception capability + tier from the board block (the same board
 /// sidecar [`read_board`] returns) plus where the vision engine's live backend
@@ -59,8 +43,8 @@ pub(crate) fn perception_fields(
     // The live offload-link the reconciler writes: a paired, reachable
     // workstation flips compute_node_paired + bearer_acceptable true and names
     // the target. Absent / stale ⇒ no link (never a fabricated paired node).
-    // Fed identically here and on the cloud heartbeat via
-    // `TierInputs::for_drone`.
+    // Fed identically here and on the cloud heartbeat, from the same live
+    // detector read, via `TierInputs::for_drone`.
     let link = ados_protocol::offload_link::read_offload_link(now_epoch_ms());
     let (paired, bearer_ok) = link
         .as_ref()
@@ -80,39 +64,15 @@ pub(crate) fn perception_fields(
 }
 
 /// Where the vision engine's loaded backend runs its detector, read LIVE over
-/// `/run/ados/vision.sock`'s `vision.list_models` reply: the engine folds its
-/// `backend` name and `backend_inference_capable` into that reply
-/// unconditionally (see `VisionEngine::is_inference_capable`), so this is
-/// answered even when no model is registered. An unreachable engine degrades
-/// to [`LiveDetector::Off`]: with nothing loaded there is no live inference to
+/// `/run/ados/vision.sock` through the shared
+/// [`ados_protocol::vision_detector::query_live_detector`], the read the cloud
+/// heartbeat makes too. An unreachable engine degrades to
+/// [`LiveDetector::Off`]: with nothing loaded there is no live inference to
 /// report, and a stale answer would be exactly the fabricated capability an
 /// honest surface forbids.
 ///
 /// Shared by `/api/status` and `/api/status/full` so both feed
 /// [`perception_fields`] the same live signal.
 pub(crate) async fn live_detector() -> LiveDetector {
-    match VisionIpcClient::default_socket().list_models().await {
-        Ok(reply) => detector_from_reply(&reply),
-        Err(_) => LiveDetector::Off,
-    }
-}
-
-/// The detector a `vision.list_models` reply describes.
-pub(crate) fn detector_from_reply(reply: &rmpv::Value) -> LiveDetector {
-    let field = |key: &str| {
-        reply
-            .as_map()
-            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(key)))
-            .map(|(_, v)| v)
-    };
-    let capable = field("backend_inference_capable")
-        .and_then(rmpv::Value::as_bool)
-        .unwrap_or(false);
-    if !capable {
-        return LiveDetector::Off;
-    }
-    match field("backend").and_then(rmpv::Value::as_str) {
-        Some(CPU_BACKEND) => LiveDetector::Cpu,
-        _ => LiveDetector::Accelerator,
-    }
+    ados_protocol::vision_detector::query_live_detector(&default_vision_socket()).await
 }

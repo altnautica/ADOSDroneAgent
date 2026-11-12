@@ -191,8 +191,7 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             kv_text(t, "Odometry", LABEL, odometry),
         ];
         if let Some(ms) = nav.pose_age_ms {
-            let text = spec_text("nav_source.pose_age", &[("ms", &format!("{ms:.0}"))]);
-            rows.push(kv_text(t, "Pose", LABEL, text));
+            rows.push(kv_text(t, "Pose", LABEL, format!("{ms:.0} ms")));
         }
         for line in rows {
             out.push(mark_stale(t, line, nav.stale));
