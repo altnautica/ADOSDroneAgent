@@ -263,6 +263,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/wfb/pair/failover-status` |  |
 | GET | `/api/wfb/pair/local-bind` | relay-forbidden |
 | POST | `/api/wfb/pair/local-bind` | relay-forbidden |
+| POST | `/api/wfb/pair/local-bind/cancel` | relay-forbidden |
 | POST | `/api/wfb/pair/unpair` | relay-forbidden |
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
@@ -270,7 +271,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-245 native routes.
+246 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

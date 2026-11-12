@@ -29,6 +29,8 @@ import { ListItem } from "@/components/ui/list-item";
 import { startRecording, stopRecording } from "@/lib/api";
 import { fmtBytes, fmtClock, fmtGb, fmtMb } from "@/lib/format-status";
 import { maxTemp, parseServices, restartVerdict, serviceTone, shortServiceName } from "@/lib/system-ops";
+import { profileWordKey, roleWordKey } from "@/lib/profile-words";
+import { prettify } from "@/lib/settings-schema";
 import { apiFetch } from "@/shared/api-fetch";
 import { rebootAgent } from "@/shared/api/setup-actions";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -36,6 +38,7 @@ import { DASH, fmtInt, fmtPct, fmtTemp, fmtUptime } from "@/shared/format";
 import "@/shared/i18n";
 import { probePairingInfo, useProfile, type PairingInfoLite } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
+import { useConfigStore } from "@/stores/config-store";
 import { useStatusStore } from "@/stores/status-store";
 import type { ScreenAction } from "@/nav/navigator";
 
@@ -136,6 +139,9 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
 
   const [restarting, setRestarting] = useState<string | null>(null);
   const [rebooting, setRebooting] = useState(false);
+  // Settings changes a service reads only at startup: the same list the shell
+  // banner shows, here as a row any input can reach.
+  const pendingReboot = useConfigStore((s) => s.pendingRebootPaths);
   const [recordBusy, setRecordBusy] = useState(false);
 
   const r = sys.data;
@@ -210,8 +216,8 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
         <Row label={t("cockpit.system.reachName")} value={mdnsHost ? <CopyHost host={mdnsHost} /> : DASH} />
         <Row
           label={t("cockpit.system.profile")}
-          value={profile && profile !== "unknown" ? profile.replace("_", " ") : DASH}
-          hint={role ? t("cockpit.system.roleHint", { role }) : undefined}
+          value={profile && profile !== "unknown" ? t(profileWordKey(profile)) : DASH}
+          hint={role ? t("cockpit.system.roleHint", { role: t(roleWordKey(role)) }) : undefined}
         />
         <Row label={t("cockpit.system.version")} value={box?.agent_version ?? DASH} mono />
         <Row label={t("cockpit.system.uptime")} value={fmtUptime(box?.uptime_seconds)} />
@@ -219,9 +225,25 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
           <Row label={t("cockpit.system.board")} value={board.name} hint={[board.soc, board.arch].filter(Boolean).join(" · ") || undefined} />
         ) : null}
         {board?.ram_total_mb ? <Row label={t("cockpit.system.ramInstalled")} value={fmtMb(board.ram_total_mb)} /> : null}
+        {pendingReboot.length > 0 ? (
+          <Row
+            label={t("cockpit.system.rebootToApply")}
+            value={t("cockpit.system.rebootPending", {
+              paths: pendingReboot.map((p) => prettify(p.split(".").pop() ?? p)).join(", "),
+            })}
+            tone="warn"
+            mono={false}
+          />
+        ) : null}
         <div className="mt-[0.3rem] flex">
           <GuardedButton
-            label={rebooting ? t("diagnostics.reboot.rebooting") : t("diagnostics.reboot.button")}
+            label={
+              rebooting
+                ? t("diagnostics.reboot.rebooting")
+                : pendingReboot.length > 0
+                  ? t("cockpit.system.rebootToApply")
+                  : t("diagnostics.reboot.button")
+            }
             guardLabel={t("cockpit.system.rebootGuard")}
             icon={Power}
             disabled={rebooting}

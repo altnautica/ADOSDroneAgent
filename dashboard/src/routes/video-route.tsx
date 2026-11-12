@@ -9,7 +9,9 @@ import { VideoPanel } from "@/components/panels/video-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useResource } from "@/hooks/use-resource";
+import { assignmentRows, showsLongRangeRadio } from "@/lib/video-page";
 import { fmtBitrate, fmtNum } from "@/shared/format";
 import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 
@@ -56,6 +58,8 @@ interface VideoLatencyResponse {
 
 export function VideoRoute() {
   const { t } = useTranslation();
+  const { profile } = useNodeIdentity();
+  const radioCards = showsLongRangeRadio(profile);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // When the agent grabbed the last downloaded still.
@@ -120,6 +124,7 @@ export function VideoRoute() {
       ? `${radio.fec_k} / ${radio.fec_n} (${radio.fec_k > 0 ? Math.round(((radio.fec_n - radio.fec_k) / radio.fec_k) * 100) : 0}%)`
       : "—";
   const camList = cameras.data?.cameras ?? [];
+  const assigned = assignmentRows(cameras.data?.assignments);
   const latencyMs = latency.data?.latency_ms;
   const ewma = latency.data?.ewma_ms;
   const samples = latency.data?.samples ?? 0;
@@ -169,6 +174,7 @@ export function VideoRoute() {
           </CardContent>
         </Card>
 
+        {radioCards && (
         <Card>
           <CardHeader>
             <CardTitle>{t("video.route.radio")}</CardTitle>
@@ -183,7 +189,7 @@ export function VideoRoute() {
               <div className="font-mono">{radio?.mcs_index ?? "—"}</div>
               <div className="text-xs text-muted-foreground">{t("video.fields.fecRatio")}</div>
               <div className="font-mono">{fecRatio}</div>
-              <div className="text-xs text-muted-foreground">{t("video.fields.adaptiveFec")}</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.adaptiveBitrate")}</div>
               <div className="font-mono">
                 {adaptive?.adaptive_bitrate_enabled == null
                   ? "—"
@@ -200,7 +206,9 @@ export function VideoRoute() {
             </div>
           </CardContent>
         </Card>
+        )}
 
+        {radioCards && (
         <LinkTuningCard
           mcsIndex={radio?.mcs_index}
           fecK={radio?.fec_k}
@@ -209,6 +217,7 @@ export function VideoRoute() {
           adaptiveEnabled={config.data?.adaptive?.adaptive_bitrate_enabled}
           onChanged={() => void config.refetch()}
         />
+        )}
 
         <Card>
           <CardHeader>
@@ -263,6 +272,20 @@ export function VideoRoute() {
                   </li>
                 ))}
               </ul>
+            )}
+            {!cameras.isError && (
+              <div className="mt-3 border-t border-border/40 pt-2 text-sm">
+                <div className="text-xs text-muted-foreground">{t("video.route.assignments")}</div>
+                {assigned.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">{t("video.route.noAssignments")}</p>
+                ) : (
+                  <ul className="font-mono text-xs">
+                    {assigned.map((a) => (
+                      <li key={a.role}>{t("video.route.assignment", { role: a.role, device: a.device })}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             )}
           </CardContent>
         </Card>

@@ -2514,6 +2514,15 @@
     {
       "method": "POST",
       "notes": "relay-forbidden",
+      "path": "/api/wfb/pair/local-bind/cancel",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
       "path": "/api/wfb/pair/unpair",
       "public": false,
       "relay_forbidden": true,

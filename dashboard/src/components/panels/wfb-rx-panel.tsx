@@ -45,7 +45,7 @@ export function WfbRxPanel() {
   const lossSeverity =
     loss == null || stale ? null : loss < 1 ? "ok" : loss < 5 ? "warn" : "err";
 
-  const badge = wfbStateBadge(state, t);
+  const badge = wfbStateBadge(state);
 
   return (
     <Card>

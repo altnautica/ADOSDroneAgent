@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { EmptyNote, ErrorNote, ProgressBar, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
@@ -13,6 +13,7 @@ import { SelectSettingRow } from "@/components/ui/setting-row";
 import { SlideToConfirm } from "@/components/ui/slide-to-confirm";
 import { FOLLOW_COUNTRY, regionApplyBlock, regionBody } from "@/lib/lora-model";
 import { getArmedReading, isArmedRefusal, radioWriteBlock } from "@/lib/radio-gate";
+import { loraRuleKey, loraSourceKey, loraTransportKey } from "@/lib/screen-words";
 import type { Tone } from "@/lib/tone";
 import type { AgentConfig } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
@@ -92,7 +93,7 @@ function RuleRow({ rule }: { rule: LoraRule }) {
     return (
       <div className="flex flex-col gap-[0.2rem] px-[0.6rem]">
         <div className="flex justify-between text-[0.8rem]">
-          <span className="text-muted-foreground">{t("lora.rule.duty", { band: rule.sub_band })}</span>
+          <span className="text-muted-foreground">{t("cockpit.lora.dutyBand", { band: rule.sub_band })}</span>
           <span className="font-mono">
             {t("lora.rule.dutyValue", {
               used: (rule.airtime_ms_window / 1000).toFixed(1),
@@ -110,11 +111,13 @@ function RuleRow({ rule }: { rule: LoraRule }) {
       : rule.kind === "lbt"
         ? t("lora.rule.lbtValue", { rssi: rule.last_rssi_dbm, threshold: rule.threshold_dbm, busy: rule.busy_count })
         : t("lora.rule.powerValue", { configured: rule.configured_mw, limit: rule.limit_mw });
-  return <Row label={t(`lora.rule.${rule.kind}`)} value={value} />;
+  return <Row label={t(`cockpit.lora.ruleName.${rule.kind}`)} value={value} />;
 }
 
 export function LoraScreen() {
   const { t } = useTranslation();
+  // A wire word the cockpit labels, else the word as sent.
+  const said = (key: ParseKeys | null, raw: string) => (key ? t(key) : raw);
   const profile = useProfile();
   const [busy, setBusy] = useState(false);
 
@@ -194,9 +197,19 @@ export function LoraScreen() {
     body = (
       <div className="flex flex-col gap-[0.4rem]">
         <Row
-          label={status.region?.plan_id ?? "--"}
-          hint={status.region ? t("lora.source", { source: status.region.source }) : t("lora.regionUnset")}
-          value={t("lora.module", { transport: status.transport ?? "--", band: status.module_band ?? "--" })}
+          label={status.region?.name ?? "--"}
+          hint={
+            status.region
+              ? t("cockpit.lora.regionHint", {
+                  source: said(loraSourceKey(status.region.source), status.region.source),
+                  plan: status.region.plan_id,
+                })
+              : t("lora.regionUnset")
+          }
+          value={t("lora.module", {
+            transport: status.transport ? said(loraTransportKey(status.transport), status.transport) : "--",
+            band: status.module_band ?? "--",
+          })}
         />
         {status.channel ? <Row label={t("lora.channel", { freq: status.channel.freq_mhz.toFixed(3) })} /> : null}
         {!status.region ? <Row label={t("lora.regionUnsetBanner")} tone="warn" /> : null}
@@ -225,10 +238,10 @@ export function LoraScreen() {
             if (code === FOLLOW_COUNTRY) return t("lora.followCountry", { country: country ?? "--" });
             const r = regionRows.find((x) => x.code === code);
             return r
-              ? t("lora.regionOption", {
+              ? t("cockpit.lora.regionOption", {
+                  name: r.name,
                   code: r.code,
-                  plan: r.plan_id,
-                  rules: r.rules.length ? r.rules.join(",") : t("lora.notVerified"),
+                  rules: r.rules.length ? r.rules.map((x) => said(loraRuleKey(x), x)).join(", ") : t("lora.notVerified"),
                   module: r.supported_by_module ? "" : t("lora.moduleCannot"),
                 })
               : code;

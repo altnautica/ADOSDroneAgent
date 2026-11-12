@@ -14,6 +14,10 @@ pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
         // unpair.
         .get("/api/wfb/pair/local-bind", wfb_local_bind::get_local_bind)
         .post("/api/wfb/pair/local-bind", wfb_local_bind::post_local_bind)
+        .post(
+            "/api/wfb/pair/local-bind/cancel",
+            wfb_local_bind::post_cancel_local_bind,
+        )
         .post("/api/wfb/pair/unpair", wfb_local_bind::post_unpair)
         // The coordinated channel hop and the runtime TX power (set + persist).
         .post("/api/wfb/channel", wfb_write::set_wfb_channel)

@@ -39,7 +39,7 @@ export function WfbTxPanel() {
   const adapterMissing =
     state === "disabled" || (state === "error" && !iface);
 
-  const badge = wfbStateBadge(state, t);
+  const badge = wfbStateBadge(state);
 
   return (
     <Card>

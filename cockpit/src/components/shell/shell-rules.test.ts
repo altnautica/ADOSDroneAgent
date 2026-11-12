@@ -23,6 +23,12 @@ describe("shell and screen rules", () => {
     expect(s).toMatch(/"touch-target flex shrink-0 items-center rounded-xl/);
   });
 
+  it("the setup offer's buttons keep the 48 px touch floor", () => {
+    const s = src("components/shell/setup-offer-banner.tsx");
+    expect(s).not.toContain("minHeight: 36");
+    expect(s).toContain('"touch-target shrink-0');
+  });
+
   it("the setup offer hides over the setup screen it opens", () => {
     expect(src("components/shell/setup-offer-banner.tsx")).toContain('activeScreenId(s) === "aircraft-setup"');
   });

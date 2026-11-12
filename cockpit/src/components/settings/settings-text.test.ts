@@ -25,6 +25,9 @@ const FILES = [
   "components/shell/reboot-banner.tsx",
   "components/shell/setup-offer-banner.tsx",
   "components/shell/menu-rail.tsx",
+  "components/shell/action-bar.tsx",
+  "components/shell/status-strip.tsx",
+  "components/shell/banner-host.tsx",
 ];
 
 const TEXT_ATTRS: Record<string, true> = {
@@ -40,8 +43,13 @@ function literalsIn(source: string): string[] {
     if (ts.isJsxAttribute(n) && TEXT_ATTRS[n.name.getText()] && n.initializer && ts.isStringLiteral(n.initializer) && isWords(n.initializer.text)) {
       out.push(`${n.name.getText()}="${n.initializer.text}"`);
     }
-    if (ts.isJsxExpression(n) && n.expression && ts.isStringLiteral(n.expression) && isWords(n.expression.text)) {
-      out.push(n.expression.text);
+    if (ts.isJsxExpression(n) && n.expression) {
+      // A literal child, or either branch of a conditional child (a prop's
+      // conditional picks a tone or a mode, not words).
+      const e = n.expression;
+      const child = !ts.isJsxAttribute(n.parent);
+      const branches = child && ts.isConditionalExpression(e) ? [e.whenTrue, e.whenFalse] : [e];
+      for (const b of branches) if (ts.isStringLiteral(b) && isWords(b.text)) out.push(b.text);
     }
     n.forEachChild(visit);
   };
@@ -52,6 +60,7 @@ function literalsIn(source: string): string[] {
 describe("settings and shell text", () => {
   it("the scan sees a literal", () => {
     expect(literalsIn('const a = <div title="Theme">Glove mode</div>;').sort()).toEqual(["Glove mode", 'title="Theme"']);
+    expect(literalsIn('const a = <span>{on ? "linked" : "none"}</span>;').sort()).toEqual(["linked", "none"]);
   });
 
   for (const file of FILES) {

@@ -6,6 +6,7 @@
     "loading": "Loading…",
     "dash": "—",
     "refusedFallback": "This device refused the request.",
+    "armedRefused": "Refused: the vehicle is armed. Disarm first.",
     "back": "Back"
   },
   "nav": {
@@ -55,6 +56,14 @@
     "msp": "MSP"
   },
   "layout": {
+    "restart": {
+      "rebooting": "Rebooting the companion computer… ({{seconds}} s)",
+      "restarting": "Restarting the agent for the new profile… ({{seconds}} s)",
+      "back": "The agent is back online.",
+      "timedOut": "The agent did not answer within two minutes of the restart. Check that the board is powered and on the network.",
+      "offlineTitle": "Restarting…",
+      "offlineBody": "The agent is restarting as asked. The dashboard reconnects on its own once it answers again."
+    },
     "settings": {
       "profileBlurb": "Drone or ground station, role, restart on apply.",
       "networkBlurb": "Uplink matrix, failover, Wi-Fi client, hotspot.",
@@ -201,6 +210,54 @@
     }
   },
   "panels": {
+    "state": {
+      "unrecognised": "Unrecognised",
+      "service": {
+        "active": "Running",
+        "inactive": "Stopped",
+        "failed": "Failed",
+        "activating": "Starting",
+        "deactivating": "Stopping",
+        "reloading": "Reloading"
+      },
+      "wfb": {
+        "active": "Active",
+        "ready": "Ready",
+        "connecting": "Connecting",
+        "stale": "Stale",
+        "error": "Error",
+        "disabled": "Disabled"
+      },
+      "gnssFix": {
+        "none": "No fix",
+        "fix2d": "2D fix",
+        "fix3d": "3D fix",
+        "dgps": "DGPS",
+        "rtkFloat": "RTK float",
+        "rtkFixed": "RTK fixed"
+      },
+      "gnssBase": {
+        "off": "Off",
+        "surveying": "Surveying",
+        "fixed": "Fixed",
+        "failed": "Failed"
+      },
+      "video": {
+        "running": "Running",
+        "ready": "Ready",
+        "noCamera": "No camera",
+        "stopped": "Stopped"
+      },
+      "storage": {
+        "ok": "OK",
+        "nearFull": "Nearly full",
+        "full": "Full"
+      },
+      "loraSource": {
+        "loraRegion": "set as a region",
+        "country": "from the country"
+      }
+    },
     "tiles": {
       "fc": "FC",
       "mav": "MAV",
@@ -266,6 +323,7 @@
       "title": "Cloud Relay",
       "mode": "mode",
       "relayDisabled": "Relay disabled. Mission Control reaches this drone over the LAN.",
+      "relayDisabledSubject": "Relay disabled. Mission Control reaches this {{subject}} over the LAN.",
       "pairing": "Pairing",
       "paired": "paired",
       "awaitingCode": "awaiting code…"
@@ -425,6 +483,7 @@
       "pausedOffScreen": "Paused while off screen.",
       "pipelineIdle": "Pipeline idle.",
       "plugInCamera": "Plug in a camera and the agent will publish a video stream automatically.",
+      "gsIdle": "No stream from the drone yet.",
       "connectingEllipsis": "connecting…",
       "snapshotOnly": "Snapshot only — live feed unavailable",
       "noVideoWfb": "No video. {{detail}}; WFB-rx received 0 packets.",
@@ -443,6 +502,7 @@
       "mcsIndex": "MCS index",
       "fecRatio": "FEC ratio",
       "adaptiveFec": "adaptive FEC",
+      "adaptiveBitrate": "adaptive bitrate",
       "preset": "preset",
       "on": "on",
       "off": "off",
@@ -469,7 +529,10 @@
       "latency": "Latency",
       "camerasDetected": "Cameras detected",
       "noCameras": "No cameras detected. Plug in a USB UVC camera or a MIPI-CSI module and Refresh.",
-      "camerasReadFailed": "Could not read the cameras from this node."
+      "camerasReadFailed": "Could not read the cameras from this node.",
+      "assignments": "Camera assignments",
+      "noAssignments": "No camera is assigned yet.",
+      "assignment": "{{role}} → {{device}}"
     },
     "error": {
       "noFrames": "No video frames received.",
@@ -1057,7 +1120,48 @@
       "advertisedLinks": "Advertised links",
       "advertisedHint": "These are the reach URLs the agent advertises. Prefer an IP URL from a hosted ground station; a <code>.local</code> name resolves only from a device on this LAN."
     },
+    "validation": {
+      "url": "Enter the full server URL, starting with https://.",
+      "broker": "Enter the MQTT broker host name.",
+      "port": "Enter a port from 1 to 65535.",
+      "boardOverride": "Use letters, digits, dash and underscore only, up to 64 characters.",
+      "invalid": "Check the highlighted value."
+    },
     "swarm": {
+      "mode": {
+        "title": "Mode",
+        "hint": "What the swarm runtime flies while Enabled is on and the aircraft is in GUIDED. Separation still overrides every mode.",
+        "hold": "Hold",
+        "holdDesc": "Hold position; no swarm motion.",
+        "flocking": "Flocking",
+        "flockingDesc": "Cohesion, alignment and separation with the neighbours it hears.",
+        "formation": "Formation",
+        "formationDesc": "Hold a station in the default formation."
+      },
+      "separation": {
+        "title": "Separation (safety layer)",
+        "radiusLabel": "Repulsion radius (m)",
+        "radiusHint": "Below this distance the drone pushes away from a neighbour. Must stay above the hard floor.",
+        "hardLabel": "Hard floor (m)",
+        "hardHint": "Below this distance the horizontal solution is abandoned for a hold and a slot-indexed climb, overriding every other mode.",
+        "order": "The repulsion radius must stay above the hard floor.",
+        "confirmTitle": "Change the separation envelope?",
+        "confirmBody": "Separation is the collision-avoidance layer, not a preference. A larger value makes the fleet spread; a smaller one lets aircraft close on each other before anything intervenes. Apply this change?",
+        "confirmAction": "Change it"
+      },
+      "flock": {
+        "title": "Flocking (advanced)",
+        "cohesionLabel": "Cohesion gain (%)",
+        "cohesionHint": "Pull toward the local group's centre, as a percentage of unit gain (40 means 0.40).",
+        "alignmentLabel": "Alignment gain (%)",
+        "alignmentHint": "Match the local group's heading and speed, as a percentage of unit gain (60 means 0.60).",
+        "separation_gainLabel": "Separation gain (%)",
+        "separation_gainHint": "Strength of the push away from a close neighbour, as a percentage of unit gain (150 means 1.50).",
+        "radiusLabel": "Flocking radius (m)",
+        "radiusHint": "Neighbours beyond this range contribute nothing to cohesion or alignment.",
+        "neighborsLabel": "Weighted neighbours",
+        "neighborsHint": "How many of the nearest neighbours inside the radius are weighted, so a dense cluster cannot dominate the solution."
+      },
       "formationLine": "Line",
       "formationLineDesc": "Abreast, perpendicular to the heading.",
       "formationColumn": "Column",
@@ -1643,6 +1747,7 @@
       "powerValue": "{{configured}}/{{limit}} mW ERP"
     },
     "refused": "refused  duty {{duty}}  dwell {{dwell}}  lbt {{lbt}}  power {{power}}  region {{region}}",
+    "refusedCounts": "Refused so far: duty cycle {{duty}}, dwell time {{dwell}}, listen before talk {{lbt}}, power {{power}}, no region {{region}}",
     "chip": {
       "moduleBand": "Module band {{module}} MHz cannot tune {{plan}}",
       "meshtastic": "Meshtastic preset {{node}}, region expects {{expected}}",
@@ -1879,7 +1984,25 @@
     },
     "lora": {
       "mismatch": "mismatch",
-      "battery": "{{pct}}%"
+      "battery": "{{pct}}%",
+      "transport": {
+        "e22": "LoRa module",
+        "meshtastic": "Meshtastic radio",
+        "loopback": "Test loopback"
+      },
+      "source": {
+        "lora": "Set on this screen",
+        "country": "Follows the country setting"
+      },
+      "regionHint": "{{source}} · plan {{plan}}",
+      "regionOption": "{{name}} ({{code}})  {{rules}} {{module}}",
+      "ruleName": {
+        "duty_cycle": "Duty cycle",
+        "dwell_time": "Dwell time",
+        "lbt": "Listen before talk",
+        "max_power": "Power limit"
+      },
+      "dutyBand": "Duty cycle, sub-band {{band}}"
     },
     "capture": {
       "state": "state",
@@ -1900,7 +2023,30 @@
       "noStreams": "No sensor streams reported.",
       "streamLine": "{{role}} · {{source}} · age {{age}} · σ {{sigma}}",
       "rigReady": "ready to replace",
-      "rigGuard": "Hold to replace the rig"
+      "rigGuard": "Hold to replace the rig",
+      "kind": {
+        "imu": "IMU",
+        "camera": "Camera",
+        "thermal": "Thermal camera",
+        "lidar": "Lidar",
+        "gnss": "GNSS",
+        "baro": "Barometer",
+        "mag": "Compass"
+      },
+      "source": {
+        "hub": "sensor hub",
+        "fc": "flight controller",
+        "vision": "camera pipeline",
+        "lidar": "lidar",
+        "gnss": "GNSS receiver",
+        "sim": "simulator",
+        "host": "this computer"
+      },
+      "hubSerial": "USB serial {{target}}",
+      "hubSimulated": "simulated hub {{target}}",
+      "calibrate": "Calibration",
+      "calibrateHint": "Accelerometer and compass calibration are in Aircraft setup.",
+      "calibrateOpen": "Calibrate"
     },
     "system": {
       "title": "System",
@@ -1930,7 +2076,9 @@
       "copyFailed": "Could not copy to the clipboard.",
       "tools": "Tools",
       "peripheralsHint": "Connected devices and buses",
-      "logsHint": "Agent and service logs"
+      "logsHint": "Agent and service logs",
+      "rebootToApply": "Reboot to apply",
+      "rebootPending": "Changed: {{paths}}"
     },
     "access": {
       "reading": "Reading this node's access state…",
@@ -1956,7 +2104,8 @@
       "vehicle": "Vehicle",
       "outOfRange": "{{name}} must be between {{min}} and {{max}}. Nothing was staged.",
       "rebootNeeded": "Saved. Reboot the flight controller for these to take effect.",
-      "nonDefault": "default {{value}}"
+      "nonDefault": "default {{value}}",
+      "savedPartialHint": "The flight controller may take longer than 2 s to confirm a write under heavy load."
     },
     "msp": {
       "title": "MSP",
@@ -1995,22 +2144,22 @@
       "linked": "linked",
       "unpairedState": "unpaired",
       "windowOpen": "Pair window open",
-      "rfLink": "Drone RF link",
-      "pairedDrone": "Bound drone",
+      "rfLink": "Radio link",
+      "pairedDrone": "Bound {{peer}}",
       "fingerprint": "Key fingerprint",
       "role": "Role",
       "autoPair": "Auto-pair",
       "on": "on",
       "off": "off",
-      "unpairDrone": "Unbind drone",
-      "rfUnpaired": "Drone unbound. The radio key is wiped.",
-      "rfUnpairNote": "Wipes the radio key and disables auto-bind. The drone must be bound again to reconnect.",
-      "noDrone": "No drone is bound to this node over the radio link.",
+      "unpairDrone": "Unbind the {{peer}}",
+      "rfUnpaired": "Unbound from the {{peer}}. The radio key is wiped.",
+      "rfUnpairNote": "Wipes the radio key and disables auto-bind. Bind with the {{peer}} again to reconnect.",
+      "noDrone": "No {{peer}} is bound to this node over the radio link.",
       "bindSession": "Bind session",
       "opening": "Opening bind window…",
-      "pairDrone": "Bind a drone",
+      "pairDrone": "Pair with a {{peer}}",
       "bindFailed": "Could not open the bind window.",
-      "bindNote": "Opens a local bind window over the radio. Power the drone nearby; auto-bind completes the pair.",
+      "bindNote": "Opens a local bind window over the radio. Power the {{peer}} nearby; auto-bind completes the pair.",
       "browserAccess": "Access from a browser",
       "browserAccessNote": "Unlock this node's data (status, video, command) from a browser on the trusted LAN by setting or entering its PIN.",
       "radioState": "Radio: {{state}}",
@@ -2027,9 +2176,11 @@
         "unknown": "Unknown step"
       },
       "bindAge": "{{s}} s in this step",
+      "bindCancel": "Cancel bind",
+      "bindCancelFailed": "Could not stop the bind.",
       "bindError": "Reason",
       "bindResult": {
-        "paired": "Drone bound.",
+        "paired": "Bound to the {{peer}}.",
         "failed": "The bind failed.",
         "aborted": "The bind was stopped before it finished."
       }
@@ -2087,7 +2238,14 @@
     },
     "peripherals": {
       "residualAbsent": "This node's peripheral service is not running, so there is no peripheral list.",
-      "unavailable": "Could not read the peripherals."
+      "unavailable": "Could not read the peripherals.",
+      "state": {
+        "connected": "connected",
+        "disconnected": "disconnected",
+        "notDetected": "not detected",
+        "error": "error",
+        "unknown": "unknown"
+      }
     },
     "node": {
       "title": "Node",
@@ -2112,7 +2270,20 @@
       "noSessions": "No perception offload session is live.",
       "sessionDetail": "camera {{camera}} · {{frames}} frames · {{reconnects}} reconnects",
       "back": "Back",
-      "stale": "stale"
+      "stale": "stale",
+      "jobState": {
+        "queued": "Queued",
+        "running": "Running",
+        "done": "Done",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+        "interrupted": "Interrupted"
+      },
+      "sessionState": {
+        "opening": "Opening",
+        "live": "Live",
+        "stalled": "Stalled"
+      }
     },
     "settingsSections": {
       "heading": "Agent settings",
@@ -2159,7 +2330,7 @@
         "appearanceSummary": "Theme and glove mode on this panel",
         "controls": "Controls",
         "aircraftSetupSummary": "Calibrate, configure and tune the flight controller",
-        "controlsSummary": "Controller map, sticks, calibration, on-screen sticks and voice prompts"
+        "controlsSummary": "Controller map, sticks, stick calibration, on-screen sticks and voice prompts"
       },
       "tree": {
         "unknownGroup": "Unknown settings group.",
@@ -2311,6 +2482,39 @@
       "restartVideo": "Restart video",
       "videoRestarted": "Video restarted. The changes are live.",
       "videoRestartFailed": "Could not restart video.",
+      "quickMenu": "Quick menu",
+      "smallerUi": "Smaller UI",
+      "largerUi": "Larger UI",
+      "hint": {
+        "move": "◀ ▶ move",
+        "select": "● select",
+        "back": "↩ back",
+        "menu": "≡ menu"
+      },
+      "input": {
+        "buttons": "Front-panel buttons",
+        "gamepad": "Gamepad",
+        "wakeLock": "Screen wake lock"
+      },
+      "strip": {
+        "loss": "Loss",
+        "snr": "SNR",
+        "channel": "Ch",
+        "rate": "Rate",
+        "role": "Role",
+        "uplink": "Uplink",
+        "pair": "Pair",
+        "linked": "linked",
+        "none": "none",
+        "cpu": "CPU",
+        "temp": "Temp",
+        "stale": "stale",
+        "rec": "REC"
+      },
+      "cloudNudge": {
+        "body": "New installs default to local-only. Switch if this node never needs to be reached from outside the LAN.",
+        "openSettings": "Open settings"
+      },
       "reach": {
         "unpairedTitle": "This node is not paired",
         "signedOutTitle": "Not signed in to this node",

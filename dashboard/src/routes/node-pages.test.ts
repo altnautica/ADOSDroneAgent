@@ -135,7 +135,7 @@ describe("/lora", () => {
     expect(out).toContain("next TX now");
     expect(out).toContain("14.4/36 s");
     expect(out).toContain("25/25 mW ERP");
-    expect(out).toContain("duty 2");
+    expect(out).toContain("duty cycle 2");
   });
 
   it("blocks with region_unset", () => {

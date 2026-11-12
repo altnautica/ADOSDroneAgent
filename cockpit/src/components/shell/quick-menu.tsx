@@ -27,7 +27,6 @@ import { useFreshPilot } from "@/hooks/use-pilot";
 import { preflightTally, usePreflightItems } from "@/hooks/use-preflight-items";
 import { useRoster } from "@/hooks/use-roster";
 import { useWidthClass } from "@/hooks/use-width-class";
-import { openAircraftSetup } from "@/lib/aircraft-setup";
 import { VIEW_LABELS } from "@/lib/cockpit-view";
 import { mountablePanels } from "@/lib/extensions";
 import { feedCameras } from "@/lib/feed-legs";
@@ -42,6 +41,7 @@ import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
+import { useSetupOfferStore } from "@/stores/setup-offer-store";
 import { useStatusStore } from "@/stores/status-store";
 import { useTopBarStore } from "@/stores/top-bar-store";
 
@@ -116,8 +116,10 @@ export function QuickMenu() {
   const cameras = useMemo(() => feedCameras(streams, roster), [streams, roster]);
   const pilot = useFreshPilot();
   const setupNeeded = pilot?.readiness.some((r) => r.id === "setup_needed" && !r.ok) ?? false;
+  const setupOffered = useSetupOfferStore((s) => s.uid !== null);
+  const closeSetupOffer = useSetupOfferStore((s) => s.close);
 
-  const entries = menuEntries({ onFeed, movedCount, cameraCount: cameras.length, panelCount: panels.length, setupNeeded, kiosk });
+  const entries = menuEntries({ onFeed, movedCount, cameraCount: cameras.length, panelCount: panels.length, setupNeeded, setupOffered, kiosk });
   const shown = panels.find(({ ext, p }) => `${ext.pluginId}:${p.id}` === openPanel) ?? null;
   const sheet = (id: "preflight" | "mode") => {
     closeQuickMenu();
@@ -165,7 +167,7 @@ export function QuickMenu() {
           </div>
         );
       case "setup":
-        return <MenuRow entry={id} icon={Wrench} label={specText("cockpit.menu.setup")} onClick={openAircraftSetup} />;
+        return <MenuRow entry={id} icon={Wrench} label={specText("cockpit.menu.setup")} onClick={() => closeSetupOffer(true)} />;
       case "settings":
         return (
           <div>

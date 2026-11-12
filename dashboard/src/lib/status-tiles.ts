@@ -7,6 +7,7 @@ import i18n from "@/shared/i18n";
 
 import { mspVariant } from "@/shared/api/fc-firmware";
 import { summarizeHardware } from "./hardware-summary";
+import { videoStateLabel } from "./state-labels";
 import type { SetupStatus } from "@/shared/agent-api.generated";
 import type { DashboardSnapshot } from "@/shared/api/types";
 import { fmtBitrate, severityFromState, type Severity } from "@/shared/format";
@@ -117,8 +118,8 @@ export function buildTiles({ snapshot: s, status: cfg, fcVariant, fcReachable, p
     : {
     label: i18n.t("panels.tiles.vid"),
     icon: Video,
-    value: vBitrate > 0 ? fmtBitrate(vBitrate) : vState,
-    sub: vBitrate > 0 ? i18n.t("panels.tiles.live") : vState,
+    value: vBitrate > 0 ? fmtBitrate(vBitrate) : videoStateLabel(vState),
+    sub: vBitrate > 0 ? i18n.t("panels.tiles.live") : "—",
     severity: severityFromState(vState),
   };
 

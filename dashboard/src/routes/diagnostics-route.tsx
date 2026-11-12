@@ -13,16 +13,26 @@ import { PageShell } from "@/components/page-shell";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useNow } from "@/hooks/use-now";
 import { useResource } from "@/hooks/use-resource";
 import { liveData } from "@/lib/freshness";
+import { serviceStateLabel, serviceStateTone } from "@/lib/state-labels";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtNum } from "@/shared/format";
 import { rebootAgent } from "@/shared/api/setup-actions";
 import { toast, toastFromError } from "@/shared/api/toast";
+import { useUiStore } from "@/stores/ui-store";
 
 const SYSTEM_POLL_MS = 5_000;
 const SERVICES_POLL_MS = 8_000;
+
+const SERVICE_TONE = {
+  ok: "border-ok/40 text-ok",
+  warn: "border-warn/40 text-warn",
+  err: "border-destructive/40 text-destructive",
+  idle: "border-border text-muted-foreground",
+} as const;
 
 // Every numeric field is null in the degraded body the agent serves when its
 // metrics store is unreachable (`available: false`).
@@ -75,6 +85,8 @@ export function DiagnosticsRoute() {
   // Agent down: the last read is not shown as current (values dash out).
   const now = useNow(1_000);
   const sysData = liveData(sys, SYSTEM_POLL_MS, now);
+  const heartbeat = useHeartbeat();
+  const beginRestart = useUiStore((s) => s.beginRestart);
   const svcData = liveData(services, SERVICES_POLL_MS, now);
 
   const items: ServiceEntry[] = Array.isArray(svcData)
@@ -115,6 +127,7 @@ export function DiagnosticsRoute() {
     setBusy("reboot");
     try {
       await rebootAgent();
+      beginRestart("reboot", heartbeat.data?.uptime_seconds ?? null);
       toast.ok(
         t("diagnostics.reboot.queued"),
         t("diagnostics.reboot.queuedDetail"),
@@ -287,13 +300,9 @@ export function DiagnosticsRoute() {
                     {svc.name}
                   </span>
                   <span
-                    className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-                      svc.active
-                        ? "border-ok/40 text-ok"
-                        : "border-destructive/40 text-destructive"
-                    }`}
+                    className={`text-[10px] px-1.5 py-0.5 rounded border ${SERVICE_TONE[serviceStateTone(svc.state)]}`}
                   >
-                    {svc.state}
+                    {serviceStateLabel(svc.state)}
                   </span>
                   <Button
                     variant="ghost"

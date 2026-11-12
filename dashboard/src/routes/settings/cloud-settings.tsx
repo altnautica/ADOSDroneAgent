@@ -12,7 +12,9 @@ import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useConfig } from "@/hooks/use-config";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
+import { cloudModeLabel } from "@/lib/enum-labels";
 import { selfHostedSeed } from "@/shared/api/cloud-seed";
+import { issueMessage } from "@/lib/validation-message";
 import { toast, toastFromError } from "@/shared/api/toast";
 import { cloudSectionSchema, postApply } from "@/shared/api/apply-actions";
 
@@ -103,7 +105,7 @@ export function CloudSettings() {
     const result = cloudSectionSchema.safeParse(payload);
     if (!result.success) {
       const first = result.error.issues[0];
-      setValidationError(`${first.path.join(".")}: ${first.message}`);
+      setValidationError(issueMessage(first));
       return false;
     }
     setValidationError(null);
@@ -259,8 +261,8 @@ export function CloudSettings() {
         description={
           <Trans
             i18nKey="settingsMore.cloud.confirmBody"
-            values={{ mode }}
-            components={{ mode: <span className="font-mono font-medium" /> }}
+            values={{ mode: cloudModeLabel(mode) }}
+            components={{ mode: <span className="font-medium" /> }}
           />
         }
         confirmLabel={t("settingsMore.cloud.apply")}

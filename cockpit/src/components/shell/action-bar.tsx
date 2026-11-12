@@ -12,11 +12,13 @@ import {
   Plus,
   Radio,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { useNavStore } from "@/stores/nav-store";
 import { useSettingsStore, UI_SCALE_STEP } from "@/stores/settings-store";
 import { CHROME } from "@/lib/cockpit-layout";
 import { cn } from "@/lib/utils";
+import "@/shared/i18n";
 
 export interface InputStatus {
   buttonsConnected: boolean;
@@ -65,43 +67,44 @@ function Indicator({
 }
 
 export function ActionBar({ input }: { input: InputStatus }) {
+  const { t } = useTranslation();
   const command = useNavStore((s) => s.command);
   const uiScale = useSettingsStore((s) => s.uiScale);
   const nudgeUiScale = useSettingsStore((s) => s.nudgeUiScale);
 
   return (
     <div className={cn("flex shrink-0 items-center gap-[0.4rem] border-t border-border bg-surface/70 px-[0.4rem]", CHROME.barHeight)}>
-      <BarButton onClick={() => command("quick-menu")} label="Quick menu">
+      <BarButton onClick={() => command("quick-menu")} label={t("cockpit.shell.quickMenu")}>
         <MenuIcon className="h-[1.2rem] w-[1.2rem]" />
       </BarButton>
 
       <div className="mx-[0.3rem] flex items-center gap-[0.15rem]">
-        <BarButton onClick={() => nudgeUiScale(-UI_SCALE_STEP)} label="Smaller UI">
+        <BarButton onClick={() => nudgeUiScale(-UI_SCALE_STEP)} label={t("cockpit.shell.smallerUi")}>
           <Minus className="h-[1.1rem] w-[1.1rem]" />
         </BarButton>
         <span className="w-[2.4rem] text-center font-mono text-[0.75rem] text-muted-foreground">
           {Math.round(uiScale * 100)}%
         </span>
-        <BarButton onClick={() => nudgeUiScale(UI_SCALE_STEP)} label="Larger UI">
+        <BarButton onClick={() => nudgeUiScale(UI_SCALE_STEP)} label={t("cockpit.shell.largerUi")}>
           <Plus className="h-[1.1rem] w-[1.1rem]" />
         </BarButton>
       </div>
 
       <div className="hidden flex-1 items-center justify-center gap-[0.6rem] font-mono text-[0.75rem] text-muted-foreground landscape:flex">
-        <span>◀ ▶ move</span>
-        <span>● select</span>
-        <span>↩ back</span>
-        <span>≡ menu</span>
+        <span>{t("cockpit.shell.hint.move")}</span>
+        <span>{t("cockpit.shell.hint.select")}</span>
+        <span>{t("cockpit.shell.hint.back")}</span>
+        <span>{t("cockpit.shell.hint.menu")}</span>
       </div>
 
       <div className="ml-auto flex items-center gap-[0.55rem] pr-[0.3rem]">
-        <Indicator on={input.buttonsConnected} title="Front-panel buttons">
+        <Indicator on={input.buttonsConnected} title={t("cockpit.shell.input.buttons")}>
           <Radio className="h-[1.05rem] w-[1.05rem]" />
         </Indicator>
-        <Indicator on={input.gamepadConnected} title="Gamepad">
+        <Indicator on={input.gamepadConnected} title={t("cockpit.shell.input.gamepad")}>
           <Gamepad2 className="h-[1.05rem] w-[1.05rem]" />
         </Indicator>
-        <Indicator on={input.wakeHeld} title="Screen wake lock">
+        <Indicator on={input.wakeHeld} title={t("cockpit.shell.input.wakeLock")}>
           {input.wakeHeld ? (
             <Monitor className="h-[1.05rem] w-[1.05rem]" />
           ) : (

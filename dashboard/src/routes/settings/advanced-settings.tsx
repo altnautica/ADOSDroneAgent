@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useConfig } from "@/hooks/use-config";
 import { advancedSectionSchema, postApply } from "@/shared/api/apply-actions";
+import { issueMessage } from "@/lib/validation-message";
 import { toast, toastFromError } from "@/shared/api/toast";
 
 const LOG_LEVELS = ["debug", "info", "warning", "error", "critical"] as const;
@@ -83,7 +84,7 @@ export function AdvancedSettings() {
     });
     if (!result.success) {
       const first = result.error.issues[0];
-      setValidationError(`${first.path.join(".")}: ${first.message}`);
+      setValidationError(issueMessage(first));
       return false;
     }
     setValidationError(null);

@@ -36,6 +36,8 @@ export interface MenuInputs {
   panelCount: number;
   /** The pilot reports the aircraft needs setting up. */
   setupNeeded: boolean;
+  /** The one-time setup offer stands (the shell banner shows it). */
+  setupOffered: boolean;
   kiosk: boolean;
 }
 
@@ -50,7 +52,7 @@ export function menuEntries(i: MenuInputs): MenuEntryId[] {
       case "extension_panels":
         return i.panelCount > 0;
       case "setup":
-        return i.setupNeeded;
+        return i.setupNeeded || i.setupOffered;
       case "exit":
         return !i.kiosk;
       default:

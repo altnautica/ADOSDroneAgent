@@ -125,7 +125,8 @@ export function ConfigToggle({
 }
 
 /** A numeric config key with a dirty-tracked Save button. Keeps the draft on
- * failure so the operator can retry. */
+ * failure so the operator can retry. `check` adds a cross-field rule (its
+ * message blocks Save); with `confirm`, Save waits for a yes. */
 export function ConfigNumberField({
   configKey,
   id,
@@ -136,6 +137,8 @@ export function ConfigNumberField({
   min,
   max,
   disabled = false,
+  check,
+  confirm,
 }: {
   configKey: string;
   id: string;
@@ -146,12 +149,15 @@ export function ConfigNumberField({
   min?: number;
   max?: number;
   disabled?: boolean;
+  check?: (n: number) => string | null;
+  confirm?: { title: string; description: string; confirmLabel?: string };
 }) {
   const { t } = useTranslation();
   const config = useConfig();
   const current = value === undefined ? "" : String(value);
   const [draft, setDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [asking, setAsking] = useState(false);
 
   const shown = draft ?? current;
   const dirty = draft !== null && draft !== current;
@@ -164,7 +170,7 @@ export function ConfigNumberField({
     if (integer && !Number.isInteger(n)) return t("settings.shared.enterWholeNumber");
     if (min !== undefined && n < min) return t("settings.shared.mustBeAtLeast", { min });
     if (max !== undefined && n > max) return t("settings.shared.mustBeAtMost", { max });
-    return null;
+    return check ? check(n) : null;
   }
 
   const error = dirty ? validate(shown) : null;
@@ -201,13 +207,24 @@ export function ConfigNumberField({
         <Button
           variant="default"
           disabled={disabled || saving || !dirty || error !== null}
-          onClick={() => void save()}
+          onClick={() => (confirm ? setAsking(true) : void save())}
         >
           {saving ? t("settings.shared.saving") : t("settings.shared.save")}
         </Button>
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {confirm ? (
+        <ConfirmDialog
+          open={asking}
+          onOpenChange={setAsking}
+          title={confirm.title}
+          description={confirm.description}
+          confirmLabel={confirm.confirmLabel}
+          destructive
+          onConfirm={save}
+        />
+      ) : null}
     </div>
   );
 }

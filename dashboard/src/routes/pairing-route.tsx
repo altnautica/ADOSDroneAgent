@@ -18,6 +18,7 @@ import {
   useUnpair,
 } from "@/hooks/use-pairing";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
+import { nodeSubject } from "@/lib/enum-labels";
 
 function MaskedCode({ code }: { code: string }) {
   return (
@@ -151,12 +152,7 @@ export function PairingRoute() {
   const { profile } = useNodeIdentity();
   const [confirmUnpair, setConfirmUnpair] = useState(false);
   const [armedPrompt, setArmedPrompt] = useState<{ resolve: (ok: boolean) => void } | null>(null);
-  const subject =
-    profile === "ground_station"
-      ? t("pairing.subject.groundStation")
-      : profile === "visor"
-        ? t("pairing.subject.visor")
-        : t("pairing.subject.drone");
+  const subject = nodeSubject(profile);
   const paired = info.data?.paired === true;
 
   return (

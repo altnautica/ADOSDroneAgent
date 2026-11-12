@@ -9,7 +9,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { apiFetch } from "@/shared/api-fetch";
-import { severityClasses, severityFromState } from "@/shared/format";
+import { severityClasses } from "@/shared/format";
+import { serviceStateLabel, serviceStateTone } from "@/lib/state-labels";
 import { cn } from "@/lib/utils";
 
 interface ServiceDescriptor {
@@ -66,7 +67,7 @@ export function ServicesPanel() {
         )}
         <ul className="divide-y divide-border/50">
           {services.map((s) => {
-            const sev = severityClasses(severityFromState(s.state));
+            const sev = severityClasses(serviceStateTone(s.state));
             return (
               <li
                 key={s.name}
@@ -78,11 +79,11 @@ export function ServicesPanel() {
                 </span>
                 <span
                   className={cn(
-                    "font-mono text-[11px] uppercase tracking-wider",
+                    "text-[11px]",
                     sev.text,
                   )}
                 >
-                  {s.state}
+                  {serviceStateLabel(s.state)}
                 </span>
               </li>
             );

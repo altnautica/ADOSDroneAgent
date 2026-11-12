@@ -1,24 +1,23 @@
-import type { TFunction } from "i18next";
-
 import type { BadgeVariant } from "@/components/ui/badge";
+import { wfbStateLabel } from "@/lib/state-labels";
 
-/** The WFB state badge. `stale` is a known state: a warning, with the
+/** The WFB state badge, labelled through `wfbStateLabel`. `stale` is a known state: a warning, with the
  *  panel's values dimmed (`wfbStale`). */
-export function wfbStateBadge(state: string, t: TFunction): { label: string; variant: BadgeVariant } | null {
+export function wfbStateBadge(state: string): { label: string; variant: BadgeVariant } | null {
   switch (state) {
     case "active":
     case "ready":
-      return { label: state, variant: "success" };
+      return { label: wfbStateLabel(state), variant: "success" };
     case "connecting":
-      return { label: t("wfb.state.connecting"), variant: "info" };
+      return { label: wfbStateLabel(state), variant: "info" };
     case "stale":
-      return { label: t("wfb.state.stale"), variant: "warning" };
+      return { label: wfbStateLabel(state), variant: "warning" };
     case "error":
-      return { label: t("wfb.state.error"), variant: "warning" };
+      return { label: wfbStateLabel(state), variant: "warning" };
     case "disabled":
-      return { label: t("wfb.state.disabled"), variant: "neutral" };
+      return { label: wfbStateLabel(state), variant: "neutral" };
     default:
-      return state && state !== "unknown" ? { label: state, variant: "neutral" } : null;
+      return state && state !== "unknown" ? { label: wfbStateLabel(state), variant: "neutral" } : null;
   }
 }
 

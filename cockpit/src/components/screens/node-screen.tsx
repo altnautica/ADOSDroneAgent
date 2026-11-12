@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { EmptyNote, ErrorNote, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
 import { readFailed } from "@/lib/read-failed";
+import { jobStateKey, sessionStateKey } from "@/lib/screen-words";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { ListItem } from "@/components/ui/list-item";
 import { TwoPane } from "@/components/ui/two-pane";
@@ -116,19 +117,23 @@ function JobList({
   if (jobs.length === 0) return <EmptyNote>{t("cockpit.node.noJobs")}</EmptyNote>;
   return (
     <div className="flex flex-col gap-[0.2rem] pr-[0.4rem]">
-      {jobs.map((j) => (
+      {jobs.map((j) => {
+        const stateKey = jobStateKey(j.state);
+        const state = stateKey ? t(stateKey) : j.state;
+        return (
         <ListItem
           key={j.id}
           headline={j.kind || j.id}
           supporting={
             j.state === "running" && j.progress != null
-              ? `${j.state} · ${t("cockpit.node.progress", { pct: Math.round(j.progress * 100) })}`
-              : (j.error ?? j.state)
+              ? `${state} · ${t("cockpit.node.progress", { pct: Math.round(j.progress * 100) })}`
+              : (j.error ?? state)
           }
           selected={j.id === selectedId}
           onClick={() => onSelect(j.id)}
         />
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -176,17 +181,20 @@ function SessionList({ sessions }: { sessions: OffloadSession[] }) {
   if (sessions.length === 0) return <EmptyNote>{t("cockpit.node.noSessions")}</EmptyNote>;
   return (
     <div className="flex flex-col gap-[0.2rem]">
-      {sessions.map((s) => (
+      {sessions.map((s) => {
+        const stateKey = sessionStateKey(s.state);
+        return (
         <ListItem
           key={s.id}
-          headline={`${s.id} · ${s.state}`}
+          headline={`${s.id} · ${stateKey ? t(stateKey) : s.state}`}
           supporting={t("cockpit.node.sessionDetail", {
             camera: s.cameraId ?? DASH,
             frames: fmtInt(s.framesProcessed),
             reconnects: fmtInt(s.reconnects),
           })}
         />
-      ))}
+        );
+      })}
     </div>
   );
 }

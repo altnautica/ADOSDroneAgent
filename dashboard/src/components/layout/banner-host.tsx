@@ -6,7 +6,9 @@ import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { buildBanners } from "@/shared/api/banners";
 import { cn } from "@/lib/utils";
+import { RestartBanner } from "@/components/layout/restart-banner";
 import { SetupNeededBanner } from "@/components/layout/setup-needed-banner";
+import { useUiStore } from "@/stores/ui-store";
 
 /** The FC-link banner reads the snapshot, so it polls (every 3 s) only on the
  *  drone Home page; every other page shows just the agent-offline banner. */
@@ -16,11 +18,13 @@ export function BannerHost() {
   const { profile } = useNodeIdentity();
   const heartbeat = useHeartbeat();
   const { pathname } = useLocation();
+  // A restart the operator asked for is not an outage: its own banner speaks.
+  const restarting = useUiStore((s) => s.restartPending !== null);
   const onDroneHome = profile === "drone" && pathname === "/";
   const snapshot = useSnapshot({ intervalMs: BANNER_SNAPSHOT_MS, enabled: onDroneHome });
 
   const banners = buildBanners({
-    agentUnreachable: heartbeat.isError,
+    agentUnreachable: heartbeat.isError && !restarting,
     profile,
     fcConnected: onDroneHome && snapshot.isSuccess ? (snapshot.data.fc?.connected ?? null) : null,
     fcReachable: heartbeat.data?.fcReachable,
@@ -29,6 +33,7 @@ export function BannerHost() {
   return (
     <div className="px-4 lg:px-6 pt-3 space-y-2 empty:hidden">
       <SetupNeededBanner />
+      <RestartBanner />
       {banners.map((b) => {
         const Icon = b.severity === "err" ? AlertCircle : AlertTriangle;
         return (

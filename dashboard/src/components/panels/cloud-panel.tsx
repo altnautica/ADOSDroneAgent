@@ -10,7 +10,9 @@ import {
 } from "@/components/ui/card";
 import { useCloudLink, type CloudLink } from "@/hooks/use-cloud-link";
 import { useSnapshot } from "@/hooks/use-snapshot";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
+import { cloudModeLabel, nodeSubject } from "@/lib/enum-labels";
 
 /** Seconds since `ms`, or null when never. */
 function ageSeconds(ms: number | null): number | null {
@@ -59,6 +61,7 @@ export function CloudPanel() {
   const { t } = useTranslation();
   const snap = useSnapshot();
   const status = useStatus();
+  const { profile } = useNodeIdentity();
 
   const cloud = snap.data?.cloud;
   const choice = status.data?.cloud_choice;
@@ -78,11 +81,11 @@ export function CloudPanel() {
       <CardContent className="space-y-2.5">
         <div className="flex items-baseline justify-between text-sm">
           <span className="text-xs text-muted-foreground">{t("panels.cloud.mode")}</span>
-          <span className="font-mono">{choice?.mode ?? "—"}</span>
+          <span>{choice?.mode ? cloudModeLabel(choice.mode) : "—"}</span>
         </div>
         {isLocal ? (
           <p className="text-xs text-muted-foreground">
-            {t("panels.cloud.relayDisabled")}
+            {t("panels.cloud.relayDisabledSubject", { subject: nodeSubject(profile) })}
           </p>
         ) : (
           <>

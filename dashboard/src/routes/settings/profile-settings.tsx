@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
+import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useStatus } from "@/hooks/use-status";
 import { toast, toastFromError } from "@/shared/api/toast";
 import {
@@ -23,12 +24,8 @@ import type { GroundRole } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
 import { invalidateProfile } from "@/shared/use-profile";
 import { profileLabel, roleLabel } from "@/lib/enum-labels";
-
-/** The redetect answer: the profile the hardware points at. */
-interface ProfileSuggestion {
-  detected: ApplyProfile;
-  ground_role_hint?: GroundRole;
-}
+import { type ProfileSuggestion, suggestionDraft, suggestionLabel } from "@/lib/profile-suggestion";
+import { useUiStore } from "@/stores/ui-store";
 
 const SOURCE_KEYS = {
   detected: "settings.profile.source.detected",
@@ -80,6 +77,8 @@ export function ProfileSettings() {
   const status = useStatus();
   const identity = useNodeIdentity();
   const qc = useQueryClient();
+  const heartbeat = useHeartbeat();
+  const beginRestart = useUiStore((s) => s.beginRestart);
 
   const [profile, setProfile] = useState<ApplyProfile>("drone");
   const [role, setRole] = useState<GroundRole>("direct");
@@ -144,6 +143,11 @@ export function ProfileSettings() {
       const section = res.sections.profile;
       if (res.overall && section?.ok) {
         toast.ok(section.message || t("settings.profile.saved"));
+        // An apply that needs a restart restarts the agent at once: say so
+        // until it answers again.
+        if (section.data?.restart_required === true) {
+          beginRestart("profile", heartbeat.data?.uptime_seconds ?? null);
+        }
         // The node may now serve a different page set; probe it again.
         invalidateProfile();
         void qc.invalidateQueries({ queryKey: ["pairing-info"] });
@@ -198,19 +202,15 @@ export function ProfileSettings() {
           {suggestion && (
             <div className="mt-3 flex flex-wrap items-center gap-3 rounded-md border border-border px-3 py-2 text-sm">
               <span>
-                {t("settings.profile.suggested", {
-                  profile:
-                    suggestion.detected === "ground_station" && suggestion.ground_role_hint
-                      ? `${profileLabel(suggestion.detected)} · ${roleLabel(suggestion.ground_role_hint)}`
-                      : profileLabel(suggestion.detected),
-                })}
+                {t("settings.profile.suggested", { profile: suggestionLabel(suggestion) })}
               </span>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => {
-                  setProfile(suggestion.detected);
-                  if (suggestion.ground_role_hint) setRole(suggestion.ground_role_hint);
+                  const draft = suggestionDraft(suggestion, role);
+                  setProfile(draft.profile);
+                  setRole(draft.role);
                   setConfirmOpen(true);
                 }}
               >

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { MENU_ORDER, menuEntries, type MenuInputs } from "@/lib/quick-menu-model";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 
-const base: MenuInputs = { onFeed: true, movedCount: 0, cameraCount: 1, panelCount: 0, setupNeeded: false, kiosk: false };
+const base: MenuInputs = { onFeed: true, movedCount: 0, cameraCount: 1, panelCount: 0, setupNeeded: false, setupOffered: false, kiosk: false };
 
 describe("the Menu (layout.json menu.order)", () => {
   it("follows the spec's order", () => {
@@ -32,6 +32,9 @@ describe("the Menu (layout.json menu.order)", () => {
 
   it("offers Set up aircraft only while setup is needed, and no Exit on the kiosk", () => {
     expect(menuEntries(base)).not.toContain("setup");
+    // The one-time setup offer stands in the Menu too, where panel and
+    // controller input reach it (a banner button they cannot).
+    expect(menuEntries({ ...base, setupOffered: true })).toContain("setup");
     expect(menuEntries({ ...base, kiosk: true })).not.toContain("exit");
     expect(menuEntries(base).at(-1)).toBe("exit");
   });

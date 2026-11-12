@@ -35,9 +35,15 @@ describe("the toast bus", () => {
     expect(seen).toEqual([]);
   });
 
-  it("turns an API refusal into a readable error", () => {
+  it("turns an API refusal into a readable error without the status number", () => {
     const seen = capture(() => toastFromError(new ApiError("409 already paired", 409, null)));
-    expect(seen[0]).toMatchObject({ kind: "err", message: "409 already paired" });
+    expect(seen[0]).toMatchObject({ kind: "err", message: "already paired" });
+  });
+
+  it("words an armed refusal the same way on every screen", () => {
+    const err = new ApiError("409 Vehicle is armed", 409, { error: "E_ARMED", override: "force" });
+    const seen = capture(() => toastFromError(err, "Could not save."));
+    expect(seen[0].message).toBe("Refused: the vehicle is armed. Disarm first.");
   });
 
   it("falls back to the given wording for an unknown throw", () => {

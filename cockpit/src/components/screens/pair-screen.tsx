@@ -298,6 +298,9 @@ function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: 
 export function PairScreen() {
   const { t } = useTranslation();
   const isGroundStation = useProfile() === "ground_station";
+  // The far end of the radio link: a ground station binds a drone, every
+  // other node binds with a ground station.
+  const peer = t(isGroundStation ? "pairing.subject.drone" : "pairing.subject.groundStation");
   const info = useResource<PairingInfo>(
     useCallback((s) => apiFetch<PairingInfo>("/api/pairing/info", { signal: s }), []),
     2000,
@@ -326,7 +329,7 @@ export function PairScreen() {
       // The POST holds until the rendezvous ends and answers with the
       // finished session, so its reply is the bind's result.
       const done = bindOutcome(await apiFetch<BindSession>("/api/wfb/pair/local-bind", { method: "POST", body: {} }));
-      if (done?.kind === "paired") toast.ok(t("cockpit.pair.bindResult.paired"));
+      if (done?.kind === "paired") toast.ok(t("cockpit.pair.bindResult.paired", { peer }));
       else if (done?.kind === "failed") toast.err(t("cockpit.pair.bindResult.failed"), done.reason ?? undefined);
       else if (done?.kind === "aborted") toast.err(t("cockpit.pair.bindResult.aborted"));
     } catch (err) {
@@ -338,12 +341,22 @@ export function PairScreen() {
     }
   };
 
+  // Stops the waiting rendezvous; the pending POST then answers with the
+  // aborted session and its toast.
+  const cancelBind = async () => {
+    try {
+      await apiFetch("/api/wfb/pair/local-bind/cancel", { method: "POST", body: {} });
+    } catch (err) {
+      toastFromError(err, t("cockpit.pair.bindCancelFailed"));
+    }
+  };
+
   const unpairRf = async () => {
     if (busy) return;
     setBusy("unpair");
     try {
       await apiFetch("/api/wfb/pair/unpair", { method: "POST", body: {} });
-      toast.ok(t("cockpit.pair.rfUnpaired"));
+      toast.ok(t("cockpit.pair.rfUnpaired", { peer }));
     } catch (err) {
       toastFromError(err, t("pairing.page.unpairFailed"));
     } finally {
@@ -394,7 +407,7 @@ export function PairScreen() {
         ) : rfPaired ? (
           <>
             <Row
-              label={t("cockpit.pair.pairedDrone")}
+              label={t("cockpit.pair.pairedDrone", { peer })}
               left={<Dot tone="ok" />}
               value={rf.data?.paired_with_device_id ?? t("cockpit.pair.linked")}
               tone="ok"
@@ -408,17 +421,17 @@ export function PairScreen() {
             <div className="mt-[0.5rem]">
               <UnpairAction
                 gate={PAIR_ACTION_GUARD.rfUnpair}
-                label={t("cockpit.pair.unpairDrone")}
+                label={t("cockpit.pair.unpairDrone", { peer })}
                 guardLabel={t("cockpit.pair.holdToUnpair")}
                 onFired={() => void unpairRf()}
                 disabled={busy !== null}
               />
-              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.rfUnpairNote")}</p>
+              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.rfUnpairNote", { peer })}</p>
             </div>
           </>
         ) : (
           <>
-            <EmptyNote>{t("cockpit.pair.noDrone")}</EmptyNote>
+            <EmptyNote>{t("cockpit.pair.noDrone", { peer })}</EmptyNote>
             {phase ? (
               <Row
                 label={t("cockpit.pair.bindSession")}
@@ -431,14 +444,19 @@ export function PairScreen() {
             {phase?.error ? <Row label={t("cockpit.pair.bindError")} value={phase.error} tone="err" mono={false} /> : null}
             <div className="mt-[0.3rem]">
               <ActionButton
-                label={busy === "pair" ? t("cockpit.pair.opening") : t("cockpit.pair.pairDrone")}
+                label={busy === "pair" ? t("cockpit.pair.opening") : t("cockpit.pair.pairDrone", { peer })}
                 icon={Link2}
                 onClick={() => void startBind()}
                 variant="primary"
                 busy={busy === "pair"}
                 full
               />
-              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.bindNote")}</p>
+              {busy === "pair" ? (
+                <div className="mt-[0.3rem]">
+                  <ActionButton label={t("cockpit.pair.bindCancel")} icon={X} onClick={() => void cancelBind()} full />
+                </div>
+              ) : null}
+              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.bindNote", { peer })}</p>
             </div>
           </>
         )}

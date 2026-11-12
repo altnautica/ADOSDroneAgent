@@ -2,14 +2,16 @@
 // banner slot (outside the flight screen's zones) when the agent's setup
 // engine reports a flight controller whose ground wizard is not done and
 // whose uid this device never offered. On the ground only. Open goes to
-// Settings › Aircraft setup; Open and Later both mark the uid offered.
+// Settings › Aircraft setup; Open and Later both mark the uid offered. The
+// offer also stands as the Menu's "Set up aircraft" row, which panel and
+// controller input can reach. The buttons keep the 48 px touch floor.
 
 import { Wrench } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useFreshPilot } from "@/hooks/use-pilot";
 import { useWidthClass } from "@/hooks/use-width-class";
-import { loadOfferedUids, markSetupOffered, openAircraftSetup, setupOfferUid } from "@/lib/aircraft-setup";
+import { setupOfferUid } from "@/lib/aircraft-setup";
 import { gridMeasures } from "@/lib/cockpit-layout";
 import { bannerTextStyle } from "@/lib/shell-banners";
 import { tourAirborne } from "@/lib/controller-tour";
@@ -19,6 +21,7 @@ import type { SetupStatus } from "@/shared/setup-wizard/types";
 import { useProfile } from "@/shared/use-profile";
 import { useFlightStore } from "@/stores/flight-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
+import { useSetupOfferStore } from "@/stores/setup-offer-store";
 
 /** How often the setup engine is asked, ms. */
 const SETUP_POLL_MS = 30_000;
@@ -26,7 +29,9 @@ const SETUP_POLL_MS = 30_000;
 export function SetupOfferBanner() {
   const profile = useProfile();
   const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [offered, setOffered] = useState(loadOfferedUids);
+  const offered = useSetupOfferStore((s) => s.offered);
+  const setOfferUid = useSetupOfferStore((s) => s.setUid);
+  const close = useSetupOfferStore((s) => s.close);
   const pilot = useFreshPilot();
   const telemetryArmed = useFlightStore((s) => s.telemetry?.armed ?? null);
   const { widthClass } = useWidthClass();
@@ -50,11 +55,9 @@ export function SetupOfferBanner() {
   }, [profile]);
 
   const uid = setupOfferUid(status, offered, tourAirborne(pilot, telemetryArmed));
+  // The Menu offers the same setup while this offer stands.
+  useEffect(() => setOfferUid(uid), [uid, setOfferUid]);
   if (!uid || onSetup) return null;
-  const close = (open: boolean) => {
-    setOffered(markSetupOffered(uid));
-    if (open) openAircraftSetup();
-  };
   const button = "touch-target shrink-0 rounded-[var(--fs-radius-sm)] border font-semibold";
   return (
     <div
@@ -71,7 +74,7 @@ export function SetupOfferBanner() {
         type="button"
         onClick={() => close(true)}
         className={`${button} border-primary bg-primary/25`}
-        style={{ minHeight: 36 * scale, padding: `0 ${10 * scale}px`, fontSize: 13 * scale }}
+        style={{ padding: `0 ${10 * scale}px`, fontSize: 13 * scale }}
       >
         {specText("setup.banner.open")}
       </button>
@@ -79,7 +82,7 @@ export function SetupOfferBanner() {
         type="button"
         onClick={() => close(false)}
         className={`${button} border-border`}
-        style={{ minHeight: 36 * scale, padding: `0 ${10 * scale}px`, fontSize: 13 * scale }}
+        style={{ padding: `0 ${10 * scale}px`, fontSize: 13 * scale }}
       >
         {specText("setup.banner.later")}
       </button>

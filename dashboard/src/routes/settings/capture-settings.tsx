@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useResource } from "@/hooks/use-resource";
 import { exposureError, gainError } from "@/lib/exposure-draft";
+import { storageStateLabel, storageStateVariant } from "@/lib/state-labels";
 import {
   CAPTURE_STATE_PATH,
   isExtensionMissing,
@@ -62,8 +63,8 @@ function StorageCard() {
                 </div>
                 <div className="text-xs text-muted-foreground">{t("settings.capture.state")}</div>
                 <div>
-                  <Badge variant={s.capture.state === "ok" ? "success" : s.capture.state === "full" ? "error" : "warning"}>
-                    {s.capture.state}
+                  <Badge variant={storageStateVariant(s.capture.state)}>
+                    {storageStateLabel(s.capture.state)}
                   </Badge>
                 </div>
               </>

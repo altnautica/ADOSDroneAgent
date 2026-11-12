@@ -23,12 +23,14 @@ import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { refusalDetail } from "@/lib/refusal";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui-store";
 import { modeFromConfig, regionFromConfig } from "@/shared/api/region";
 
 export function HomeRoute() {
   const status = useStatus({ poll: true });
   const heartbeat = useHeartbeat();
   const { profile, role } = useNodeIdentity();
+  const restarting = useUiStore((s) => s.restartPending !== null);
   // One-shot prompt for agents still on the legacy `cloud` posture.
   // The hook self-gates and runs at most once per agent.
   useCloudPostureNudge(status.data?.cloud_choice?.mode);
@@ -46,7 +48,7 @@ export function HomeRoute() {
     // is the backstop for the case where it does not, and it must still say
     // what actually happened.
     const refusal = refusalDetail(status.error) ?? refusalDetail(heartbeat.error);
-    return <OfflineHome refusal={refusal} onRetry={() => {
+    return <OfflineHome refusal={refusal} restarting={restarting} onRetry={() => {
       heartbeat.refetch();
       status.refetch();
     }} />;
@@ -57,9 +59,11 @@ export function HomeRoute() {
 
 function OfflineHome({
   refusal,
+  restarting,
   onRetry,
 }: {
   refusal: string | null;
+  restarting: boolean;
   onRetry: () => void;
 }) {
   const { t } = useTranslation();
@@ -71,12 +75,18 @@ function OfflineHome({
         </div>
         <div>
           <h1 className="text-xl font-semibold tracking-tight">
-            {refusal ? t("home.offline.accessNotSetUp") : t("home.offline.unreachable")}
+            {refusal
+              ? t("home.offline.accessNotSetUp")
+              : restarting
+                ? t("layout.restart.offlineTitle")
+                : t("home.offline.unreachable")}
           </h1>
           {refusal ? (
             <p className="text-sm text-muted-foreground mt-2 max-w-sm">
               {t("home.offline.refusedBody", { refusal })}
             </p>
+          ) : restarting ? (
+            <p className="text-sm text-muted-foreground mt-2 max-w-sm">{t("layout.restart.offlineBody")}</p>
           ) : (
             <p className="text-sm text-muted-foreground mt-2 max-w-sm">
               <Trans

@@ -13,6 +13,7 @@ import { resourceQueryOptions, useResource } from "@/hooks/use-resource";
 import { useNodeProfile } from "@/hooks/use-node-profile";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useConfig } from "@/hooks/use-config";
+import { loraSourceLabel } from "@/lib/state-labels";
 import {
   CRSF_STATUS_PATH,
   LORA_BEACONS_PATH,
@@ -165,7 +166,7 @@ export function LoraView({
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span className="font-mono">{status.region?.plan_id ?? "--"}</span>
         <span className="text-xs text-muted-foreground">
-          {status.region ? t("lora.source", { source: status.region.source }) : t("lora.regionUnset")}
+          {status.region ? t("lora.source", { source: loraSourceLabel(status.region.source) }) : t("lora.regionUnset")}
         </span>
         <span className="font-mono text-xs">
           {t("lora.module", { transport: status.transport ?? "—", band: status.module_band ?? "—" })}
@@ -194,7 +195,7 @@ export function LoraView({
         ))}
       </div>
       <div className="font-mono text-xs text-muted-foreground">
-        {t("lora.refused", {
+        {t("lora.refusedCounts", {
           duty: refused.duty_cycle ?? 0,
           dwell: refused.dwell_time ?? 0,
           lbt: refused.lbt ?? 0,
@@ -216,7 +217,7 @@ export function LoraView({
                 {t("lora.regionOption", {
                   code: r.code,
                   plan: r.plan_id,
-                  rules: r.rules.length ? r.rules.join(",") : t("lora.notVerified"),
+                  rules: r.rules.length ? r.rules.map((k) => t(`lora.rule.${k}`, { defaultValue: t("panels.state.unrecognised") })).join(", ") : t("lora.notVerified"),
                   module: r.supported_by_module ? "" : t("lora.moduleCannot"),
                 })}
               </option>

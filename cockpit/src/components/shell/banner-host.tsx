@@ -7,6 +7,7 @@
 // flight screen it also carries the one-time aircraft setup offer.
 
 import { AlertCircle, AlertTriangle, Cloud } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { SetupOfferBanner } from "@/components/shell/setup-offer-banner";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
@@ -18,8 +19,10 @@ import { useProfile } from "@/shared/use-profile";
 import { useNavStore } from "@/stores/nav-store";
 import { useReachStore } from "@/stores/reach-store";
 import { useStatusStore } from "@/stores/status-store";
+import "@/shared/i18n";
 
 export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
+  const { t } = useTranslation();
   const stale = useStatusStore((s) => s.stale);
   const hasStatus = useStatusStore((s) => s.status != null);
   const fcConnected = useStatusStore((s) => s.status?.fc_connected);
@@ -61,10 +64,8 @@ export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
         <div role="status" className="flex items-center gap-[0.5rem] bg-primary/10 px-[0.75rem] py-[0.3rem] text-[0.8rem]">
           <Cloud className="h-[1rem] w-[1rem] shrink-0 text-hud-primary" aria-hidden />
           <div className="min-w-0 flex-1">
-            <div className="truncate font-medium text-foreground">Cloud relay is on by default for upgraded agents.</div>
-            <div className="truncate text-muted-foreground">
-              New installs default to local-only. Switch if this node never needs to be reached from outside the LAN.
-            </div>
+            <div className="truncate font-medium text-foreground">{t("app.cloudNudge.title")}</div>
+            <div className="truncate text-muted-foreground">{t("cockpit.shell.cloudNudge.body")}</div>
           </div>
           <button
             type="button"
@@ -74,14 +75,14 @@ export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
             }}
             className="touch-target rounded-md border border-border px-[0.6rem] text-[0.78rem] font-semibold text-foreground"
           >
-            Open settings
+            {t("cockpit.shell.cloudNudge.openSettings")}
           </button>
           <button
             type="button"
             onClick={nudge.ack}
             className="touch-target rounded-md px-[0.6rem] text-[0.78rem] text-muted-foreground hover:text-foreground"
           >
-            Got it
+            {t("app.cloudNudge.gotIt")}
           </button>
         </div>
       ) : null}

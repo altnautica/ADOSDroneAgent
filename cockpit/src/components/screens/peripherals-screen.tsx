@@ -9,6 +9,7 @@ import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { Dot, EmptyNote, ErrorNote, StaleBadge } from "@/components/ui/data";
 import { ListItem } from "@/components/ui/list-item";
 import { parsePeripherals, sinceParts } from "@/lib/peripherals";
+import { peripheralStateKey } from "@/lib/screen-words";
 import { useNavStore } from "@/stores/nav-store";
 import { toneClass } from "@/lib/tone";
 import { apiFetch } from "@/shared/api-fetch";
@@ -35,9 +36,8 @@ export function PeripheralsScreen() {
       <div className="flex flex-col gap-[0.2rem]">
         <p className="mb-[0.3rem] text-[0.8rem] text-muted-foreground">{t("peripherals.page.blurb")}</p>
         {items.map((p) => {
-          const stateText = p.connected
-            ? t("peripherals.state.connected")
-            : (p.state ?? t("peripherals.state.unknown"));
+          const stateKey = peripheralStateKey(p);
+          const stateText = stateKey ? t(stateKey) : p.state;
           const since = p.lastSeen !== null ? sinceParts(p.lastSeen) : null;
           return (
             <ListItem
@@ -49,7 +49,6 @@ export function PeripheralsScreen() {
                 </span>
               }
               supporting={[
-                p.id,
                 ...p.detail,
                 p.description,
                 since

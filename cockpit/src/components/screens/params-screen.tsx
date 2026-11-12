@@ -132,7 +132,7 @@ function ParametersTab({ identity }: { identity: FcIdentity | null }) {
     } else {
       toast.info(
         t("telemetry.params.savedPartial", { ok: out.acked.length, failed: out.failed.length, pending: out.pending.length }),
-        t("telemetry.params.savedPartialHint"),
+        t("cockpit.params.savedPartialHint"),
       );
     }
   }

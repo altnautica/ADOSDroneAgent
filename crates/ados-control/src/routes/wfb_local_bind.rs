@@ -8,6 +8,9 @@
 //!   first connection then reports.
 //! * `GET /api/wfb/pair/local-bind` is the latest session (`bind_status`), or `{}`
 //!   when none has run or the socket is unreachable.
+//! * `POST /api/wfb/pair/local-bind/cancel` stops the in-flight bind (the
+//!   operator's Cancel): `cancel_bind` on its own connection, so the blocked
+//!   `POST .../local-bind` then answers with the aborted session.
 //! * `POST /api/wfb/pair/unpair` wipes both key files and the relay peer secret,
 //!   clears the persisted pair fields, disarms auto-pair (so the rig does not
 //!   silently re-bind) and restarts the role's radio unit.
@@ -195,6 +198,28 @@ pub async fn get_local_bind() -> Json<Value> {
     Json(bind_status(&supervisor_sock()).await)
 }
 
+/// `POST /api/wfb/pair/local-bind/cancel` → `{cancelled: true}`, or 503 when
+/// the control socket is unreachable.
+pub async fn post_cancel_local_bind() -> Response {
+    match cancel_bind(&supervisor_sock()).await {
+        Ok(()) => Json(json!({"cancelled": true})).into_response(),
+        Err(()) => nested_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "E_BIND_UNAVAILABLE",
+            "bind control socket unavailable",
+        ),
+    }
+}
+
+/// Ask the supervisor to abort the in-flight bind session. A cancel with no
+/// session in flight is a no-op the socket still acknowledges.
+async fn cancel_bind(sock: &Path) -> Result<(), ()> {
+    crate::ipc::cmd::roundtrip(sock, &json!({"op": "cancel_bind"}), CONNECT_TIMEOUT)
+        .await
+        .map(|_| ())
+        .map_err(|e| tracing::debug!(?e, "bind cancel failed"))
+}
+
 // ---------------------------------------------------------------------------
 // Unpair.
 // ---------------------------------------------------------------------------
@@ -360,6 +385,33 @@ mod tests {
         // The cancel released the rendezvous, which then answered the original
         // connection with its terminal session.
         assert_eq!(session["role"], json!("drone"));
+    }
+
+    #[tokio::test]
+    async fn cancel_releases_the_waiting_bind_and_an_absent_socket_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = fake_supervisor(dir.path(), Duration::from_secs(60), session_reply);
+        let waiting = {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                start_bind(
+                    &sock,
+                    &json!({"op": "start_bind", "role": "gs"}),
+                    LOCAL_BIND_CAP,
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(cancel_bind(&sock).await, Ok(()));
+        // The operator's cancel, not the 300 s cap, ends the rendezvous.
+        let session = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the cancel released the bind")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session["role"], json!("gs"));
+        assert_eq!(cancel_bind(&dir.path().join("absent.sock")).await, Err(()));
     }
 
     #[tokio::test]

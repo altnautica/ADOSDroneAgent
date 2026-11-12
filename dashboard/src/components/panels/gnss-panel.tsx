@@ -13,6 +13,7 @@ import { useResource } from "@/hooks/use-resource";
 import { GNSS_PATH, putGnssBase, type GnssStatus } from "@/shared/api/sensors";
 import { toast, toastFromError } from "@/shared/api/toast";
 import { fmtNum } from "@/shared/format";
+import { gnssBaseLabel, gnssFixLabel } from "@/lib/state-labels";
 
 /** Receivers, base mode (survey/off) and the RTCM output of the GS GNSS. */
 export function GnssPanel() {
@@ -76,7 +77,7 @@ export function GnssPanel() {
                   <tr key={r.id}>
                     <td className="py-1">{r.id}</td>
                     <td>{r.model ?? t("common.dash")}</td>
-                    <td>{r.fix}</td>
+                    <td>{gnssFixLabel(r.fix)}</td>
                     <td>{r.sats}</td>
                     <td>{r.hdop == null ? t("common.dash") : fmtNum(r.hdop, 1)}</td>
                     <td>
@@ -93,7 +94,7 @@ export function GnssPanel() {
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-muted-foreground">{t("gnss.base")}</span>
                   <Badge variant={g.base.state === "failed" ? "error" : g.base.state === "off" ? "neutral" : "success"}>
-                    {g.base.state}
+                    {gnssBaseLabel(g.base.state)}
                   </Badge>
                   {g.base.state === "surveying" && (
                     <span className="font-mono text-xs">

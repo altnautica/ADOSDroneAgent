@@ -4,6 +4,7 @@
 // a toast renderer anywhere else is never necessary.
 
 import { ApiError } from "../api-fetch";
+import i18n from "../i18n";
 
 export type ToastKind = "ok" | "err" | "info";
 
@@ -44,10 +45,16 @@ export const toast = {
   },
 };
 
-/** Surface an unknown error from a mutation as a readable error toast. */
+/** Surface an unknown error from a mutation as a readable error toast. An
+ *  armed refusal reads as one sentence on every screen; any other refusal
+ *  shows the agent's message without the HTTP status number. */
 export function toastFromError(err: unknown, fallback = "Something went wrong."): void {
   if (err instanceof ApiError) {
-    toast.err(`${err.status} ${err.message.replace(/^\d+\s/, "")}`);
+    if (err.code === "E_ARMED") {
+      toast.err(i18n.t("common.armedRefused"));
+      return;
+    }
+    toast.err(err.message.replace(/^\d+\s/, "").trim() || fallback);
     return;
   }
   if (err instanceof Error) {

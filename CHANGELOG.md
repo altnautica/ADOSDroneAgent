@@ -6,6 +6,21 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.111] - 2026-11-12
+
+### Added
+
+- `POST /api/wfb/pair/local-bind/cancel` stops a waiting radio bind; the cockpit's Pair screen offers "Cancel bind" while one waits.
+- Cockpit: System shows a "Reboot to apply" row while a reboot is pending; the Menu's "Set up aircraft" entry shows while the setup offer stands; Sensors has a Calibration row that opens Aircraft setup.
+- Dashboard: a "Rebooting…" / "Restarting…" banner after a reboot or a profile change that restarts the agent, holding back the unreachable banner until it answers again; swarm mode, separation and flocking fields; camera assignments on the Video page.
+
+### Changed
+
+- Cockpit and dashboard show service, radio, GNSS, LoRa, mesh, node, peripheral, sensor, video and capture states as words, with "Unrecognised" for an unknown code; the cockpit status strip, action bar and cloud notice draw their words from the locale file.
+- The radio-pairing copy names the right peer per profile ("Pair with a ground station" on a drone); the Controls row says "stick calibration".
+- Error toasts no longer start with the HTTP status number, and a refusal while armed reads as one sentence; form check messages name the field in words.
+- Dashboard: the Video page hides the radio cards on a visor, a ground station's idle video reads "No stream from the drone yet.", and the cloud relay card names the right node.
+
 ## [0.109.110] - 2026-11-12
 
 ### Fixed

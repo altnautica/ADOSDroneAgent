@@ -5,18 +5,23 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Upload } from "lucide-react";
+import type { ParseKeys } from "i18next";
+import { Upload, Wrench } from "lucide-react";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { ActionButton, Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
 import { ListItem } from "@/components/ui/list-item";
 import { GuardedButton } from "@/components/ui/guarded-button";
+import { openAircraftSetup } from "@/lib/aircraft-setup";
+import { FIX_WORDS, knownWord, RTK_WORDS } from "@/lib/mav-gps";
+import { hubTransportWord, sensorKindKey, sensorSourceKey } from "@/lib/screen-words";
 import { getClock, getSensors, rigRejection, sensorTone } from "@/lib/sensors-model";
 import { NO_RIG, pickRig, rigPayload, type RigPick } from "@/lib/settings/sensors";
 import { formatSigma, putRig, rateVerdict } from "@/shared/api/sensors";
 import { toast } from "@/shared/api/toast";
 import { DASH, fmtNum } from "@/shared/format";
 import "@/shared/i18n";
+import { useProfile } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
 
 const POLL_MS = 2_000;
@@ -26,6 +31,9 @@ export function SensorsScreen() {
   const [uploading, setUploading] = useState(false);
   const [rig, setRig] = useState<RigPick>(NO_RIG);
   const fileRef = useRef<HTMLInputElement>(null);
+  const profile = useProfile();
+  // A wire word the cockpit labels, else the word as sent.
+  const said = (key: ParseKeys | null, raw: string) => (key ? t(key) : raw);
 
   const sensors = useResource(useCallback((s: AbortSignal) => getSensors(s), []), POLL_MS);
   const clock = useResource(useCallback((s: AbortSignal) => getClock(s), []), POLL_MS);
@@ -112,6 +120,9 @@ export function SensorsScreen() {
     );
   } else {
     const hub = s.hub;
+    const hubLink = hubTransportWord(hub?.transport);
+    const fixWord = knownWord(s.gnss?.fix, FIX_WORDS);
+    const rtkWord = knownWord(s.gnss?.rtk, RTK_WORDS);
     body = (
       <div className="flex flex-col gap-[0.4rem]">
         <Row
@@ -121,7 +132,7 @@ export function SensorsScreen() {
             hub
               ? t("sensors.hubLine", {
                   state: hub.connected ? t("sensors.connected") : t("sensors.disconnected"),
-                  transport: hub.transport,
+                  transport: hubLink ? t(hubLink.key, { target: hubLink.target }) : hub.transport,
                   crc: hub.crc_errors,
                   dropped: hub.dropped,
                 })
@@ -145,7 +156,12 @@ export function SensorsScreen() {
           label={t("sensors.gnss")}
           value={
             s.gnss
-              ? t("sensors.gnssLine", { fix: s.gnss.fix, sats: s.gnss.sats, hdop: fmtNum(s.gnss.hdop, 1), rtk: s.gnss.rtk })
+              ? t("sensors.gnssLine", {
+                  fix: fixWord ? t(`cockpit.gnss.fixLabel.${fixWord}`) : s.gnss.fix,
+                  sats: s.gnss.sats,
+                  hdop: fmtNum(s.gnss.hdop, 1),
+                  rtk: rtkWord ? t(`cockpit.gnss.rtkLabel.${rtkWord}`) : s.gnss.rtk,
+                })
               : t("sensors.notConfigured")
           }
         />
@@ -158,10 +174,10 @@ export function SensorsScreen() {
             return (
               <ListItem
                 key={row.id}
-                headline={`${row.id} · ${row.kind}`}
+                headline={`${said(sensorKindKey(row.kind), row.kind)} · ${row.id}`}
                 supporting={t("cockpit.sensors.streamLine", {
                   role: row.role,
-                  source: row.source,
+                  source: said(sensorSourceKey(row.source), row.source),
                   age: row.age_ms == null ? DASH : t("sensors.ageMs", { ms: fmtNum(row.age_ms, 0) }),
                   sigma: formatSigma(row.sigma_ns),
                 })}
@@ -185,6 +201,14 @@ export function SensorsScreen() {
 
   return (
     <ConsoleScaffold stale={sensors.stale || clock.stale} title={t("sensors.title")} actions={<StaleBadge stale={sensors.stale || clock.stale} />}>
+      {/* Flight-controller calibration lives in Aircraft setup (as in Settings);
+          this screen is the sensor-hub stream list, so it points there. */}
+      {profile === "drone" || profile === "ground_station" ? (
+        <div className="mb-[0.4rem]">
+          <Row label={t("cockpit.sensors.calibrate")} hint={t("cockpit.sensors.calibrateHint")} />
+          <ActionButton label={t("cockpit.sensors.calibrateOpen")} icon={Wrench} onClick={openAircraftSetup} />
+        </div>
+      ) : null}
       {body}
     </ConsoleScaffold>
   );

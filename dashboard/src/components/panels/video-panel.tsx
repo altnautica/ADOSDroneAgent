@@ -10,6 +10,8 @@ import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/shared/format";
 import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 import { cn } from "@/lib/utils";
+import { wfbStateLabel } from "@/lib/state-labels";
+import { videoIdleDetailKey } from "@/lib/video-page";
 import { VideoDetections } from "@/components/panels/video-detections";
 import { CameraSelect, GimbalBadge, LayerToggles, VideoLayers } from "@/components/panels/video-layers";
 import { useResource } from "@/hooks/use-resource";
@@ -94,8 +96,8 @@ export function VideoPanel() {
   const wfbStreaming = wfbPacketsReceived > 0;
   const waitingForWfb = isGround && !wfbStreaming;
   const wfbWaitDetail = wfbChannel
-    ? t("video.panel.wfbWaitDetailChannel", { state: wfbState, channel: wfbChannel })
-    : t("video.panel.wfbWaitDetail", { state: wfbState });
+    ? t("video.panel.wfbWaitDetailChannel", { state: wfbStateLabel(wfbState), channel: wfbChannel })
+    : t("video.panel.wfbWaitDetail", { state: wfbStateLabel(wfbState) });
 
   const pipelineRunning = pipelineState === "running";
   const haveAnyUrl = whepUrl.length > 0 || hlsUrl.length > 0;
@@ -256,7 +258,7 @@ export function VideoPanel() {
                   <div className="text-xs max-w-xs text-center">
                     {waitingForWfb
                       ? wfbWaitDetail
-                      : t("video.panel.plugInCamera")}
+                      : t(videoIdleDetailKey(isGround))}
                   </div>
                 </>
               )}

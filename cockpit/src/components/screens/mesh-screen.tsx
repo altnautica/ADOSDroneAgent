@@ -13,6 +13,7 @@ import { useTranslation } from "react-i18next";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { Dot, EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
 import { meshViewKind } from "@/lib/ground-station";
+import { roleWordKey } from "@/lib/profile-words";
 import type { Tone } from "@/lib/tone";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH, fmtInt, fmtTq } from "@/shared/format";
@@ -64,6 +65,11 @@ export function MeshScreen() {
   const role = status?.role;
   const health = status?.mesh;
   const current = role?.current ?? mesh.data?.role ?? null;
+  // A role the mesh names as a word; one outside the set shows as sent.
+  const roleText = (r: string | null | undefined) => {
+    if (r == null) return DASH;
+    return r === "direct" || r === "relay" || r === "receiver" ? t(roleWordKey(r)) : r;
+  };
   const meshCapable = role?.mesh_capable ?? false;
   const state = mesh.data;
   const kind = meshViewKind({ data: state, httpStatus: mesh.status, error: mesh.error, role: current });
@@ -145,22 +151,22 @@ export function MeshScreen() {
       actions={
         <span className="flex items-center gap-[0.5rem]">
           <Dot tone={carrierTone} />
-          <span className="text-[0.8rem] text-surface-foreground">{current ?? DASH}</span>
+          <span className="text-[0.8rem] text-surface-foreground">{roleText(current)}</span>
           <StaleBadge stale={mesh.stale && kind === "ok"} />
         </span>
       }
     >
       <div className="flex flex-col gap-[0.15rem]">
         <SectionHeader>{t("cockpit.mesh.role")}</SectionHeader>
-        <Row label={t("cockpit.mesh.current")} value={current ?? DASH} tone={kind === "ok" ? "ok" : "muted"} />
-        <Row label={t("cockpit.mesh.configured")} value={role?.configured ?? DASH} />
+        <Row label={t("cockpit.mesh.current")} value={roleText(current)} tone={kind === "ok" ? "ok" : "muted"} />
+        <Row label={t("cockpit.mesh.configured")} value={roleText(role?.configured)} />
         <Row
           label={t("cockpit.mesh.capable")}
           left={<Dot tone={meshCapable ? "ok" : "muted"} />}
           value={meshCapable ? t("cockpit.mesh.yes") : t("cockpit.mesh.no")}
         />
         {role?.supported?.length ? (
-          <Row label={t("cockpit.mesh.supported")} value={role.supported.join(" · ")} mono={false} />
+          <Row label={t("cockpit.mesh.supported")} value={role.supported.map(roleText).join(" · ")} mono={false} />
         ) : null}
         {body}
       </div>

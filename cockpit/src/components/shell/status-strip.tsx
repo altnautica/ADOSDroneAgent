@@ -18,6 +18,7 @@
 
 import { Wifi, WifiOff } from "lucide-react";
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { SignalBars } from "@/components/shell/signal-bars";
 import { WallClock } from "@/components/shell/wall-clock";
@@ -30,6 +31,7 @@ import { fmtDb, fmtKbpsAsMbps, fmtLossPct } from "@/lib/format-status";
 import { linkDiagView, type LinkDiagView } from "@/lib/link-diag";
 import type { GsStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import "@/shared/i18n";
 
 /** Map a bare link state string to a tone, the fallback when the agent has not
  *  yet classified the link with a verdict. Only the states that name a fault
@@ -94,6 +96,7 @@ function VerdictChip({ view }: { view: LinkDiagView }) {
 
 /** LEFT zone — the RF link. */
 function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
+  const { t } = useTranslation();
   const view = linkDiagView(link?.link_diag);
   const dotTone = view ? view.tone : stateTone(link?.state);
   const loss = link?.loss_percent ?? null;
@@ -108,16 +111,16 @@ function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
         <SignalBars rssi={link?.rssi_dbm} tone={dotTone} />
         <span className="font-mono text-[0.8rem] text-surface-foreground">{fmtDbm(link?.rssi_dbm)}</span>
       </span>
-      <Item label="Loss">
+      <Item label={t("cockpit.shell.strip.loss")}>
         <span className={loss != null && loss > 5 ? "text-warn" : undefined}>{fmtLossPct(loss)}</span>
       </Item>
-      <Item label="SNR" className="hidden md:flex">
+      <Item label={t("cockpit.shell.strip.snr")} className="hidden md:flex">
         {fmtDb(link?.snr_db)}
       </Item>
-      <Item label="Ch" className="hidden lg:flex">
+      <Item label={t("cockpit.shell.strip.channel")} className="hidden lg:flex">
         {fmtChannel(link?.channel)}
       </Item>
-      <Item label="Rate" className="hidden lg:flex">
+      <Item label={t("cockpit.shell.strip.rate")} className="hidden lg:flex">
         {bitrate}
       </Item>
     </div>
@@ -126,6 +129,7 @@ function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
 
 /** RIGHT zone — the box + reach state. */
 function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean }) {
+  const { t } = useTranslation();
   const role = status?.role?.current;
   const uplink = status?.network?.uplink_type;
   const uplinkReachable = status?.network?.uplink_reachable;
@@ -140,15 +144,15 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
       {recording ? (
         <span className="inline-flex items-center gap-[0.28rem] text-err">
           <span className="h-[0.5rem] w-[0.5rem] animate-pulse rounded-full bg-err" aria-hidden />
-          <span className="text-[0.75rem] font-medium">REC</span>
+          <span className="text-[0.75rem] font-medium">{t("cockpit.shell.strip.rec")}</span>
         </span>
       ) : null}
       {role ? (
-        <Item label="Role" className="hidden lg:flex">
+        <Item label={t("cockpit.shell.strip.role")} className="hidden lg:flex">
           {role}
         </Item>
       ) : null}
-      <Item label="Uplink" className="hidden md:flex">
+      <Item label={t("cockpit.shell.strip.uplink")} className="hidden md:flex">
         <span className="inline-flex items-center gap-[0.25rem]">
           {/* Reachability is three-state: only badge it when the node actually
               reports it. Absent (undefined) is UNKNOWN, not "not reachable", so
@@ -161,21 +165,21 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
           {uplink ?? DASH}
         </span>
       </Item>
-      <Item label="Pair">
+      <Item label={t("cockpit.shell.strip.pair")}>
         <span className={paired ? "text-ok" : "text-muted-foreground"}>
-          {paired ? "linked" : "none"}
+          {paired ? t("cockpit.shell.strip.linked") : t("cockpit.shell.strip.none")}
         </span>
       </Item>
-      <Item label="CPU" className="hidden lg:flex">
+      <Item label={t("cockpit.shell.strip.cpu")} className="hidden lg:flex">
         {fmtPct(cpu)}
       </Item>
-      <Item label="Temp">
+      <Item label={t("cockpit.shell.strip.temp")}>
         <span className={tempClass}>{fmtTemp(temp)}</span>
       </Item>
       <span className="text-[0.78rem] text-surface-foreground">
         <WallClock />
       </span>
-      {stale ? <span className="text-[0.75rem] text-warn">stale</span> : null}
+      {stale ? <span className="text-[0.75rem] text-warn">{t("cockpit.shell.strip.stale")}</span> : null}
     </div>
   );
 }
