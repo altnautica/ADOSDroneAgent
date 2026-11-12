@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.107] - 2026-11-12
+
+### Fixed
+
+- Cockpit browser checks wait for the flight-state chip button, not for the chip text to stop reading "NO PILOT". The spec text is now sentence case ("No pilot"), so the old wait passed at once and on a fast runner a check could tap the placeholder before the first pilot frame arrived (the Mode sheet check at compact and medium widths).
+
 ## [0.109.106] - 2026-11-12
 
 ### Fixed

@@ -213,8 +213,10 @@ async function pilotPage(browser, vp, sim, query = "") {
   await page.goto(`${BASE}${query}`);
   await page.waitForSelector('[data-testid="top-bar-stop"]', { timeout: 10000 });
   await page.waitForSelector('[data-testid="flight-state-chip"]', { timeout: 10000 });
-  // The first pilot frame has reached the chip (it no longer reads NO PILOT).
-  if (sim.pilot) await page.waitForFunction(() => !/NO PILOT/.test(document.querySelector('[data-testid="flight-state-chip"]')?.textContent ?? ""), null, { timeout: 10000 });
+  // The first pilot frame has reached the chip: it is the pressable chip
+  // button, no longer the "No pilot" placeholder. Checked by element, not by
+  // wording, so a change to the spec text cannot turn this wait into a no-op.
+  if (sim.pilot) await page.waitForSelector('button[data-testid="flight-state-chip"]', { timeout: 10000 });
   const skip = page.getByRole("button", { name: "Skip" });
   if (await skip.count()) await skip.first().click();
   return { ctx, page };
