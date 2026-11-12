@@ -39,7 +39,7 @@ describe("chip GOTO distance", () => {
     expect(d).toBeCloseTo(5, 6);
     expect(chipFacts(pilot, 0, { ...base, distM: d }).distM).toBeCloseTo(5, 6);
     const goto = wire({ owner: "goto", mission: null });
-    expect(flightStateChip(chipFacts(goto, 0, { ...base, distM: d })).text).toBe("GOTO · 5 m");
+    expect(flightStateChip(chipFacts(goto, 0, { ...base, distM: d })).text).toBe("Goto · 5 m");
   });
 
   it("is null when either end is missing", () => {
@@ -64,16 +64,16 @@ describe("chip inputs", () => {
     expect(chipInputs(wire({ owner: "pilot" }), 0, 0, { ...ctx, modeDetail: "ORBIT 8 m" }).modeDetail).toBeNull();
   });
 
-  it("drives the TRANSITION chip from the pilot kind", () => {
+  it("drives the Transition chip from the pilot kind", () => {
     const p = wire({ vtol_transitioning: true, vehicle_class: "vtol", owner: "fc_mode", mission: null });
     expect(chipInputs(p, 0, 0, ctx).vtolTransitioning).toBe(true);
-    expect(flightStateChip(chipInputs(p, 0, 0, ctx)).text).toBe("TRANSITION");
+    expect(flightStateChip(chipInputs(p, 0, 0, ctx)).text).toBe("Transition");
     expect(chipInputs(wire({}), 0, 0, ctx).vtolTransitioning).toBe(false);
   });
 
-  it("names the setup step of a tuning flight, and reads TUNING without one", () => {
-    expect(flightStateChip(chipInputs(wire({ owner: "tuning", setup_step: "autotune_roll" }), 0, 0, ctx)).text).toBe("TUNING · AUTOTUNE_ROLL");
-    expect(flightStateChip(chipInputs(wire({ owner: "tuning" }), 0, 0, ctx)).text).toBe("TUNING");
+  it("names the setup step of a tuning flight, and reads Tuning without one", () => {
+    expect(flightStateChip(chipInputs(wire({ owner: "tuning", setup_step: "autotune_roll" }), 0, 0, ctx)).text).toBe("Tuning · AUTOTUNE_ROLL");
+    expect(flightStateChip(chipInputs(wire({ owner: "tuning" }), 0, 0, ctx)).text).toBe("Tuning");
   });
 });
 
@@ -120,7 +120,7 @@ describe("chip golden cases (fixtures/chip-cases.json)", () => {
 
   it("reads a mission ETA of 119.6 s as 2:00, never 1:60", () => {
     const facts = chipFacts(wire({ owner: "mission_fc", mission: { state: "active", seq: 4, total: 6 } }), 100, { ...base, etaS: 119.6 });
-    expect(flightStateChip(facts).text).toBe("MISSION · WP 4/6 · ETA 2:00");
+    expect(flightStateChip(facts).text).toBe("Mission · WP 4/6 · ETA 2:00");
   });
 
   for (const c of chipCases) {

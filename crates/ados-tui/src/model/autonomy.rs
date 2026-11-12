@@ -52,13 +52,14 @@ fn one_of(v: &Value, key: &str, values: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// One kind's payload, its age, and whether it is stale. A kind without a
-/// whole-millisecond `age_ms` is of unknown age, so it is stale too.
+/// One kind's payload, its age, and whether it is stale: at least the spec's
+/// `stale_after_ms` old. A kind without a whole-millisecond `age_ms` is of
+/// unknown age, so it is stale too.
 fn kind<'a>(v: &'a Value, name: &str) -> Option<(&'a Value, Option<u64>, bool)> {
     let entry = v.get(name).filter(|e| !e.is_null())?;
     let data = entry.get("data")?;
     let age = entry.get("age_ms").and_then(Value::as_u64);
-    let stale = age.is_none_or(|a| a > stale_after_ms());
+    let stale = age.is_none_or(|a| a >= stale_after_ms());
     Some((data, age, stale))
 }
 

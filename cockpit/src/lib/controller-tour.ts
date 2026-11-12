@@ -18,8 +18,8 @@ export function tourStage(padReported: boolean, padAnnounced: boolean, seen: boo
 
 /** Whether the vehicle is in the air: the live pilot state's `armed &&
  *  !landed`, else (no live pilot) the heartbeat's arm state. */
-export function tourAirborne(pilot: { armed: boolean; landed: boolean } | null, telemetryArmed: boolean | null | undefined): boolean {
-  if (pilot) return pilot.armed && !pilot.landed;
+export function tourAirborne(pilot: { armed: boolean | null; landed: boolean | null } | null, telemetryArmed: boolean | null | undefined): boolean {
+  if (pilot) return pilot.armed === true && pilot.landed === false;
   return telemetryArmed === true;
 }
 
@@ -30,10 +30,10 @@ export function tourAirborne(pilot: { armed: boolean; landed: boolean } | null, 
  *  loaded mid-flight before the first frame, link down) counts as airborne:
  *  the card shows without capturing, so kill, RTH, pause and arm stay live. */
 export function tourCapturesPad(
-  pilot: { armed: boolean; landed: boolean } | null,
+  pilot: { armed: boolean | null; landed: boolean | null } | null,
   telemetry: { live: boolean; armed: boolean | null | undefined },
 ): boolean {
-  if (pilot) return pilot.landed && !pilot.armed;
+  if (pilot) return pilot.landed !== false && pilot.armed !== true;
   return telemetry.live && telemetry.armed === false;
 }
 

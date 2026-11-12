@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.104] - 2026-11-12
+
+### Changed
+
+- Shared flight-screen spec: a pilot frame is stale from exactly `stale_after_ms` (2000 ms) old on every surface, including the terminal UI. A 1999 ms frame still reads fresh.
+- Shared flight-screen spec: the pilot frame's `armed` and `landed` may be unknown (`null`). The status pill hides its pre-flight items, Fly Here never treats the drone as landed, and a lost controller warns, whenever the arm state is unknown.
+- Shared flight-screen spec: the Fly Here offer reports why it is refused (`failsafe`, `landed`, `pilot_stale`, `control_mode`, `not_guided`), with new refusal texts "Fly here needs GUIDED on the flight controller" and "Pilot not answering".
+- Shared flight-screen spec: a degraded navigation source raises a status pill warning, "Navigation source degraded ({source})".
+- Shared flight-screen spec: spec texts for the remaining flight-screen strings (confirm sheet, stop hint, link and readout units, pre-flight icons, terminal UI row labels), and "Pose age {ms} ms" for the navigation source. The unused Medium and Low stream-quality texts are removed.
+- Flight-screen chrome tokens are sharper and quieter: radius 6 on panels and 4 on controls, near-opaque panels with lighter blur, a fainter border, and one 36 px control height. The flight-state chip and spec texts read in sentence case ("Mission · WP 3/7", "Active"); acronyms stay upper case. The menu reads "Full screen" and "Exit full screen".
+- Shared fonts ship weight 500 for Inter and JetBrains Mono.
+
 ## [0.109.103] - 2026-11-10
 
 ### Fixed

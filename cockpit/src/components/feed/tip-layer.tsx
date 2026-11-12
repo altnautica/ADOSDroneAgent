@@ -83,8 +83,8 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
         if (r) rects[a] = r;
       }
       const screen: TipsScreen = {
-        armed: pilot ? pilot.armed : telemetryArmed === true,
-        airborne: pilot ? pilot.armed && !pilot.landed : telemetryArmed !== false,
+        armed: pilot ? pilot.armed === true : telemetryArmed === true,
+        airborne: pilot ? pilot.armed === true && pilot.landed === false : telemetryArmed !== false,
         flightScreen: activeScreenId(nav) === "feed" && nav.detailStack.length === 0,
         sheetOrMenuOpen:
           useCockpitUiStore.getState().sheet !== null ||

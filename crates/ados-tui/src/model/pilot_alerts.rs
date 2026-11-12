@@ -226,6 +226,19 @@ mod tests {
     }
 
     #[test]
+    fn the_pill_reads_the_spec_threshold_as_stale() {
+        let p = fresh(vec![], vec![]);
+        let ids = |age: u64| -> Vec<String> {
+            pilot_alerts(&p, Some(age), None)
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        };
+        assert!(ids(1999).is_empty(), "1999 ms is fresh");
+        assert_eq!(ids(2000), ["pilot_not_answering"], "2000 ms is stale");
+    }
+
+    #[test]
     fn a_failsafe_cause_reads_its_spec_label() {
         assert_eq!(failsafe_text(None), "Failsafe: flight controller");
         assert_eq!(
@@ -244,7 +257,9 @@ mod tests {
 
     /// Whether a golden case uses only the sources this port models (the
     /// pilot kind and the FC's PreArm texts): the terminal has no surface
-    /// alerts, storage, agent-reachability, controller or checklist rules.
+    /// alerts, storage, agent-reachability, controller, checklist or
+    /// navigation-source rules. An `armed` input only hides checklist items,
+    /// so a case without them reads the same whatever it says.
     fn pilot_sources_only(i: &Value) -> bool {
         let empty = |k: &str| i[k].as_array().is_none_or(Vec::is_empty);
         empty("alerts")
@@ -252,6 +267,7 @@ mod tests {
             && i["agent_reachable"] != Value::Bool(false)
             && i["controller_lost"] != Value::Bool(true)
             && i["storage_pct"].as_f64().is_none_or(|s| s < 90.0)
+            && i["nav_source"].is_null()
     }
 
     #[test]

@@ -127,6 +127,7 @@ class MockNavStream {
         obstacleRateHz: 10,
         minObstacleM: null,
         gpsFix: 0,
+        poseAgeMs: 40,
       },
     });
     store.ingest({

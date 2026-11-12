@@ -102,7 +102,7 @@ function engineContext(): EngineContext {
   const p = pilotNow();
   return {
     pickerOpen: useInputStore.getState().pickerOpen,
-    landed: p ? p.landed : null,
+    landed: p ? p.landed !== false : null,
     rthActive: rthModeActive(p?.fcModeName),
     vehicleVtol: p?.vehicleClass === "vtol",
     nativeSafety: nativeInputActive(),
@@ -118,7 +118,7 @@ export function feedbackView(p: PilotState): FeedbackView {
     owner: p.owner,
     skillId: p.skill ? `${p.skill.pluginId}:${p.skill.skillId}` : null,
     controlMode: p.controlMode,
-    armed: p.armed,
+    armed: p.armed === true,
     warnings,
     criticals,
   };

@@ -17,6 +17,8 @@ export interface ChromeTokens {
   border_px: number;
   radius_px: number;
   radius_small_px: number;
+  /** Visual height of a top-bar control; its hit area stays at least 48. */
+  control_px: number;
   text: string;
   text_dim: string;
   severity_ok: string;
@@ -52,6 +54,7 @@ export function chromeStyle(t: ChromeTokens = CHROME_TOKENS): CSSProperties {
     "--fs-border-w": `${t.border_px}px`,
     "--fs-radius": `${t.radius_px}px`,
     "--fs-radius-sm": `${t.radius_small_px}px`,
+    "--fs-control": `${t.control_px}px`,
     "--fs-text": t.text,
     "--fs-text-dim": t.text_dim,
     "--fs-ok": t.severity_ok,

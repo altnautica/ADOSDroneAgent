@@ -94,7 +94,7 @@ describe("launch sequence and the chip", () => {
       expect(launchRunning(sequence)).toBe(facts.launchStep !== null);
       if (launchRunning(sequence)) {
         const chip = flightStateChip({ ...facts, owner: "pilot" });
-        expect(chip.text).toBe(`TAKING OFF · ${launchStepUpper(sequence.step)}`);
+        expect(chip.text).toBe(`Taking off · ${launchStepUpper(sequence.step)}`);
       }
     }
     expect(launchStepUpper("takeoff")).toBe("TAKE OFF");

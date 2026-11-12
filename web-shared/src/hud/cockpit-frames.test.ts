@@ -110,6 +110,12 @@ describe("parsePilotState on the golden fixture", () => {
     expect(parsePilotState({ owner: "boss" })).toBeNull();
   });
 
+  it("keeps an unknown arm and landed state unknown", () => {
+    expect(parsePilotState({ owner: "idle", armed: null, landed: null })).toMatchObject({ armed: null, landed: null });
+    expect(parsePilotState({ owner: "idle" })).toMatchObject({ armed: null, landed: null });
+    expect(parsePilotState({ owner: "idle", armed: false, landed: true })).toMatchObject({ armed: false, landed: true });
+  });
+
   it("caps the plan at 16 points", () => {
     const plan = Array.from({ length: 30 }, (_, i) => [i, i]);
     expect(parsePilotState({ owner: "pilot", plan_ned: plan })!.planNed).toHaveLength(16);

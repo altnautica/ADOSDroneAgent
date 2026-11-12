@@ -7,13 +7,13 @@
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 
 interface GroundFrame {
-  landed: boolean;
-  armed: boolean;
+  landed: boolean | null;
+  armed: boolean | null;
 }
 
 /** From the fresh pilot frame (null when absent or stale). */
 export function groundFrom(fresh: GroundFrame | null, telemetryArmed: boolean | null | undefined): boolean {
-  return fresh ? fresh.landed || !fresh.armed : telemetryArmed === false;
+  return fresh ? fresh.landed !== false || fresh.armed !== true : telemetryArmed === false;
 }
 
 /** From a stamped pilot frame, judged fresh at `nowMs`. */

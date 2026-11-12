@@ -56,7 +56,7 @@ export function mapPickAction(p: PilotState | null, pilotAgeMs: number, fc: FlyH
 export function flyHereFc(t: VehicleState | null, live: boolean, pilot: PilotState | null): FlyHereFc | null {
   if (!live || !t || !pilot) return null;
   const mode = pilot.fcModeName ?? t.mode ?? null;
-  return { guided: mode?.toUpperCase() === "GUIDED", armed: t.armed === true, landed: pilot.landed };
+  return { guided: mode?.toUpperCase() === "GUIDED", armed: t.armed === true, landed: pilot.landed !== false };
 }
 
 /** The Launch sheet's go-to for a picked point: whole metres north/east of

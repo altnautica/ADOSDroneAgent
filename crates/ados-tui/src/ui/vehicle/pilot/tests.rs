@@ -68,7 +68,7 @@ fn row<'a>(text: &'a str, prefix: &str) -> &'a str {
 }
 
 const ROWS: [&str; 4] = [
-    "Mode      ADOS PILOT",
+    "Mode      ADOS Pilot",
     "Link loss ",
     "AGL       ",
     "Alerts    ",
@@ -98,5 +98,78 @@ fn the_rows_dim_once_the_pilot_ages_past_the_threshold_between_reads() {
             row(&text, prefix).contains("(stale)"),
             "{prefix:?} reads live from an aged pilot kind\n{text}"
         );
+    }
+}
+
+#[test]
+fn the_rows_read_the_spec_threshold_as_stale() {
+    let mut app = app_with_pilot(1_999);
+    let text = draw(&mut app, 160, 48);
+    assert!(!text.contains("State     LINK"), "1999 ms is fresh\n{text}");
+    for prefix in ROWS {
+        assert!(
+            !row(&text, prefix).contains("(stale)"),
+            "{prefix:?} stale at 1999 ms\n{text}"
+        );
+    }
+
+    // One more millisecond: the frame is 2000 ms old, the threshold itself.
+    app.core.now += Duration::from_millis(1);
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("State     LINK (stale)"), "{text}");
+    for prefix in ROWS {
+        assert!(
+            row(&text, prefix).contains("(stale)"),
+            "{prefix:?} reads live at the threshold\n{text}"
+        );
+    }
+}
+
+#[test]
+fn the_follow_height_reads_the_spec_threshold_as_stale() {
+    let mut app = app_with_pilot(0);
+    let mut frame: Value = serde_json::from_str(include_str!(
+        "../../../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON");
+    // No height of the pilot's own: the row reads the follow kind's.
+    frame.as_object_mut().expect("object").remove("agl_m");
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        json!({
+            "pilot": {"ts_ms": 1, "age_ms": 0, "data": frame},
+            "follow": {"ts_ms": 1, "age_ms": 1_999,
+                "data": {"phase": "following", "agl_m": 6.5, "agl_source": "baro"}}
+        }),
+    );
+    let text = draw(&mut app, 160, 48);
+    let agl = row(&text, "AGL       ");
+    assert!(agl.contains("6.5 m"), "{text}");
+    assert!(!agl.contains("(stale)"), "1999 ms is fresh\n{text}");
+
+    app.core.now += Duration::from_millis(1);
+    let text = draw(&mut app, 160, 48);
+    assert!(
+        row(&text, "AGL       ").contains("(stale)"),
+        "a 2000 ms old follow height reads live\n{text}"
+    );
+}
+
+#[test]
+fn the_row_labels_are_the_spec_strings() {
+    use crate::model::spec_text::{has_spec_text, spec_text};
+    for key in [
+        "cockpit.row.failsafe",
+        "cockpit.row.mode",
+        "cockpit.row.offers",
+    ] {
+        assert!(has_spec_text(key), "the spec has no {key}");
+    }
+    let mut app = app_with_pilot(0);
+    let text = draw(&mut app, 160, 48);
+    for key in ["cockpit.row.mode", "cockpit.row.offers"] {
+        let label = format!("{:<width$} ", spec_text(key, &[]), width = super::LABEL);
+        assert!(text.contains(&label), "no {label:?} row\n{text}");
     }
 }

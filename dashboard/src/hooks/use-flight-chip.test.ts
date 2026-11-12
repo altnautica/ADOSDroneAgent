@@ -58,7 +58,7 @@ describe("dashboard flight-state chip", () => {
         telemetry: { home_distance: null, local_position: { x: 0, y: 0, age_ms } },
       })!.text;
     // goal_ned (12, -3.5) from the origin: 12.5 m, shown whole.
-    expect(chip(2_000)).toBe("GOTO · 13 m");
+    expect(chip(2_000)).toBe("Goto · 13 m");
     expect(chip(2_001)).not.toContain("13");
     expect(chip(5_000)).not.toContain("13");
     expect(chip(undefined)).not.toContain("13");

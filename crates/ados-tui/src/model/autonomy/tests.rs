@@ -123,15 +123,16 @@ fn an_old_pilot_kind_is_stale_and_a_null_one_is_absent() {
 }
 
 #[test]
-fn a_kind_past_the_spec_threshold_is_stale() {
+fn a_kind_at_the_spec_threshold_is_stale() {
     let at = |age: u64| {
         Autonomy::from_value(&json!({"pilot": {"ts_ms": 1, "age_ms": age, "data": pilot_frame()}}))
             .pilot
             .unwrap()
             .stale
     };
-    assert!(!at(stale_after_ms()));
-    assert!(at(stale_after_ms() + 1));
+    assert_eq!(stale_after_ms(), 2000);
+    assert!(!at(1999), "1999 ms is fresh");
+    assert!(at(2000), "2000 ms is stale: the threshold itself is stale");
     assert!(at(2500), "2.5 s is past the spec's 2 s");
 }
 

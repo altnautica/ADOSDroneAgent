@@ -223,7 +223,7 @@ fn is_bool(want: &Value, v: bool) -> bool {
 
 fn matches(when: &Map<String, Value>, f: &ChipFacts) -> bool {
     when.iter().all(|(key, want)| match key.as_str() {
-        "pilot_stale" => is_bool(want, f.age_ms > SPEC.stale_after_ms),
+        "pilot_stale" => is_bool(want, f.age_ms >= SPEC.stale_after_ms),
         "owner" => is(want, Some(&f.owner)),
         "ready" => is_bool(want, f.ready),
         "mission_state" => is(want, f.mission_state.as_deref()),
@@ -306,7 +306,7 @@ pub fn hold_reason_label(reason: &str) -> String {
         .unwrap_or_else(|| reason.replace(['-', '_'], " "))
 }
 
-/// The avoidance state as the chip names it (`AVOIDING`, `BLOCKED`, ...),
+/// The avoidance state as the chip names it (`Avoiding`, `Blocked`, ...),
 /// with its spec colour; `None` for `clear` and unknown states.
 pub fn avoid_state_text(state: &str) -> Option<ChipLine> {
     SPEC.secondary
@@ -319,7 +319,7 @@ pub fn avoid_state_text(state: &str) -> Option<ChipLine> {
         })
 }
 
-/// A control mode as the chip names it (`ADOS PILOT`, `FC MANUAL`, `ELRS`).
+/// A control mode as the chip names it (`ADOS Pilot`, `FC Manual`, `ELRS`).
 pub fn control_mode_text(mode: &str) -> String {
     SPEC.secondary
         .control_mode

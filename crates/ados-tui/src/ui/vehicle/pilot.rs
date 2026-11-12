@@ -67,7 +67,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
         // Nothing publishes the pilot kind: the chip's absent state.
         return vec![kv_text(t, "State", LABEL, spec_text("chip.no_pilot", &[]))];
     };
-    let p_stale = p.stale || i.age_ms > stale_after_ms();
+    let p_stale = p.stale || i.age_ms >= stale_after_ms();
     let stale = |line: Line<'static>| mark_stale(t, line, p_stale);
     let mut out = Vec::new();
 
@@ -105,7 +105,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
         }
         out.push(stale(kv(
             t,
-            "Failsafe",
+            &spec_text("cockpit.row.failsafe", &[]),
             LABEL,
             Span::styled(text, Style::default().fg(t.error())),
         )));
@@ -125,7 +125,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
     .join(" · ");
     out.push(stale(kv_text(
         t,
-        "Mode",
+        &spec_text("cockpit.row.mode", &[]),
         LABEL,
         if mode.is_empty() { "–".into() } else { mode },
     )));
@@ -142,7 +142,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
         .join(" · ");
     out.push(stale(kv_text(
         t,
-        "Offers",
+        &spec_text("cockpit.row.offers", &[]),
         LABEL,
         if ops.is_empty() { "–".into() } else { ops },
     )));
@@ -206,7 +206,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
             ]);
             let from_stale = if from_follow {
                 i.follow
-                    .is_some_and(|f| f.stale || i.follow_age_ms > stale_after_ms())
+                    .is_some_and(|f| f.stale || i.follow_age_ms >= stale_after_ms())
             } else {
                 p_stale
             };

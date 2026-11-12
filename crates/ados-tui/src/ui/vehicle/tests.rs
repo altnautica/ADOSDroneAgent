@@ -212,8 +212,8 @@ fn the_autonomy_block_shows_who_flies_and_how() {
     let text = draw(&mut app, 120, 40);
     for want in [
         "State     FOLLOW · ACTIVE",
-        "Mode      ADOS PILOT · Normal",
-        "Avoid     Brake · AVOIDING 2.4 m",
+        "Mode      ADOS Pilot · Normal",
+        "Avoid     Brake · Avoiding 2.4 m",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
@@ -234,8 +234,8 @@ fn an_old_pilot_kind_is_marked_stale_and_avoid_off_reads_off() {
     let text = draw(&mut app, 120, 40);
     for want in [
         "State     LINK (stale)",
-        "Mode      FC MANUAL · Sport (stale)",
-        "Avoid     AVOIDANCE OFF",
+        "Mode      FC Manual · Sport (stale)",
+        "Avoid     Avoidance off",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
@@ -246,7 +246,7 @@ fn without_a_pilot_kind_the_state_reads_no_pilot() {
     let mut app = live_app();
     land(&mut app, ResourceId::NavStatus, nav_status());
     let text = draw(&mut app, 120, 40);
-    assert!(text.contains("State     NO PILOT"), "{text}");
+    assert!(text.contains("State     No pilot"), "{text}");
     assert!(!text.contains("Mode      –"), "{text}");
 }
 
@@ -416,7 +416,7 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
     fail(&mut app, ResourceId::NavStatus);
     let text = draw(&mut app, 160, 48);
     for prefix in [
-        "Mode      ADOS PILOT",
+        "Mode      ADOS Pilot",
         "Avoid     ",
         "Follow    ",
         "Range     10.2 m",
@@ -448,7 +448,7 @@ fn every_row_built_from_a_stale_kind_is_marked_and_dim() {
     land(&mut app, ResourceId::NavStatus, body);
     let text = draw(&mut app, 160, 48);
     for prefix in [
-        "Mode      ADOS PILOT",
+        "Mode      ADOS Pilot",
         "Avoid     ",
         "Nav       ",
         "Odometry  ",
@@ -461,7 +461,7 @@ fn every_row_built_from_a_stale_kind_is_marked_and_dim() {
     }
     assert!(!row(&text, "Follow    ").contains("(stale)"), "{text}");
     let buf = draw_buffer(&mut app, 160, 48);
-    assert_dim(&app, &buf, "ADOS PILOT");
+    assert_dim(&app, &buf, "ADOS Pilot");
     assert_dim(&app, &buf, "min 3.0 m");
 }
 
@@ -475,7 +475,7 @@ fn a_pilot_kind_without_an_age_reads_stale() {
     );
     let text = draw(&mut app, 120, 40);
     assert!(
-        row(&text, "Mode      ADOS PILOT").contains("(stale)"),
+        row(&text, "Mode      ADOS Pilot").contains("(stale)"),
         "{text}"
     );
 }
@@ -539,9 +539,9 @@ fn the_pilot_panel_reads_its_rows_from_the_spec() {
     let text = draw(&mut app, 160, 48);
     for want in [
         "State     FOLLOW · ACTIVE",
-        "AVOIDING · ADOS PILOT",
-        "Mode      ADOS PILOT · Normal",
-        "Avoid     Brake · AVOIDING 2.4 m",
+        "Avoiding · ADOS Pilot",
+        "Mode      ADOS Pilot · Normal",
+        "Avoid     Brake · Avoiding 2.4 m",
         "Mission   No mission loaded on the drone",
         "Link loss → Return home",
         "AGL       4.2 m (AGL)",
@@ -576,7 +576,7 @@ fn the_pilot_panel_on_a_mission_with_the_link_lost() {
     land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
     let text = draw(&mut app, 160, 48);
     for want in [
-        "State     MISSION · WP 4/6",
+        "State     Mission · WP 4/6",
         "Mission   WP 4/6",
         "Link loss Link lost: Land in 4 s",
         "AGL       8.4 m (HOME)",
@@ -595,19 +595,21 @@ fn the_pilot_panel_on_a_mission_with_the_link_lost() {
 }
 
 #[test]
-fn the_chip_reads_link_past_the_spec_stale_threshold() {
+fn the_chip_reads_link_from_the_spec_stale_threshold() {
     let mut app = live_app();
+    for age in [2500, 2000] {
+        land(
+            &mut app,
+            ResourceId::NavStatus,
+            pilot_status(pilot_frame(), age),
+        );
+        let text = draw(&mut app, 120, 40);
+        assert!(text.contains("State     LINK (stale)"), "{age} ms\n{text}");
+    }
     land(
         &mut app,
         ResourceId::NavStatus,
-        pilot_status(pilot_frame(), 2500),
-    );
-    let text = draw(&mut app, 120, 40);
-    assert!(text.contains("State     LINK (stale)"), "{text}");
-    land(
-        &mut app,
-        ResourceId::NavStatus,
-        pilot_status(pilot_frame(), 2000),
+        pilot_status(pilot_frame(), 1999),
     );
     let text = draw(&mut app, 120, 40);
     assert!(text.contains("State     FOLLOW · ACTIVE"), "{text}");
@@ -640,7 +642,7 @@ fn pilot_and_autonomy_fit_a_120_by_40_terminal() {
     // first rows, are on screen; whatever is cut is counted, never lost silently.
     for want in [
         "State     FOLLOW · ACTIVE",
-        "Mode      ADOS PILOT · Normal",
+        "Mode      ADOS Pilot · Normal",
         "Mission",
         "Link loss → Return home",
         "AGL       4.2 m (AGL)",
@@ -680,7 +682,7 @@ fn the_pilot_panel_shows_surface_ops_and_the_failsafe_cause() {
     let text = draw(&mut app, 160, 48);
     // The alerts list carries the failsafe as the pill does.
     for want in [
-        "Failsafe  FAILSAFE · RC switch or failsafe",
+        "Failsafe  Failsafe · RC switch or failsafe",
         "Offers    –",
         "Failsafe: RC switch or failsafe",
     ] {
@@ -692,7 +694,7 @@ fn the_pilot_panel_shows_surface_ops_and_the_failsafe_cause() {
     land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
     let text = draw(&mut app, 160, 48);
     for want in [
-        "Failsafe  FAILSAFE · flight controller",
+        "Failsafe  Failsafe · flight controller",
         "Offers    Fly here",
         "Failsafe: flight controller",
     ] {

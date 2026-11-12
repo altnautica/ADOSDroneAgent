@@ -294,7 +294,7 @@ describe("the top bar's cells from the spec", () => {
   it("critical text, panel and STOP colours come from the chrome tokens", () => {
     expect(TEXT_CRITICAL).toBe("#FF8A80");
     expect(severityTextColor("critical")).toBe(TEXT_CRITICAL);
-    expect(chromeStyle()).toMatchObject({ "--fs-panel-bg": "#080A0EC8", "--fs-stop-bg": "#C81E1E" });
+    expect(chromeStyle()).toMatchObject({ "--fs-panel-bg": "#0B0D12EB", "--fs-stop-bg": "#C81E1E", "--fs-control": "36px" });
     const stack = readFileSync(path.resolve(__dirname, "../components/feed/alert-stack.tsx"), "utf8");
     expect(stack).toContain("TEXT_CRITICAL");
   });

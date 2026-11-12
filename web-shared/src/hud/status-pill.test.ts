@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import layout from "../cockpit-spec/layout.json";
 import type { BatteryHealthInput } from "./battery";
 import pillCases from "./fixtures/pill-cases.json";
-import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs } from "./status-pill";
+import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs, type PillInputs } from "./status-pill";
 
 function inputs(over: Partial<BaseAlertInputs> = {}): BaseAlertInputs {
   return { status: null, telemetry: null, battery: null, msSinceLive: 0, video: "live", ...over };
@@ -231,6 +231,8 @@ describe("status pill", () => {
     expect(controllerLost({ ...p, armed: false })).toBe(false);
     expect(controllerLost({ ...p, holdReason: "link-loss" })).toBe(false);
     expect(controllerLost(null)).toBe(false);
+    // An unknown arm state is possibly airborne.
+    expect(controllerLost({ ...p, armed: null, landed: null })).toBe(true);
   });
 });
 
@@ -250,6 +252,8 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
         preflightFailing: i.preflight_failing,
         fcFailsafe: i.fc_failsafe,
         failsafeCause: i.failsafe_cause,
+        armed: i.armed,
+        navSource: i.nav_source as PillInputs["navSource"],
       });
       const s = pillSummary(alerts, new Set());
       expect({ severity: s.severity, text: s.text, count: s.count, ids: alerts.map((a) => a.id) }).toEqual(c.expected);

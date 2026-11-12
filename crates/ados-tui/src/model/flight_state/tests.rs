@@ -63,6 +63,17 @@ fn the_stale_threshold_is_the_spec_value() {
 }
 
 #[test]
+fn the_chip_reads_the_spec_threshold_as_stale() {
+    let frame = serde_json::json!({"owner": "idle", "readiness": []});
+    let rule_at = |age: u64| {
+        let facts = chip_inputs(&pilot_of(&frame), age, &ChipContext::default()).unwrap();
+        flight_state_chip(&facts).rule_id
+    };
+    assert_ne!(rule_at(1999), "link_stale", "1999 ms is fresh");
+    assert_eq!(rule_at(2000), "link_stale", "2000 ms is stale");
+}
+
+#[test]
 fn eta_reads_seconds_then_minutes() {
     assert_eq!(fmt_eta(Some(37.0)), "ETA 37 s");
     assert_eq!(fmt_eta(Some(65.0)), "ETA 1:05");

@@ -37,20 +37,20 @@ const base: ChipFacts = {
 };
 
 describe("flight-state chip (flight-state.json rules)", () => {
-  it("reads PILOT · <PROFILE> in blue with the control mode below", () => {
+  it("reads Pilot · <PROFILE> in blue with the control mode below", () => {
     const c = flightStateChip(base);
-    expect(c.text).toBe("PILOT · NORMAL");
+    expect(c.text).toBe("Pilot · NORMAL");
     expect(c.color).toBe("#2979FF");
-    expect(c.secondary.map((l) => l.text)).toContain("ADOS PILOT");
+    expect(c.secondary.map((l) => l.text)).toContain("ADOS Pilot");
   });
 
   it("dims to LINK when the pilot state is older than 2 s", () => {
     expect(flightStateChip({ ...base, ageMs: 2500 })).toMatchObject({ text: "LINK", dim: true });
   });
 
-  it("shows NOT READY with the first blocker and the setup link", () => {
+  it("shows Not ready with the first blocker and the setup link", () => {
     const c = flightStateChip({ ...base, owner: "idle", ready: false, firstBlockMsg: "Aircraft setup needed", setupNeeded: true });
-    expect(c.text).toBe("NOT READY · Aircraft setup needed");
+    expect(c.text).toBe("Not ready · Aircraft setup needed");
     expect(c.button).toBe("setup");
   });
 
@@ -63,23 +63,23 @@ describe("flight-state chip (flight-state.json rules)", () => {
 
   it("follows the mission states", () => {
     const m = { ...base, owner: "mission_fc", seq: 3, total: 9 };
-    expect(flightStateChip({ ...m, missionState: "active" }).text).toBe("MISSION · WP 3/9");
-    expect(flightStateChip({ ...m, missionState: "active", landingSeq: true }).text).toBe("MISSION · WP 3/9 · LANDING");
-    expect(flightStateChip({ ...m, owner: "fc_mode", fcMode: 5, fcModeName: "LOITER", missionState: "paused" })).toMatchObject({ text: "MISSION PAUSED · WP 3/9", button: "resume" });
-    expect(flightStateChip({ ...m, missionState: "complete", completeAgeMs: 2000 }).text).toBe("MISSION COMPLETE");
+    expect(flightStateChip({ ...m, missionState: "active" }).text).toBe("Mission · WP 3/9");
+    expect(flightStateChip({ ...m, missionState: "active", landingSeq: true }).text).toBe("Mission · WP 3/9 · Landing");
+    expect(flightStateChip({ ...m, owner: "fc_mode", fcMode: 5, fcModeName: "LOITER", missionState: "paused" })).toMatchObject({ text: "Mission paused · WP 3/9", button: "resume" });
+    expect(flightStateChip({ ...m, missionState: "complete", completeAgeMs: 2000 }).text).toBe("Mission complete");
   });
 
-  it("names RTH, LANDING and other FC modes with Take control", () => {
+  it("names RTH, Landing and other FC modes with Take control", () => {
     expect(flightStateChip({ ...base, owner: "fc_mode", fcMode: 6, fcModeName: "RTL", homeDistM: 42 }).text).toBe("RTH · 42 m");
-    expect(flightStateChip({ ...base, owner: "fc_mode", fcMode: 9, fcModeName: "LAND" }).text).toBe("LANDING");
+    expect(flightStateChip({ ...base, owner: "fc_mode", fcMode: 9, fcModeName: "LAND" }).text).toBe("Landing");
     const loiter = flightStateChip({ ...base, owner: "fc_mode", fcMode: 5, fcModeName: "Loiter" });
-    expect(loiter.text).toBe("FC · LOITER · ADOS STANDING BY");
+    expect(loiter.text).toBe("FC · LOITER · ADOS standing by");
     expect(loiter.button).toBe("take_control");
   });
 
-  it("puts AVOIDING and BLOCKED on the secondary line", () => {
-    expect(flightStateChip({ ...base, avoidState: "detour" }).secondary[0].text).toBe("AVOIDING");
-    expect(flightStateChip({ ...base, avoidState: "blocked" }).secondary[0].text).toBe("BLOCKED");
+  it("puts Avoiding and Blocked on the secondary line", () => {
+    expect(flightStateChip({ ...base, avoidState: "detour" }).secondary[0].text).toBe("Avoiding");
+    expect(flightStateChip({ ...base, avoidState: "blocked" }).secondary[0].text).toBe("Blocked");
   });
 });
 
