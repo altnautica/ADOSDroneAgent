@@ -39,7 +39,8 @@ fn app_with_pilot(age_ms: u64) -> App {
         json!({
             "armed": true, "mode": "LOITER",
             "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 1.57},
-            "gps": {"fix_type": 3, "satellites": 14, "eph": 0.8}
+            "gps": {"fix_type": 3, "satellites": 14, "eph": 0.8},
+            "battery": {"voltage": 14.1, "remaining": 8}
         }),
     );
     let mut frame: Value = serde_json::from_str(include_str!(
@@ -67,12 +68,7 @@ fn row<'a>(text: &'a str, prefix: &str) -> &'a str {
     &line[line.find(prefix).unwrap_or(0)..]
 }
 
-const ROWS: [&str; 4] = [
-    "Mode      ADOS Pilot",
-    "Link loss ",
-    "AGL       ",
-    "Alerts    ",
-];
+const ROWS: [&str; 3] = ["Mode      ADOS Pilot", "Link loss ", "AGL       "];
 
 #[test]
 fn the_rows_dim_once_the_pilot_ages_past_the_threshold_between_reads() {
@@ -98,6 +94,37 @@ fn the_rows_dim_once_the_pilot_ages_past_the_threshold_between_reads() {
             row(&text, prefix).contains("(stale)"),
             "{prefix:?} reads live from an aged pilot kind\n{text}"
         );
+    }
+}
+
+/// The Alerts row and every alert line under it.
+fn alert_block(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.contains("Alerts    "))
+        .unwrap_or_else(|| panic!("no Alerts row\n{text}"));
+    lines[at..]
+        .iter()
+        .take_while(|l| !l.trim().is_empty())
+        .copied()
+        .collect()
+}
+
+#[test]
+fn current_alerts_never_read_as_stale_with_the_pilot_kind() {
+    let mut app = app_with_pilot(1_800);
+    // The pilot stalls: its rows dim, but the battery alert is current.
+    app.core.now += Duration::from_millis(500);
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("State     LINK (stale)"), "{text}");
+    let block = alert_block(&text);
+    assert!(
+        block.iter().any(|l| l.contains("Battery critical")),
+        "{text}"
+    );
+    for line in block {
+        assert!(!line.contains("(stale)"), "{line:?} reads stale\n{text}");
     }
 }
 

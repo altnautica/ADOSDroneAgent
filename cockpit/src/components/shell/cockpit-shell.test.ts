@@ -3,7 +3,7 @@
 // full bleed on the kiosk, and full bleed after the top bar's Full screen
 // button (back to framed when the browser leaves full screen).
 
-import { createElement, type ComponentType } from "react";
+import { createElement, useEffect, type ComponentType } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -84,6 +84,47 @@ describe("the shell around the Feed", () => {
       document.dispatchEvent(new Event("fullscreenchange"));
     });
     expect(shellOf(el)).toBe("flight-framed");
+    stop();
+  });
+
+  it("keeps the one Feed mounted across Full screen, its exit and Escape", async () => {
+    // A remount would release the stick session (the vehicle brakes) and
+    // answer every pending RTH or Land as a failure.
+    kiosk.on = false;
+    const { watchFullscreenExit } = await import("@/lib/fullscreen");
+    const stop = watchFullscreenExit();
+    const TopBar = (await import("@/components/feed/cockpit/top-bar")).TopBar;
+    const life = { mounts: 0, unmounts: 0 };
+    const Feed = () => {
+      useEffect(() => {
+        life.mounts += 1;
+        return () => {
+          life.unmounts += 1;
+        };
+      }, []);
+      return createElement(TopBar);
+    };
+    const { CockpitShell } = await import("@/components/shell/cockpit-shell");
+    screen.body = Feed;
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => root.render(createElement(CockpitShell, { input: { buttonsConnected: false, gamepadConnected: false, wakeHeld: false } })));
+    const el = host;
+    const toggle = () => el.querySelector<HTMLButtonElement>('[data-testid="top-bar-fullscreen"]')!.click();
+    await act(async () => toggle());
+    expect(shellOf(el)).toBe("flight");
+    // Escape: the browser leaves full screen.
+    await act(async () => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    expect(shellOf(el)).toBe("flight-framed");
+    await act(async () => toggle());
+    expect(shellOf(el)).toBe("flight");
+    // The button again, now reading Exit full screen.
+    await act(async () => toggle());
+    expect(shellOf(el)).toBe("flight-framed");
+    expect(life).toEqual({ mounts: 1, unmounts: 0 });
     stop();
   });
 });

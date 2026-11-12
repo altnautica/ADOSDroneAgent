@@ -85,7 +85,7 @@ jobs:
       # gestures (Fly Here, ground launch, labels, readouts) land where they
       # should. Each case runs in its own process (`<group> <case>`, the
       # groups in e2e/*.e2e.cjs); e2e/shots.e2e.cjs stays manual.
-      - name: Browser checks (STOP, sheets, flows, gimbal pad, controls, maps)
+      - name: Browser checks (STOP, sheets, flows, gimbal pad, controls, shell, maps)
         working-directory: cockpit
         run: |
           set -euo pipefail
@@ -95,7 +95,7 @@ jobs:
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4273/cockpit/ >/dev/null && break; sleep 1; done
           for gc in stop:stop stop:stop-sheets stop:stop-hold stop:pad-safety stop:panel-stop \
             flows:flow-stale flows:sequence flows:mode-pending flows:hold-hint flows:overlay-close \
-            controls:recentre controls:gimbal-flick controls:chips controls:controls controls:stream; do
+            controls:recentre controls:gimbal-flick controls:chips controls:controls controls:stream controls:shell; do
             SHOTS="$RUNNER_TEMP/e2e-shots" node "e2e/${gc%%:*}.e2e.cjs" "${gc#*:}"
           done
           BASE=http://127.0.0.1:4273/cockpit/ SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/tips.e2e.cjs

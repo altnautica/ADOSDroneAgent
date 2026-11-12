@@ -1,1 +1,0 @@
-import{x as e,y as t}from"./api-fetch-7GB0VyUK.js";var n=e(t(),1);function r(e){let[t,r]=(0,n.useState)(()=>Date.now());return(0,n.useEffect)(()=>{if(e===null)return;let t=setInterval(()=>r(Date.now()),e);return()=>clearInterval(t)},[e]),t}export{r as t};

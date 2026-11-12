@@ -500,6 +500,24 @@ async fn a_primary_gamepad_change_is_refused_while_armed_and_force_passes() {
     assert!(!is_guarded("GET", "/api/v1/ground-station/gamepads"));
 }
 
+#[tokio::test]
+async fn a_bluetooth_forget_is_refused_while_armed_and_force_passes() {
+    // Forgetting a paired controller can drop the RC input mid-flight.
+    let uri = "/api/v1/ground-station/bluetooth/AA:BB:CC:DD:EE:FF";
+    let (status, hits) = send_armed("DELETE", uri, "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(hits, 0);
+    let (status, hits) = send_armed("DELETE", &format!("{uri}?force=1"), "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hits, 1);
+    assert!(!is_guarded(
+        "GET",
+        "/api/v1/ground-station/bluetooth/paired"
+    ));
+    assert!(!is_guarded("POST", "/api/v1/ground-station/bluetooth/scan"));
+    assert!(!is_guarded("DELETE", "/api/v1/ground-station/bluetooth/"));
+}
+
 #[test]
 fn setup_reset_is_not_guarded() {
     assert!(!is_guarded("POST", "/api/v1/setup/reset"));

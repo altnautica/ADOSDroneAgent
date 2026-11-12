@@ -207,6 +207,9 @@ pub fn is_guarded(method: &str, path: &str) -> bool {
                 // Forgetting a saved network, and a MAC re-tag's removal.
                 || any_depth_after(path, "/api/v1/network/client/").is_some()
                 || any_depth_after(path, "/api/v1/network/mac/").is_some()
+                // Forgetting a paired Bluetooth device: it may be the
+                // controller carrying the RC input.
+                || single_segment_after(path, "/api/v1/ground-station/bluetooth/").is_some()
                 // Removing a plugin, and revoking one of its permissions.
                 || single_segment_after(path, "/api/plugins/").is_some()
                 || plugin_permission_revoke(path)

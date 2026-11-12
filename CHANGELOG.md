@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.112] - 2026-11-13
+
+### Fixed
+
+- Cockpit: switching the Feed to full screen, leaving it, or pressing Escape no longer remounts the Feed, so the stick session stays up (the vehicle no longer brakes to a hold) and a pending Return home or Land keeps its answer. The browser shell check now runs in CI and asserts the Feed survives the toggle.
+- Ground-station gamepad reader: an unknown arm or landed state (the pilot cannot hear the flight controller) is treated as possibly airborne: the lightbar never shows the disarmed colour and Triangle-hold maps to Land, not Take off.
+- Forgetting a paired Bluetooth device is refused while the vehicle is armed or its arm state is unknown: the cockpit's IO screen holds Forget back and says why, and the agent's armed guard covers `DELETE /api/v1/ground-station/bluetooth/{mac}` (override with `force`).
+- Cockpit: the top bar's link cell no longer reads fresh while the flight controller is lost; a pilot frame counts only while it reports the flight controller linked. The telemetry age is read on one clock.
+- TUI: current alerts (battery, link, GPS, storage) are no longer dimmed as "(stale)" when the pilot state goes stale.
+
 ## [0.109.111] - 2026-11-12
 
 ### Added

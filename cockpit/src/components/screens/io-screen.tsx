@@ -30,9 +30,9 @@ import { DASH } from "@/shared/format";
 import "@/shared/i18n";
 import { useResource } from "@/shared/use-resource";
 
-export function IoScreen() {
+export function IoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
   const { t } = useTranslation();
-  const [tab, setTab] = useState(0);
+  const [tab, setTab] = useState(initialTab);
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [found, setFound] = useState<BtDevice[] | null>(null);
@@ -40,8 +40,9 @@ export function IoScreen() {
   const gamepads = useResource(useCallback((s: AbortSignal) => getGamepads(s), []), 5_000, { enabled: tab === 0 });
   const display = useResource(useCallback((s: AbortSignal) => getDisplay(s), []), 10_000, { enabled: tab === 1 });
   const paired = useResource(useCallback((s: AbortSignal) => getPairedBt(s), []), 15_000, { enabled: tab === 2 });
-  const armed = useResource(useCallback((s: AbortSignal) => getArmedReading(s), []), 1_000, { enabled: tab === 0 });
-  // Making a pad primary moves RC input: never while armed or unknown.
+  const armed = useResource(useCallback((s: AbortSignal) => getArmedReading(s), []), 1_000, { enabled: tab === 0 || tab === 2 });
+  // Making a pad primary, or forgetting a paired controller, moves or drops
+  // RC input: never while armed or unknown.
   const armedBlock = radioWriteBlock(armed.stale ? null : armed.data);
 
   const forget = (mac: string) => {
@@ -156,26 +157,29 @@ export function IoScreen() {
         ) : list.length === 0 ? (
           <EmptyNote>{t("io.bluetooth.noPaired")}</EmptyNote>
         ) : (
-          list.map((d) => (
-            <ListItem
-              key={d.mac}
-              headline={d.name ?? d.mac}
-              supporting={[d.mac, d.type].filter(Boolean).join(" · ")}
-              trailing={
-                <span className="flex items-center gap-[0.4rem]">
-                  <span className={d.connected ? "text-[0.8rem] text-ok" : "text-[0.8rem] text-muted-foreground"}>
-                    {d.connected ? t("io.bluetooth.connected") : t("io.bluetooth.paired")}
+          <>
+            {armedBlock ? <p className="text-[0.8rem] text-warn">{t(`cockpit.radio.${armedBlock}`)}</p> : null}
+            {list.map((d) => (
+              <ListItem
+                key={d.mac}
+                headline={d.name ?? d.mac}
+                supporting={[d.mac, d.type].filter(Boolean).join(" · ")}
+                trailing={
+                  <span className="flex items-center gap-[0.4rem]">
+                    <span className={d.connected ? "text-[0.8rem] text-ok" : "text-[0.8rem] text-muted-foreground"}>
+                      {d.connected ? t("io.bluetooth.connected") : t("io.bluetooth.paired")}
+                    </span>
+                    <GuardedButton
+                      label={t("cockpit.io.forget")}
+                      guardLabel={t("cockpit.io.forgetGuard")}
+                      disabled={busy || armedBlock !== null}
+                      onFired={() => forget(d.mac)}
+                    />
                   </span>
-                  <GuardedButton
-                    label={t("cockpit.io.forget")}
-                    guardLabel={t("cockpit.io.forgetGuard")}
-                    disabled={busy}
-                    onFired={() => forget(d.mac)}
-                  />
-                </span>
-              }
-            />
-          ))
+                }
+              />
+            ))}
+          </>
         )}
         {nearby ? (
           <>

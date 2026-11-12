@@ -167,18 +167,15 @@ describe("the flight instruments (cockpit spec layers.json)", () => {
 describe("no legacy chrome on the flight screen (legacy_chrome: none)", () => {
   const src = (p: string) => readFileSync(path.resolve(__dirname, p), "utf8");
   const shell = src("../components/shell/cockpit-shell.tsx");
-  const flight = shell.slice(shell.indexOf("if (fullBleed)"), shell.indexOf("if (onTop)"));
-  const framedFeed = shell.slice(shell.indexOf("if (onTop)"), shell.indexOf("data-shell=\"framed\""));
+  // The full-screen and framed Feed share one tree (so the Feed never
+  // remounts on the toggle); the rail is its only chrome, and only framed.
+  // `cockpit-shell.test.ts` renders both.
+  const feed = shell.slice(shell.indexOf("if (onTop)"), shell.indexOf('data-shell="framed"'));
 
-  it("the shell draws no status strip, menu rail or action bar around the full-screen Feed", () => {
-    expect(flight).toContain('data-shell="flight"');
-    for (const legacy of ["<StatusStrip", "<MenuRail", "<ActionBar"]) expect(flight).not.toContain(legacy);
-  });
-
-  it("the framed Feed sits beside the menu rail with no status strip or action bar", () => {
-    expect(framedFeed).toContain('data-shell="flight-framed"');
-    expect(framedFeed).toContain("<MenuRail");
-    for (const legacy of ["<StatusStrip", "<ActionBar", "<BannerHost"]) expect(framedFeed).not.toContain(legacy);
+  it("the shell draws no status strip or action bar around the Feed, and the rail only when framed", () => {
+    expect(feed).toContain('data-shell={fullBleed ? "flight" : "flight-framed"}');
+    expect(feed).toContain("{fullBleed ? null : <MenuRail />}");
+    for (const legacy of ["<StatusStrip", "<ActionBar", "<BannerHost"]) expect(feed).not.toContain(legacy);
   });
 
   it("the Feed's grid draws no telemetry strip or hint bar", () => {
@@ -369,19 +366,27 @@ describe("whether the agent has a video source", () => {
 
 describe("the newest vehicle frame's age", () => {
   it("a ground station with fresh pilot frames and no heartbeat field reads fresh", () => {
-    const age = vehicleFrameAgeMs({ pilotAgeMs: 400, telemetryAgeMs: null, heartbeatAgeS: undefined });
+    const age = vehicleFrameAgeMs({ pilotFcLinked: true, pilotAgeMs: 400, telemetryAgeMs: null, heartbeatAgeS: undefined });
     expect(age).toBe(400);
     expect(linkCell(age).severity).toBe("ok");
   });
 
   it("the younger of the pilot frame and the telemetry sample wins", () => {
-    expect(vehicleFrameAgeMs({ pilotAgeMs: 5000, telemetryAgeMs: 200, heartbeatAgeS: 9 })).toBe(200);
-    expect(vehicleFrameAgeMs({ pilotAgeMs: null, telemetryAgeMs: 1200, heartbeatAgeS: 9 })).toBe(1200);
+    expect(vehicleFrameAgeMs({ pilotFcLinked: true, pilotAgeMs: 5000, telemetryAgeMs: 200, heartbeatAgeS: 9 })).toBe(200);
+    expect(vehicleFrameAgeMs({ pilotFcLinked: true, pilotAgeMs: null, telemetryAgeMs: 1200, heartbeatAgeS: 9 })).toBe(1200);
+  });
+
+  it("a pilot frame that cannot hear the flight controller does not read fresh", () => {
+    // A drone with the FC unplugged: the pilot keeps publishing (armed null).
+    expect(vehicleFrameAgeMs({ pilotFcLinked: false, pilotAgeMs: 200, telemetryAgeMs: 9000, heartbeatAgeS: 9 })).toBe(9000);
+    const lost = vehicleFrameAgeMs({ pilotFcLinked: false, pilotAgeMs: 200, telemetryAgeMs: null, heartbeatAgeS: 12 });
+    expect(lost).toBe(12_000);
+    expect(linkCell(lost).severity).toBe("critical");
   });
 
   it("the heartbeat age is the fallback, and nothing at all reads no link", () => {
-    expect(vehicleFrameAgeMs({ pilotAgeMs: null, telemetryAgeMs: null, heartbeatAgeS: 1.5 })).toBe(1500);
-    const none = vehicleFrameAgeMs({ pilotAgeMs: null, telemetryAgeMs: null, heartbeatAgeS: undefined });
+    expect(vehicleFrameAgeMs({ pilotFcLinked: true, pilotAgeMs: null, telemetryAgeMs: null, heartbeatAgeS: 1.5 })).toBe(1500);
+    const none = vehicleFrameAgeMs({ pilotFcLinked: true, pilotAgeMs: null, telemetryAgeMs: null, heartbeatAgeS: undefined });
     expect(none).toBeNull();
     expect(linkCell(none).severity).toBe("critical");
   });

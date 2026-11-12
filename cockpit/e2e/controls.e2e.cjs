@@ -282,11 +282,19 @@ async function shellCase(browser) {
     assert.equal(await shell(page), "flight-framed", "a browser load frames the Feed");
     assert.equal(await page.locator('[data-shell="flight-framed"] > nav').count(), 1, "the menu rail sits beside it");
     await page.screenshot({ path: path.join(SHOTS, "shell-framed-1920x1080.png") });
+    // Mark the Feed's top bar: the same node after the toggles proves the Feed
+    // was not remounted (a remount releases the stick session).
+    await page.$eval('[data-zone="top_bar"]', (el) => (el.dataset.e2eMark = "kept"));
+    const kept = '[data-zone="top_bar"][data-e2e-mark="kept"]';
     await page.getByTestId("top-bar-fullscreen").click();
     await page.waitForSelector('[data-shell="flight"]', { timeout: 3000 });
     assert.equal(await page.locator("nav").count(), 0, "full screen draws no menu rail");
+    assert.equal(await page.locator(kept).count(), 1, "full screen keeps the same Feed");
     await page.waitForTimeout(400);
     await page.screenshot({ path: path.join(SHOTS, "shell-fullscreen-1920x1080.png") });
+    await page.getByTestId("top-bar-fullscreen").click();
+    await page.waitForSelector('[data-shell="flight-framed"]', { timeout: 3000 });
+    assert.equal(await page.locator(kept).count(), 1, "leaving full screen keeps the same Feed");
     await ctx.close();
   }
   {

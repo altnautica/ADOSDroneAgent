@@ -195,7 +195,8 @@ pub async fn run(mut cfg: RunnerConfig) {
         if let Some(st) = &state {
             let ctx = Context {
                 rth_active: view.rth_active(now),
-                landed: live.as_ref().is_none_or(|s| s["landed"] != false),
+                // Unknown counts as airborne: Triangle-hold lands.
+                landed: view.known_landed(now),
                 vtol: live.as_ref().is_some_and(|s| s["vehicle_class"] == "vtol"),
             };
             let out = gestures.tick(st, &ctx, now);

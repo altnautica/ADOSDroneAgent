@@ -130,14 +130,18 @@ function LinkItem({ text }: { text: boolean }) {
   const ageS = useStatusStore((s) => s.status?.heartbeat_age_s);
   const rssi = useStatusStore((s) => s.status?.link?.rssi_dbm);
   const pilotAt = useNavStreamStore((s) => s.pilot?.at ?? null);
+  const pilotFcLinked = useNavStreamStore((s) => s.pilot !== null && s.pilot.data.armed !== null);
   const lastLiveAt = useFlightStore((s) => s.lastLiveAt);
   const now = useNow(500);
+  const monoNow = useNow(500, "monotonic");
   const [rect, setRect] = useState<DOMRect | null>(null);
   const cell = linkCell(
     vehicleFrameAgeMs({
       pilotAgeMs: pilotAt === null ? null : now - pilotAt,
-      // `lastLiveAt` is on the `performance.now()` clock.
-      telemetryAgeMs: lastLiveAt === null ? null : now - (performance.timeOrigin + lastLiveAt),
+      pilotFcLinked,
+      // `lastLiveAt` is on the `performance.now()` clock, so its age is read
+      // on that clock, never across to the wall clock.
+      telemetryAgeMs: lastLiveAt === null ? null : monoNow - lastLiveAt,
       heartbeatAgeS: ageS,
     }),
   );

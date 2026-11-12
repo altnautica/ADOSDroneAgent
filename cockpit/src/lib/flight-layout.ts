@@ -81,10 +81,18 @@ export function linkCell(ageMs: number | null): { text: string; severity: "ok" |
 
 /** The age of the newest vehicle frame the cockpit holds
  *  (`top_bar.link.metric`): the younger of the pilot frame and the last live
- *  telemetry sample. The agent's heartbeat age is the fallback only, because
- *  a ground station's status carries none. Null with no frame at all. */
-export function vehicleFrameAgeMs(i: { pilotAgeMs: number | null; telemetryAgeMs: number | null; heartbeatAgeS: number | null | undefined }): number | null {
-  const ages = [i.pilotAgeMs, i.telemetryAgeMs].filter((a): a is number => typeof a === "number" && Number.isFinite(a));
+ *  telemetry sample. A pilot frame counts only while it reports the flight
+ *  controller linked (`armed` not null): the onboard pilot keeps publishing
+ *  while the FC is lost, and its frames prove nothing about the vehicle. The
+ *  agent's heartbeat age is the fallback only, because a ground station's
+ *  status carries none. Null with no frame at all. */
+export function vehicleFrameAgeMs(i: {
+  pilotAgeMs: number | null;
+  pilotFcLinked: boolean;
+  telemetryAgeMs: number | null;
+  heartbeatAgeS: number | null | undefined;
+}): number | null {
+  const ages = [i.pilotFcLinked ? i.pilotAgeMs : null, i.telemetryAgeMs].filter((a): a is number => typeof a === "number" && Number.isFinite(a));
   if (ages.length > 0) return Math.max(0, Math.min(...ages));
   return typeof i.heartbeatAgeS === "number" && Number.isFinite(i.heartbeatAgeS) ? i.heartbeatAgeS * 1000 : null;
 }

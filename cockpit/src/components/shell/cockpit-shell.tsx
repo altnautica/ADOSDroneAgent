@@ -91,34 +91,24 @@ export function CockpitShell({ input }: { input: InputStatus }) {
     </Suspense>
   ) : null;
 
-  if (fullBleed) {
-    // The Feed is the whole viewport: no status strip, menu rail or action
-    // bar (cockpit spec `legacy_chrome: "none"`). Navigation is behind the
-    // top bar's Menu; the Feed shows the reach and offline notices in its
-    // alert column.
-    return (
-      <div
-        className={`relative h-full w-full overflow-hidden bg-black text-foreground ${renderProfileClass(renderProfile())}`}
-        data-shell="flight"
-      >
-        {body}
-        {quickMenu}
-        <DirtyGuardDialog />
-      </div>
-    );
-  }
-
   if (onTop) {
-    // The Feed in a browser, not full screen: beside the menu rail, with no
-    // status strip, action bar or banners; the Feed's top bar and alert
-    // column carry them.
+    // The Feed full screen is the whole viewport: no status strip, menu rail
+    // or action bar (cockpit spec `legacy_chrome: "none"`); navigation is
+    // behind the top bar's Menu. In a browser not full screen it sits beside
+    // the menu rail. Either way the Feed's top bar and alert column carry the
+    // reach and offline notices.
+    // One tree shape for both: the rail's slot is null when full screen, so
+    // the Feed under `main` keeps its place and never remounts on the toggle
+    // or Escape (a remount releases the stick session and the vehicle brakes).
     return (
       <div
-        className={`relative flex h-full w-full overflow-hidden bg-black text-foreground landscape:flex-row portrait:flex-col-reverse ${renderProfileClass(renderProfile())}`}
-        data-shell="flight-framed"
+        className={`relative h-full w-full overflow-hidden bg-black text-foreground ${
+          fullBleed ? "" : "flex landscape:flex-row portrait:flex-col-reverse "
+        }${renderProfileClass(renderProfile())}`}
+        data-shell={fullBleed ? "flight" : "flight-framed"}
       >
-        <MenuRail />
-        <main className="relative min-h-0 min-w-0 flex-1">{body}</main>
+        {fullBleed ? null : <MenuRail />}
+        <main className={fullBleed ? "relative h-full w-full" : "relative min-h-0 min-w-0 flex-1"}>{body}</main>
         {quickMenu}
         <DirtyGuardDialog />
       </div>

@@ -36,7 +36,7 @@ impl PilotView {
         }
         self.state
             .as_ref()
-            .filter(|(_, at)| now_ms.saturating_sub(*at) <= STATE_STALE_MS)
+            .filter(|(_, at)| now_ms.saturating_sub(*at) < STATE_STALE_MS)
             .map(|(v, _)| v)
     }
 
@@ -48,6 +48,13 @@ impl PilotView {
                     s["fc_mode"].as_i64().unwrap_or(-1),
                 )
         })
+    }
+
+    /// Whether the vehicle is known to be on the ground. Unknown (no live
+    /// state, or `landed: null` while the pilot cannot hear the FC) counts as
+    /// possibly airborne, so the gestures offer Land rather than Take off.
+    pub fn known_landed(&self, now_ms: u64) -> bool {
+        self.live(now_ms).is_some_and(|s| s["landed"] == true)
     }
 
     /// The spec lightbar state id, first match in the spec priority order.
@@ -73,7 +80,8 @@ impl PilotView {
             "mission_fc" => "mission",
             "skill" => "skill",
             "pilot" | "goto" | "swarm" | "tuning" => "pilot",
-            _ if s["armed"] == true => "armed_idle",
+            // Unknown (`armed: null`) may be flying: never the disarmed light.
+            _ if s["armed"] != false => "armed_idle",
             _ => "disarmed",
         }
     }
@@ -261,6 +269,19 @@ mod tests {
             "failsafe"
         );
         assert_eq!(PilotView::default().lightbar_state(0), "failsafe");
+    }
+
+    #[test]
+    fn unknown_arm_state_reads_as_possibly_airborne() {
+        // The pilot sends null while it cannot hear the FC.
+        let unknown = view(json!({"owner":"idle","armed":null,"landed":null}));
+        assert_eq!(unknown.lightbar_state(1500), "armed_idle");
+        assert!(!unknown.known_landed(1500));
+        assert!(view(json!({"owner":"idle","armed":false,"landed":true})).known_landed(1500));
+        assert!(!view(json!({"owner":"idle","armed":true,"landed":false})).known_landed(1500));
+        // No live state at all is not known landed either.
+        assert!(!PilotView::default().known_landed(0));
+        assert!(!view(json!({"landed":true})).known_landed(1000 + STATE_STALE_MS));
     }
 
     #[test]

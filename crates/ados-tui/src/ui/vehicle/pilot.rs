@@ -68,14 +68,13 @@ fn op_text(op: &str) -> String {
     }
 }
 
-/// The alert count and one line per alert.
-fn alert_rows(core: &Core, alerts: &[PillAlert], stale: bool) -> Vec<Row> {
+/// The alert count and one line per alert. The alerts are computed now from
+/// the readings the tab holds (an aged pilot kind adds its own "not
+/// answering" item), so they never read as stale with the pilot kind.
+fn alert_rows(core: &Core, alerts: &[PillAlert]) -> Vec<Row> {
     let t = &core.theme;
     let count = alerts_count_text(alerts.len()).unwrap_or_else(|| "–".into());
-    let mut out = vec![(
-        mark_stale(t, kv_text(t, "Alerts", LABEL, count), stale),
-        true,
-    )];
+    let mut out = vec![(kv_text(t, "Alerts", LABEL, count), true)];
     for a in alerts {
         let (sym, color) = match a.severity {
             Severity::Critical => (core.sym.err, t.error()),
@@ -85,7 +84,7 @@ fn alert_rows(core: &Core, alerts: &[PillAlert], stale: bool) -> Vec<Row> {
             Span::raw("  "),
             Span::styled(format!("{sym} {}", a.text), Style::default().fg(color)),
         ]);
-        out.push((mark_stale(t, line, stale), false));
+        out.push((line, false));
     }
     out
 }
@@ -104,7 +103,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         // Nothing publishes the pilot kind: the chip's absent state.
         let state = kv_text(t, "State", LABEL, spec_text("chip.no_pilot", &[]));
         let mut out = vec![(state, true)];
-        out.extend(alert_rows(core, i.alerts, false));
+        out.extend(alert_rows(core, i.alerts));
         return out;
     };
     let p_stale = p.stale || i.age_ms >= stale_after_ms();
@@ -263,7 +262,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         None => stale(kv_text(t, "AGL", LABEL, "–".to_string())),
     };
     out.push((agl, false));
-    out.extend(alert_rows(core, i.alerts, p_stale));
+    out.extend(alert_rows(core, i.alerts));
     out
 }
 
