@@ -317,6 +317,9 @@ pub struct FcConnection {
     last_banner_req: Mutex<Option<Instant>>,
     /// Capture marker and IMU-stream fallback state the stream cadence reads.
     sensor_streams: imu_fallback::SensorStreams,
+    /// The once-per-link-up EXTENDED_SYS_STATE request decision (see
+    /// `tick_landed_state_request`). Held only for the synchronous check.
+    landed_state_req: std::sync::Mutex<send_scheduler::LandedStateRequest>,
 }
 
 impl FcConnection {
@@ -386,6 +389,7 @@ impl FcConnection {
             agent_signing,
             last_banner_req: Mutex::new(None),
             sensor_streams: imu_fallback::SensorStreams::default(),
+            landed_state_req: std::sync::Mutex::new(send_scheduler::LandedStateRequest::default()),
         })
     }
 

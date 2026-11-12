@@ -440,6 +440,8 @@ impl FcConnection {
 }
 
 mod client;
+mod landed_request;
+pub(super) use landed_request::LandedStateRequest;
 mod sensor_sends;
 mod ticks;
 

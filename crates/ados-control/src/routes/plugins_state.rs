@@ -41,7 +41,7 @@ const STALE_AFTER: Duration = Duration::from_millis(ados_protocol::paths::PLUGIN
 /// The per-plugin socket directory the plugin-host daemon binds its sockets and
 /// writes its state sidecars in. Defaults to `/run/ados/plugins`, overridable via
 /// `ADOS_PLUGIN_SOCKET_DIR` (the same env the daemon reads) so both agree.
-fn plugin_socket_dir() -> PathBuf {
+pub(crate) fn plugin_socket_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("ADOS_PLUGIN_SOCKET_DIR").unwrap_or_else(|_| "/run/ados/plugins".to_string()),
     )
@@ -73,20 +73,28 @@ pub(crate) fn is_state_id(id: &str) -> bool {
 /// The read logic against an explicit socket dir + a reference "now", so a test
 /// can point it at a temp dir and drive the staleness check deterministically.
 fn read_plugin_state(socket_dir: &std::path::Path, plugin_id: &str, now: SystemTime) -> Response {
+    match read_plugin_sidecar(socket_dir, plugin_id, now) {
+        Some(doc) => (StatusCode::OK, Json(Value::Object(doc))).into_response(),
+        None => not_found(plugin_id),
+    }
+}
+
+/// A plugin's state sidecar document, `None` when the id cannot name one or the
+/// sidecar is absent, stale (it stopped reporting), future-dated (an
+/// unprovable age), torn / malformed, or not an object.
+pub(crate) fn read_plugin_sidecar(
+    socket_dir: &std::path::Path,
+    plugin_id: &str,
+    now: SystemTime,
+) -> Option<Map<String, Value>> {
     if !is_state_id(plugin_id) {
-        return not_found(plugin_id);
+        return None;
     }
     let path = socket_dir.join(format!("{plugin_id}-state.json"));
-
-    // Absent (the plugin has published nothing, or is not running), stale (it
-    // stopped reporting), future-dated (an unprovable age), torn / malformed, or
-    // not an object all read as absent, never a 500.
-    let Reading::Fresh(doc) = read_fresh_at::<Map<String, Value>>(&path, Some(STALE_AFTER), now)
-    else {
-        return not_found(plugin_id);
-    };
-
-    (StatusCode::OK, Json(Value::Object(doc))).into_response()
+    match read_fresh_at::<Map<String, Value>>(&path, Some(STALE_AFTER), now) {
+        Reading::Fresh(doc) => Some(doc),
+        _ => None,
+    }
 }
 
 /// The `404` body, FastAPI-shaped (`{"detail": "..."}`), matching the rest of the

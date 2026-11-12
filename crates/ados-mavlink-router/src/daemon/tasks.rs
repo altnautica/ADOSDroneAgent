@@ -219,6 +219,7 @@ pub(super) fn spawn_core(
                     _ = tick.tick() => {
                         fc.tick_streams().await;
                         fc.tick_banner_request().await;
+                        fc.tick_landed_state_request().await;
                         fc.tick_param_sweep().await;
                     }
                     _ = cancel.wait() => break,

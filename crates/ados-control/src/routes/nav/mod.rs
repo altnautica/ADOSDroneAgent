@@ -24,10 +24,13 @@
 //! follow-me's `follow.state` and follow events. They reach this process over
 //! the plugin host's event export ([`crate::ipc::plugin_events_client`]), so
 //! the operator surfaces read navigation without loading an extension UI. `data`
-//! is the source payload verbatim.
+//! is the source payload verbatim, except that the `nav` kind gains
+//! `pose_age_ms` (number or `null`), vision-nav's pose age from its
+//! `navigation` telemetry channel (see [`pose_age`]).
 
 mod hub;
 mod mission;
+pub(crate) mod pose_age;
 mod stream;
 mod tiles;
 mod view;

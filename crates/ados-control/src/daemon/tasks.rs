@@ -107,6 +107,7 @@ where
     // swarm reader: an absent plugin host leaves every kind `null`.
     let events_handle = crate::ipc::plugin_events_client::spawn(
         crate::ipc::default_events_socket(),
+        crate::routes::plugins_state::plugin_socket_dir(),
         state.nav.clone(),
     );
 

@@ -13,10 +13,10 @@
 use std::f64::consts::PI;
 
 use ados_protocol::mavlink::ardupilotmega::{
-    GpsFixType, MavAutopilot, MavBatteryFunction, MavBatteryType, MavMessage, MavModeFlag,
-    MavState, MavSysStatusSensor, MavType, ATTITUDE_DATA, BATTERY_STATUS_DATA,
-    GLOBAL_POSITION_INT_DATA, GPS_RAW_INT_DATA, HEARTBEAT_DATA, RC_CHANNELS_DATA, SYS_STATUS_DATA,
-    VFR_HUD_DATA,
+    GpsFixType, MavAutopilot, MavBatteryFunction, MavBatteryType, MavLandedState, MavMessage,
+    MavModeFlag, MavState, MavSysStatusSensor, MavType, MavVtolState, ATTITUDE_DATA,
+    BATTERY_STATUS_DATA, EXTENDED_SYS_STATE_DATA, GLOBAL_POSITION_INT_DATA, GPS_RAW_INT_DATA,
+    HEARTBEAT_DATA, RC_CHANNELS_DATA, SYS_STATUS_DATA, VFR_HUD_DATA,
 };
 
 // Flight-path constants, identical to the Python demo source.
@@ -111,9 +111,10 @@ pub fn sample_at(t: f64) -> DemoSample {
     }
 }
 
-/// Build the eight MAVLink messages for elapsed time `t` (seconds): HEARTBEAT,
+/// Build the nine MAVLink messages for elapsed time `t` (seconds): HEARTBEAT,
 /// GLOBAL_POSITION_INT, ATTITUDE, SYS_STATUS, GPS_RAW_INT, VFR_HUD,
-/// BATTERY_STATUS, RC_CHANNELS. The set and the per-message scaling match the
+/// BATTERY_STATUS, RC_CHANNELS and EXTENDED_SYS_STATE (in the air, as the
+/// armed circling vehicle is). The set and the per-message scaling match the
 /// fields the Python demo drives onto the vehicle state, so the snapshot the
 /// router publishes is shape- and value-compatible with the Python demo's.
 pub fn demo_messages(t: f64) -> Vec<MavMessage> {
@@ -219,6 +220,10 @@ pub fn demo_messages(t: f64) -> Vec<MavMessage> {
             chan18_raw: 1500,
             chancount: 18,
             rssi: 200,
+        }),
+        MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
+            vtol_state: MavVtolState::MAV_VTOL_STATE_MC,
+            landed_state: MavLandedState::MAV_LANDED_STATE_IN_AIR,
         }),
     ]
 }

@@ -946,6 +946,7 @@ async fn telemetry_projection_for_wire(wire: Wire) {
     // The vehicle values survive verbatim.
     assert_eq!(got["mode"], serde_json::json!("GUIDED"));
     assert_eq!(got["armed"], Value::Bool(true));
+    assert_eq!(got["landed_state"], serde_json::json!("in_air"));
     assert_eq!(got["battery"]["voltage"], serde_json::json!(16.4));
 
     h.stop().await;

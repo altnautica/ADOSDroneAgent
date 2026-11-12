@@ -456,6 +456,25 @@ fn golden_pilot_fixture_round_trips() {
     assert_eq!(serde_json::to_value(&o).unwrap(), v);
 }
 
+/// Without a live FC link the frame does not claim an arm or landed state:
+/// both serialise as JSON `null`, never skipped.
+#[test]
+fn arm_and_landed_are_null_without_an_fc_link() {
+    let p = crate::core::Pilot::new(crate::config::Settings::default());
+    let v = serde_json::to_value(p.state(1000)).unwrap();
+    assert_eq!(v.get("armed"), Some(&serde_json::Value::Null));
+    assert_eq!(v.get("landed"), Some(&serde_json::Value::Null));
+
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let s = w.p.state(w.now);
+    assert_eq!((s.armed, s.landed), (Some(true), Some(false)));
+    // The heartbeat goes quiet for longer than the link window.
+    let v = serde_json::to_value(w.p.state(w.now + 3000)).unwrap();
+    assert_eq!(v.get("armed"), Some(&serde_json::Value::Null));
+    assert_eq!(v.get("landed"), Some(&serde_json::Value::Null));
+}
+
 fn home_at(w: &mut World, lat: f64, lon: f64) {
     let m = MavMessage::HOME_POSITION(HOME_POSITION_DATA {
         latitude: (lat * 1e7) as i32,

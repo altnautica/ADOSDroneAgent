@@ -121,6 +121,10 @@ impl VehicleState {
             "mission": self.mission.clone().unwrap_or(Value::Null),
             // PreArm/Arm STATUSTEXT seen in the last 10 s, oldest first.
             "prearm": prearm,
+            // EXTENDED_SYS_STATE `landed_state`: undefined | on_ground |
+            // in_air | takeoff | landing, or `null` while the FC has not
+            // reported it within LANDED_STATE_MAX_AGE.
+            "landed_state": self.landed_state_at(now).map(landed_state_name),
         })
     }
 

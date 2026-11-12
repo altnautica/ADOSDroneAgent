@@ -175,8 +175,12 @@ pub struct PilotState {
     pub avoid: AvoidMode,
     pub fc_mode: u32,
     pub fc_mode_name: String,
-    pub armed: bool,
-    pub landed: bool,
+    /// Whether the FC reports armed; `None` (JSON `null`) while the FC link
+    /// is down, so a surface treats the vehicle as possibly airborne.
+    pub armed: Option<bool>,
+    /// Whether the FC reports landed; `None` (JSON `null`) while the FC link
+    /// is down.
+    pub landed: Option<bool>,
     /// A VTOL between hover and forward flight (the FC's EXTENDED_SYS_STATE
     /// says it is transitioning either way).
     pub vtol_transitioning: bool,

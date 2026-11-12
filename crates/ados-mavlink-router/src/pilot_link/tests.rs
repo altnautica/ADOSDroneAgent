@@ -251,6 +251,33 @@ fn pilot_death_needs_the_pilot_flying() {
     );
 }
 
+/// A pilot that lost the FC publishes `armed`/`landed` as nil: the vehicle
+/// may still be flying, so its death still sets the loss mode, and a goto is
+/// refused meanwhile.
+#[test]
+fn unknown_arm_state_keeps_the_pilot_flying() {
+    let (tx, _rx) = mpsc::channel(4);
+    let link = PilotLink::new(ControlMode::Ados, tx);
+    link.on_state(&pilot_state("pilot", true, false, "multirotor"));
+    assert!(link.goto_ok.load(Ordering::Relaxed));
+    let rmpv::Value::Map(mut unlinked) = pilot_state("pilot", true, false, "multirotor") else {
+        unreachable!()
+    };
+    for (k, v) in &mut unlinked {
+        if matches!(k.as_str(), Some("armed" | "landed")) {
+            *v = rmpv::Value::Nil;
+        }
+    }
+    link.on_state(&rmpv::Value::Map(unlinked));
+    assert!(!link.goto_ok.load(Ordering::Relaxed));
+    let t = link.alive_ms.load(Ordering::Relaxed);
+    assert_eq!(
+        link.death_mode_at(t + DEATH_MS, || LossAction::Rth),
+        Some(6),
+        "still treated as flying"
+    );
+}
+
 #[tokio::test]
 async fn gotos_and_swarm_goals_reach_the_pilot_socket() {
     let (tx, mut rx) = mpsc::channel(4);

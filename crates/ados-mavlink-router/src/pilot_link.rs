@@ -222,6 +222,17 @@ impl PilotLink {
             Some("vtol") => CLASS_VTOL,
             _ => CLASS_MULTIROTOR,
         };
+        // `armed`/`landed` are null while the pilot has no FC link: the
+        // vehicle may still be airborne, so the last known flying state
+        // stands rather than reading the silence as disarmed, and no goto
+        // is accepted until the FC is heard again.
+        let unknown = |name: &str| field(name).is_some_and(rmpv::Value::is_nil);
+        if unknown("armed") || unknown("landed") {
+            self.goto_ok.store(false, Ordering::Relaxed);
+            if mode == Some(ControlMode::Ados) && motion {
+                return;
+            }
+        }
         let flying = mode == Some(ControlMode::Ados) && flag("armed") && !flag("landed") && motion;
         self.flying
             .store(if flying { class } else { 0 }, Ordering::Relaxed);

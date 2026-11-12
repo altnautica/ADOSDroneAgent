@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use ados_protocol::flight_modes::{ArduPilotFirmware, MAV_AUTOPILOT_PX4};
-use ados_protocol::mavlink::ardupilotmega::{MavMessage, BATTERY_STATUS_DATA};
+use ados_protocol::mavlink::ardupilotmega::{MavLandedState, MavMessage, BATTERY_STATUS_DATA};
 use serde_json::{json, Value};
 
 /// How many distinct BATTERY_STATUS ids the snapshot tracks. MAVLink allows 256;
@@ -136,6 +136,10 @@ pub struct VehicleState {
     /// The mission block the mission mirror computes ([`crate::mission_mirror`]);
     /// `None` until it has run once.
     pub mission: Option<Value>,
+    /// The last EXTENDED_SYS_STATE `landed_state` and when it was decoded,
+    /// monotonic. `None` until the FC sends one; published as `landed_state`
+    /// only while fresh (see [`Self::landed_state_at`]).
+    pub landed_state: Option<(MavLandedState, std::time::Instant)>,
 }
 
 /// How long GIMBAL_DEVICE_ATTITUDE_STATUS stays preferred over
@@ -217,6 +221,7 @@ impl Default for VehicleState {
             gimbal_device_at: None,
             prearm: std::collections::VecDeque::new(),
             mission: None,
+            landed_state: None,
         }
     }
 }
@@ -363,6 +368,10 @@ impl VehicleState {
                 self.gps_epv = (m.epv != u16::MAX).then(|| m.epv as f64 / 100.0);
                 None
             }
+            MavMessage::EXTENDED_SYS_STATE(m) => {
+                self.landed_state = Some((m.landed_state, std::time::Instant::now()));
+                None
+            }
             MavMessage::EKF_STATUS_REPORT(m) => {
                 self.ekf_flags = Some(m.flags.bits());
                 self.ekf_at = Some(std::time::Instant::now());
@@ -468,6 +477,8 @@ fn param_id_to_string(raw: &[u8]) -> String {
     String::from_utf8_lossy(&raw[..end]).into_owned()
 }
 
+mod landed;
+pub use landed::*;
 mod battery;
 pub use battery::*;
 mod modes;

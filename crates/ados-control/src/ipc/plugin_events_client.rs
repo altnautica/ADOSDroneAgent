@@ -13,7 +13,8 @@
 //! the reader logs at debug, retries on the shared local-socket pace, and the
 //! routes report the kinds as `null`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use ados_protocol::ipc::read_newline_line;
 use ados_protocol::retry::RetryPace;
@@ -22,7 +23,8 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
-use crate::routes::nav::{NavHub, EXPORT_TOPICS};
+use crate::routes::nav::pose_age::enrich_nav_state;
+use crate::routes::nav::{route, NavHub, NavKind, Routed, EXPORT_TOPICS};
 
 /// The `plugin.events` wire version this reader speaks.
 const EXPORT_VERSION: u64 = 1;
@@ -58,10 +60,11 @@ impl PluginEventsHandle {
     }
 }
 
-/// Spawn the reader against `socket_path`, feeding `hub`.
-pub fn spawn(socket_path: PathBuf, hub: NavHub) -> PluginEventsHandle {
+/// Spawn the reader against `socket_path`, feeding `hub`. `sidecar_dir` is the
+/// plugin state-sidecar directory the `nav` kind's pose age is read from.
+pub fn spawn(socket_path: PathBuf, sidecar_dir: PathBuf, hub: NavHub) -> PluginEventsHandle {
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let join = tokio::spawn(read_loop(socket_path, hub, stop_rx));
+    let join = tokio::spawn(read_loop(socket_path, sidecar_dir, hub, stop_rx));
     PluginEventsHandle {
         stop: Some(stop_tx),
         join,
@@ -81,8 +84,9 @@ pub(crate) fn request_line() -> Vec<u8> {
 }
 
 /// Apply one exported event line to the hub. A line that is not a well-formed
-/// event of this wire version is skipped.
-pub(crate) fn apply_line(hub: &NavHub, line: &[u8]) {
+/// event of this wire version is skipped. vision-nav's `nav.state` gains the
+/// pose age from its state sidecar in `sidecar_dir`.
+pub(crate) fn apply_line(hub: &NavHub, sidecar_dir: &Path, line: &[u8]) {
     let Ok(event) = serde_json::from_slice::<Value>(line) else {
         return;
     };
@@ -94,10 +98,19 @@ pub(crate) fn apply_line(hub: &NavHub, line: &[u8]) {
         return;
     };
     let ts_ms = event["ts_ms"].as_i64().unwrap_or(0);
-    hub.ingest(topic, publisher, ts_ms, event["payload"].clone());
+    let mut payload = event["payload"].clone();
+    if route(topic, publisher) == Routed::Latest(NavKind::Nav) {
+        payload = enrich_nav_state(payload, sidecar_dir, SystemTime::now());
+    }
+    hub.ingest(topic, publisher, ts_ms, payload);
 }
 
-async fn read_loop(socket_path: PathBuf, hub: NavHub, stop: oneshot::Receiver<()>) {
+async fn read_loop(
+    socket_path: PathBuf,
+    sidecar_dir: PathBuf,
+    hub: NavHub,
+    stop: oneshot::Receiver<()>,
+) {
     tokio::pin!(stop);
     loop {
         tokio::select! {
@@ -107,7 +120,7 @@ async fn read_loop(socket_path: PathBuf, hub: NavHub, stop: oneshot::Receiver<()
                 match connected {
                     Ok(stream) => {
                         tracing::debug!(path = %socket_path.display(), "plugin event export connected");
-                        if run_stream(stream, &hub, &mut stop).await {
+                        if run_stream(stream, &hub, &sidecar_dir, &mut stop).await {
                             return;
                         }
                     }
@@ -133,6 +146,7 @@ async fn read_loop(socket_path: PathBuf, hub: NavHub, stop: oneshot::Receiver<()
 async fn run_stream(
     stream: UnixStream,
     hub: &NavHub,
+    sidecar_dir: &Path,
     stop: &mut std::pin::Pin<&mut oneshot::Receiver<()>>,
 ) -> bool {
     let (read_half, mut write_half) = stream.into_split();
@@ -164,7 +178,7 @@ async fn run_stream(
             r = read_newline_line(&mut reader, MAX_LINE) => r,
         };
         match line {
-            Ok(Some(bytes)) => apply_line(hub, &bytes),
+            Ok(Some(bytes)) => apply_line(hub, sidecar_dir, &bytes),
             Ok(None) | Err(_) => return false,
         }
     }
@@ -188,13 +202,53 @@ mod tests {
     #[test]
     fn a_line_of_another_version_or_shape_is_skipped() {
         let hub = NavHub::new();
-        apply_line(&hub, b"not json");
+        let dir = tempfile::tempdir().unwrap();
+        apply_line(&hub, dir.path(), b"not json");
         apply_line(
             &hub,
+            dir.path(),
             br#"{"v":2,"topic":"follow.state","publisher":"com.altnautica.follow-me","payload":{}}"#,
         );
-        apply_line(&hub, br#"{"v":1,"payload":{}}"#);
+        apply_line(&hub, dir.path(), br#"{"v":1,"payload":{}}"#);
         assert_eq!(hub.status_body()["follow"], Value::Null);
+    }
+
+    /// The `nav` kind carries vision-nav's pose age from its state sidecar,
+    /// `null` without one; the other kinds stay verbatim.
+    #[test]
+    fn nav_state_gains_the_pose_age() {
+        let hub = NavHub::new();
+        let dir = tempfile::tempdir().unwrap();
+        let line = br#"{"v":1,"topic":"nav.state","publisher":"com.altnautica.vision-nav","ts_ms":1,"payload":{"mode":"external_nav"}}"#;
+        apply_line(&hub, dir.path(), line);
+        let nav = &hub.status_body()["nav"]["data"];
+        assert_eq!(nav["mode"], "external_nav");
+        assert!(nav.as_object().unwrap().contains_key("pose_age_ms"));
+        assert_eq!(nav["pose_age_ms"], Value::Null);
+
+        let written_ms = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let sidecar = json!({"telemetry.navigation": {"ts_ms": written_ms,
+            "payload": {"poseAgeMs": 118.0}}});
+        std::fs::write(
+            dir.path().join("com.altnautica.vision-nav-state.json"),
+            sidecar.to_string(),
+        )
+        .unwrap();
+        apply_line(&hub, dir.path(), line);
+        assert_eq!(hub.status_body()["nav"]["data"]["pose_age_ms"], 118.0);
+
+        apply_line(
+            &hub,
+            dir.path(),
+            br#"{"v":1,"topic":"follow.state","publisher":"com.altnautica.follow-me","ts_ms":1,"payload":{"phase":"idle"}}"#,
+        );
+        assert_eq!(
+            hub.status_body()["follow"]["data"],
+            json!({"phase": "idle"})
+        );
     }
 
     #[tokio::test]
@@ -230,7 +284,7 @@ mod tests {
         });
 
         let hub = NavHub::new();
-        let handle = spawn(path, hub.clone());
+        let handle = spawn(path, dir.path().to_path_buf(), hub.clone());
         for _ in 0..200 {
             if !hub.status_body()["follow"].is_null() {
                 break;

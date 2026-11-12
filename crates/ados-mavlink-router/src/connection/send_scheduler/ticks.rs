@@ -98,7 +98,7 @@ impl FcConnection {
 
     /// `MAV_CMD_SET_MESSAGE_INTERVAL` for `msg_id`: `interval_us` between
     /// messages, 0 to restore the FC's default rate, or -1 to stop the message.
-    async fn send_message_interval(&self, msg_id: u32, interval_us: f32) {
+    pub(super) async fn send_message_interval(&self, msg_id: u32, interval_us: f32) {
         let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
             target_system: self.target_system.load(Ordering::Relaxed),
             target_component: 1,

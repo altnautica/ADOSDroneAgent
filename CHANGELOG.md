@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.105] - 2026-11-12
+
+### Changed
+
+- Pilot frame: `armed` and `landed` are `null` while the pilot has not heard the flight controller, instead of repeating the last known state. The router keeps its last "pilot is flying" belief while they are unknown and refuses repositions until the flight controller is heard again.
+- `/api/telemetry` reports `landed_state` (`undefined`, `on_ground`, `in_air`, `takeoff`, `landing`) from the flight controller's extended system state, or `null` when it is not reported. On link-up the router asks for that message once a second when nothing else already requests it; a refused or unanswered request is harmless. The vehicle-state wire is now version 6.
+- Navigation status (`/api/v1/nav/status` and the nav stream) carries `pose_age_ms`, the age of the vision navigation pose, or `null`.
+
 ## [0.109.104] - 2026-11-12
 
 ### Changed

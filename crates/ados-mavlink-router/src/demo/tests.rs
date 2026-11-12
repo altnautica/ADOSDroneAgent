@@ -32,18 +32,19 @@ fn variant_id(m: &MavMessage) -> u32 {
         MavMessage::RC_CHANNELS(_) => 65,
         MavMessage::VFR_HUD(_) => 74,
         MavMessage::BATTERY_STATUS(_) => 147,
+        MavMessage::EXTENDED_SYS_STATE(_) => 245,
         _ => u32::MAX,
     }
 }
 
 #[test]
-fn demo_builds_eight_distinct_messages() {
+fn demo_builds_nine_distinct_messages() {
     let msgs = demo_messages(3.0);
-    assert_eq!(msgs.len(), 8);
-    // The message-id set must be exactly the eight telemetry types.
+    assert_eq!(msgs.len(), 9);
+    // The message-id set must be exactly the nine telemetry types.
     let ids: std::collections::BTreeSet<u32> = msgs.iter().map(variant_id).collect();
     let expected: std::collections::BTreeSet<u32> =
-        [0, 1, 24, 30, 33, 65, 74, 147].into_iter().collect();
+        [0, 1, 24, 30, 33, 65, 74, 147, 245].into_iter().collect();
     assert_eq!(ids, expected);
 }
 
@@ -87,4 +88,5 @@ fn decoded_messages_reproduce_the_sample_within_scaling() {
     assert_eq!(st.throttle, s.throttle as i64);
     assert_eq!(st.gps_satellites, 14);
     assert_eq!(st.gps_fix_type, GpsFixType::GPS_FIX_TYPE_3D_FIX as i64);
+    assert_eq!(st.to_wire()["landed_state"], "in_air");
 }

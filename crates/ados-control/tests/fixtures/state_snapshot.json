@@ -25,6 +25,7 @@
     "fix_type": 3,
     "satellites": 14
   },
+  "landed_state": "in_air",
   "last_heartbeat": "2026-01-01T00:00:00Z",
   "last_update": "2026-01-01T00:00:01Z",
   "mav_type": 2,

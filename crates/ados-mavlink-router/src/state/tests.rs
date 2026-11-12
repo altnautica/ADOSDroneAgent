@@ -37,6 +37,34 @@ fn banner(text: &str) -> MavMessage {
 }
 
 #[test]
+fn extended_sys_state_publishes_landed_state_while_fresh() {
+    use ados_protocol::mavlink::ardupilotmega::{
+        MavLandedState, MavVtolState, EXTENDED_SYS_STATE_DATA,
+    };
+    let mut s = VehicleState::default();
+    assert_eq!(s.to_wire()["landed_state"], Value::Null, "never reported");
+    for (state, name) in [
+        (MavLandedState::MAV_LANDED_STATE_UNDEFINED, "undefined"),
+        (MavLandedState::MAV_LANDED_STATE_ON_GROUND, "on_ground"),
+        (MavLandedState::MAV_LANDED_STATE_IN_AIR, "in_air"),
+        (MavLandedState::MAV_LANDED_STATE_TAKEOFF, "takeoff"),
+        (MavLandedState::MAV_LANDED_STATE_LANDING, "landing"),
+    ] {
+        let msg = MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
+            vtol_state: MavVtolState::MAV_VTOL_STATE_UNDEFINED,
+            landed_state: state,
+        });
+        assert!(s.update_from_message(&msg, TS).is_none());
+        assert_eq!(s.to_wire()["landed_state"], json!(name));
+    }
+    // A report older than the window is no longer claimed.
+    let old =
+        std::time::Instant::now() - LANDED_STATE_MAX_AGE - std::time::Duration::from_millis(1);
+    s.landed_state = Some((MavLandedState::MAV_LANDED_STATE_IN_AIR, old));
+    assert_eq!(s.to_wire()["landed_state"], Value::Null, "stale");
+}
+
+#[test]
 fn heartbeat_sets_mode_armed_and_type() {
     let mut s = VehicleState::default();
     let r = s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 4, true), TS);
