@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.106] - 2026-11-12
+
+### Fixed
+
+- The MAVLink router's connection module is back under the 500-line Rust size limit after the landed-state request field was added.
+
 ## [0.109.105] - 2026-11-12
 
 ### Changed

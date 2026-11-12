@@ -1,6 +1,5 @@
 //! Flight-controller serial link.
 //!
-//!
 //! Transport scope: serial is the default and the production path on the dev
 //! rigs. A configured port starting with `tcp:` or `udp:` opens a TCP or UDP
 //! MAVLink transport instead, for SITL bench and demo use.
@@ -26,11 +25,10 @@
 //! only current state) the source is telemetry-only; every other FC source
 //! (serial / UDP / TCP / discovery) keeps its full command path.
 //!
-//! The module is split by concern into siblings of this orchestrator:
-//! [`framing`] (MAVLink frame extraction), [`transport`] (serial discovery +
-//! TCP/UDP open + the write/persist helpers), and [`send_scheduler`] (the FC
-//! send paths and the three periodic send cadences). This file owns the
-//! [`FcConnection`] state and the connect/read reconnect FSM.
+//! Split by concern: [`framing`] (MAVLink frame extraction), [`transport`]
+//! (serial discovery, TCP/UDP open, write/persist helpers) and
+//! [`send_scheduler`] (FC send paths and the periodic send cadences). This
+//! file owns the [`FcConnection`] state and the connect/read reconnect FSM.
 
 mod client_framer;
 pub(crate) use client_framer::{ClientFramer, ConnFramers};
@@ -317,8 +315,7 @@ pub struct FcConnection {
     last_banner_req: Mutex<Option<Instant>>,
     /// Capture marker and IMU-stream fallback state the stream cadence reads.
     sensor_streams: imu_fallback::SensorStreams,
-    /// The once-per-link-up EXTENDED_SYS_STATE request decision (see
-    /// `tick_landed_state_request`). Held only for the synchronous check.
+    /// Once-per-link-up EXTENDED_SYS_STATE request (`tick_landed_state_request`).
     landed_state_req: std::sync::Mutex<send_scheduler::LandedStateRequest>,
 }
 
