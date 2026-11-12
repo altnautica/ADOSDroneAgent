@@ -1,6 +1,7 @@
 import * as SwitchPrimitive from "@radix-ui/react-switch";
 import { forwardRef, type ComponentPropsWithoutRef, type ElementRef } from "react";
 
+import { COARSE_HIT_AREA } from "@/lib/hit-area";
 import { cn } from "@/lib/utils";
 
 export const Switch = forwardRef<
@@ -14,6 +15,7 @@ export const Switch = forwardRef<
       "transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
       "disabled:cursor-not-allowed disabled:opacity-50",
       "data-[state=checked]:bg-primary data-[state=unchecked]:bg-muted",
+      COARSE_HIT_AREA,
       className,
     )}
     {...props}

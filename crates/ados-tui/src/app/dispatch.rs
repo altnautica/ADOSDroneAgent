@@ -71,6 +71,10 @@ impl App {
                 .get(self.core.tab, self.core.profile())
                 .searchable(&self.core),
             Command::InstallFile => !self.core.target.remote,
+            Command::NextPane | Command::PrevPane => self
+                .tabs
+                .get(self.core.tab, self.core.profile())
+                .has_panes(),
             _ => true,
         }
     }
@@ -174,17 +178,16 @@ impl App {
                 if self.core.target.remote {
                     self.core.toast(
                         ToastKind::Warn,
-                        "Quick actions run on the agent host; not available remotely",
+                        "Quick actions run on the companion computer; not available remotely",
                     );
                 } else {
                     self.core.open(Overlay::Actions(0));
                 }
             }
-            Command::Update => {
-                if self.enabled(Command::Update) {
-                    self.core.shell = Some(ShellReq::Update);
-                }
-            }
+            Command::Update => match self.core.update_refusal() {
+                Some(why) => self.core.toast(ToastKind::Info, why),
+                None => self.core.shell = Some(ShellReq::Update),
+            },
             Command::Quit => {
                 let staged = self.tabs.params.staged_count();
                 if staged > 0 {

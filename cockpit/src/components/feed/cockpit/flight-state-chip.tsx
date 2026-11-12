@@ -10,7 +10,7 @@ import { useRef, useState } from "react";
 
 import { Overlay } from "@/components/ui/overlay";
 import { useFlightChip } from "@/hooks/use-pilot";
-import { chipButton, chipFullText, chipLines } from "@/lib/chip-view";
+import { chipButton, chipFullText, chipLines, chipLineTextColor } from "@/lib/chip-view";
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { CHIP_MAX_FRAC, HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
@@ -25,14 +25,13 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   const radioFallback = useNavStreamStore((s) => s.radioFallback);
   const openSheet = useCockpitUiStore((s) => s.openSheet);
   const textRef = useRef<HTMLSpanElement>(null);
-  const lineRef = useRef<HTMLSpanElement>(null);
   const [fullAt, setFullAt] = useState<DOMRect | null>(null);
   const maxWidth = `${CHIP_MAX_FRAC * 100}cqw`;
 
   if (!chip) {
     return (
       <span
-        className="chrome-chip-text chrome-dim min-w-0 shrink truncate whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] px-[10px] py-[6px]"
+        className="chrome-chip-text chrome-dim h-[var(--fs-control)] min-w-0 shrink truncate whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] px-[10px] leading-[var(--fs-control)]"
         style={{ maxWidth }}
         data-testid="flight-state-chip"
       >
@@ -44,12 +43,13 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   const button = chipButton(chip.button);
   const lines = chipLines(chip, radioFallback);
   const full = chipFullText(chip.text, lines);
-  const truncated = () =>
-    [textRef.current, lineRef.current].some((el) => el !== null && el.scrollWidth > el.clientWidth + 1);
+  const truncated = () => textRef.current !== null && textRef.current.scrollWidth > textRef.current.clientWidth + 1;
 
   return (
     <span
-      className={cn("flex min-w-0 items-center gap-[6px]", fit ? "min-w-[96px] shrink" : "shrink", chip.dim && "opacity-55")}
+      // Until the bar is full the chip keeps its width (up to its cap) and the
+      // bar moves items into the Menu instead; only then does it truncate.
+      className={cn("flex min-w-0 items-center gap-[6px]", fit ? "min-w-[96px] shrink" : "shrink-0", chip.dim && "opacity-55")}
       style={{ maxWidth }}
       data-testid="flight-state-chip-box"
     >
@@ -59,22 +59,25 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
         aria-label={specText("chip.aria", { text: chip.text })}
         title={full}
         data-testid="flight-state-chip"
-        className={cn(HIT_AREA, "flex h-[40px] min-w-0 shrink flex-col items-start justify-center rounded-[var(--fs-radius-sm)] border px-[10px] text-left transition-transform duration-150 ease-out active:scale-[0.97]")}
-        style={{ borderColor: `${chip.color}B3`, background: `${chip.color}2E` }}
+        className={cn(HIT_AREA, "flex h-[var(--fs-control)] min-w-0 shrink items-center gap-[6px] rounded-[var(--fs-radius-sm)] border bg-transparent px-[10px] text-left transition-transform duration-150 ease-out active:scale-[0.97]")}
+        // An outline in the state colour, a dot in it, and the words in the
+        // panel's text colours: a state hue is too dark as small text.
+        style={{ borderColor: `${chip.color}99` }}
       >
-        <span ref={textRef} className="chrome-chip-text max-w-full truncate whitespace-nowrap leading-[16px] tracking-[0.02em]" style={{ color: chip.color }}>
-          {chip.text}
+        <span aria-hidden data-testid="flight-state-chip-dot" className="h-[6px] w-[6px] shrink-0 rounded-full" style={{ background: chip.color }} />
+        <span ref={textRef} className="min-w-0 truncate whitespace-nowrap tracking-[0.02em]" style={{ color: "var(--fs-text)" }}>
+          <span className="chrome-chip-text">{chip.text}</span>
+          {!compact && lines.length > 0 ? (
+            <span className="font-normal" data-testid="flight-state-chip-lines">
+              {lines.map((l, i) => (
+                <span key={i} style={{ color: chipLineTextColor(l.color) }}>
+                  {" · "}
+                  {l.text}
+                </span>
+              ))}
+            </span>
+          ) : null}
         </span>
-        {!compact && lines.length > 0 ? (
-          <span ref={lineRef} className="max-w-full truncate whitespace-nowrap text-[11px] leading-[13px]" data-testid="flight-state-chip-lines">
-            {lines.map((l, i) => (
-              <span key={i} style={{ color: l.color }}>
-                {i > 0 ? " · " : ""}
-                {l.text}
-              </span>
-            ))}
-          </span>
-        ) : null}
       </button>
       {button ? (
         <button
@@ -82,7 +85,7 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
           onClick={button.run}
           data-testid="flight-state-chip-button"
           data-button={chip.button}
-          className={cn(HIT_AREA, "h-[40px] shrink-0 whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] bg-white/10 px-[10px] font-semibold hover:bg-white/15")}
+          className={cn(HIT_AREA, "h-[var(--fs-control)] shrink-0 whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] bg-white/10 px-[10px] font-semibold hover:bg-white/15")}
         >
           {button.label}
         </button>

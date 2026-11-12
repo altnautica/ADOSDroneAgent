@@ -110,6 +110,17 @@ export function RegionSettings() {
     }
   }
 
+  if (config.isLoading) {
+    return <p className="text-[11px] text-muted-foreground">{t("settings.shared.readingConfig")}</p>;
+  }
+  if (config.isError || !config.data) {
+    return (
+      <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
+        {t("settings.region.readFailed")}
+      </div>
+    );
+  }
+
   const countryOptions = [
     ...COMMON_REGIONS.map((r) => ({
       value: r.code,
@@ -144,8 +155,8 @@ export function RegionSettings() {
       </Card>
 
       {mode === "unrestricted" && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm">
-          <span className="font-medium text-amber-200">{t("settings.region.unrestrictedBannerTitle")}</span>{" "}
+        <div className="rounded-md border border-warn/60 px-4 py-3 text-sm">
+          <span className="font-medium text-warn">{t("settings.region.unrestrictedBannerTitle")}</span>{" "}
           <span className="text-muted-foreground">
             {t("settings.region.unrestrictedBannerBody")}
           </span>

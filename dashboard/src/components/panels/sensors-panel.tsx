@@ -16,10 +16,10 @@ import {
 import { fmtNum } from "@/shared/format";
 
 const VERDICT_VARIANT: Record<RateVerdict, BadgeProps["variant"]> = {
-  ok: "ok",
-  degraded: "warn",
-  low: "err",
-  none: "default",
+  ok: "success",
+  degraded: "warning",
+  low: "error",
+  none: "neutral",
 };
 
 export interface SensorsViewProps {

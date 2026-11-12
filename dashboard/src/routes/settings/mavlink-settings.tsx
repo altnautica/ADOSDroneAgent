@@ -12,6 +12,8 @@ import { useConfig } from "@/hooks/use-config";
 // Example endpoint values, not copy.
 const NETWORK_TARGET_EXAMPLE = "udp:127.0.0.1:14550";
 const SERIAL_PORT_EXAMPLE = "/dev/ttyACM0";
+// The fastest UART rate the supported USB-serial bridges and SBC UARTs run.
+const MAX_BAUD = 3_000_000;
 
 const SOURCE_OPTIONS = [
   {
@@ -41,7 +43,7 @@ export function MavlinkSettings() {
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">{t("settings.shared.readingConfig")}</p>;
+    return <p className="text-[11px] text-muted-foreground">{t("settings.shared.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
@@ -86,6 +88,12 @@ export function MavlinkSettings() {
               description: t(o.descriptionKey),
             }))}
             columns={2}
+            confirm={(next) => ({
+              title: t("settings.mavlink.sourceConfirmTitle"),
+              description: t("settings.mavlink.sourceConfirmBody", {
+                source: t(SOURCE_OPTIONS.find((o) => o.value === next)?.labelKey ?? "settings.shared.unknown"),
+              }),
+            })}
           />
         </CardContent>
       </Card>
@@ -114,6 +122,7 @@ export function MavlinkSettings() {
             value={mav.baud_rate}
             integer
             min={1200}
+            max={MAX_BAUD}
             disabled={source === "auto" || isNetwork}
           />
         </CardContent>

@@ -28,7 +28,7 @@ import { create } from "zustand";
 import { skillContextNow } from "@/hooks/use-skill-context";
 import { CommandTimeoutError, sendCommand } from "@/lib/api";
 import type { ActionPhase } from "@/lib/cockpit-actions";
-import { FC_LAND_MODES, FC_RETURN_MODES, noteCommandedModes } from "@/lib/fc-failsafe";
+import { claimCommandedModes, FC_LAND_MODES, FC_RETURN_MODES } from "@/lib/fc-failsafe";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
@@ -45,10 +45,14 @@ import { requirePreflight } from "@/stores/preflight-store";
 const ACK_CLEAR_MS = 4000;
 let ackTimer: ReturnType<typeof setTimeout> | undefined;
 
+/** Show an outcome on the ack line; it clears after `ACK_CLEAR_MS` unless
+ *  another line (a later outcome, an Abort refusal) has replaced it. */
 function report(ack: AckLine): void {
   useConfirmStore.getState().setAck(ack);
   clearTimeout(ackTimer);
-  ackTimer = setTimeout(() => useConfirmStore.getState().setAck(null), ACK_CLEAR_MS);
+  ackTimer = setTimeout(() => {
+    if (useConfirmStore.getState().ack === ack) useConfirmStore.getState().setAck(null);
+  }, ACK_CLEAR_MS);
 }
 
 function failureText(e: unknown): string {
@@ -81,9 +85,11 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
     return;
   }
   const args = skill.takesAltitude && altitudeM != null ? [altitudeM] : [];
-  // A return or landing sent from here is this cockpit's, not a failsafe.
-  if (b.command === "rtl") noteCommandedModes(FC_RETURN_MODES);
-  else if (b.command === "land") noteCommandedModes(FC_LAND_MODES);
+  // A return or landing sent from here is this cockpit's, not a failsafe,
+  // once the answer is in (`claimCommandedModes`).
+  const claimed = b.command === "rtl" ? FC_RETURN_MODES : b.command === "land" ? FC_LAND_MODES : null;
+  const modeAtCommand = skillContextNow().fc?.mode ?? null;
+  const sentAt = Date.now();
   let res;
   try {
     res = await sendCommand(b.command, args);
@@ -94,9 +100,13 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
       report({ text: `${skill.label}: ${refusalText(e.status === 503 ? "no_fc" : "bad_args")}`, kind: "err" });
       return;
     }
+    // No answer: the command may still have gone out, so it is ours only if
+    // the flight controller is seen entering the mode.
+    if (claimed) claimCommandedModes(claimed, modeAtCommand, null, sentAt);
     throw e;
   }
   const a = res.ack;
+  if (claimed) claimCommandedModes(claimed, modeAtCommand, a, sentAt);
   if (!a?.observed) {
     report({ text: specText("skill.did_not_respond", { skill: skill.label }), kind: "warn" });
   } else if (a.accepted) {

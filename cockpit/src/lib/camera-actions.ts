@@ -221,23 +221,45 @@ function mainVideo(): HTMLVideoElement | null {
   return document.querySelector<HTMLVideoElement>("[data-main-video] video");
 }
 
-/** The part of a `vw`×`vh` frame the pilot sees at a digital zoom: its
- *  centre, 1/zoom of each side. */
-export function frameCrop(vw: number, vh: number, zoom: number): { sx: number; sy: number; sw: number; sh: number } {
-  const sw = vw / zoom;
-  const sh = vh / zoom;
-  return { sx: (vw - sw) / 2, sy: (vh - sh) / 2, sw, sh };
+/** The part of a `vw`×`vh` frame the pilot sees: the frame is fitted inside
+ *  a `boxW`×`boxH` box (`object-contain`, letterboxed), scaled by the
+ *  digital zoom about the box centre, and clipped to the box. A letterboxed
+ *  side stays whole until the zoom pushes it past the box edge. */
+export function frameCrop(
+  vw: number,
+  vh: number,
+  zoom: number,
+  boxW: number = vw,
+  boxH: number = vh,
+): { sx: number; sy: number; sw: number; sh: number } {
+  const fit = Math.min(boxW / vw, boxH / vh) * zoom;
+  const rw = vw * fit;
+  const rh = vh * fit;
+  const rx = (boxW - rw) / 2;
+  const ry = (boxH - rh) / 2;
+  const x0 = Math.max(0, rx);
+  const y0 = Math.max(0, ry);
+  return {
+    sx: (x0 - rx) / fit,
+    sy: (y0 - ry) / fit,
+    sw: (Math.min(boxW, rx + rw) - x0) / fit,
+    sh: (Math.min(boxH, ry + rh) - y0) / fit,
+  };
 }
 
-/** A still of the shown video, as the pilot sees it (the digital zoom's
- *  centre crop), as a PNG download. */
+/** A still of the shown video, as the pilot sees it (the rendered picture
+ *  under the digital zoom, letterbox excluded), as a PNG download. */
 async function grabFrame(): Promise<void> {
   const video = mainVideo();
   if (!video || video.videoWidth === 0) {
     toast.err(specText("camera.no_video"));
     return;
   }
-  const { sx, sy, sw, sh } = frameCrop(video.videoWidth, video.videoHeight, useCockpitViewStore.getState().digitalZoom);
+  // The box the picture is fitted in: the video element's own layout size
+  // (the zoom is a transform on its wrapper, so it does not change this).
+  const boxW = video.clientWidth || video.videoWidth;
+  const boxH = video.clientHeight || video.videoHeight;
+  const { sx, sy, sw, sh } = frameCrop(video.videoWidth, video.videoHeight, useCockpitViewStore.getState().digitalZoom, boxW, boxH);
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(sw);
   canvas.height = Math.round(sh);

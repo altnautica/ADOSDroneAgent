@@ -11,10 +11,10 @@ import { create } from "zustand";
 import { offerCommand } from "@/lib/command-stack";
 import {
   DEFAULT_TAB_ID,
-  TAB_ORDER,
   type NavCommand,
   type ScreenAction,
 } from "@/nav/navigator";
+import { TAB_ORDER } from "@/nav/screen-table";
 import { useDirtyStore } from "@/stores/dirty-store";
 
 const PERSIST_KEY = "ados-cockpit-active-tab";

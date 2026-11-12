@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ConfirmDialog } from "@/components/settings/confirm-dialog";
+import { useNow } from "@/hooks/use-now";
+import { liveData } from "@/lib/freshness";
 import {
   CAPTURE_STATE_PATH,
   HEALTH_IDS,
@@ -22,7 +25,7 @@ import { toastFromError } from "@/shared/api/toast";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtDuration } from "@/shared/format";
 
-const LEVEL_VARIANT = { ok: "ok", warn: "warn", bad: "err" } as const;
+const LEVEL_VARIANT = { ok: "success", warn: "warning", bad: "error" } as const;
 const KNOWN_ERRORS = ["E_STORAGE_FULL", "E_ALREADY_RECORDING", "E_CLOCK_NOT_READY"] as const;
 type KnownError = (typeof KNOWN_ERRORS)[number];
 
@@ -41,6 +44,7 @@ export function CaptureView({ state, errorCode, busy, onStart, onStop, onMark }:
   const { t } = useTranslation();
   const [room, setRoom] = useState(state.room ?? "");
   const [floor, setFloor] = useState(String(state.floor ?? 0));
+  const [stopOpen, setStopOpen] = useState(false);
   const floorNum = Number.parseInt(floor, 10);
   const floorValid = Number.isFinite(floorNum);
   const recording = state.state === "recording" || state.state === "paused";
@@ -48,7 +52,7 @@ export function CaptureView({ state, errorCode, busy, onStart, onStop, onMark }:
   return (
     <div className="space-y-4 text-sm">
       <div className="flex flex-wrap items-center gap-3">
-        <Badge variant={recording ? "err" : "default"}>{t(`capture.state.${state.state}`)}</Badge>
+        <Badge variant={recording ? "error" : "neutral"}>{t(`capture.state.${state.state}`)}</Badge>
         {state.session_id && <span className="font-mono text-xs">{state.session_id}</span>}
         {recording && (
           <span className="font-mono text-xs">
@@ -64,7 +68,7 @@ export function CaptureView({ state, errorCode, busy, onStart, onStop, onMark }:
         {HEALTH_IDS.map((id) => {
           const h = state.health.find((x) => x.id === id);
           return (
-            <Badge key={id} variant={h ? LEVEL_VARIANT[h.level] : "default"}>
+            <Badge key={id} variant={h ? LEVEL_VARIANT[h.level] : "neutral"}>
               {t(`capture.health.${id}`)}
             </Badge>
           );
@@ -86,7 +90,7 @@ export function CaptureView({ state, errorCode, busy, onStart, onStop, onMark }:
           />
         </div>
         {recording ? (
-          <Button size="sm" variant="destructive" disabled={busy} onClick={onStop}>
+          <Button size="sm" variant="destructive" disabled={busy} onClick={() => setStopOpen(true)}>
             <Square className="h-3.5 w-3.5" />
             {t("capture.stop")}
           </Button>
@@ -118,6 +122,15 @@ export function CaptureView({ state, errorCode, busy, onStart, onStop, onMark }:
           {t("capture.storage", { remaining: fmtDuration(state.storage.est_remaining_s) })}
         </p>
       )}
+      <ConfirmDialog
+        open={stopOpen}
+        onOpenChange={setStopOpen}
+        title={t("capture.stopTitle")}
+        description={t("capture.stopBody")}
+        confirmLabel={t("capture.stop")}
+        destructive
+        onConfirm={onStop}
+      />
     </div>
   );
 }
@@ -133,6 +146,10 @@ export function CapturePanel() {
     refetchInterval: 1_000,
     retry: (count, err) => !isExtensionMissing(err) && count < 2,
   });
+  // Agent down: the last read is not shown as current. The window is wider
+  // than the 1 s poll so a slow reply never blinks the form away.
+  const now = useNow(1_000);
+  const live = liveData(capture, 2_500, now);
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -155,9 +172,9 @@ export function CapturePanel() {
         <CardTitle>{t("capture.title")}</CardTitle>
       </CardHeader>
       <CardContent>
-        {capture.data ? (
+        {live ? (
           <CaptureView
-            state={capture.data}
+            state={live}
             errorCode={errorCode}
             busy={busy}
             onStart={(room, floor) => run(() => startCapture(room.trim() ? { room: room.trim(), floor } : { floor }))}

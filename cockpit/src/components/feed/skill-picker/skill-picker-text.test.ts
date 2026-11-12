@@ -15,7 +15,7 @@ const read = (rel: string) => readFileSync(path.resolve(__dirname, rel), "utf8")
 describe("skill picker text", () => {
   it("has no hard-coded flight-screen words or colours", () => {
     const src = read("skill-picker.tsx") + read("../../../lib/skill-picker-model.ts");
-    for (const literal of ['"GO"', '"Starting…"', '"ACTIVE', "`ACTIVE", '"Skills"', '"Stop"', '"On"', '"Off"', '"Behaviors"', '"CLEAR"', "No skills in this tab", "#22D3EE", "last seen"]) {
+    for (const literal of ['"GO"', '"Starting…"', '"ACTIVE', "`ACTIVE", '"Skills"', '"Stop"', '"On"', '"Off"', '"Behaviors"', '"CLEAR"', "No skills in this tab", "#22D3EE", "last seen", "} down`", "} up`"]) {
       expect(src, literal).not.toContain(literal);
     }
   });

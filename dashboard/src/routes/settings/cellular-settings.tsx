@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ConfirmDialog } from "@/components/settings/confirm-dialog";
+import { ConfirmSwitch } from "@/components/settings/confirm-switch";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { putConfigChecked } from "@/shared/api/apply-actions";
@@ -57,6 +59,7 @@ function ApplyField({
   current,
   disabled,
   validate,
+  confirm,
   onApply,
 }: {
   id: string;
@@ -66,11 +69,14 @@ function ApplyField({
   current: string;
   disabled: boolean;
   validate?: (draft: string) => string | null;
+  /** When set, Save asks first. */
+  confirm?: { title: string; body: string };
   onApply: (value: string) => Promise<void>;
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [asking, setAsking] = useState(false);
 
   const value = draft ?? current;
   const dirty = draft !== null && draft !== current;
@@ -104,13 +110,22 @@ function ApplyField({
         <Button
           variant="default"
           disabled={disabled || saving || !dirty || error !== null}
-          onClick={() => void apply()}
+          onClick={() => (confirm ? setAsking(true) : void apply())}
         >
           {saving ? t("settings.shared.saving") : t("settings.shared.save")}
         </Button>
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {confirm && (
+        <ConfirmDialog
+          open={asking}
+          onOpenChange={setAsking}
+          title={confirm.title}
+          description={confirm.body}
+          onConfirm={apply}
+        />
+      )}
     </div>
   );
 }
@@ -122,7 +137,6 @@ function GsCellular() {
   const [modem, setModemState] = useState<ModemView | null>(null);
   const [presence, setPresence] = useState<ModemPresence | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [togglePending, setTogglePending] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -162,15 +176,12 @@ function GsCellular() {
   }
 
   async function onToggleEnabled(enabled: boolean) {
-    if (togglePending) return;
-    setTogglePending(true);
     try {
       await writeModem({ enabled });
       toast.ok(enabled ? t("settings.cellular.modemEnabled") : t("settings.cellular.modemDisabled"));
     } catch (err) {
       toastFromError(err, t("settings.cellular.modemUpdateFailed"));
-    } finally {
-      setTogglePending(false);
+      throw err;
     }
   }
 
@@ -240,10 +251,13 @@ function GsCellular() {
       {/* Presence + reported connection facts — read-only. */}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-2">
-          <div className="text-sm font-semibold mb-1">{t("settings.cellular.modemTitle")}</div>
+          <div className="flex items-center gap-2 text-sm font-semibold mb-1">
+            {t("settings.cellular.modemTitle")}
+            {loadFailed && modem && <Badge variant="warning">{t("cockpit.stale")}</Badge>}
+          </div>
           <ReadRow label={t("settings.cellular.presence")} value={presenceText} />
           {modem && (
-            <>
+            <div className={loadFailed ? "space-y-2 opacity-50" : "space-y-2"}>
               <ReadRow label={t("settings.cellular.state")} value={stateText} />
               {operator && <ReadRow label={t("settings.cellular.operator")} value={operator} />}
               {technology && <ReadRow label={t("settings.cellular.technology")} value={technology} />}
@@ -265,7 +279,7 @@ function GsCellular() {
                   <p className="text-[11px] text-muted-foreground">{t("settings.cellular.noCap")}</p>
                 )}
               </div>
-            </>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -281,11 +295,12 @@ function GsCellular() {
                   {t("settings.cellular.uplinkHintGs")}
                 </p>
               </div>
-              <Switch
+              <ConfirmSwitch
                 checked={modem.enabled === true}
-                onCheckedChange={(v) => void onToggleEnabled(v)}
-                disabled={togglePending}
-                aria-label={t("settings.cellular.uplinkTitle")}
+                label={t("settings.cellular.uplinkTitle")}
+                on={{ title: t("settings.cellular.enableTitle"), body: t("settings.cellular.enableBody") }}
+                off={{ title: t("settings.cellular.disableTitle"), body: t("settings.cellular.disableBody") }}
+                onChange={onToggleEnabled}
               />
             </div>
 
@@ -296,6 +311,7 @@ function GsCellular() {
               placeholder={APN_PLACEHOLDER}
               current={typeof modem.apn === "string" ? modem.apn : ""}
               disabled={false}
+              confirm={{ title: t("settings.cellular.apnConfirmTitle"), body: t("settings.cellular.apnConfirmBody") }}
               onApply={applyApn}
             />
 
@@ -324,15 +340,18 @@ function ConfigOnlyCellular() {
   const [enabled, setEnabled] = useState(false);
   const [apn, setApn] = useState("");
   const [apnBusy, setApnBusy] = useState(false);
+  const [askApn, setAskApn] = useState(false);
 
-  useEffect(() => {
-    if (config.data) {
-      setEnabled(config.data.network?.cellular?.enabled ?? false);
-      setApn(config.data.network?.cellular?.apn ?? "");
-    }
-  }, [config.data]);
-
+  // Re-seed per value: a refetch after the switch must not wipe a typed APN.
+  const cfgEnabled = config.data?.network?.cellular?.enabled;
   const initialApn = config.data?.network?.cellular?.apn ?? "";
+  const read = config.data !== undefined;
+  useEffect(() => {
+    if (read) setEnabled(cfgEnabled ?? false);
+  }, [read, cfgEnabled]);
+  useEffect(() => {
+    if (read) setApn(initialApn);
+  }, [read, initialApn]);
 
   async function applyEnabled(next: boolean) {
     const previous = enabled;
@@ -344,6 +363,7 @@ function ConfigOnlyCellular() {
     } catch (err) {
       setEnabled(previous);
       toastFromError(err, t("settings.cellular.cellularUpdateFailed"));
+      throw err;
     }
   }
 
@@ -355,6 +375,7 @@ function ConfigOnlyCellular() {
       config.refetch();
     } catch (err) {
       toastFromError(err, t("settings.cellular.apnFailed"));
+      throw err;
     } finally {
       setApnBusy(false);
     }
@@ -377,10 +398,12 @@ function ConfigOnlyCellular() {
                 {t("settings.cellular.uplinkHintConfig")}
               </p>
             </div>
-            <Switch
+            <ConfirmSwitch
               checked={enabled}
-              onCheckedChange={(v) => void applyEnabled(v)}
-              aria-label={t("settings.cellular.uplinkTitle")}
+              label={t("settings.cellular.uplinkTitle")}
+              on={{ title: t("settings.cellular.enableTitle"), body: t("settings.cellular.enableBody") }}
+              off={{ title: t("settings.cellular.disableTitle"), body: t("settings.cellular.disableBody") }}
+              onChange={applyEnabled}
             />
           </div>
 
@@ -397,7 +420,7 @@ function ConfigOnlyCellular() {
               <Button
                 variant="default"
                 disabled={apn === initialApn || apnBusy}
-                onClick={() => void applyApn()}
+                onClick={() => setAskApn(true)}
               >
                 {t("settings.shared.save")}
               </Button>
@@ -406,6 +429,13 @@ function ConfigOnlyCellular() {
               {t("settings.cellular.apnHint")}
             </p>
           </div>
+          <ConfirmDialog
+            open={askApn}
+            onOpenChange={setAskApn}
+            title={t("settings.cellular.apnConfirmTitle")}
+            description={t("settings.cellular.apnConfirmBody")}
+            onConfirm={applyApn}
+          />
         </CardContent>
       </Card>
     </div>
@@ -425,7 +455,7 @@ export function CellularSettings() {
   // while loading, both indistinguishable from "no cellular configured".
   if (config.isLoading) {
     return (
-      <p className="text-[11px] text-muted-foreground/70">{t("settings.shared.readingConfig")}</p>
+      <p className="text-[11px] text-muted-foreground">{t("settings.shared.readingConfig")}</p>
     );
   }
   if (config.isError) {

@@ -44,7 +44,7 @@ export function DiscoverySettings() {
     <div className="space-y-6">
       {/* mDNS toggle + read-only service type. */}
       {config.isLoading ? (
-        <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>
+        <p className="text-[11px] text-muted-foreground">{t("settingsMore.security.readingConfig")}</p>
       ) : config.isError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
           {t("settingsMore.discovery.readError")}
@@ -95,7 +95,7 @@ export function DiscoverySettings() {
                 {mdnsHost ? (
                   <span className="font-mono text-xs">{mdnsHost}</span>
                 ) : (
-                  <Badge variant="default" className="font-normal">
+                  <Badge variant="neutral">
                     {t("settingsMore.discovery.nonePublished")}
                   </Badge>
                 )}

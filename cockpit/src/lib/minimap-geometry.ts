@@ -135,6 +135,18 @@ export function svgTextUnits(px: number, boxPx: number, view: number): number {
   return boxPx > 0 ? (px * view) / boxPx : px;
 }
 
+/** Where a card's face title ends, CSS px from its top (`radar-cards.tsx`
+ *  `FaceTitle`: 4 px down, 16 px line). */
+export const CARD_TITLE_BOTTOM_PX = 20;
+
+/** The y (SVG units) of the minimap's north label baseline: near the top, or
+ *  in a card below the card's title, so a small card never draws "MAP" over
+ *  "N". The viewBox is square and fitted with `meet` on `boxPx`. */
+export function northLabelY(textUnits: number, inCard: boolean, boxPx: number, view: number): number {
+  const top = textUnits * 1.2;
+  return inCard ? Math.max(top, svgTextUnits(CARD_TITLE_BOTTOM_PX, boxPx, view) + textUnits) : top;
+}
+
 /** Half the length of the local minimap's origin crosshair arm (px). */
 export const ORIGIN_CROSS_ARM_PX = 4;
 

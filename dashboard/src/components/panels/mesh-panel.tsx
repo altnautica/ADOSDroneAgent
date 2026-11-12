@@ -7,7 +7,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useNow } from "@/hooks/use-now";
 import { useResource } from "@/hooks/use-resource";
+import { roleLabel } from "@/lib/enum-labels";
+import { liveData } from "@/lib/freshness";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { ApiError } from "@/shared/api-fetch";
 import { fmtPct } from "@/shared/format";
@@ -34,12 +37,15 @@ interface MeshState {
   partition?: boolean;
 }
 
+const MESH_POLL_MS = 2_000;
+
 export function MeshPanel() {
   const { t } = useTranslation();
   const identity = useNodeIdentity();
-  const mesh = useResource<MeshState>("gs-mesh", "/api/v1/ground-station/mesh", 2_000);
+  const mesh = useResource<MeshState>("gs-mesh", "/api/v1/ground-station/mesh", MESH_POLL_MS);
+  const now = useNow(1_000);
 
-  const m = mesh.data;
+  const m = liveData(mesh, MESH_POLL_MS, now);
   // `{}` means the agent holds no current snapshot: the poll loop is not
   // reporting, which is not the same as "no peers".
   const current = m != null && m.up !== undefined;
@@ -53,8 +59,8 @@ export function MeshPanel() {
         <CardTitle className="flex items-center gap-2">
           <Network className="h-3.5 w-3.5" />
           {t("panels.mesh.title")}
-          <span className="ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-border text-muted-foreground">
-            {role}
+          <span className="ml-auto text-xs px-1.5 py-0.5 rounded border border-border text-muted-foreground">
+            {roleLabel(role)}
           </span>
         </CardTitle>
       </CardHeader>

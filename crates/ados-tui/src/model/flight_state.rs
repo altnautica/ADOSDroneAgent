@@ -257,13 +257,16 @@ fn fmt_eta(s: Option<f64>) -> String {
 }
 
 /// A launch step's name, upper case (`flow.launch.step.*`, `after` read as
-/// its label).
+/// its label). The take-off step reads as its action
+/// (`chip.launch_step.takeoff`), so the chip never repeats "take off".
 fn launch_step_upper(step: Option<&str>) -> String {
-    match step {
-        None => String::new(),
-        Some("after") => spec_text("flow.launch.step.after_label", &[]).to_uppercase(),
-        Some(s) => spec_text(&format!("flow.launch.step.{s}"), &[]).to_uppercase(),
-    }
+    let key = match step {
+        None => return String::new(),
+        Some("after") => "flow.launch.step.after_label".to_string(),
+        Some("takeoff") => "chip.launch_step.takeoff".to_string(),
+        Some(s) => format!("flow.launch.step.{s}"),
+    };
+    spec_text(&key, &[]).to_uppercase()
 }
 
 fn num(v: Option<f64>) -> String {

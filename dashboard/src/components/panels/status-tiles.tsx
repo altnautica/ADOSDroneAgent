@@ -14,7 +14,8 @@ import { STATUS_POLL_MS, useStatus } from "@/hooks/use-status";
 import { useVehicleLiveness } from "@/hooks/use-vehicle-liveness";
 import { useVehicleTelemetry, VEHICLE_TELEMETRY_POLL_MS } from "@/hooks/use-vehicle-telemetry";
 import { liveData } from "@/lib/freshness";
-import { freshNavFrames, homePill, homeStatusLines, type StatusFull } from "@/lib/home-status";
+import { chipTextColor } from "@/lib/chip-color";
+import { freshNavFrames, homePill, homeStatusLines, poseAgeText, type StatusFull } from "@/lib/home-status";
 import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
 import { severityClasses } from "@/shared/format";
@@ -56,16 +57,17 @@ function FlightChip() {
   const chip = useFlightChip();
   if (!chip) return null;
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs" aria-label={t("home.flightState")}>
+    <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs" aria-label={t("home.flightState")}>
       <span
-        className={cn("rounded-full border px-2.5 py-0.5 font-mono font-semibold", chip.dim && "opacity-60")}
-        style={{ color: chip.color, borderColor: chip.color }}
+        className={cn("max-w-full truncate rounded-full border px-2.5 py-0.5 font-mono font-semibold", chip.dim && "opacity-60")}
+        style={{ color: chipTextColor(chip.color), borderColor: chip.color }}
+        title={chip.text}
         data-testid="flight-chip"
       >
         {chip.text}
       </span>
       {chip.secondary.map((l) => (
-        <span key={l.text} className="font-mono" style={{ color: l.color }}>
+        <span key={l.text} className="max-w-full truncate font-mono" style={{ color: chipTextColor(l.color) }} title={l.text}>
           {l.text}
         </span>
       ))}
@@ -103,10 +105,11 @@ function VehicleStatus() {
     pilotAgeMs: nav.data?.pilot && pilot ? Math.max(0, now - nav.dataUpdatedAt) + (nav.data.pilot.age_ms ?? 0) : null,
     agentReachable: !heartbeat.isError,
   };
-  const pill = homePill(inputs);
   // The lines are live values: each reads only a source that is still live,
-  // and the pilot and follow frames only while fresh.
+  // and the pilot, follow and nav frames only while fresh.
   const fresh = freshNavFrames(nav.data, nav.dataUpdatedAt, now);
+  const pill = homePill({ ...inputs, nav: fresh.nav });
+  const poseAge = poseAgeText(fresh.nav);
   const lines = homeStatusLines({
     ...inputs,
     pilot: fresh.pilot,
@@ -119,13 +122,13 @@ function VehicleStatus() {
       <details className="group">
         <summary
           className={cn(
-            "inline-flex cursor-pointer list-none items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-medium",
+            "inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-medium max-md:min-h-11",
             PILL_TONE[pill.severity],
           )}
           data-severity={pill.severity}
           data-testid="status-pill"
         >
-          {pill.text}
+          <span className="truncate" title={pill.text}>{pill.text}</span>
           {pill.count > 0 ? <ChevronDown aria-hidden className="h-3 w-3 transition-transform group-open:rotate-180" /> : null}
         </summary>
         {pill.count > 0 ? (
@@ -149,6 +152,7 @@ function VehicleStatus() {
           </span>
         ) : null}
         {lines.sticks ? <span>{lines.sticks}</span> : null}
+        {poseAge ? <span data-testid="pose-age">{poseAge}</span> : null}
         {lines.timeToReserve ? (
           <span title={RESERVE_TITLE}>{lines.timeToReserve}</span>
         ) : null}

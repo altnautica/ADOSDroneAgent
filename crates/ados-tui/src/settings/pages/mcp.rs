@@ -289,7 +289,7 @@ impl Page {
                 .collect(),
             selected: 0,
             footer: Some(
-                "Flight, destructive and secret-read tokens are minted from Mission Control".into(),
+                "Flight, destructive and secret-read tokens are minted from Mission Control · Space toggles · Enter done · Esc cancels".into(),
             ),
             ret: Ret::new(route(), "scopes").with(json!({ "label": label })),
         }));

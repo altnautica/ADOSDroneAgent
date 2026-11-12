@@ -240,4 +240,61 @@ describe("pause after this cockpit's own return home on the command route", () =
     await executeSkill(B.land!);
     expect(resolveSkillState(B.pause!, { ...stale, fc: { mode: "AUTO.LAND", systemStatus: 4 } }).enabled).toBe(true);
   });
+
+  const flying = (mode: string): SkillContext => ({
+    fcConnected: true,
+    live: true,
+    armed: true,
+    pilot: { armed: true, landed: false, vehicleClass: "multirotor", fresh: false, fcFailsafe: false },
+    pilotLinkOpen: true,
+    fc: { mode, systemStatus: 4 },
+  });
+  const answer = (ack: Record<string, unknown>) => vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ status: "ok", ack }), { status: 200 }));
+
+  it("a refused return claims nothing: a later return is the flight controller's own", async () => {
+    ctxNow.ctx = flying("LOITER");
+    answer({ observed: true, accepted: false, result_name: "DENIED" });
+    await executeSkill(B.rth!);
+    expect(resolveSkillState(B.pause!, flying("RTL")).enabled).toBe(false);
+  });
+
+  it("a return pressed while the flight controller already flies its own stays its own", async () => {
+    ctxNow.ctx = flying("RTL");
+    answer({ observed: true, accepted: true });
+    await executeSkill(B.rth!);
+    expect(resolveSkillState(B.pause!, flying("RTL")).enabled).toBe(false);
+  });
+
+  it("an unanswered return is ours once the flight controller is seen flying it", async () => {
+    ctxNow.ctx = flying("LOITER");
+    answer({ observed: false });
+    await executeSkill(B.rth!);
+    expect(resolveSkillState(B.pause!, flying("RTL")).enabled).toBe(true);
+  });
+});
+
+describe("the ack line", () => {
+  it("clears only the line this outcome wrote, never a later one", async () => {
+    vi.useFakeTimers();
+    ctxNow.ctx = pilotCtx;
+    const done = executeSkill(B.land!);
+    actions[0]!.answer({ ok: true });
+    await done;
+    expect(useConfirmStore.getState().ack?.kind).toBe("ok");
+    vi.advanceTimersByTime(1000);
+    const later = { text: "Abort refused", kind: "err" as const };
+    useConfirmStore.getState().setAck(later);
+    vi.advanceTimersByTime(4000);
+    expect(useConfirmStore.getState().ack).toBe(later);
+  });
+
+  it("clears its own line after four seconds", async () => {
+    vi.useFakeTimers();
+    ctxNow.ctx = pilotCtx;
+    const done = executeSkill(B.land!);
+    actions[0]!.answer({ ok: true });
+    await done;
+    vi.advanceTimersByTime(4000);
+    expect(useConfirmStore.getState().ack).toBeNull();
+  });
 });

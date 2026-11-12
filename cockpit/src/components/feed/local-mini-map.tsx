@@ -20,6 +20,7 @@ import { useElementSize } from "@/hooks/use-element-size";
 import { useNow } from "@/hooks/use-now";
 import { useOccupancyImages } from "@/hooks/use-occupancy-images";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import { HIT_AREA } from "@/lib/flight-layout";
 import { fcOrigin, flyHerePosition, localToLatLon } from "@/lib/fly-here";
 import { freshLocalPosition, localDrone, localSceneInput, localTarget, panBy, screenToLocal } from "@/lib/local-minimap";
 import { emptyTextTop, latLonToEN, ORIGIN_CROSS_ARM_PX } from "@/lib/minimap-geometry";
@@ -230,13 +231,14 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
         scale={scale}
         inCard={inCard}
       />
-      <div className="absolute right-[4px] top-1/2 flex -translate-y-1/2 flex-col gap-[4px]">
+      {/* 20 px apart: the two 48 px hit areas meet without overlapping. */}
+      <div className="absolute right-[4px] top-1/2 flex -translate-y-1/2 flex-col gap-[20px]">
         <button
           type="button"
           aria-label={specText("cockpit.zoom.out")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => setPxPerM((z) => stepZoom(z, -1))}
-          className="flex h-[28px] w-[28px] items-center justify-center rounded bg-hud-glass text-hud-ink"
+          className={cn(HIT_AREA, "chrome-panel flex h-[28px] w-[28px] items-center justify-center !rounded-[var(--fs-radius-sm)]")}
         >
           <Minus className="h-[14px] w-[14px]" aria-hidden />
         </button>
@@ -245,7 +247,7 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
           aria-label={specText("cockpit.zoom.in")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => setPxPerM((z) => stepZoom(z, 1))}
-          className="flex h-[28px] w-[28px] items-center justify-center rounded bg-hud-glass text-hud-ink"
+          className={cn(HIT_AREA, "chrome-panel flex h-[28px] w-[28px] items-center justify-center !rounded-[var(--fs-radius-sm)]")}
         >
           <Plus className="h-[14px] w-[14px]" aria-hidden />
         </button>

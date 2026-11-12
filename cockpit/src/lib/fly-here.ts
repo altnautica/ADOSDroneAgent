@@ -8,7 +8,7 @@
 
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
-import { flyHereOffered, type FlyHereFc } from "@/shared/hud/fly-here-offer";
+import { flyHereOffered, type FlyHereFc, type FlyHereReason } from "@/shared/hud/fly-here-offer";
 import { CHIP_STALE_AFTER_MS } from "@/shared/hud/flight-state";
 import { isValidFix, latLonToEN, type LatLon, type MapView } from "@/lib/minimap-geometry";
 import type { VehicleState } from "@/lib/types";
@@ -37,26 +37,46 @@ const DEG = Math.PI / 180;
 /** What a picked map point does: the Fly Here confirm in the air, sent
  *  through the pilot (`pilot`) or straight to the flight controller (`fc`),
  *  the Launch sheet with a go-to on the ground, or nothing (a stale pilot
- *  state, or neither route takes a point now). */
+ *  state, or neither route takes a point now). Only a reported landed or
+ *  disarmed state opens the Launch sheet; an unknown one is possibly
+ *  airborne. */
 export type MapPickAction = "pilot" | "fc" | "launch" | null;
 
 export function mapPickAction(p: PilotState | null, pilotAgeMs: number, fc: FlyHereFc | null): MapPickAction {
   const { route } = flyHereOffered(p, pilotAgeMs, fc);
   if (route !== null) return route;
-  if (p !== null && pilotAgeMs < CHIP_STALE_AFTER_MS && (p.landed || !p.armed)) return "launch";
+  if (p !== null && pilotAgeMs < CHIP_STALE_AFTER_MS && (p.landed === true || p.armed === false)) return "launch";
+  return null;
+}
+
+/** Why a picked point does nothing, when the shared rule knows (a map
+ *  long-press then says `refusal.<reason>` instead of opening a sheet), else
+ *  null. Null too whenever the pick does something. */
+export function mapPickRefusal(p: PilotState | null, pilotAgeMs: number, fc: FlyHereFc | null): FlyHereReason | null {
+  if (mapPickAction(p, pilotAgeMs, fc) !== null) return null;
+  return flyHereOffered(p, pilotAgeMs, fc).reason ?? null;
+}
+
+/** The flight controller's landed state from `/api/telemetry`
+ *  `landed_state` (`EXTENDED_SYS_STATE`): null while unknown. A take-off or
+ *  a landing in progress is off the ground. */
+export function fcLanded(state: VehicleState["landed_state"]): boolean | null {
+  if (state === "on_ground") return true;
+  if (state === "in_air" || state === "takeoff" || state === "landing") return false;
   return null;
 }
 
 /** The flight controller's facts for the FC route: its mode is GUIDED (the
  *  pilot's report of the FC mode, else the vehicle snapshot's), it is armed,
- *  and whether it has landed. Only the pilot reports landed (the vehicle
- *  snapshot carries no landed state), so without a fresh pilot state the
- *  facts are unknown and the FC route is not offered. `pilot` is the fresh
- *  pilot state or null. */
+ *  and whether it has landed: the fresh pilot's report, else the flight
+ *  controller's own `landed_state`. With neither the facts are unknown and
+ *  the FC route is not offered. `pilot` is the fresh pilot state or null. */
 export function flyHereFc(t: VehicleState | null, live: boolean, pilot: PilotState | null): FlyHereFc | null {
-  if (!live || !t || !pilot) return null;
-  const mode = pilot.fcModeName ?? t.mode ?? null;
-  return { guided: mode?.toUpperCase() === "GUIDED", armed: t.armed === true, landed: pilot.landed !== false };
+  if (!live || !t) return null;
+  const landed = pilot && pilot.landed !== null ? pilot.landed : fcLanded(t.landed_state);
+  if (landed === null) return null;
+  const mode = pilot?.fcModeName ?? t.mode ?? null;
+  return { guided: mode?.toUpperCase() === "GUIDED", armed: t.armed === true, landed };
 }
 
 /** The Launch sheet's go-to for a picked point: whole metres north/east of

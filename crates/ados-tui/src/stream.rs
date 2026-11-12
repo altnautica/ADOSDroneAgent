@@ -126,7 +126,7 @@ pub enum LogMsg {
 }
 
 /// The comment the agent sends just before closing a stream it cannot serve.
-const STORE_UNAVAILABLE: &str = "logging store unavailable";
+pub const STORE_UNAVAILABLE: &str = "logging store unavailable";
 
 /// Server-sent-events framing: `data:` lines accumulate until a blank line
 /// ends the event; `:` comment lines are keep-alives (the last one is kept as

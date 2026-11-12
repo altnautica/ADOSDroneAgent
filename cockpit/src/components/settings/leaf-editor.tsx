@@ -9,12 +9,17 @@
 
 import { useState } from "react";
 import { RotateCw, TriangleAlert } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { ActionButton, ConfirmButton, EmptyNote } from "@/components/ui/data";
+import { CameraSourcePicker } from "@/components/settings/camera-source-picker";
+import { CAMERA_SOURCE_PATH } from "@/lib/camera-source";
 import { OnScreenKeyboard } from "@/components/settings/on-screen-keyboard";
 import { OnScreenNumpad } from "@/components/settings/on-screen-numpad";
 import { SegmentedPicker } from "@/components/settings/widgets";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { markRebootPending, type WriteResult } from "@/stores/config-store";
+import { useDirtyStore } from "@/stores/dirty-store";
 import type { AgentConfig, ConfigValue } from "@/lib/types";
 import {
   ENUM_OPTIONS,
@@ -40,6 +45,14 @@ export function LeafEditor({
   onDone: () => void;
 }) {
   const current = getAtPath(config, path);
+  const { t } = useTranslation();
+  const words: LeafWords = {
+    hidden: t("cockpit.settingsSections.leaf.hidden"),
+    unset: t("cockpit.settingsSections.leaf.unset"),
+    empty: t("cockpit.settingsSections.leaf.empty"),
+    on: t("cockpit.settingsSections.leaf.on"),
+    off: t("cockpit.settingsSections.leaf.off"),
+  };
   const redacted = isRedacted(path);
   const reboot = needsReboot(path);
   const kind = editorKind(current, path);
@@ -51,6 +64,8 @@ export function LeafEditor({
   const check = computeSaveValue(kind, path, pending, redacted);
   const unchanged = redacted ? false : isUnchanged(kind, current, pending);
   const canSave = check.value != null && !unchanged;
+  const owner = `settings-leaf:${path}`;
+  useDirtyGuard(redacted ? pending !== "" : !unchanged, owner);
 
   const doSave = async () => {
     if (check.value == null || busy) return;
@@ -59,14 +74,16 @@ export function LeafEditor({
     const r = await write(path, check.value);
     setBusy(false);
     if (!r.ok) {
-      setError(r.error ?? "Write failed");
+      setError(t("cockpit.settingsSections.leaf.writeFailed"));
       return;
     }
     if (reboot) markRebootPending(path);
     if (r.persisted === false) {
-      setError("Saved to memory but not written to disk. It will not survive a restart.");
+      setError(t("cockpit.settingsSections.leaf.notPersisted"));
       return;
     }
+    // Saved: the edit is no longer unsaved, so leaving must not ask.
+    useDirtyStore.getState().setDirty(owner, false);
     onDone();
   };
 
@@ -75,22 +92,22 @@ export function LeafEditor({
       {/* before → after */}
       <div className="flex items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.5rem]">
         <div className="min-w-0 flex-1">
-          <div className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">Current</div>
+          <div className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">{t("settings.shared.current")}</div>
           <div className="truncate font-mono text-[0.9rem] text-surface-foreground">
-            {displayLeaf(path, current, kind)}
+            {displayLeaf(path, current, kind, words)}
           </div>
         </div>
         <div className="text-muted-foreground">→</div>
         <div className="min-w-0 flex-1">
-          <div className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">New</div>
+          <div className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">{t("cockpit.settingsSections.leaf.new")}</div>
           <div className={cn("truncate font-mono text-[0.9rem]", canSave ? "text-hud-primary" : "text-muted-foreground")}>
             {redacted
               ? pending
-                ? "•••• (new value)"
-                : "•••• hidden"
+                ? t("cockpit.settingsSections.leaf.hiddenNew")
+                : t("cockpit.settingsSections.leaf.hidden")
               : check.value == null
                 ? "—"
-                : displayPending(kind, pending)}
+                : displayPending(kind, pending, words)}
           </div>
         </div>
       </div>
@@ -98,25 +115,27 @@ export function LeafEditor({
       {reboot ? (
         <div className="flex items-center gap-[0.4rem] rounded-md bg-warn/10 px-[0.6rem] py-[0.35rem] text-[0.75rem] text-warn">
           <RotateCw className="h-[0.9rem] w-[0.9rem] shrink-0" aria-hidden />
-          Takes effect after a reboot — this change is not applied live.
+          {t("cockpit.settingsSections.leaf.rebootNote")}
         </div>
       ) : null}
       {redacted ? (
         <div className="rounded-md bg-input/30 px-[0.6rem] py-[0.35rem] text-[0.75rem] text-muted-foreground">
-          This value is hidden. Enter a new value to replace it, or go back to keep it.
+          {t("cockpit.settingsSections.leaf.hiddenNote")}
         </div>
       ) : null}
 
       {/* the widget */}
       <div className="rounded-lg bg-surface/40 p-[0.5rem]">
-        {kind === "enum" ? (
+        {path === CAMERA_SOURCE_PATH ? (
+          <CameraSourcePicker value={pending} onChange={setPending} />
+        ) : kind === "enum" ? (
           <SegmentedPicker options={ENUM_OPTIONS[path] ?? []} value={pending || null} onSelect={setPending} />
         ) : kind === "toggle" ? (
           <SegmentedPicker
             options={["true", "false"]}
             value={pending || null}
             onSelect={setPending}
-            optionLabel={(o) => (o === "true" ? "On" : "Off")}
+            optionLabel={(o) => (o === "true" ? t("cockpit.settingsSections.leaf.on") : t("cockpit.settingsSections.leaf.off"))}
           />
         ) : kind === "number" ? (
           <OnScreenNumpad value={pending} onChange={setPending} bound={NUMBER_BOUNDS[path]} />
@@ -124,33 +143,35 @@ export function LeafEditor({
           <OnScreenKeyboard
             value={pending}
             onChange={setPending}
-            placeholder={redacted ? "New value…" : "Enter a value…"}
+            placeholder={redacted ? t("cockpit.settingsSections.leaf.placeholderNew") : t("cockpit.settingsSections.leaf.placeholder")}
           />
         )}
       </div>
 
-      {check.error && !unchanged ? <div className="text-[0.75rem] text-warn">{check.error}</div> : null}
+      {check.error && !unchanged ? (
+        <div className="text-[0.75rem] text-warn">{t(`cockpit.settingsSections.leaf.${check.error.key}`, { n: check.error.n })}</div>
+      ) : null}
       {error ? (
         <div className="flex items-start gap-[0.4rem] rounded-md bg-err/10 px-[0.6rem] py-[0.4rem] text-[0.75rem] text-err">
           <TriangleAlert className="mt-[0.1rem] h-[0.9rem] w-[0.9rem] shrink-0" aria-hidden />
           <span className="min-w-0 break-words">{error}</span>
         </div>
       ) : null}
-      {unchanged ? <EmptyNote>No change to save.</EmptyNote> : null}
+      {unchanged ? <EmptyNote>{t("cockpit.settingsSections.leaf.noChange")}</EmptyNote> : null}
 
       {/* save */}
       <div className="pt-[0.2rem]">
         {reboot || redacted ? (
           <ConfirmButton
-            label="Save"
-            confirmLabel="Tap again to confirm"
+            label={t("settings.shared.save")}
+            confirmLabel={t("cockpit.settingsSections.leaf.tapConfirm")}
             onConfirm={doSave}
             busy={busy}
             disabled={!canSave}
             full
           />
         ) : (
-          <ActionButton label="Save" onClick={doSave} variant="primary" busy={busy} disabled={!canSave} full />
+          <ActionButton label={t("settings.shared.save")} onClick={doSave} variant="primary" busy={busy} disabled={!canSave} full />
         )}
       </div>
     </div>
@@ -181,44 +202,54 @@ function isUnchanged(kind: EditorKind, current: ConfigValue | undefined, pending
   return pending === cur;
 }
 
+type LeafErrorKey = "enterNumber" | "validNumber" | "wholeNumber" | "minimum" | "maximum" | "chooseValue";
+
 function computeSaveValue(
   kind: EditorKind,
   path: string,
   pending: string,
   redacted: boolean,
-): { value: string | null; error?: string } {
+): { value: string | null; error?: { key: LeafErrorKey; n?: number } } {
   if (kind === "number") {
     if (pending === "" || pending === "-" || pending === "." || pending === "-.") {
-      return { value: null, error: "Enter a number" };
+      return { value: null, error: { key: "enterNumber" } };
     }
     const n = Number(pending);
-    if (!Number.isFinite(n)) return { value: null, error: "Enter a valid number" };
+    if (!Number.isFinite(n)) return { value: null, error: { key: "validNumber" } };
     const bound = NUMBER_BOUNDS[path];
-    if (bound?.int && !Number.isInteger(n)) return { value: null, error: "Must be a whole number" };
-    if (bound?.min != null && n < bound.min) return { value: null, error: `Minimum is ${bound.min}` };
-    if (bound?.max != null && n > bound.max) return { value: null, error: `Maximum is ${bound.max}` };
+    if (bound?.int && !Number.isInteger(n)) return { value: null, error: { key: "wholeNumber" } };
+    if (bound?.min != null && n < bound.min) return { value: null, error: { key: "minimum", n: bound.min } };
+    if (bound?.max != null && n > bound.max) return { value: null, error: { key: "maximum", n: bound.max } };
     return { value: String(n) };
   }
   if (kind === "enum" || kind === "toggle") {
-    return pending ? { value: pending } : { value: null, error: "Choose a value" };
+    return pending ? { value: pending } : { value: null, error: { key: "chooseValue" } };
   }
   // text
   if (redacted && pending === "") return { value: null };
   return { value: pending };
 }
 
+interface LeafWords {
+  hidden: string;
+  unset: string;
+  empty: string;
+  on: string;
+  off: string;
+}
+
 /** Display a stored leaf value (current) by kind. */
-function displayLeaf(path: string, value: ConfigValue | undefined, kind: EditorKind): string {
-  if (isRedacted(path)) return "•••• hidden";
+function displayLeaf(path: string, value: ConfigValue | undefined, kind: EditorKind, w: LeafWords): string {
+  if (isRedacted(path)) return w.hidden;
   if (value === undefined) return "—";
-  if (value === null) return "unset";
-  if (kind === "toggle") return value ? "on" : "off";
-  if (typeof value === "string") return value === "" ? "(empty)" : value;
+  if (value === null) return w.unset;
+  if (kind === "toggle") return value ? w.on : w.off;
+  if (typeof value === "string") return value === "" ? w.empty : value;
   return String(value);
 }
 
 /** Display the pending (new) value by kind. */
-function displayPending(kind: EditorKind, pending: string): string {
-  if (kind === "toggle") return pending === "true" ? "on" : pending === "false" ? "off" : "—";
-  return pending === "" ? "(empty)" : pending;
+function displayPending(kind: EditorKind, pending: string, w: LeafWords): string {
+  if (kind === "toggle") return pending === "true" ? w.on : pending === "false" ? w.off : "—";
+  return pending === "" ? w.empty : pending;
 }

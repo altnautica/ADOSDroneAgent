@@ -9,8 +9,15 @@ import { LEASE_OWNER } from "@/lib/lease-owner";
 import { holdDetectionLease, type VisibilitySource } from "@/lib/video-detections";
 import layersJson from "@/shared/cockpit-spec/layers.json";
 
-/** The primary camera's served id. */
-export const CAMERA_ID = "main";
+/** The primary camera's served id: the default for detections and layers. */
+export const DEFAULT_CAMERA_ID = "main";
+
+/** The camera ids the detections and layers can follow: the primary first,
+ *  then every other leg of the camera roster (`GET /api/video/roster`). */
+export function cameraOptions(roster: { cameras?: readonly { id?: unknown }[] } | null | undefined): string[] {
+  const ids = (roster?.cameras ?? []).map((c) => c.id).filter((id): id is string => typeof id === "string" && id !== "");
+  return [DEFAULT_CAMERA_ID, ...ids.filter((id) => id !== DEFAULT_CAMERA_ID)];
+}
 const BASE_LAYERS = ["ar_route", "ar_motion", "obstacles"] as const;
 
 /** The leased layers toggled on their own (`layers.json` `lease: true`), with
@@ -25,9 +32,9 @@ export function defaultLeasedLayers(): Record<string, boolean> {
 }
 
 /** The view query for the base layers plus the toggled-on leased ones. */
-export function layersViewQuery(toggles: Readonly<Record<string, boolean>>): string {
+export function layersViewQuery(toggles: Readonly<Record<string, boolean>>, cameraId: string = DEFAULT_CAMERA_ID): string {
   const on = LEASED_LAYERS.filter((l) => toggles[l.id]).map((l) => l.id);
-  return `${CAMERA_ID}:${[...BASE_LAYERS, ...on].join(",")}`;
+  return `${cameraId}:${[...BASE_LAYERS, ...on].join(",")}`;
 }
 
 /** A demand lease's hold, and how often it is renewed while held. */
@@ -44,12 +51,17 @@ export interface VisionDemandBody {
   owner: string;
 }
 
-/** Hold a `kind` demand lease on the primary camera while the page is
+/** Hold a `kind` demand lease on `cameraId` while the page is
  *  visible: taken now, renewed every `DEMAND_RENEW_MS`, released with
  *  `hold_s: 0` when the page hides or the returned function runs. */
-export function holdLayerDemand(kind: DemandKind, post: (body: VisionDemandBody) => void, doc: VisibilitySource): () => void {
+export function holdLayerDemand(
+  kind: DemandKind,
+  post: (body: VisionDemandBody) => void,
+  doc: VisibilitySource,
+  cameraId: string = DEFAULT_CAMERA_ID,
+): () => void {
   return holdDetectionLease(
-    (holdS) => post({ kind, camera_id: CAMERA_ID, hold_s: holdS, owner: LEASE_OWNER }),
+    (holdS) => post({ kind, camera_id: cameraId, hold_s: holdS, owner: LEASE_OWNER }),
     doc,
     DEMAND_HOLD_S,
     DEMAND_RENEW_MS,

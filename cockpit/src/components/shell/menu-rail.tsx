@@ -4,6 +4,9 @@
 // focus ring highlights the focused entry so the menu is fully operable
 // eyes-on-panel with any input source.
 
+import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
+
 import { useNodeIdentity } from "@/shared/use-profile";
 import { useNavStore } from "@/stores/nav-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -19,9 +22,19 @@ export function MenuRail() {
   const { profile, role } = useNodeIdentity();
   const fcFamily = useStatusStore((s) => s.status?.fc_family ?? null);
   const tabs = tabScreens(profile, role, fcFamily);
+  const { t } = useTranslation();
+  const navRef = useRef<HTMLElement>(null);
+
+  // Keep the focused (or active) entry in view: on a tall menu the ring can
+  // otherwise move below the fold where the operator cannot see it.
+  useEffect(() => {
+    const el = navRef.current?.querySelector<HTMLElement>("[data-focused]") ?? navRef.current?.querySelector<HTMLElement>("[aria-current]");
+    el?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [menuFocusIndex, activeTabId]);
 
   return (
     <nav
+      ref={navRef}
       className={cn(
         "flex shrink-0 gap-[0.3rem] overflow-auto p-[0.3rem]",
         // rail (landscape) vs strip (portrait)
@@ -29,7 +42,7 @@ export function MenuRail() {
         CHROME.menuSize,
         "landscape:border-r landscape:border-border portrait:border-t portrait:border-border bg-surface/50",
       )}
-      aria-label="Cockpit menu"
+      aria-label={t("cockpit.shell.menu")}
     >
       {tabs.map((tab, index) => {
         const active = tab.id === activeTabId;

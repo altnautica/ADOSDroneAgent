@@ -15,7 +15,9 @@
 // they deal with it.
 
 import { Suspense, lazy } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
+import "@/shared/i18n";
 import { useReachStore } from "@/stores/reach-store";
 
 // The PIN form carries the access locale, so it loads only when a refusal
@@ -23,6 +25,7 @@ import { useReachStore } from "@/stores/reach-store";
 const SetUpAccess = lazy(() => import("@/components/shell/set-up-access").then((m) => ({ default: m.SetUpAccess })));
 
 export function ReachNotice() {
+  const { t } = useTranslation();
   const refusal = useReachStore((s) => s.refusal);
   const pairingCode = useReachStore((s) => s.pairingCode);
 
@@ -37,26 +40,22 @@ export function ReachNotice() {
     >
       <div className="flex w-full flex-wrap items-center justify-center gap-x-[0.75rem] gap-y-[0.25rem]">
         <span className="font-semibold text-hud-primary">
-          {unpaired ? "This node is not paired" : "Not signed in to this node"}
+          {unpaired ? t("cockpit.shell.reach.unpairedTitle") : t("cockpit.shell.reach.signedOutTitle")}
         </span>
         <span className="text-muted-foreground">
-          {unpaired
-            ? "It answers its own identity and nothing else, so every reading below is unavailable rather than empty."
-            : "It is paired, and this browser holds no credential for it, so its readings are unavailable rather than empty."}
+          {unpaired ? t("cockpit.shell.reach.unpairedBody") : t("cockpit.shell.reach.signedOutBody")}
         </span>
         {unpaired && pairingCode ? (
           <span className="text-muted-foreground">
-            Pair it from Mission Control with code{" "}
-            <span className="select-text font-mono font-semibold text-foreground">
-              {pairingCode}
-            </span>
-            , or reach it over its hotspot or a USB cable.
+            <Trans
+              i18nKey="cockpit.shell.reach.pairWithCode"
+              values={{ code: pairingCode }}
+              components={{ code: <span className="select-text font-mono font-semibold text-foreground" /> }}
+            />
           </span>
         ) : null}
         {!unpaired ? (
-          <span className="text-muted-foreground">
-            Enter this node&apos;s access PIN below to unlock it from this browser.
-          </span>
+          <span className="text-muted-foreground">{t("cockpit.shell.reach.enterPin")}</span>
         ) : null}
       </div>
       {/* The way past either refusal from a trusted-LAN browser: set or enter

@@ -1,0 +1,1 @@
+import{_ as e}from"./api-fetch-7GB0VyUK.js";var t=e(()=>({status:null,stale:!1,error:null,battery:null}));export{t};

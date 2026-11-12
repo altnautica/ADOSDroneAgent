@@ -9,6 +9,10 @@ import { parsePilotState } from "@/shared/hud/cockpit-frames";
 import { specText } from "@/shared/hud/spec-text";
 import { useNavStreamStore, type NavStreamState } from "@/stores/nav-stream-store";
 
+import { FC_RECOVERY_MODES } from "@/lib/fc-failsafe";
+import { fcModesFor } from "@/lib/fc-modes";
+import { MODE_SHEET } from "@/lib/cockpit-spec";
+
 import { ModeSheet } from "./mode-sheet";
 import { modeChange, pickDisabled, sendFcMode } from "./mode-sheet-pending";
 
@@ -26,6 +30,17 @@ describe("a pending pick in the Mode sheet", () => {
     for (const mode of ["RTL", "SMART_RTL", "LAND", "BRAKE", "QRTL", "QLAND"]) expect(pickDisabled(pending, "fc", mode)).toBe(false);
     expect(pickDisabled({ fc: "LOITER" }, "fc", "RTL")).toBe(false);
     expect(pickDisabled({ who: "take" }, "who", "loiter")).toBe(false);
+  });
+
+  it("one recovery set: Loiter, Alt Hold and PosHold are never held back and take the short hold", () => {
+    for (const mode of ["LOITER", "ALT_HOLD", "POSHOLD"]) {
+      expect(FC_RECOVERY_MODES[mode], mode).toBe(true);
+      expect(pickDisabled({ fc: "AUTO" }, "fc", mode), mode).toBe(false);
+    }
+    for (const family of ["copter", "plane", "px4"] as const) {
+      for (const m of fcModesFor(family)) expect(m.holdMs, `${family} ${m.name}`).toBe(FC_RECOVERY_MODES[m.name] ? 800 : 1500);
+    }
+    expect(fcModesFor("copter").find((m) => m.name === "GUIDED")?.holdMs).toBe(1500);
   });
 
   it("waits only in its own row", () => {
@@ -79,5 +94,24 @@ describe("the Mode sheet on a stale pilot frame", () => {
     expect(html).toContain('data-testid="mode-stale"');
     expect(html).toContain(specText("flow.mode.stale"));
     expect(takeControl(html)).toContain('disabled=""');
+  });
+});
+
+describe("the Mode sheet's control mode row on a drone", () => {
+  afterEach(() => serverPilot(null));
+  const render = (controlMode: string) => {
+    serverPilot({ data: parsePilotState({ ...demoPilotData(0), control_mode: controlMode })!, at: Date.now() });
+    return renderToStaticMarkup(createElement(ModeSheet));
+  };
+  const elrsExplain = MODE_SHEET.control_mode.explain.elrs.replace(/'/g, "&#x27;");
+
+  it("keeps ELRS, selected and explained, while it is the current mode", () => {
+    const html = render("elrs");
+    expect(html).toMatch(/aria-checked="true"[^>]*>(?:(?!<\/button>).)*ELRS/);
+    expect(html).toContain(elrsExplain);
+  });
+
+  it("does not offer ELRS on a drone otherwise", () => {
+    expect(render("ados")).not.toContain(elrsExplain);
   });
 });

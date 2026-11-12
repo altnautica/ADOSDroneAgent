@@ -1,0 +1,3 @@
+# Web app source files over the size limit, with their line count. A listed
+# file may shrink but never grow; an unlisted file must stay at or under 500
+# lines. Maintained by scripts/check-ts-size.mjs.

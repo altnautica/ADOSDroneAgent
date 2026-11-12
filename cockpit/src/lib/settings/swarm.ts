@@ -22,7 +22,8 @@ export const SWARM_KEYS = {
 /** The role placeholder is the config value itself, not copy. */
 export const ROLE_PLACEHOLDER = "auto";
 
-export const SPACING_BOUNDS = { min: 0, max: 10_000 } as const;
+/** Zero spacing would stack the aircraft on one point, so the floor is 1 m. */
+export const SPACING_BOUNDS = { min: 1, max: 10_000 } as const;
 
 export function toFormation(v: unknown): Formation | null {
   return (FORMATIONS as readonly unknown[]).includes(v) ? (v as Formation) : null;

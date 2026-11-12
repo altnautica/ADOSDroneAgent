@@ -13,7 +13,7 @@ use ratatui::Frame;
 
 use super::row::{display, EditRow};
 use crate::app::{Core, FrameOut, Hit};
-use crate::ui::widgets::{scroll_offset, truncate};
+use crate::ui::widgets::{scroll_offset, truncate, truncate_line};
 
 /// How long `v` reveals a secret.
 pub const REVEAL_FOR: Duration = Duration::from_secs(10);
@@ -254,6 +254,8 @@ pub fn render(
                 Line::from(spans)
             }
         };
+        // Notes and info rows are cut with a `…` mark, never mid-word unmarked.
+        let line = truncate_line(line, area.width as usize);
         f.render_widget(Paragraph::new(line), rect);
     }
 }

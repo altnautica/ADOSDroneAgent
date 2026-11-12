@@ -106,15 +106,39 @@ fn render_logs_120x40() {
     tab.ring.push(line(3, "ERROR", "serial port lost"));
     tab.mode = Mode::Polling;
     tab.down_reason = Some("http 503: too many subscribers".into());
-    tab.warning = Some("logging store unavailable".into());
+    tab.warning = Some("store query failed: timeout".into());
     let text = draw(&mut app, 120, 40);
     assert!(text.contains("Level ≥ INFO"), "{text}");
     assert!(text.contains("polling (stream unavailable)"), "{text}");
-    assert!(text.contains("logging store unavailable"), "{text}");
+    assert!(text.contains("store query failed: timeout"), "{text}");
     assert!(text.contains("12:04:31.123"), "{text}");
     assert!(text.contains("WARNING"), "{text}");
     assert!(text.contains("ERROR"), "{text}");
     assert!(text.contains("ados.mavlink"), "{text}");
     assert!(text.contains("serial port lost"), "{text}");
     assert!(text.contains("3/3 lines"), "{text}");
+}
+
+#[test]
+fn a_store_that_is_off_says_so_once_with_the_journal_hint() {
+    let mut app = test_app();
+    feed(&mut app, setup(), ProfileRoutes::default(), Duration::ZERO);
+    app.activate_tab(TabId::Logs);
+    let tab = &mut app.tabs.logs;
+    tab.mode = Mode::Polling;
+    tab.down_reason = Some("logging store unavailable".into());
+    tab.warning = Some("logging store unavailable".into());
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        !text.contains("logging store unavailable"),
+        "raw warning\n{text}"
+    );
+    assert_eq!(
+        text.matches("The logging store is off or not answering")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert!(text.contains("journalctl -u ados-supervisor -f"), "{text}");
+    assert!(!text.contains("No log lines yet."), "{text}");
 }

@@ -30,8 +30,8 @@ import { useElementSize } from "@/hooks/use-element-size";
 import { useMapChrome } from "@/hooks/use-map-chrome";
 import { useNow } from "@/hooks/use-now";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import { HIT_AREA } from "@/lib/flight-layout";
 import { minimapFrame, nextMinimapPin } from "@/lib/local-minimap";
-import { nextNoFixSince } from "@/shared/hud/minimap-mode";
 import { MiniMapReadoutRow, type MiniMapReadout } from "@/components/feed/minimap-readout";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -42,6 +42,7 @@ import {
   latLonToEN,
   projectEN,
   svgTextUnits,
+  northLabelY,
   viewSpanMeters,
   type EN,
   type LatLon,
@@ -70,8 +71,11 @@ const MapPanel = lazy(() => import("@/components/feed/map-panel"));
 
 const PIN_WORD = { auto: "minimap.pin.auto", local: "minimap.pin.local", map: "minimap.pin.map" } as const;
 
+/** In the card, the header's top from the card's top edge, CSS px: a 24 px
+ *  button's 48 px hit area (centred) then stays inside the clipping card. */
+const CARD_HIT_INSET_PX = 12;
+
 export function MiniMap({ className }: { className?: string } = {}) {
-  const telemetry = useFlightStore((s) => s.telemetry);
   const live = useFlightStore((s) => s.live);
   const nav = useNavStreamStore((s) => s.nav);
   const lastCommandedSet = useNavStreamStore((s) => s.lastCommandedSet);
@@ -82,14 +86,13 @@ export function MiniMap({ className }: { className?: string } = {}) {
   const now = useNow(500);
   const [panelOpen, setPanelOpen] = useState(false);
 
-  // The start of the current below-3D run, updated as the fix changes.
-  const fix = live ? (telemetry?.gps?.fix_type ?? null) : null;
-  const [noFix, setNoFix] = useState<{ fix: number | null; since: number | null }>({ fix: null, since: null });
-  if (noFix.fix !== fix) setNoFix({ fix, since: nextNoFixSince(noFix.since, fix, now) });
+  // When the live fix dropped below 3D, kept with the telemetry so a minimap
+  // mounted by a view switch keeps the frame it had.
+  const noFixSince = useFlightStore((s) => s.noFixSince);
 
   const { frame, reason } = minimapFrame({
     pin,
-    noFixSince: noFix.since,
+    noFixSince,
     now,
     ekfParams,
     activeSet: nav?.data.activeSet ?? lastCommandedSet,
@@ -103,45 +106,53 @@ export function MiniMap({ className }: { className?: string } = {}) {
     <div ref={rootRef} className={cn("relative h-[96px] w-[96px] shrink-0", className)} data-testid="minimap" data-inset-top={insetTop}>
       <div
         className={cn(
-          "relative h-full w-full overflow-hidden rounded-lg border border-surface-foreground/15 bg-background/55 backdrop-blur-sm",
+          "chrome-panel relative h-full w-full overflow-hidden",
           !live && "opacity-70",
         )}
       >
         <div className="absolute inset-x-0 bottom-0" style={{ top: insetTop }}>
           {local ? <LocalMiniMap scale={scale} inCard={zoned} /> : <GlobalMiniMap scale={scale} inCard={zoned} />}
-          <div
-            // The card's frame draws its title top-left, so the card keeps
-            // these top-right; a full map keeps them top-left.
-            className={cn("pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start gap-[4px] px-[4px]", zoned ? "justify-end" : "justify-start")}
-            style={{ fontSize: labelPx }}
-            data-testid="minimap-header"
-          >
-            <span className="pt-[2px] uppercase tracking-wide text-muted-foreground">
-              {local ? specText(reason === "pinned" ? "minimap.local" : "minimap.local_no_gps") : specText("cockpit.card.map")}
-            </span>
-            <span className="flex gap-[2px]">
-              {hasMapStatus ? (
-                <button
-                  type="button"
-                  onClick={() => setPanelOpen(true)}
-                  aria-haspopup="dialog"
-                  aria-label={specText("minimap.mapping_status")}
-                  className="pointer-events-auto flex min-h-[24px] items-center rounded px-[4px] text-hud-ink hover:bg-hud-hair"
-                >
-                  <Layers style={{ width: labelPx * 1.2, height: labelPx * 1.2 }} aria-hidden />
-                </button>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => setPin(nextMinimapPin(pin))}
-                aria-label={specText("minimap.frame_change", { pin: specText(PIN_WORD[pin]) })}
-                className="pointer-events-auto min-h-[24px] rounded px-[4px] font-mono text-surface-foreground/80 hover:bg-hud-hair"
-              >
-                {specText(PIN_WORD[pin])}
-              </button>
-            </span>
-          </div>
         </div>
+      </div>
+      <div
+        // Outside the panel, which clips its contents. The card's frame draws
+        // its title top-left, so the card keeps these top-right, inset so each
+        // button's 48 px hit area stays inside the card, which clips too; a
+        // full map keeps them top-left.
+        className={cn(
+          "pointer-events-none absolute inset-x-0 z-10 flex items-start gap-[4px]",
+          zoned ? "justify-end pl-[4px] pr-[12px]" : "justify-start px-[4px]",
+          !live && "opacity-70",
+        )}
+        style={{ top: zoned ? Math.max(insetTop, CARD_HIT_INSET_PX) : insetTop, fontSize: labelPx }}
+        data-testid="minimap-header"
+      >
+        <span className="pt-[2px] uppercase tracking-wide text-muted-foreground">
+          {local ? specText(reason === "pinned" ? "minimap.local" : "minimap.local_no_gps") : specText("cockpit.card.map")}
+        </span>
+        {/* Apart enough that the two 48 px hit areas do not overlap. */}
+        <span className="flex gap-[16px]">
+          {hasMapStatus ? (
+            <button
+              type="button"
+              onClick={() => setPanelOpen(true)}
+              aria-haspopup="dialog"
+              aria-label={specText("minimap.mapping_status")}
+              className={cn(HIT_AREA, "pointer-events-auto flex min-h-[24px] items-center rounded-[var(--fs-radius-sm)] px-[4px] text-hud-ink hover:bg-hud-hair")}
+            >
+              <Layers style={{ width: labelPx * 1.2, height: labelPx * 1.2 }} aria-hidden />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setPin(nextMinimapPin(pin))}
+            aria-label={specText("minimap.frame_change", { pin: specText(PIN_WORD[pin]) })}
+            className={cn(HIT_AREA, "pointer-events-auto min-h-[24px] rounded-[var(--fs-radius-sm)] px-[4px] font-mono text-surface-foreground/80 hover:bg-hud-hair")}
+            data-testid="minimap-frame-toggle"
+          >
+            {specText(PIN_WORD[pin])}
+          </button>
+        </span>
       </div>
       {panelOpen ? (
         <Suspense fallback={null}>
@@ -324,7 +335,7 @@ function GlobalMiniMap({ scale, inCard }: { scale: number; inCard: boolean }) {
               <g className="text-muted-foreground">
                 <text
                   x={VIEW / 2}
-                  y={textUnits * 1.2}
+                  y={northLabelY(textUnits, inCard, Math.min(box.w, box.h), VIEW)}
                   textAnchor="middle"
                   fontSize={textUnits}
                   fill="currentColor"

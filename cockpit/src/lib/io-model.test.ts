@@ -34,9 +34,12 @@ describe("IO reads", () => {
 describe("primary controller gate", () => {
   const pads = { devices: [{ deviceId: "a", name: null, path: null }, { deviceId: "b", name: null, path: null }], primaryId: "a" };
   it("offers the guarded write only for an attached, non-primary controller while idle", () => {
-    expect(canMakePrimary(pads, "b", false)).toBe(true);
-    expect(canMakePrimary(pads, "a", false)).toBe(false);
-    expect(canMakePrimary(pads, "c", false)).toBe(false);
-    expect(canMakePrimary(pads, "b", true)).toBe(false);
+    expect(canMakePrimary(pads, "b", false, null)).toBe(true);
+    expect(canMakePrimary(pads, "a", false, null)).toBe(false);
+    expect(canMakePrimary(pads, "c", false, null)).toBe(false);
+    expect(canMakePrimary(pads, "b", true, null)).toBe(false);
+    // Moving RC input while the vehicle is armed (or its arm state unknown) is refused.
+    expect(canMakePrimary(pads, "b", false, "armed")).toBe(false);
+    expect(canMakePrimary(pads, "b", false, "armedUnknown")).toBe(false);
   });
 });

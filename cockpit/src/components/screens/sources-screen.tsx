@@ -62,7 +62,7 @@ export function SourcesScreen() {
   }
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={combined.stale || relays.stale}
       title={t("panels.sources.title")}
       actions={
         <span className="flex items-center gap-[0.5rem]">

@@ -1,8 +1,7 @@
 // The top bar's status pill and its alert list.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 
 import { Overlay } from "@/components/ui/overlay";
 import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
@@ -10,16 +9,15 @@ import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
 import { pillWiring } from "@/lib/alerts";
 import { chromeStyle, severityColor, severityIcon } from "@/lib/chrome-tokens";
-import { HIT_AREA, severityTextColor } from "@/lib/flight-layout";
+import { useNavSource } from "@/hooks/use-nav-source";
+import { HIT_AREA } from "@/lib/flight-layout";
 import { preflightChecks } from "@/shared/hud/preflight";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
-import { pillAlerts, pillSummary, type PillAlert, type PillSeverity } from "@/shared/hud/status-pill";
+import { pillAlerts, pillSummary, severityTextColor, type PillAlert } from "@/shared/hud/status-pill";
 import { useFlightStore } from "@/stores/flight-store";
 import { useStatusPillStore } from "@/stores/status-pill-store";
 import { useStatusStore } from "@/stores/status-store";
-
-const SEVERITY_ICON: Record<PillSeverity, LucideIcon> = { ok: CheckCircle2, warning: AlertTriangle, critical: XCircle };
 
 /** The status pill: "All systems OK", the one alert, or "<n> warnings",
  *  flashing on a new alert until the list is opened. The shared rules also
@@ -46,17 +44,20 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
   const [rect, setRect] = useState<DOMRect | null>(null);
   const pillRef = useRef<HTMLButtonElement>(null);
   const open = rect !== null;
+  const navSource = useNavSource(true).result;
+  // The pilot frame's arm state while there is one (null: its FC link is
+  // down, possibly airborne), else the telemetry's.
+  const armed: boolean | null | undefined = pilot ? pilot.armed : telemetry?.armed;
   const wiring = pillWiring({
     pilot: stamped,
     nowMs: now,
     statusStale,
-    armed: telemetry?.armed,
+    armed: armed ?? undefined,
     checks: preflightChecks({ telemetry, battery, live }),
     alerts,
   });
-  const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus, ...wiring }), acked);
+  const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus, ...wiring, armed, navSource }), acked);
   const color = severityColor(summary.severity);
-  const Icon = SEVERITY_ICON[summary.severity];
 
   return (
     <>
@@ -70,13 +71,15 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
         data-severity={summary.severity}
         className={cn(
           HIT_AREA,
-          "flex min-h-[36px] min-w-[44px] items-center gap-[6px] rounded-full border px-[10px] font-semibold",
+          "flex h-[var(--fs-control)] min-w-[44px] items-center gap-[6px] rounded-[var(--fs-radius-sm)] border bg-transparent px-[10px] font-semibold",
           fit ? "min-w-0 shrink" : "shrink-0",
           summary.flashing && "chrome-pill-flash",
         )}
-        style={{ color, borderColor: `${color}80` }}
+        // A dot in the severity colour; the outline in it unless all is well;
+        // the words in the severity's text colour.
+        style={{ color: severityTextColor(summary.severity), borderColor: summary.severity === "ok" ? "var(--fs-border)" : `${color}80` }}
       >
-        <Icon className="chrome-icon shrink-0" aria-hidden />
+        <span aria-hidden data-testid="status-pill-dot" className="h-[6px] w-[6px] shrink-0 rounded-full" style={{ background: color }} />
         {compact && summary.count > 0 ? (
           <span className="tabular-nums">{summary.count}</span>
         ) : compact ? null : (

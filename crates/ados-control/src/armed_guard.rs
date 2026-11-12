@@ -10,13 +10,16 @@
 //! - hopping the radio channel, changing its TX power, unpairing a radio, and
 //!   opening a local radio bind;
 //! - changing the node's profile or role, and a ground-station factory reset;
+//! - unpairing the node from its ground control station;
 //! - enrolling or disabling MAVLink signing on the flight controller;
+//! - choosing the ground station's primary gamepad (it moves the RC input);
 //! - a flight-controller parameter write and an RC-module parameter write;
 //! - joining, leaving or forgetting a Wi-Fi network, re-tagging an adapter's
 //!   MAC, and the ground station's AP, uplink-share, client, ethernet and mesh
 //!   writes;
-//! - installing, enabling, disabling or removing a plugin (a plugin may feed
-//!   pose or setpoints to the flight controller);
+//! - installing, enabling, disabling or removing a plugin, and granting or
+//!   revoking one of its permissions (a plugin may feed pose or setpoints to
+//!   the flight controller, and a revoke takes effect at once);
 //! - body-scoped: `POST /api/v1/setup/apply` carrying a `profile`, `wfb`,
 //!   `network` or `regulatory` section, and `PUT /api/config` of a profile,
 //!   role, radio, regulatory or flight-controller link key (`mavlink.source`,
@@ -77,6 +80,8 @@ const GUARDED_EXACT: &[(&str, &str)] = &[
     // Radio unpair: the drone's own, the station-wide one, and one fleet slot.
     ("POST", "/api/wfb/pair/unpair"),
     ("DELETE", "/api/v1/ground-station/wfb/pair"),
+    // Unpairing cuts the ground control station off the vehicle.
+    ("POST", "/api/pairing/unpair"),
     // A local bind stops the normal radio unit for the bind window.
     ("POST", "/api/wfb/pair/local-bind"),
     // Flight-controller link signing.
@@ -84,6 +89,8 @@ const GUARDED_EXACT: &[(&str, &str)] = &[
     ("POST", "/api/mavlink/signing/disable-on-fc"),
     // RC-module parameter write on the transmit lane.
     ("POST", "/api/v1/ground-station/crsf/params"),
+    // Choosing the primary gamepad moves the RC input to another controller.
+    ("PUT", "/api/v1/ground-station/gamepads/primary"),
     // Leaving the Wi-Fi client network.
     ("DELETE", "/api/v1/network/client"),
     // Ground-station network and mesh writes.
@@ -200,8 +207,9 @@ pub fn is_guarded(method: &str, path: &str) -> bool {
                 // Forgetting a saved network, and a MAC re-tag's removal.
                 || any_depth_after(path, "/api/v1/network/client/").is_some()
                 || any_depth_after(path, "/api/v1/network/mac/").is_some()
-                // Removing a plugin.
+                // Removing a plugin, and revoking one of its permissions.
                 || single_segment_after(path, "/api/plugins/").is_some()
+                || plugin_permission_revoke(path)
         }
         "PUT" => any_depth_after(path, "/api/v1/network/client/").is_some(),
         "POST" => {
@@ -213,10 +221,10 @@ pub fn is_guarded(method: &str, path: &str) -> bool {
             if any_depth_after(path, "/api/v1/network/mac/").is_some() {
                 return true;
             }
-            // Enabling or disabling a plugin.
+            // Enabling or disabling a plugin, or granting it a permission.
             if let Some(rest) = path.strip_prefix("/api/plugins/") {
                 if let Some((id, verb)) = rest.split_once('/') {
-                    if !id.is_empty() && matches!(verb, "enable" | "disable") {
+                    if !id.is_empty() && matches!(verb, "enable" | "disable" | "grant") {
                         return true;
                     }
                 }
@@ -252,6 +260,15 @@ fn single_segment_after<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 /// The non-empty remainder after `prefix`, at any depth.
 fn any_depth_after<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     path.strip_prefix(prefix).filter(|rest| !rest.is_empty())
+}
+
+/// `/api/plugins/{id}/perms/{permission}`: one plugin permission's revoke.
+fn plugin_permission_revoke(path: &str) -> bool {
+    path.strip_prefix("/api/plugins/")
+        .and_then(|rest| rest.split_once("/perms/"))
+        .is_some_and(|(id, perm)| {
+            !id.is_empty() && !id.contains('/') && !perm.is_empty() && !perm.contains('/')
+        })
 }
 
 /// Whether the query string carries `force=1` (or `force=true`).

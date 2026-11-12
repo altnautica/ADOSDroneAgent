@@ -186,29 +186,25 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
     };
     // The perception tier this node runs on: the canonical ados_offload::pick_tier
     // decision from the board's local compute path (an NPU, or the profile-declared
-    // CPU-ONNX local inference) + the live offload-link the reconciler writes (a
-    // paired, reachable workstation flips compute_node_paired + bearer_acceptable
-    // true and names the target). Absent / stale ⇒ no link ⇒ a board with a local
-    // path reads `local` and one without any path reads `none`; the offload target
-    // stays absent until a workstation is actually paired. Fed
-    // identically to /api/status via `TierInputs::for_drone`.
+    // CPU-ONNX detector) + the live offload-link the reconciler writes (a paired,
+    // reachable workstation flips compute_node_paired + bearer_acceptable true and
+    // names the target). Absent / stale ⇒ no link ⇒ an NPU board reads `local`, a
+    // CPU-detector board `cpu` and one without any path `none`; the offload target
+    // stays absent until a workstation is actually paired. Fed identically to
+    // /api/status via `TierInputs::for_drone`.
     let has_accelerator = base.board_npu_tops > 0.0;
     let offload_link = ados_protocol::offload_link::read_offload_link(now_epoch_ms());
     let (link_paired, link_bearer_ok) = offload_link
         .as_ref()
         .map(|l| (l.paired, l.bearer_acceptable))
         .unwrap_or((false, false));
-    let perception_tier = match ados_offload::pick_tier(&ados_offload::TierInputs::for_drone(
+    let perception_tier = ados_offload::pick_tier(&ados_offload::TierInputs::for_drone(
         has_accelerator,
         base.board_local_inference,
         link_paired,
         link_bearer_ok,
-    )) {
-        Some(ados_offload::PerceptionTier::Local) => "local",
-        Some(ados_offload::PerceptionTier::Offload) => "offload",
-        Some(ados_offload::PerceptionTier::Hybrid) => "hybrid",
-        None => "none",
-    }
+    ))
+    .map_or("none", ados_offload::PerceptionTier::as_str)
     .to_string();
     // Surface the target only on an actual offload path.
     let perception_offload_target = offload_link

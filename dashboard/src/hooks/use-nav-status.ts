@@ -27,7 +27,7 @@ export interface NavStatusEntry {
 }
 
 export type NavStatusBody = Partial<
-  Record<"pilot" | "ar" | "obstacles" | "depth" | "surfaces" | "follow", NavStatusEntry | null>
+  Record<"pilot" | "ar" | "obstacles" | "depth" | "surfaces" | "follow" | "nav", NavStatusEntry | null>
 >;
 
 interface NavPollState {

@@ -275,12 +275,17 @@ async function panelStopCase(browser) {
     const { ctx, page } = await pilotPage(browser, vp, sim, "?kiosk=1");
     const kills = () => sentCount(sim, "kill", "killswitch");
     const send = (ev) => panel.send(JSON.stringify({ ...ev, timestamp_ms: Date.now() }));
-    await debugOnFail(page, `panel-stop-${step}`, async () => {
-      await until(page, "the panel socket", () => panel !== null, 8000);
-      await page.waitForTimeout(500);
+    // From nothing focused, one press of the panel's next (or previous)
+    // button lands on STOP, as a pilot reaches it.
+    const reachStop = async () => {
       await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
       send({ ...STEP[step], kind: "short", action: step });
       await page.waitForFunction(() => document.activeElement?.closest('[data-zone="stop"]') != null, null, { timeout: 2000 });
+    };
+    await debugOnFail(page, `panel-stop-${step}`, async () => {
+      await until(page, "the panel socket", () => panel !== null, 8000);
+      await page.waitForTimeout(500);
+      await reachStop();
       send(select);
       await page.getByTestId("stop-sheet-title").waitFor({ timeout: 2000 });
       assert.equal(kills(), 0, "one long select opens the STOP sheet and sends nothing");
@@ -289,7 +294,7 @@ async function panelStopCase(browser) {
       await page.locator(SHEET, { hasText: "Emergency stop" }).waitFor({ state: "detached", timeout: 2000 });
       await page.waitForTimeout(400);
       assert.equal(kills(), 0, "a long back closes the STOP sheet and sends nothing");
-      await page.locator(STOP).focus();
+      await reachStop();
       send(select);
       await page.getByTestId("stop-sheet-title").waitFor({ timeout: 2000 });
       await page.waitForTimeout(1100);
@@ -300,7 +305,7 @@ async function panelStopCase(browser) {
       // A sheet opened by a short select is armed only by a long select:
       // one long select a second later sends nothing, a second one fires.
       await page.waitForTimeout(300);
-      await page.locator(STOP).focus();
+      await reachStop();
       send({ ...select, kind: "short" });
       await page.getByTestId("stop-sheet-title").waitFor({ timeout: 2000 });
       await page.waitForTimeout(1200);

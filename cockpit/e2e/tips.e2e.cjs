@@ -136,23 +136,37 @@ async function tipsCase(browser) {
   ctx.setDefaultTimeout(15000);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("pageerror:", String(e).slice(0, 400)));
-  // The ground mock: the demo's scripted layer feed (a 50 ms timer) flies an
-  // armed mission; keep it off so the pilot stream below is the only pilot.
+  // A live load: the mocked pilot stream below is the only pilot (the demo
+  // never opens the pilot link). The page notes, on its own clock, when the
+  // Feed opens its tips session (it saves the open count) and when the first
+  // tip shows, so the first delay is measured without the test's own
+  // polling lag.
   await page.addInitScript(() => {
-    const set = window.setInterval.bind(window);
-    window.setInterval = (fn, ms, ...rest) => (ms === 50 ? 0 : set(fn, ms, ...rest));
+    window.__tipTimes = {};
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) {
+      if (k === "ados-cockpit-tips" && window.__tipTimes.opened === undefined) window.__tipTimes.opened = performance.now();
+      return setItem.call(this, k, v);
+    };
+    const poll = () => {
+      const t = window.__tipTimes;
+      if (t.tip === undefined && document.querySelector('[data-testid="cockpit-tip"]')) t.tip = performance.now();
+      if (t.tip === undefined) requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
   });
   await mockAgent(page);
-  await page.goto(`${BASE}?demo=1`);
+  await page.goto(BASE);
   await page.waitForSelector("[data-zone=status_pill]", { timeout: 10000 });
-  const opened = Date.now();
 
   // (1) The first tip, and no other before it, shows after the first delay
   // just below the top bar beside the status pill.
   assert.equal(await tipNow(page), null, "no tip before the first delay");
   const first = await waitTip(page, "status_pill", RULES.first_delay_ms + 3000);
-  const firstAfter = Date.now() - opened;
-  assert.ok(firstAfter >= RULES.first_delay_ms - 300, `first tip after ${firstAfter} ms`);
+  const times = await page.evaluate(() => window.__tipTimes);
+  const firstAfter = Math.round(times.tip - times.opened);
+  // 50 ms: the store reads its clock just before it saves.
+  assert.ok(firstAfter >= RULES.first_delay_ms - 50, `first tip ${firstAfter} ms after the Feed opened`);
   assert.ok(first.text.includes(STRINGS["tips.status_pill"]), first.text);
   assert.equal(STRINGS["tips.status_pill"], "Warnings collect here. Select to see them.");
   const pill = await rectOf(page, "[data-zone=status_pill]");

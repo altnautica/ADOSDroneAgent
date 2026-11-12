@@ -160,6 +160,30 @@ fn a_failed_poll_takes_the_verdict_line_over_the_last_snapshot() {
 }
 
 #[test]
+fn no_agent_names_the_host_and_the_retry_key_not_the_transport_error() {
+    let refused = ados_protocol::rest::RestError::Transport(
+        "http://127.0.0.1:1/api/v1/setup/status: Connection refused".into(),
+    );
+    let mut app = test_app();
+    app.core.view.error = Some(crate::app::error_text(&refused));
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        text.contains("Cannot reach the agent at 127.0.0.1. r retry"),
+        "{text}"
+    );
+    assert!(!text.contains("transport error"), "{text}");
+
+    feed(&mut app, live_drone(), ProfileRoutes::default(), fresh());
+    app.core.view.error = Some(crate::app::error_text(&refused));
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("UNREACHABLE"), "{text}");
+    assert!(
+        text.contains("Cannot reach the agent at 127.0.0.1"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_stale_snapshot_hides_its_flight_readings() {
     let mut app = test_app();
     feed(&mut app, live_drone(), ProfileRoutes::default(), fresh());
@@ -254,7 +278,7 @@ fn the_tab_bar_lists_only_the_tabs_the_profile_shows() {
         "Video",
         "Params",
         "Extensions",
-        "Logs",
+        "Agent logs",
         "System",
         "Settings",
     ] {
@@ -305,4 +329,120 @@ fn a_terminal_below_80_by_24_shows_the_size_notice() {
         "{text}"
     );
     assert!(!draw(&mut app, 80, 24).contains("Terminal too small"));
+    let narrow = draw(&mut app, 40, 10);
+    assert!(narrow.contains("Too small: 40×10, need 80×24"), "{narrow}");
+}
+
+#[test]
+fn the_overview_shows_the_flight_state_chip_and_alert_count() {
+    use crate::app::{Slot, Tab};
+    use crate::poll::ResourceId;
+    let mut app = test_app();
+    feed(&mut app, live_drone(), ProfileRoutes::default(), fresh());
+    let frame: Value = serde_json::from_str(include_str!(
+        "../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON");
+    let id = ResourceId::NavStatus;
+    app.core.res.insert(
+        id.clone(),
+        Slot {
+            value: Some(json!({"pilot": {"ts_ms": 1, "age_ms": 100, "data": frame}})),
+            error: None,
+            code: None,
+            error_body: None,
+            at: Instant::now(),
+        },
+    );
+    app.tabs.overview.on_resource(&mut app.core, &id);
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("HEALTHY"), "{text}");
+    assert!(text.contains("State     FOLLOW · ACTIVE"), "{text}");
+    assert!(text.contains("Alerts    "), "{text}");
+    let subs = app.tabs.overview.subs(&app.core);
+    assert!(subs.iter().any(|s| s.id == ResourceId::NavStatus));
+}
+
+#[test]
+fn every_confirmed_quick_action_keeps_its_confirm_mark_at_80_by_24() {
+    let mut app = test_app();
+    feed(&mut app, sample(), ProfileRoutes::default(), fresh());
+    app.core.open(Overlay::Actions(0));
+    let text = draw(&mut app, 80, 24);
+    let want = crate::action::ACTIONS.iter().filter(|a| a.confirm).count();
+    assert!(want > 0);
+    assert_eq!(text.matches("(confirm)").count(), want, "{text}");
+}
+
+#[test]
+fn the_hint_bar_keeps_whole_hints_and_always_help() {
+    let hints = [
+        ("Tab", "pane"),
+        ("/", "search"),
+        ("^K", "palette"),
+        ("?", "help"),
+        ("q", "quit"),
+    ];
+    let kept = crate::ui::chrome::fit_hints(&hints, 22);
+    assert!(kept.contains(&("?", "help")), "{kept:?}");
+    assert!(kept.contains(&("q", "quit")), "{kept:?}");
+    let narrow = crate::ui::chrome::fit_hints(&hints, 8);
+    assert_eq!(narrow, [("?", "help")]);
+    assert_eq!(crate::ui::chrome::fit_hints(&hints, 200), hints);
+}
+
+#[test]
+fn help_at_80_by_24_keeps_its_close_line() {
+    for tab in [TabId::Params, TabId::Logs, TabId::Extensions, TabId::System] {
+        let mut app = test_app();
+        feed(&mut app, sample(), ProfileRoutes::default(), fresh());
+        app.activate_tab(tab);
+        app.core.open(Overlay::Help);
+        let text = draw(&mut app, 80, 24);
+        assert!(text.contains("Esc close"), "{tab:?}\n{text}");
+    }
+}
+
+#[test]
+fn a_checklist_with_its_own_footer_drops_the_generic_hint() {
+    use crate::overlay::{CheckItem, ChecklistState, Ret};
+    let mut app = test_app();
+    feed(&mut app, sample(), ProfileRoutes::default(), fresh());
+    app.core.open(Overlay::Checklist(ChecklistState {
+        title: "Remove".into(),
+        items: vec![CheckItem {
+            label: "Remove its data".into(),
+            checked: false,
+            locked: false,
+            bit: None,
+        }],
+        selected: 0,
+        footer: Some("Space toggles · Enter removes · Esc cancels".into()),
+        ret: Ret::new(crate::worker::Route::tab(TabId::Extensions), "remove"),
+    }));
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("Enter removes"), "{text}");
+    assert!(!text.contains("Enter done"), "{text}");
+}
+
+#[test]
+fn a_gauge_label_below_half_uses_the_text_colour() {
+    use crate::ui::widgets::{render_cells, Cell};
+    let app = test_app();
+    let t = &app.core.theme;
+    let mut term = Terminal::new(TestBackend::new(20, 1)).unwrap();
+    term.draw(|f| {
+        let cell = Cell::Gauge {
+            ratio: 0.2,
+            label: "20 %".into(),
+            color: t.accent(),
+        };
+        render_cells(f, t, f.area(), vec![cell]);
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+    let x = (0..20u16)
+        .find(|&x| buf[(x, 0)].symbol() == "2")
+        .expect("label drawn");
+    assert_eq!(buf[(x, 0)].fg, t.text().fg.unwrap());
 }

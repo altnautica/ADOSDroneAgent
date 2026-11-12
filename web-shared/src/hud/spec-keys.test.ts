@@ -8,7 +8,7 @@ import tips from "../cockpit-spec/tips.json";
 import tokens from "../cockpit-spec/tokens.json";
 import views from "../cockpit-spec/views.json";
 import holdReasons from "./fixtures/hold-reasons.json";
-import { PILL_SOURCES } from "./status-pill";
+import { PILL_SOURCES, severityTextColor } from "./status-pill";
 
 const S: Record<string, string> = strings.strings;
 const HOLD: Record<string, string> = flightState.hold_reason_labels;
@@ -117,6 +117,14 @@ describe("flight-screen readability over bright video", () => {
   it("keeps panel text at 4.5:1 or more over a white picture", () => {
     expect(contrast(tokens.chrome.text, panelOnWhite)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(tokens.chrome.text_critical, panelOnWhite)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("draws severity words in a text colour that keeps 4.5:1, never the dot hue", () => {
+    for (const s of ["ok", "warning", "critical"] as const) {
+      expect(contrast(severityTextColor(s), panelOnWhite)).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(severityTextColor("critical")).toBe(tokens.chrome.text_critical);
+    expect(contrast(tokens.chrome.severity_critical, panelOnWhite)).toBeLessThan(4.5);
   });
 
   it("gives the STOP label 4.5:1 on its fill", () => {

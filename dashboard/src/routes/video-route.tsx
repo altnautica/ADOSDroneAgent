@@ -1,4 +1,5 @@
 import { Camera, RefreshCw } from "lucide-react";
+import { ReadErrorCard } from "@/components/read-error-card";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -101,7 +102,9 @@ export function VideoRoute() {
     try {
       // Refetch the camera list and config. The list is the agent's latest
       // HAL enumeration, refreshed whenever the video pipeline (re)starts.
-      await Promise.all([cameras.refetch(), config.refetch()]);
+      // `refetch()` resolves with the error inside: check the results.
+      const results = await Promise.all([cameras.refetch(), config.refetch()]);
+      if (results.some((r) => r.isError)) setError(t("video.route.rescanFailed"));
     } catch (e) {
       setError(e instanceof Error ? e.message : t("video.route.rescanFailed"));
     } finally {
@@ -234,7 +237,9 @@ export function VideoRoute() {
             <CardTitle>{t("video.route.camerasDetected")}</CardTitle>
           </CardHeader>
           <CardContent>
-            {camList.length === 0 ? (
+            {cameras.isError ? (
+              <ReadErrorCard message={t("video.route.camerasReadFailed")} onRetry={() => void cameras.refetch()} />
+            ) : camList.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {t("video.route.noCameras")}
               </p>
@@ -254,7 +259,7 @@ export function VideoRoute() {
                           : ""}
                       </div>
                     </div>
-                    <Badge variant="outline">{cam.type}</Badge>
+                    <Badge variant="neutral">{cam.type}</Badge>
                   </li>
                 ))}
               </ul>

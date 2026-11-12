@@ -13,6 +13,7 @@ import { getTelemetry } from "@/lib/api";
 import { pollIntervalMs, renderProfile } from "@/lib/render-profile";
 import type { VehicleState } from "@/lib/types";
 import { pollLoop } from "@/hooks/use-status-poll";
+import { nextNoFixSince } from "@/shared/hud/minimap-mode";
 import { INITIAL_FLIGHT_STATE, useFlightStore, type HomePoint } from "@/stores/flight-store";
 
 export const FLIGHT_POLL_MS = 200;
@@ -119,12 +120,15 @@ export function useFlightTelemetryPoll(): void {
               telemetry.armed === true,
               Date.now(),
             ),
+            // Kept with the telemetry, not per map: a minimap mounted later
+            // (a view switch) keeps the frame it had.
+            noFixSince: nextNoFixSince(prev.noFixSince, live ? (telemetry.gps?.fix_type ?? null) : null, Date.now()),
           });
         } catch {
           if (signal.aborted) return;
           // Provenance survives a failed poll: the last snapshot is still on
           // screen and its origin has not changed.
-          useFlightStore.setState({ stale: true, live: false });
+          useFlightStore.setState({ stale: true, live: false, noFixSince: null });
         }
       },
       () => interval,

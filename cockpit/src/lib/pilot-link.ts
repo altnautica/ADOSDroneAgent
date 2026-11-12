@@ -137,6 +137,15 @@ export function handlePilotFrame(raw: unknown): void {
   if (frame) useNavStreamStore.getState().ingest(frame);
 }
 
+/** Which surface a Feed opens the pilot link as, or null for none: only a
+ *  node that flies opens it, a kiosk ground station as the kiosk, and never
+ *  in demo mode, whose pilot frames are local and would alternate with live
+ *  ones in the same store slot. */
+export function pilotLinkSource(i: { flies: boolean; groundStation: boolean; kiosk: boolean; demo: boolean }): PilotSource | null {
+  if (!i.flies || i.demo) return null;
+  return i.kiosk && i.groundStation ? "kiosk" : "cockpit";
+}
+
 /** Open the pilot link. Returns a cleanup that releases input and closes. */
 export function connectPilotLink(source: PilotSource): () => void {
   if (typeof window === "undefined") return () => {};

@@ -945,5 +945,41 @@ async fn targets_the_latched_fc_system_id() {
     );
 }
 
+/// The command route's FC gate and `/api/status`'s `fc_connected` read the same
+/// snapshot field, so the command route never answers "FC not connected" while
+/// the status route reports the flight controller connected.
+#[tokio::test]
+async fn the_command_gate_agrees_with_the_status_fc_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    for snapshot in [
+        json!({"fc_connected": true, "autopilot": 3}),
+        json!({"fc_connected": false, "transport_open": true, "mavlink_alive": true}),
+        json!({}),
+    ] {
+        let state = state_with_socket(dir.path(), dir.path().join("absent.sock"));
+        state.state.set_snapshot_for_test(snapshot.clone());
+        let (status_flag, ..) = crate::routes::status::fc_from_snapshot(Some(&snapshot));
+        let resp = execute_command(
+            State(state),
+            Json(CommandRequest {
+                cmd: "arm".to_string(),
+                args: vec![],
+            }),
+        )
+        .await;
+        let code = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let refused_as_disconnected = body["detail"] == json!("FC not connected");
+        assert_eq!(
+            refused_as_disconnected,
+            status_flag != json!(true),
+            "{snapshot}: {code} {body}"
+        );
+    }
+}
+
 #[path = "reposition_tests.rs"]
 mod reposition;

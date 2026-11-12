@@ -18,6 +18,7 @@ import { fetchSetupStatus } from "@/shared/setup-wizard/client";
 import type { SetupStatus } from "@/shared/setup-wizard/types";
 import { useProfile } from "@/shared/use-profile";
 import { useFlightStore } from "@/stores/flight-store";
+import { activeScreenId, useNavStore } from "@/stores/nav-store";
 
 /** How often the setup engine is asked, ms. */
 const SETUP_POLL_MS = 30_000;
@@ -30,6 +31,8 @@ export function SetupOfferBanner() {
   const telemetryArmed = useFlightStore((s) => s.telemetry?.armed ?? null);
   const { widthClass } = useWidthClass();
   const scale = gridMeasures(widthClass, false).scale;
+  // The offer is pointless over the setup screen it opens.
+  const onSetup = useNavStore((s) => activeScreenId(s) === "aircraft-setup");
 
   useEffect(() => {
     if (profile !== "drone") return;
@@ -47,12 +50,12 @@ export function SetupOfferBanner() {
   }, [profile]);
 
   const uid = setupOfferUid(status, offered, tourAirborne(pilot, telemetryArmed));
-  if (!uid) return null;
+  if (!uid || onSetup) return null;
   const close = (open: boolean) => {
     setOffered(markSetupOffered(uid));
     if (open) openAircraftSetup();
   };
-  const button = "shrink-0 rounded-[var(--fs-radius-sm)] border font-semibold";
+  const button = "touch-target shrink-0 rounded-[var(--fs-radius-sm)] border font-semibold";
   return (
     <div
       role="status"

@@ -252,10 +252,9 @@ impl ParamsTab {
             core.toast(ToastKind::Error, WRITE_REFUSAL);
             return;
         }
-        let mut body = vec![format!(
-            "Write {} parameter(s) to the flight controller?",
-            self.staged_count()
-        )];
+        let n = self.staged_count();
+        let noun = if n == 1 { "parameter" } else { "parameters" };
+        let mut body = vec![format!("Write {n} {noun} to the flight controller?")];
         for (name, staged) in self.store.staged().iter().take(CONFIRM_ROWS) {
             let meta = self.store.meta(name);
             let old = staged
@@ -276,7 +275,7 @@ impl ParamsTab {
         }
         core.open(Overlay::confirm(
             Ret::new(ROUTE, "write"),
-            "Write parameters",
+            format!("Write {n} to flight controller"),
             body,
         ));
     }

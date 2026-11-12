@@ -23,6 +23,10 @@ export interface FcSetupController {
   status: SetupStatus | null;
   /** True until the first read settles. */
   loading: boolean;
+  /** The setup stream is live: false once it has been closed or silent for
+   *  5 s (the stream keeps alive at 1 Hz), true again on reconnect. Always
+   *  true when the stream is not held open. */
+  streamUp: boolean;
   /** The last failed read, or null. */
   loadError: string | null;
   /** The last refused or failed request, as display text, or null. */
@@ -52,6 +56,7 @@ export interface UseFcSetupOptions {
 export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupController {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [streamUp, setStreamUp] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -88,6 +93,9 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
       ? openSetupStream(
           (frame) => setStatus((s) => (s ? applyFrame(s, frame) : s)),
           () => void refresh(),
+          (up) => {
+            if (mounted.current) setStreamUp(up);
+          },
         )
       : undefined;
     return () => {
@@ -119,6 +127,7 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
   return {
     status,
     loading,
+    streamUp: stream ? streamUp : true,
     loadError,
     requestError,
     busy,

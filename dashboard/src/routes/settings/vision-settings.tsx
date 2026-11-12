@@ -27,7 +27,7 @@ export function VisionSettings() {
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
+    return <p className="text-[11px] text-muted-foreground">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (

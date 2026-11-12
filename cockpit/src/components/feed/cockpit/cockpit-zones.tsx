@@ -9,7 +9,7 @@
 import { House, Pause, PlaneLanding, PlaneTakeoff } from "lucide-react";
 
 import { useNow } from "@/hooks/use-now";
-import { useFreshPilot, usePilot } from "@/hooks/use-pilot";
+import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { distanceFromHomeM, readoutParts, rowAgl } from "@/lib/bottom-row";
 import { leftColumnCaption } from "@/lib/cockpit-layout";
@@ -24,21 +24,13 @@ import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
-import { groundFrom } from "./on-ground";
+import { useOnGround } from "./on-ground";
 import { ZoneButton } from "./zone-button";
 
 /** A built-in's full label (`builtins.json`): the button's accessible name
  *  and tooltip; the short label under the icon is `builtin.short.<id>`. */
 function builtinLabel(id: string): string {
   return builtinsJson.builtins.find((x) => x.id === id)?.label ?? id;
-}
-
-/** Whether the aircraft is on the ground: the fresh pilot's `landed`, else
- *  telemetry reported disarmed; unknown is not ground (`on-ground.ts`). */
-function useOnGround(): boolean {
-  const fresh = useFreshPilot();
-  const armed = useFlightStore((s) => s.telemetry?.armed);
-  return groundFrom(fresh, armed);
 }
 
 /** The left column: Take off (opens the Launch sheet) or Land, Return home,

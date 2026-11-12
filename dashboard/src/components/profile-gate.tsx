@@ -2,10 +2,9 @@ import { Ban } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
-import i18n from "@/shared/i18n";
-
 import { Button } from "@/components/ui/button";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
+import { profileLabel, roleLabel } from "@/lib/enum-labels";
 import { gateDecision, type AllowedProfile } from "@/lib/node-identity";
 import type { GroundRole, Profile } from "@/shared/api/types";
 
@@ -15,33 +14,6 @@ interface ProfileGateProps {
   allow: AllowedProfile[];
   roles?: GroundRole[];
   children: React.ReactNode;
-}
-
-function profileLabel(p: Profile): string {
-  switch (p) {
-    case "drone":
-      return i18n.t("access.profileGate.profileDrone");
-    case "ground_station":
-      return i18n.t("access.profileGate.profileGroundStation");
-    case "workstation":
-      return i18n.t("access.profileGate.profileWorkstation");
-    case "compute":
-      return i18n.t("access.profileGate.profileCompute");
-    case "visor":
-      return i18n.t("access.profileGate.profileVisor");
-    case "auto":
-      return i18n.t("access.profileGate.profileAuto");
-    case "unknown":
-      return i18n.t("access.profileGate.profileOther");
-  }
-}
-
-function roleLabel(r: GroundRole): string {
-  return r === "direct"
-    ? i18n.t("access.profileGate.roleDirect")
-    : r === "relay"
-      ? i18n.t("access.profileGate.roleRelay")
-      : i18n.t("access.profileGate.roleReceiver");
 }
 
 function ProfileMismatchPanel({

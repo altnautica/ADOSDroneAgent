@@ -43,14 +43,15 @@ assert!(session.tick(1_760).commanding);
 - Fail-safe by construction: stale or link-lost means stop and hold, never extrapolate, and a lost lock never re-acquires on its own.
 - Freshness is measured on the drone's own monotonic clock, so a remote node with a skewed clock cannot make a frozen stream look fresh.
 - A negative freshness budget is clamped to zero rather than flipping the fail-safe direction.
-- One dependency (`serde`, for the state enums); 30 unit tests.
+- One dependency (`serde`, for the state enums); 31 unit tests.
 
 ## How it works
 
 The rule the crate is built around: the fast control loop and the control-loop pose stay on the drone; the heavy perception and the drift-corrected map pose may go remote.
 
 - [`pick_tier`](https://docs.rs/ados-offload/latest/ados_offload/fn.pick_tier.html) chooses a [`PerceptionTier`](https://docs.rs/ados-offload/latest/ados_offload/enum.PerceptionTier.html) from [`TierInputs`](https://docs.rs/ados-offload/latest/ados_offload/struct.TierInputs.html):
-  - a local accelerator that fits the models, or a CPU strong enough for the detector, gives **Local**;
+  - a local accelerator that fits the models gives **Local**;
+  - otherwise a CPU that runs the detector itself gives **Cpu**;
   - otherwise a paired node on an acceptable link gives **Hybrid** when the board can run a light local path, else **Offload**;
   - otherwise a board with a light local path gives degraded **Local**;
   - otherwise `None`: no heavy perception, the drone flies on bare odometry.

@@ -14,7 +14,8 @@ import { aglMarkText, bottomRowAgl } from "@/shared/hud/chip-inputs";
 import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
 import { linkLossLine } from "@/shared/hud/link-loss";
-import { parseFollowState } from "@/shared/hud/nav-types";
+import { resolveNavSource, type NavSourceResult } from "@/shared/hud/nav-source";
+import { parseFollowState, parseNavState, type NavState } from "@/shared/hud/nav-types";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
 import { specText } from "@/shared/hud/spec-text";
@@ -46,6 +47,38 @@ export interface HomeStatusInputs {
   pilotAgeMs: number | null;
   /** False while the agent's own status read fails. */
   agentReachable: boolean;
+  /** The fresh vision-nav state, or null when absent or stale. */
+  nav?: NavState | null;
+}
+
+/** The arm state the pill reads: the pilot frame's (null while the FC is
+ *  unheard), else the telemetry's; null while unknown, so the pre-flight
+ *  items hide while the drone may be airborne. */
+export function pillArmed(i: Pick<HomeStatusInputs, "pilot" | "telemetry">): boolean | null {
+  if (i.pilot) return i.pilot.armed;
+  return typeof i.telemetry?.armed === "boolean" ? i.telemetry.armed : null;
+}
+
+/** The nav source from the live EKF report, GPS and the fresh vision-nav
+ *  state (the cockpit chip's inputs, without a commanded set or params). */
+export function homeNavSource(i: Pick<HomeStatusInputs, "telemetry" | "live" | "nav">): NavSourceResult {
+  const ekf = i.telemetry?.ekf;
+  const gps = i.telemetry?.gps;
+  return resolveNavSource({
+    ekf: ekf && i.live ? { flags: ekf.flags, ageMs: ekf.age_ms } : null,
+    gps:
+      gps && gps.fix_type != null
+        ? { fixType: gps.fix_type, satellites: gps.satellites ?? undefined, hdop: gps.eph ?? undefined }
+        : null,
+    nav: i.nav ?? null,
+    lastCommandedSet: null,
+    params: null,
+  });
+}
+
+/** `Pose age {ms} ms` from the fresh vision-nav state, or null without one. */
+export function poseAgeText(nav: NavState | null | undefined): string | null {
+  return nav?.poseAgeMs != null ? specText("nav_source.pose_age", { ms: Math.round(nav.poseAgeMs) }) : null;
 }
 
 /** The pill and its alert list, from the cockpit's inputs. The dashboard
@@ -72,6 +105,8 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       controllerLost: controllerLost(i.pilot),
       ...pilotFailsafe(i.pilot),
       preflightFailing: preflightFailing(checks, alerts, i.telemetry?.armed),
+      armed: pillArmed(i),
+      navSource: homeNavSource(i),
     }),
     new Set(),
   );
@@ -86,11 +121,12 @@ export function freshNavFrames(
   body: NavStatusBody | undefined,
   receivedAtMs: number,
   nowMs: number,
-): { pilot: PilotState | null; follow: FollowAgl | null } {
+): { pilot: PilotState | null; follow: FollowAgl | null; nav: NavState | null } {
   const fresh = (e: NavStatusEntry | null | undefined): e is NavStatusEntry => !!e && pilotFresh(receivedAtMs - (e.age_ms ?? 0), nowMs);
   return {
     pilot: fresh(body?.pilot) ? parsePilotState(body.pilot.data) : null,
     follow: fresh(body?.follow) ? parseFollowState(body.follow.data) : null,
+    nav: fresh(body?.nav) ? parseNavState(body.nav.data) : null,
   };
 }
 
@@ -117,7 +153,9 @@ export function homeStatusLines(
   i: HomeStatusInputs & { follow: { aglM: number | null; aglSource: "rng" | "baro" | null } | null },
 ): HomeStatusLines {
   const agl = bottomRowAgl(i.pilot, i.follow);
-  const label = i.pilot?.inputSession?.label ?? i.pilot?.inputSrc ?? null;
+  // A person or app by its session label only; the raw `input_src` code
+  // never reaches the line.
+  const label = i.pilot?.inputSession?.label ?? null;
   const reading = batteryReading(i.battery, i.telemetry);
   return {
     linkLoss: i.pilot ? linkLossLine(i.pilot) : null,

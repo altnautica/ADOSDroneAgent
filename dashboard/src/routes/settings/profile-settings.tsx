@@ -22,6 +22,21 @@ import { withArmedRetry } from "@/shared/api/armed-retry";
 import type { GroundRole } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
 import { invalidateProfile } from "@/shared/use-profile";
+import { profileLabel, roleLabel } from "@/lib/enum-labels";
+
+/** The redetect answer: the profile the hardware points at. */
+interface ProfileSuggestion {
+  detected: ApplyProfile;
+  ground_role_hint?: GroundRole;
+}
+
+const SOURCE_KEYS = {
+  detected: "settings.profile.source.detected",
+  tiebreaker: "settings.profile.source.tiebreaker",
+  override: "settings.profile.source.override",
+  default: "settings.profile.source.default",
+  user: "settings.profile.source.user",
+} as const;
 
 // Workstation and compute are detected, never chosen here.
 const PROFILE_OPTIONS = [
@@ -71,11 +86,9 @@ export function ProfileSettings() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
-  // The pending armed-override question: its text and the answer's resolver.
-  const [armedPrompt, setArmedPrompt] = useState<{
-    message: string;
-    resolve: (ok: boolean) => void;
-  } | null>(null);
+  const [suggestion, setSuggestion] = useState<ProfileSuggestion | null>(null);
+  // The pending armed-override question's resolver.
+  const [armedPrompt, setArmedPrompt] = useState<{ resolve: (ok: boolean) => void } | null>(null);
 
   const initialProfile = profileFromStatus(identity.profile);
   const initialRole = identity.role;
@@ -95,7 +108,7 @@ export function ProfileSettings() {
   async function handleRedetect() {
     setRedetecting(true);
     try {
-      await apiFetch("/api/v1/setup/profile/redetect", { method: "POST" });
+      setSuggestion(await apiFetch<ProfileSuggestion>("/api/v1/setup/profile/redetect", { method: "POST" }));
       await qc.invalidateQueries({ queryKey: ["setup-status"] });
       toast.ok(t("settings.profile.redetectOk"));
     } catch (err) {
@@ -123,11 +136,9 @@ export function ProfileSettings() {
           };
           return postApply(payload);
         },
-        (message) => {
+        () => {
           setConfirmOpen(false);
-          return new Promise<boolean>((resolve) =>
-            setArmedPrompt({ message, resolve }),
-          );
+          return new Promise<boolean>((resolve) => setArmedPrompt({ resolve }));
         },
       );
       const section = res.sections.profile;
@@ -155,18 +166,23 @@ export function ProfileSettings() {
             <RiskBadge tone="manual" />
           </div>
           <div className="text-sm">
-            <span className="font-mono">{initialProfile}</span>
+            <span>{profileLabel(initialProfile)}</span>
             {initialProfile === "ground_station" && (
               <>
                 <span className="text-muted-foreground">{t("settings.profile.roleSeparator")}</span>
-                <span className="font-mono">{initialRole}</span>
+                <span>{roleLabel(initialRole)}</span>
               </>
             )}
             <span className="text-muted-foreground">
               {t("settings.profile.sourceSeparator")}
             </span>
-            <span className="font-mono">
-              {status.data?.profile_source ?? t("settings.shared.unknown")}
+            <span>
+              {(() => {
+                const src = status.data?.profile_source;
+                return src && src in SOURCE_KEYS
+                  ? t(SOURCE_KEYS[src as keyof typeof SOURCE_KEYS])
+                  : t("settings.shared.unknown");
+              })()}
             </span>
           </div>
           <div className="pt-2">
@@ -179,6 +195,29 @@ export function ProfileSettings() {
               {redetecting ? t("settings.profile.detecting") : t("settings.profile.redetect")}
             </Button>
           </div>
+          {suggestion && (
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-md border border-border px-3 py-2 text-sm">
+              <span>
+                {t("settings.profile.suggested", {
+                  profile:
+                    suggestion.detected === "ground_station" && suggestion.ground_role_hint
+                      ? `${profileLabel(suggestion.detected)} · ${roleLabel(suggestion.ground_role_hint)}`
+                      : profileLabel(suggestion.detected),
+                })}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setProfile(suggestion.detected);
+                  if (suggestion.ground_role_hint) setRole(suggestion.ground_role_hint);
+                  setConfirmOpen(true);
+                }}
+              >
+                {t("settings.profile.applySuggestion")}
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -241,13 +280,13 @@ export function ProfileSettings() {
               {profile === "ground_station" ? (
                 <Trans
                   i18nKey="settings.profile.confirmReconfigureRole"
-                  values={{ profile, role }}
+                  values={{ profile: profileLabel(profile), role: roleLabel(role) }}
                   components={{ code: <span className="font-mono font-medium" /> }}
                 />
               ) : (
                 <Trans
                   i18nKey="settings.profile.confirmReconfigure"
-                  values={{ profile }}
+                  values={{ profile: profileLabel(profile) }}
                   components={{ code: <span className="font-mono font-medium" /> }}
                 />
               )}
@@ -271,7 +310,7 @@ export function ProfileSettings() {
           }
         }}
         title={t("settings.profile.armedTitle")}
-        description={armedPrompt?.message ?? ""}
+        description={t("settings.shared.armedOverride")}
         confirmLabel={t("settings.profile.applyAnyway")}
         destructive
         onConfirm={() => armedPrompt?.resolve(true)}

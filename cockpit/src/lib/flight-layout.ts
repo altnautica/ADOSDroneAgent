@@ -13,7 +13,6 @@ import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { leftColumnLabelsAt, type GridMeasures } from "@/lib/cockpit-layout";
 import type { CockpitView } from "@/lib/cockpit-view";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
-import tokensJson from "@/shared/cockpit-spec/tokens.json";
 import { specText } from "@/shared/hud/spec-text";
 
 export interface Rect {
@@ -80,6 +79,16 @@ export function linkCell(ageMs: number | null): { text: string; severity: "ok" |
   return { text: specText(l.text, { s: s < 10 ? s.toFixed(1) : String(Math.round(s)) }), severity };
 }
 
+/** The age of the newest vehicle frame the cockpit holds
+ *  (`top_bar.link.metric`): the younger of the pilot frame and the last live
+ *  telemetry sample. The agent's heartbeat age is the fallback only, because
+ *  a ground station's status carries none. Null with no frame at all. */
+export function vehicleFrameAgeMs(i: { pilotAgeMs: number | null; telemetryAgeMs: number | null; heartbeatAgeS: number | null | undefined }): number | null {
+  const ages = [i.pilotAgeMs, i.telemetryAgeMs].filter((a): a is number => typeof a === "number" && Number.isFinite(a));
+  if (ages.length > 0) return Math.max(0, Math.min(...ages));
+  return typeof i.heartbeatAgeS === "number" && Number.isFinite(i.heartbeatAgeS) ? i.heartbeatAgeS * 1000 : null;
+}
+
 /** The link popover's detail line (RSSI), or null without a reading. */
 export function linkDetail(rssiDbm: number | null | undefined): string | null {
   return typeof rssiDbm === "number" && Number.isFinite(rssiDbm) ? specText("cockpit.link.rssi", { v: `${Math.round(rssiDbm)} dBm` }) : null;
@@ -92,14 +101,10 @@ export function reserveText(t: string, short: boolean): string {
   return specText(short ? r.short : r.text, { t });
 }
 
-/** Text in a critical state (`tokens.json` `chrome.text_critical`), lighter
- *  than the critical fill so it reads on the dark panel. */
-export const TEXT_CRITICAL: string = tokensJson.chrome.text_critical;
-
-/** The colour of text at a severity: critical text uses `TEXT_CRITICAL`. */
-export function severityTextColor(s: "ok" | "warning" | "critical"): string {
-  return s === "critical" ? TEXT_CRITICAL : s === "warning" ? CHROME_TOKENS.severity_warning : CHROME_TOKENS.severity_ok;
-}
+/** How much of an alert level's hue the alert stack mixes into its dark
+ *  panel, percent: at most 18, so the title keeps the panel's contrast over
+ *  any picture. */
+export const ALERT_TINT_PCT: Readonly<Record<"critical" | "warning" | "advisory", number>> = { critical: 18, warning: 14, advisory: 0 };
 
 /** The smallest hit area of a flight-screen control, CSS px
  *  (`layout.json` `touch_target.min`). */
@@ -125,6 +130,23 @@ export function labelPx(base: number, widthClass: keyof typeof layoutJson.classe
   const cls = layoutJson.classes[widthClass];
   const min = cls && "label_min_px" in cls && typeof cls.label_min_px === "number" ? cls.label_min_px : 0;
   return Math.max(base * classScale(widthClass), min);
+}
+
+/** The Menu's row type size, CSS px: the chrome bar type scaled by the width
+ *  class, so every Menu row (the entries, the Layers and overflow sections,
+ *  the extension panels) reads at one size, a tv's from across the room. */
+export function menuTextPx(widthClass: keyof typeof layoutJson.classes): number {
+  return labelPx(CHROME_TOKENS.type.top_bar_px, widthClass);
+}
+
+/** Whether the agent has a video source to dial: its video reports running,
+ *  or it lists a stream or a roster camera. A status that does not report a
+ *  video state (none read yet, or a ground station relaying the drone's
+ *  picture) counts as a source, so the dial goes ahead. */
+export function videoHasSource(video: { state?: string | null; streams?: readonly unknown[] } | null | undefined, rosterCount: number): boolean {
+  if (rosterCount > 0 || (video?.streams?.length ?? 0) > 0) return true;
+  if (video?.state == null) return true;
+  return video.state === "running";
 }
 
 /** The no-picture note in the spec's words (`video.state.*`), and whether it

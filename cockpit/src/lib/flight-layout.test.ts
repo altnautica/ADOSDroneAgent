@@ -12,11 +12,12 @@ import {
   CENTRE_MARK_REACH_U,
   CHIP_MAX_FRAC,
   labelPx,
+  menuTextPx,
   linkCell,
   linkDetail,
   reserveText,
-  severityTextColor,
-  TEXT_CRITICAL,
+  vehicleFrameAgeMs,
+  videoHasSource,
   videoNote,
   classScale,
   FLIGHT_PX,
@@ -166,11 +167,18 @@ describe("the flight instruments (cockpit spec layers.json)", () => {
 describe("no legacy chrome on the flight screen (legacy_chrome: none)", () => {
   const src = (p: string) => readFileSync(path.resolve(__dirname, p), "utf8");
   const shell = src("../components/shell/cockpit-shell.tsx");
-  const flight = shell.slice(shell.indexOf("if (fullBleed)"), shell.indexOf("data-shell=\"framed\""));
+  const flight = shell.slice(shell.indexOf("if (fullBleed)"), shell.indexOf("if (onTop)"));
+  const framedFeed = shell.slice(shell.indexOf("if (onTop)"), shell.indexOf("data-shell=\"framed\""));
 
-  it("the shell draws no status strip, menu rail or action bar around the Feed", () => {
+  it("the shell draws no status strip, menu rail or action bar around the full-screen Feed", () => {
     expect(flight).toContain('data-shell="flight"');
     for (const legacy of ["<StatusStrip", "<MenuRail", "<ActionBar"]) expect(flight).not.toContain(legacy);
+  });
+
+  it("the framed Feed sits beside the menu rail with no status strip or action bar", () => {
+    expect(framedFeed).toContain('data-shell="flight-framed"');
+    expect(framedFeed).toContain("<MenuRail");
+    for (const legacy of ["<StatusStrip", "<ActionBar", "<BannerHost"]) expect(framedFeed).not.toContain(legacy);
   });
 
   it("the Feed's grid draws no telemetry strip or hint bar", () => {
@@ -217,12 +225,12 @@ describe("the top bar's controls", () => {
     expect(HIT_AREA).toContain(`before:w-[max(100%,${TOUCH_MIN_PX}px)]`);
     // The bar is as tall as the hit areas it hosts.
     expect(FLIGHT_PX.barH).toBeGreaterThanOrEqual(TOUCH_MIN_PX);
-    // The pill, the link, the layer level and its ▾, Menu and STOP; the chip and its inline button; the nav-source chip.
-    expect(bar.match(/cn\(\s*HIT_AREA/g)?.length).toBe(6);
+    // The pill, the link, the layer level and its ▾, full screen, Menu and STOP; the chip and its inline button; the nav-source chip.
+    expect(bar.match(/cn\(\s*HIT_AREA/g)?.length).toBe(7);
     expect(chip.match(/cn\(HIT_AREA/g)?.length).toBe(2);
     expect(nav).toMatch(/HIT_AREA/);
     // The layer menu's ▾ is itself 48 px wide.
-    expect(bar).toMatch(/data-testid="layer-flags-button"\s+className=\{cn\(HIT_AREA, "flex h-\[40px\] w-\[48px\]/);
+    expect(bar).toMatch(/data-testid="layer-flags-button"\s+className=\{cn\(HIT_AREA, "flex h-\[var\(--fs-control\)\] w-\[48px\]/);
   });
 
   it("STOP is never disabled and names its 3 s hold", () => {
@@ -235,6 +243,8 @@ describe("the top bar's controls", () => {
       expect(bar, word).not.toContain(word);
     }
     for (const word of ["NO PILOT", '"Take control"', '"Resume"', '"Set up aircraft"', "Open mode sheet"]) expect(chip, word).not.toContain(word);
+    const sheet = readFileSync(path.resolve(__dirname, "../components/feed/skill-confirm-sheet.tsx"), "utf8");
+    for (const word of ["Hold to confirm", '"Cancel"', "Gamepad:", "Panel:", "Takeoff altitude", "takeoff altitude"]) expect(sheet, word).not.toContain(word);
   });
 
   it("the layer menu lists every layer flag", () => {
@@ -291,12 +301,10 @@ describe("the top bar's cells from the spec", () => {
     expect(bar).toContain("reserveText(fmtClock(r.timeToReserveS), compact)");
   });
 
-  it("critical text, panel and STOP colours come from the chrome tokens", () => {
-    expect(TEXT_CRITICAL).toBe("#FF8A80");
-    expect(severityTextColor("critical")).toBe(TEXT_CRITICAL);
+  it("panel and STOP colours come from the chrome tokens; critical alert words use the text variant", () => {
     expect(chromeStyle()).toMatchObject({ "--fs-panel-bg": "#0B0D12EB", "--fs-stop-bg": "#C81E1E", "--fs-control": "36px" });
     const stack = readFileSync(path.resolve(__dirname, "../components/feed/alert-stack.tsx"), "utf8");
-    expect(stack).toContain("TEXT_CRITICAL");
+    expect(stack).toContain("severityTextColor(level)");
   });
 
   it("a tv label is never below label_min_px", () => {
@@ -335,5 +343,64 @@ describe("the no-picture note's words", () => {
     const video = readFileSync(path.resolve(__dirname, "../components/shell/video-layer.tsx"), "utf8");
     expect(video).not.toContain("Connecting to feed");
     expect(video).toContain('specText("video.state.retry")');
+  });
+});
+
+describe("whether the agent has a video source", () => {
+  it("a stopped video with no streams and an empty roster has none, so the note says so", () => {
+    expect(videoHasSource({ state: "stopped", streams: [] }, 0)).toBe(false);
+    expect(videoNote("connecting", videoHasSource({ state: "stopped", streams: [] }, 0))).toEqual({ text: "No video source", retry: false });
+    expect(videoNote("failed", videoHasSource({ state: "stopped", streams: [] }, 0))?.retry).toBe(false);
+  });
+
+  it("a running video, a listed stream or a roster camera is a source", () => {
+    expect(videoHasSource({ state: "running", streams: [] }, 0)).toBe(true);
+    expect(videoHasSource({ state: "stopped", streams: [{ id: "main" }] }, 0)).toBe(true);
+    expect(videoHasSource({ state: "stopped", streams: [] }, 1)).toBe(true);
+  });
+
+  it("an unread status or a ground station's (no video state) keeps dialling", () => {
+    expect(videoHasSource(null, 0)).toBe(true);
+    expect(videoHasSource({}, 0)).toBe(true);
+    const feed = readFileSync(path.resolve(__dirname, "../components/screens/feed-screen.tsx"), "utf8");
+    expect(feed).toContain("hasSource={videoHasSource(statusVideo, roster.length)}");
+  });
+});
+
+describe("the newest vehicle frame's age", () => {
+  it("a ground station with fresh pilot frames and no heartbeat field reads fresh", () => {
+    const age = vehicleFrameAgeMs({ pilotAgeMs: 400, telemetryAgeMs: null, heartbeatAgeS: undefined });
+    expect(age).toBe(400);
+    expect(linkCell(age).severity).toBe("ok");
+  });
+
+  it("the younger of the pilot frame and the telemetry sample wins", () => {
+    expect(vehicleFrameAgeMs({ pilotAgeMs: 5000, telemetryAgeMs: 200, heartbeatAgeS: 9 })).toBe(200);
+    expect(vehicleFrameAgeMs({ pilotAgeMs: null, telemetryAgeMs: 1200, heartbeatAgeS: 9 })).toBe(1200);
+  });
+
+  it("the heartbeat age is the fallback, and nothing at all reads no link", () => {
+    expect(vehicleFrameAgeMs({ pilotAgeMs: null, telemetryAgeMs: null, heartbeatAgeS: 1.5 })).toBe(1500);
+    const none = vehicleFrameAgeMs({ pilotAgeMs: null, telemetryAgeMs: null, heartbeatAgeS: undefined });
+    expect(none).toBeNull();
+    expect(linkCell(none).severity).toBe("critical");
+  });
+});
+
+describe("the Menu's rows", () => {
+  it("read at the chrome bar type scaled by class, a tv's never below its label floor", () => {
+    expect(menuTextPx("medium")).toBe(13);
+    expect(menuTextPx("tv")).toBeCloseTo(13 * 1.33);
+    const menu = readFileSync(path.resolve(__dirname, "../components/shell/quick-menu.tsx"), "utf8");
+    // The entry rows and the extension-panel buttons both take the size.
+    expect(menu.match(/menuTextPx\(/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(menu).toContain("style={{ fontSize }}");
+  });
+
+  it("the Pre-flight row shows passed/total from the sheet's own items", () => {
+    const menu = readFileSync(path.resolve(__dirname, "../components/shell/quick-menu.tsx"), "utf8");
+    expect(menu).toContain("preflightTally(usePreflightItems())");
+    const sheet = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/preflight-sheet.tsx"), "utf8");
+    expect(sheet).toContain("usePreflightItems()");
   });
 });

@@ -8,13 +8,14 @@
 // Every install previews the manifest first, then runs the permission review
 // sheet, which installs on a slide.
 
+import { toneClass } from "@/lib/tone";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { InstallSheet, RiskBadge } from "@/components/extensions/install-sheet";
 import { PluginFrameHost } from "@/components/plugins/plugin-overlay-host";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { ActionButton, EmptyNote, StaleBadge } from "@/components/ui/data";
+import { ActionButton, EmptyNote, ErrorNote, StaleBadge } from "@/components/ui/data";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { ListItem } from "@/components/ui/list-item";
 import { SwitchSettingRow, TextSettingRow } from "@/components/ui/setting-row";
@@ -27,6 +28,8 @@ import {
   parseInstalls,
   type CatalogEntry,
   type CatalogResponse,
+  installStatusKey,
+  installStatusTone,
   type InstallRow,
 } from "@/lib/plugin-catalog";
 import { cn } from "@/lib/utils";
@@ -99,6 +102,9 @@ export function ExtensionsScreen() {
   const rows = installs.data ?? [];
   const selected = rows.find((r) => r.pluginId === selectedId) ?? null;
   const installedVersions = new Map(rows.map((r) => [r.pluginId, r.version ?? undefined] as const));
+  // The install record has no display name; the running list does.
+  const running = useExtensionsStore((s) => s.extensions);
+  const names = new Map(running.map((e) => [e.pluginId, e.name] as const));
 
   let body;
   if (tab === 0) {
@@ -107,13 +113,13 @@ export function ExtensionsScreen() {
     body = !installs.ready ? (
       <EmptyNote>{t("extensions.page.loading")}</EmptyNote>
     ) : installs.error && !installs.data ? (
-      <EmptyNote>{t("cockpit.extensions.unavailable", { error: installs.error })}</EmptyNote>
+      <ErrorNote onRetry={installs.refresh}>{t("cockpit.extensions.unavailable")}</ErrorNote>
     ) : rows.length === 0 ? (
       <EmptyNote>{t("extensions.empty.title")}</EmptyNote>
     ) : (
       <TwoPane
         showDetailInPortrait={selected !== null}
-        list={<InstallList rows={rows} selectedId={selectedId} onSelect={setSelectedId} />}
+        list={<InstallList rows={rows} names={names} selectedId={selectedId} onSelect={setSelectedId} />}
         detail={
           selected ? (
             <InstallDetail
@@ -147,7 +153,7 @@ export function ExtensionsScreen() {
   }
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={installs.stale}
       title={t("extensions.page.title")}
       onBack={tab === 1 && selected ? () => setSelectedId(null) : undefined}
       backLabel={t("cockpit.extensions.back")}
@@ -227,10 +233,12 @@ function RunningTab() {
 
 function InstallList({
   rows,
+  names,
   selectedId,
   onSelect,
 }: {
   rows: InstallRow[];
+  names: ReadonlyMap<string, string>;
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
@@ -240,10 +248,11 @@ function InstallList({
       {rows.map((r) => (
         <ListItem
           key={r.pluginId}
-          headline={r.pluginId}
+          headline={names.get(r.pluginId) ?? r.pluginId}
           supporting={[
+            names.has(r.pluginId) ? r.pluginId : null,
             r.version ? `v${r.version}` : null,
-            r.status ?? (r.enabled ? t("extensions.status.enabled") : t("extensions.status.disabled")),
+            t(installStatusKey(r.status)),
             r.signed ? t("extensions.status.signed") : t("extensions.status.unsigned"),
           ]
             .filter(Boolean)
@@ -285,11 +294,15 @@ function InstallDetail({
   return (
     <div className="flex flex-col gap-[0.5rem] pl-[0.6rem]">
       <div className="font-mono text-[0.85rem]">{row.pluginId}</div>
-      <div className="text-[0.8rem] text-muted-foreground">
-        {[row.version ? `v${row.version}` : null, row.status, row.signed ? t("extensions.status.signed") : t("extensions.status.unsigned")]
+      <div className={cn("text-[0.8rem]", toneClass(installStatusTone(row.status)))}>
+        {[row.version ? `v${row.version}` : null, t(installStatusKey(row.status)), row.signed ? t("extensions.status.signed") : t("extensions.status.unsigned")]
           .filter(Boolean)
           .join(" · ")}
       </div>
+      {row.failureReason ? <div className="text-[0.8rem] text-err">{row.failureReason}</div> : null}
+      {row.status === "incompatible" ? (
+        <div className="text-[0.8rem] text-warn">{t("cockpit.extensions.incompatible")}</div>
+      ) : null}
       {row.declared > 0 ? (
         <div className="text-[0.8rem] text-muted-foreground">
           {t("extensions.status.permissionsGranted", { granted: row.granted, total: row.declared })}
@@ -314,6 +327,8 @@ function InstallDetail({
           label={t("extensions.actions.enable")}
           variant="primary"
           busy={busy}
+          // An incompatible extension cannot start on this agent.
+          disabled={row.status === "incompatible"}
           onClick={() =>
             void run(
               () => enablePlugin(row.pluginId),

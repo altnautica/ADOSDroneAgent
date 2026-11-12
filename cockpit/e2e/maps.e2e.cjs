@@ -230,6 +230,31 @@ async function layoutCase(browser) {
     assert.ok(readout.y + readout.h <= map.y + map.h && readout.x >= map.x, "readout inside the map");
     const fontPx = await page.$eval('[data-zone="bottom_left_card"] [data-testid="minimap-readout"]', (e) => parseFloat(getComputedStyle(e).fontSize));
     assert.equal(fontPx, 11, "readout at the chrome label size (the zone zoom applies the class scale)");
+    // The minimap's frame toggle and (below) the HUD's REL/MSL toggle are
+    // drawn small but take a 48 px press. Measured on screen: from the
+    // control's centre, how far a press still lands on it along each axis
+    // (the zone zoom scales the 48 CSS px box by the class scale).
+    const hitBox = (sel) =>
+      page.$eval(sel, (e) => {
+        const r = e.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        const on = (x, y) => {
+          const h = document.elementFromPoint(x, y);
+          return h !== null && (h === e || e.contains(h));
+        };
+        const name = (h) => (h ? `${h.tagName.toLowerCase()}${h.getAttribute("data-testid") ? `[${h.getAttribute("data-testid")}]` : ""}${h.getAttribute("data-zone") ? `{${h.getAttribute("data-zone")}}` : ""}` : "none");
+        const stops = [];
+        const reach = (dx, dy) => {
+          let d = 0;
+          while (d < 200 && on(cx + dx * (d + 0.25), cy + dy * (d + 0.25))) d += 0.25;
+          stops.push(document.elementsFromPoint(cx + dx * (d + 0.25), cy + dy * (d + 0.25)).slice(0, 5).map(name).join(">") + `@${d}`);
+          return d;
+        };
+        return { w: reach(-1, 0) + reach(1, 0), h: reach(0, -1) + reach(0, 1), beyond: stops.join(" ; "), rect: [r.left, r.top, r.width, r.height], before: [getComputedStyle(e, "::before").width, getComputedStyle(e, "::before").height] };
+      });
+    const frameHit = await hitBox('[data-zone="bottom_left_card"] [data-testid="minimap-frame-toggle"]');
+    assert.ok(frameHit.w >= 48 && frameHit.h >= 48, `frame toggle hit area ${JSON.stringify(frameHit)}`);
     // Instruments: the altitude-reference toggle clear of the ALT tape title.
     for (let i = 0; i < 5 && (await page.getAttribute("[data-layer-level]", "data-layer-level")) !== "instruments"; i++) {
       await page.keyboard.press("o");
@@ -247,6 +272,8 @@ async function layoutCase(browser) {
     assert.ok(!overlap, `toggle ${JSON.stringify(toggle)} overlaps the ALT title ${JSON.stringify(title)}`);
     const tFont = await page.$eval('[data-testid="alt-ref-toggle"]', (e) => parseFloat(getComputedStyle(e).fontSize));
     assert.ok(Math.abs(tFont - 11 * vp.scale) < 0.5, `toggle text ${tFont}px = 11 px × ${vp.scale}`);
+    const toggleHit = await hitBox('[data-testid="alt-ref-toggle"]');
+    assert.ok(toggleHit.w >= 48 && toggleHit.h >= 48, `REL/MSL toggle hit area ${JSON.stringify(toggleHit)}`);
     console.log(`PASS ${vp.name}: readout row in the map at 11 px; REL/MSL toggle at ${tFont}px clear of the ALT title`);
     await ctx.close();
   }

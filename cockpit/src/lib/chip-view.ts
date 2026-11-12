@@ -7,6 +7,7 @@ import { runCockpitAction } from "@/lib/cockpit-actions";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import type { ChipView } from "@/shared/hud/flight-state";
 import { specText } from "@/shared/hud/spec-text";
+import { severityTextColor } from "@/shared/hud/status-pill";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
 
 /** The chip's inline button: its words and what a press does. */
@@ -31,6 +32,17 @@ export function chipLines(chip: ChipView, radioFallback: boolean): { text: strin
   const lines = chip.secondary.map((l) => ({ text: l.text, color: l.color }));
   if (radioFallback) lines.push({ text: specText("nav.reduced_rate"), color: CHROME_TOKENS.severity_warning });
   return lines;
+}
+
+/** The text colour of a chip line. A state hue is for the chip's dot and
+ *  outline only; as small text it is too dark on the panel. A critical hue
+ *  reads as `text_critical`, a warning hue as the warning text, anything
+ *  else in the dim text colour. */
+export function chipLineTextColor(color: string): string {
+  const c = color.toUpperCase();
+  if (c === CHROME_TOKENS.severity_critical.toUpperCase()) return severityTextColor("critical");
+  if (c === CHROME_TOKENS.severity_warning.toUpperCase()) return severityTextColor("warning");
+  return CHROME_TOKENS.text_dim;
 }
 
 /** The chip's whole text, as its tooltip and its tap panel read it. */

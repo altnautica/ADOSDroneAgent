@@ -8,10 +8,12 @@ import { useTranslation } from "react-i18next";
 import { Camera, RefreshCw } from "lucide-react";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { ActionButton, EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { ActionButton, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { ListItem } from "@/components/ui/list-item";
 import { SelectSettingRow, SwitchSettingRow } from "@/components/ui/setting-row";
 import { SlideToConfirm } from "@/components/ui/slide-to-confirm";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { armedRefusalText, getArmedReading, radioWriteBlock } from "@/lib/radio-gate";
 import {
   FEC_RATIOS,
@@ -43,11 +45,23 @@ const PRESET_KEYS = {
   aggressive: "wfb.tuning.presetAggressive",
 } as const satisfies Record<LinkPreset, string>;
 
+/** The row labels of the fields a tuning patch changes (FEC k and n are one
+ *  field), so the staged line names what the operator sees, not wire keys. */
+function changedFieldNames(patch: object | null): ("wfb.tuning.preset" | "wfb.tuning.fec" | "wfb.tuning.mcsRate" | "wfb.tuning.adaptive")[] {
+  const keys = Object.keys(patch ?? {});
+  const out: ("wfb.tuning.preset" | "wfb.tuning.fec" | "wfb.tuning.mcsRate" | "wfb.tuning.adaptive")[] = [];
+  if (keys.some((k) => k.includes("preset"))) out.push("wfb.tuning.preset");
+  if (keys.some((k) => k.startsWith("fec"))) out.push("wfb.tuning.fec");
+  if (keys.some((k) => k.includes("mcs"))) out.push("wfb.tuning.mcsRate");
+  if (keys.some((k) => k.includes("auto") || k.includes("adaptive"))) out.push("wfb.tuning.adaptive");
+  return out;
+}
+
 const FEC_OPTIONS = FEC_RATIOS.map(([k, n]) => `${k}/${n}`);
 
-export function VideoScreen() {
+export function VideoScreen({ initialTab = 0 }: { initialTab?: number } = {}) {
   const { t } = useTranslation();
-  const [tab, setTab] = useState(0);
+  const [tab, setTab] = useState(initialTab);
   const [busy, setBusy] = useState(false);
   const [snapshotAt, setSnapshotAt] = useState<Date | null>(null);
   const [draft, setDraft] = useState<TuneDraft>({});
@@ -81,6 +95,7 @@ export function VideoScreen() {
   };
 
   const patch = draftPatch(draft, cfg);
+  useDirtyGuard(Object.keys(draft).length > 0, "video-tuning");
   const block = tuneBlock(patch, radioWriteBlock(armed.stale ? null : armed.data));
 
   const apply = () => {
@@ -158,9 +173,14 @@ export function VideoScreen() {
           label={t("wfb.fields.txPower")}
           value={radio?.txPowerDbm != null ? t("cockpit.video.dbm", { dbm: radio.txPowerDbm }) : DASH}
         />
-        <Row label={t("video.fields.preset")} value={radio?.preset ?? DASH} />
+        <Row
+          label={t("video.fields.preset")}
+          value={radio?.preset && radio.preset in PRESET_KEYS ? t(PRESET_KEYS[radio.preset as LinkPreset]) : (radio?.preset ?? DASH)}
+        />
         <SectionHeader>{t("video.route.camerasDetected")}</SectionHeader>
-        {(cameras.data ?? []).length === 0 ? (
+        {readFailed(cameras) ? (
+          <ErrorNote onRetry={cameras.refresh}>{t("cockpit.readFailed.cameras")}</ErrorNote>
+        ) : (cameras.data ?? []).length === 0 ? (
           <EmptyNote>{t("video.route.noCameras")}</EmptyNote>
         ) : (
           (cameras.data ?? []).map((c) => (
@@ -174,6 +194,14 @@ export function VideoScreen() {
           ))
         )}
       </div>
+    );
+  } else if (cfg == null) {
+    // Tuning stages a change against the current values, so it stays off until
+    // they have been read: never offer made-up "current" values.
+    body = config.error ? (
+      <ErrorNote onRetry={config.refresh}>{t("cockpit.readFailed.videoConfig")}</ErrorNote>
+    ) : (
+      <EmptyNote>{t("common.loading")}</EmptyNote>
     );
   } else {
     body = (
@@ -218,7 +246,7 @@ export function VideoScreen() {
             ? t("cockpit.video.noChange")
             : block
               ? t(`cockpit.radio.${block}`)
-              : t("cockpit.video.pending", { changes: Object.keys(patch ?? {}).join(", ") })}
+              : t("cockpit.video.pending", { changes: changedFieldNames(patch).map((k) => t(k)).join(", ") })}
         </div>
         <SlideToConfirm label={t("cockpit.video.slideApply")} onConfirmed={apply} disabled={busy || block !== null} />
         {Object.keys(draft).length > 0 ? (
@@ -229,7 +257,7 @@ export function VideoScreen() {
   }
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={config.stale || latency.stale}
       title={t("video.panel.title")}
       tabs={[t("cockpit.video.tabStatus"), t("cockpit.video.tabTuning")]}
       selectedTab={tab}

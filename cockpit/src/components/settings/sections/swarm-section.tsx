@@ -1,7 +1,9 @@
 // Swarm: the node's swarm participation, role, default formation and spacing.
-// These persist to config only (no runtime swarm consumer reads them yet),
-// which the page says plainly. Plain config-leaf writes.
+// The onboard swarm runtime reads these live and commands the flight
+// controller while enabled, so turning it on asks first. Plain config-leaf
+// writes.
 
+import { useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
 import { EmptyNote } from "@/components/ui/data";
@@ -16,13 +18,14 @@ import {
 } from "@/lib/settings/swarm";
 import type { AgentConfig } from "@/shared/api/types";
 
-import { LeafNumberRow, LeafTextRow, SectionGroup } from "./section-kit";
+import { LeafNumberRow, LeafTextRow, SectionGroup, SlideConfirmDialog } from "./section-kit";
 import { useAgentConfig, useLeafWriter } from "./section-hooks";
 
 export function SwarmSection() {
   const { t } = useTranslation();
   const { config, ready, get } = useAgentConfig();
   const { save } = useLeafWriter();
+  const [confirmEnable, setConfirmEnable] = useState(false);
 
   if (!ready) return <EmptyNote>{t("settingsMore.security.readingConfig")}</EmptyNote>;
   if (config == null) return <EmptyNote>{t("settingsMore.swarm.readError")}</EmptyNote>;
@@ -34,7 +37,6 @@ export function SwarmSection() {
   return (
     <div className="flex flex-col gap-[0.8rem]">
       <div className="rounded-md bg-input/40 px-[0.75rem] py-[0.5rem] text-[0.8rem] leading-relaxed text-muted-foreground">
-        <span className="mr-[0.4rem] text-[0.7rem] uppercase tracking-wide">{t("settingsMore.swarm.configOnlyBadge")}</span>
         <Trans
           i18nKey="settingsMore.swarm.configOnlyBanner"
           components={{ strong: <span className="font-medium text-surface-foreground" /> }}
@@ -45,8 +47,22 @@ export function SwarmSection() {
         title={t("settingsMore.swarm.participationLabel")}
         summary={t("settingsMore.swarm.participationHint")}
         checked={swarm.enabled === true}
-        onChange={(next) => void save(SWARM_KEYS.enabled, next)}
+        // Turning off is always safe; turning on hands the runtime the FC.
+        onChange={(next) => (next ? setConfirmEnable(true) : void save(SWARM_KEYS.enabled, false))}
       />
+      {confirmEnable ? (
+        <SlideConfirmDialog
+          title={t("settingsMore.swarm.enableTitle")}
+          slideLabel={t("cockpit.settingsSections.swarm.enableSlide")}
+          onConfirmed={() => {
+            setConfirmEnable(false);
+            void save(SWARM_KEYS.enabled, true);
+          }}
+          onDismiss={() => setConfirmEnable(false)}
+        >
+          {t("settingsMore.swarm.enableBody")}
+        </SlideConfirmDialog>
+      ) : null}
 
       <SectionGroup>
         <LeafTextRow

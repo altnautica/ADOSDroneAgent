@@ -38,7 +38,15 @@ pub const MIN_H: u16 = 24;
 /// Draw one frame and report the rects effects and mouse hits need.
 pub fn render(frame: &mut Frame, app: &mut App) -> FrameOut {
     let stack = app.ctx_stack();
-    let hints = keymap::hints(&stack, |c| app.enabled(c));
+    // The help overlay lists every key itself; its bar says only how to close.
+    let hints = if matches!(
+        app.core.overlays.last(),
+        Some(crate::overlay::Overlay::Help)
+    ) {
+        vec![("Esc", "close")]
+    } else {
+        keymap::hints(&stack, |c| app.enabled(c))
+    };
     // The key contexts of the screen under any overlay, for the help overlay.
     let under: Vec<keymap::Ctx> = {
         let mut s = app

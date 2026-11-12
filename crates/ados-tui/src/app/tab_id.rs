@@ -64,7 +64,7 @@ impl TabId {
             TabId::Video => "Video",
             TabId::Params => "Params",
             TabId::Extensions => "Extensions",
-            TabId::Logs => "Logs",
+            TabId::Logs => "Agent logs",
             TabId::System => "System",
             TabId::Settings => "Settings",
         }

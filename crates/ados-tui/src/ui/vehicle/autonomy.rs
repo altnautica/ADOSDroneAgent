@@ -13,8 +13,8 @@ use ratatui::Frame;
 
 use crate::app::Core;
 use crate::model::autonomy::detection::{DepthLayer, Detection};
-use crate::model::autonomy::{health_tone, phase_tone, Autonomy, Tone};
-use crate::model::fix_label;
+use crate::model::autonomy::{health_tone, Autonomy, Tone};
+use crate::model::spec_text::{has_spec_text, spec_text};
 use crate::theme::Theme;
 use crate::ui::widgets::{kv, kv_text, panel};
 
@@ -85,6 +85,49 @@ fn depth_line(core: &Core, d: &DepthLayer) -> Line<'static> {
     kv(&core.theme, "Depth", LABEL, tone_span(core, tone, d.word()))
 }
 
+/// A spec word by key, or `–` when the spec has none for this value.
+fn spec_or_dash(key: &str) -> String {
+    if has_spec_text(key) {
+        spec_text(key, &[])
+    } else {
+        "–".to_string()
+    }
+}
+
+/// A follow phase's glyph and colour: following in the `track` role,
+/// coasting in the `coast` role, searching and holding as cautions, lost as
+/// a fault. Each phase has its own glyph, so the word never rides on colour.
+fn phase_mark(core: &Core, phase: &str) -> (&'static str, Color) {
+    let t = &core.theme;
+    let ascii = core.sym.name == "ascii";
+    let pick = |glyph: &'static str, plain: &'static str| if ascii { plain } else { glyph };
+    match phase {
+        "following" => (pick("◆", "*"), t.track()),
+        "coasting" => (pick("◇", "o"), t.coast()),
+        "searching" | "acquiring" => (pick("◌", "?"), t.warning()),
+        "holding" => (pick("‖", "="), t.warning()),
+        "lost" => (pick("✕", "x"), t.error()),
+        _ => (core.sym.info, t.fg()),
+    }
+}
+
+/// The GPS fix as the nav-source spec words it (`nav_source.fix.*`; no GPS
+/// and no fix are both "No fix"). Fix types the spec has no word for
+/// (static, PPP) keep the MAVLink label. The GPS panel uses it too, so both
+/// places name a fix alike.
+pub(super) fn fix_word(fix: i64) -> String {
+    let key = match fix {
+        0 | 1 => "nav_source.q.no_fix",
+        2 => "nav_source.fix.2d",
+        3 => "nav_source.fix.3d",
+        4 => "nav_source.fix.dgps",
+        5 => "nav_source.fix.rtk_float",
+        6 => "nav_source.fix.rtk_fixed",
+        other => return crate::model::fix_label(other),
+    };
+    spec_text(key, &[])
+}
+
 /// The block's lines for `a` and the detector state `det`.
 pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'static>> {
     let t = &core.theme;
@@ -96,8 +139,11 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
         }
     }
     if let Some(follow) = &a.follow {
-        let phase = follow.phase.clone().unwrap_or_else(|| "unknown".into());
-        let mut word = phase.clone();
+        let phase = follow.phase.clone().unwrap_or_else(|| "stale".into());
+        let mut word = spec_text(&format!("follow.phase.{phase}"), &[]);
+        if !has_spec_text(&format!("follow.phase.{phase}")) {
+            word = phase.clone();
+        }
         if let Some(id) = follow.track_id {
             word.push_str(&format!(" #{id}"));
         }
@@ -106,19 +152,19 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
                 word.push_str(&format!(" {s:.1} s"));
             }
         }
+        let (glyph, color) = phase_mark(core, &phase);
         let range = match (follow.range_m, follow.range_sigma_m) {
             (Some(r), Some(s)) => format!("{r:.1} m ± {s:.1} m"),
             (Some(r), None) => format!("{r:.1} m"),
             _ => "–".to_string(),
         };
-        let reacquire = follow.reacquire_mode.clone().unwrap_or_else(|| "–".into());
+        let reacquire = match follow.reacquire_mode.as_deref() {
+            Some(m @ ("smart" | "strict")) => spec_text(&format!("follow.mode.{m}"), &[]),
+            _ => "–".to_string(),
+        };
+        let phase_span = Span::styled(format!("{glyph} {word}"), Style::default().fg(color));
         for line in [
-            kv(
-                t,
-                "Follow",
-                LABEL,
-                tone_span(core, phase_tone(&phase), word),
-            ),
+            kv(t, "Follow", LABEL, phase_span),
             kv_text(t, "Range", LABEL, range),
             kv_text(t, "Reacquire", LABEL, reacquire),
         ] {
@@ -126,23 +172,29 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
         }
     }
     if let Some(nav) = &a.nav {
-        let health = nav
-            .extnav_health
-            .clone()
-            .unwrap_or_else(|| "unknown".into());
+        let health = nav.extnav_health.as_deref().unwrap_or("unknown");
         let word = format!(
-            "set {} · ext nav {health}",
+            "{} {} · {} {}",
+            spec_text("nav_source.set", &[]),
             opt(nav.active_set, |s| s.to_string()),
+            spec_text("nav_source.ext_nav", &[]),
+            spec_or_dash(&format!("nav_source.q.{health}")),
         );
         let odometry = format!(
-            "{} · GPS {}",
+            "{} · {} {}",
             opt(nav.odom_rate_hz, |r| format!("{r:.0} Hz")),
-            opt(nav.gps_fix, fix_label)
+            spec_text("nav_source.gps", &[]),
+            nav.gps_fix.map_or_else(|| "–".to_string(), fix_word),
         );
-        for line in [
-            kv(t, "Nav", LABEL, tone_span(core, health_tone(&health), word)),
+        let mut rows = vec![
+            kv(t, "Nav", LABEL, tone_span(core, health_tone(health), word)),
             kv_text(t, "Odometry", LABEL, odometry),
-        ] {
+        ];
+        if let Some(ms) = nav.pose_age_ms {
+            let text = spec_text("nav_source.pose_age", &[("ms", &format!("{ms:.0}"))]);
+            rows.push(kv_text(t, "Pose", LABEL, text));
+        }
+        for line in rows {
             out.push(mark_stale(t, line, nav.stale));
         }
     }
@@ -270,4 +322,23 @@ pub fn render(
         }
     };
     f.render_widget(Paragraph::new(fit(t, out, inner.height)), inner);
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::phase_mark;
+    use crate::ui::tests::test_app;
+
+    #[test]
+    fn each_follow_phase_has_its_own_glyph_and_role_colour() {
+        let app = test_app();
+        let (core, t) = (&app.core, &app.core.theme);
+        let following = phase_mark(core, "following");
+        let coasting = phase_mark(core, "coasting");
+        assert_eq!(following.1, t.track());
+        assert_eq!(coasting.1, t.coast());
+        assert_ne!(following.0, coasting.0);
+        assert_eq!(phase_mark(core, "lost").1, t.error());
+        assert_eq!(phase_mark(core, "holding").1, t.warning());
+    }
 }

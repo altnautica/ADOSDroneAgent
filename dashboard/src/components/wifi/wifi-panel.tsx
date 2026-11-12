@@ -3,6 +3,7 @@ import { Loader2, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { ReadErrorCard } from "@/components/read-error-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -61,6 +62,7 @@ export function WifiPanel() {
     saved: boolean;
   } | null>(null);
   const [forgetTarget, setForgetTarget] = useState<WifiSavedConnection | null>(null);
+  const [leaveOpen, setLeaveOpen] = useState(false);
 
   const refreshAll = () => {
     void qc.invalidateQueries({ queryKey: STATUS_KEY });
@@ -136,6 +138,8 @@ export function WifiPanel() {
   const currentStatus = status.data ?? null;
   const isConnected = !!currentStatus?.connected;
   const scanning = scan.isFetching;
+  // The last status read failed: what shows is the last known state.
+  const statusStale = status.isError && status.data !== undefined;
 
   function openPasswordFor(net: WifiNetwork) {
     setSelected({
@@ -166,18 +170,19 @@ export function WifiPanel() {
                 {status.isLoading ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                 ) : isConnected ? (
-                  <Badge variant="ok" className="font-normal">
+                  <Badge variant="success">
                     <Wifi className="h-3 w-3 mr-1" />
                     {t("wifi.network.connected")}
                   </Badge>
                 ) : (
-                  <Badge variant="default" className="font-normal">
+                  <Badge variant="neutral">
                     <WifiOff className="h-3 w-3 mr-1" />
                     {t("wifi.panel.notConnected")}
                   </Badge>
                 )}
+                {statusStale && <Badge variant="warning">{t("cockpit.stale")}</Badge>}
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className={statusStale ? "text-xs text-muted-foreground opacity-50" : "text-xs text-muted-foreground"}>
                 {isConnected && currentStatus?.ssid
                   ? `${t("wifi.panel.connectedTo", { ssid: currentStatus.ssid })}${
                       currentStatus.ip ? ` · ${currentStatus.ip}` : ""
@@ -195,7 +200,7 @@ export function WifiPanel() {
                   variant="outline"
                   size="sm"
                   disabled={leaveMutation.isPending}
-                  onClick={() => leaveMutation.mutate()}
+                  onClick={() => setLeaveOpen(true)}
                 >
                   {t("wifi.panel.disconnect")}
                 </Button>
@@ -253,10 +258,18 @@ export function WifiPanel() {
                 </div>
               )}
             </div>
-            {networks.length === 0 && !scanning && (
-              <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-                {t("wifi.panel.noNetworks")}
-              </div>
+            {scan.isError && !scanning ? (
+              <ReadErrorCard
+                message={t("wifi.panel.scanFailed")}
+                onRetry={() => void qc.invalidateQueries({ queryKey: SCAN_KEY })}
+              />
+            ) : (
+              networks.length === 0 &&
+              !scanning && (
+                <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+                  {t("wifi.panel.noNetworks")}
+                </div>
+              )
             )}
             {networks.length > 0 && (
               <div className="rounded-md border border-border max-h-96 overflow-y-auto divide-y divide-border">
@@ -280,6 +293,16 @@ export function WifiPanel() {
         target={selected}
         onClose={() => setSelected(null)}
         onJoined={refreshAll}
+      />
+
+      <ConfirmDialog
+        open={leaveOpen}
+        onOpenChange={setLeaveOpen}
+        title={t("wifi.panel.disconnectTitle", { ssid: currentStatus?.ssid ?? "" })}
+        description={t("wifi.panel.disconnectBody")}
+        confirmLabel={t("wifi.panel.disconnect")}
+        destructive
+        onConfirm={() => leaveMutation.mutateAsync().then(() => undefined)}
       />
 
       <ConfirmDialog

@@ -1,11 +1,12 @@
 // The cockpit shell. The active screen is resolved from the navigator (top of
 // the detail stack, or the active tab).
 //
-// The Feed (the full-bleed flight screen) takes the whole viewport and draws
-// its own grid; the shell adds no chrome around it, only the reach and
-// offline notices under its top bar and the Menu (quick menu) its top bar
-// opens. Every other screen renders framed: the status strip on top, the
-// menu rail (a strip in portrait) beside it and the action bar below.
+// The Feed (the flight screen) draws its own grid. Full screen (the kiosk, or
+// the top bar's Full screen button) it takes the whole viewport and the shell
+// adds no chrome, only the Menu its top bar opens. In a browser otherwise it
+// sits beside the menu rail with no status strip or action bar. Every other
+// screen renders framed: the status strip on top, the menu rail (a strip in
+// portrait) beside it and the action bar below.
 
 import { Suspense, lazy, useEffect } from "react";
 
@@ -26,6 +27,7 @@ import { useExtensionsStore } from "@/stores/extensions-store";
 import { getScreen, homeTabFor, tabScreens } from "@/nav/registry";
 import { useNodeIdentity } from "@/shared/use-profile";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
+import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import type { ScreenContext } from "@/nav/navigator";
 
 // The quick menu loads the first time it is opened, outside the Feed's chunk.
@@ -35,6 +37,7 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   const activeTabId = useNavStore((s) => s.activeTabId);
   const detailStack = useNavStore((s) => s.detailStack);
   const quickMenuOpen = useNavStore((s) => s.quickMenuOpen);
+  const flightFullscreen = useCockpitUiStore((s) => s.flightFullscreen);
   const dispatch = useNavStore((s) => s.dispatch);
   const setVisibleTabs = useNavStore((s) => s.setVisibleTabs);
   const loadExtensions = useExtensionsStore((s) => s.load);
@@ -75,11 +78,18 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   }, [visibleKey, home, setVisibleTabs]);
 
   const screen = getScreen(activeScreenId({ activeTabId, detailStack }));
-  // A full-bleed screen only paints edge-to-edge when it is the top surface; a
-  // detail screen pushed over it renders framed.
-  const fullBleed = Boolean(screen.fullBleed) && detailStack.length === 0;
+  // A full-bleed screen only paints edge-to-edge when it is the top surface
+  // and the cockpit is full screen (the kiosk, or the top bar's Full screen
+  // button); a detail screen pushed over it renders framed.
+  const onTop = Boolean(screen.fullBleed) && detailStack.length === 0;
+  const fullBleed = onTop && flightFullscreen;
   const ctx: ScreenContext = { dispatch };
   const body = <Suspense fallback={null}>{screen.render(ctx)}</Suspense>;
+  const quickMenu = quickMenuOpen ? (
+    <Suspense fallback={null}>
+      <QuickMenu />
+    </Suspense>
+  ) : null;
 
   if (fullBleed) {
     // The Feed is the whole viewport: no status strip, menu rail or action
@@ -92,11 +102,24 @@ export function CockpitShell({ input }: { input: InputStatus }) {
         data-shell="flight"
       >
         {body}
-        {quickMenuOpen ? (
-          <Suspense fallback={null}>
-            <QuickMenu />
-          </Suspense>
-        ) : null}
+        {quickMenu}
+        <DirtyGuardDialog />
+      </div>
+    );
+  }
+
+  if (onTop) {
+    // The Feed in a browser, not full screen: beside the menu rail, with no
+    // status strip, action bar or banners; the Feed's top bar and alert
+    // column carry them.
+    return (
+      <div
+        className={`relative flex h-full w-full overflow-hidden bg-black text-foreground landscape:flex-row portrait:flex-col-reverse ${renderProfileClass(renderProfile())}`}
+        data-shell="flight-framed"
+      >
+        <MenuRail />
+        <main className="relative min-h-0 min-w-0 flex-1">{body}</main>
+        {quickMenu}
         <DirtyGuardDialog />
       </div>
     );
@@ -121,11 +144,7 @@ export function CockpitShell({ input }: { input: InputStatus }) {
           </div>
           <ActionBar input={input} />
         </div>
-        {quickMenuOpen ? (
-          <Suspense fallback={null}>
-            <QuickMenu />
-          </Suspense>
-        ) : null}
+        {quickMenu}
         <DirtyGuardDialog />
       </div>
     </>

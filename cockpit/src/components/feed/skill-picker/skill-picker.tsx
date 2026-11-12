@@ -69,7 +69,7 @@ function ParamRow({ skill, param, focused }: { skill: Skill; param: SkillParam; 
       <span className="min-w-[7rem] flex-1 text-[0.82rem]">{param.label}</span>
       {param.kind === "number" ? (
         <>
-          <button type="button" aria-label={`${param.label} down`} onClick={() => c.set(stepParam(param, c.value, -1))} className="flex h-[48px] w-[48px] items-center justify-center rounded-lg border border-border">
+          <button type="button" aria-label={specText("flow.stepper.down", { label: param.label })} onClick={() => c.set(stepParam(param, c.value, -1))} className="flex h-[48px] w-[48px] items-center justify-center rounded-lg border border-border">
             <Minus className="h-[1rem] w-[1rem]" aria-hidden />
           </button>
           <input
@@ -83,7 +83,7 @@ function ParamRow({ skill, param, focused }: { skill: Skill; param: SkillParam; 
             className="min-w-[4rem] flex-1"
           />
           <span className="min-w-[3rem] text-center font-mono text-[0.85rem]">{typeof c.value === "number" ? c.value : "—"}</span>
-          <button type="button" aria-label={`${param.label} up`} onClick={() => c.set(stepParam(param, c.value, 1))} className="flex h-[48px] w-[48px] items-center justify-center rounded-lg border border-border">
+          <button type="button" aria-label={specText("flow.stepper.up", { label: param.label })} onClick={() => c.set(stepParam(param, c.value, 1))} className="flex h-[48px] w-[48px] items-center justify-center rounded-lg border border-border">
             <Plus className="h-[1rem] w-[1rem]" aria-hidden />
           </button>
         </>

@@ -167,7 +167,7 @@ impl SystemTab {
         if core.target.remote {
             core.open(Overlay::confirm(
                 Ret::new(ROUTE, TAG_REBOOT),
-                "Reboot the agent host?",
+                "Reboot the companion computer?",
                 vec![format!(
                     "{} reboots; this session reconnects when it is back.",
                     core.target.host
@@ -180,11 +180,8 @@ impl SystemTab {
     }
 
     fn update(&self, core: &mut Core) {
-        if core.target.remote {
-            core.toast(
-                ToastKind::Warn,
-                "Update runs on the agent host; not available remotely",
-            );
+        if let Some(why) = core.update_refusal() {
+            core.toast(ToastKind::Info, why);
             return;
         }
         if core.guard_disarmed() {
@@ -215,6 +212,10 @@ impl SystemTab {
 impl Tab for SystemTab {
     fn ctx(&self, _core: &Core) -> Vec<Ctx> {
         vec![Ctx::Page(PageKeys::System), Ctx::List]
+    }
+
+    fn has_panes(&self) -> bool {
+        true
     }
 
     fn subs(&self, _core: &Core) -> Vec<Sub> {

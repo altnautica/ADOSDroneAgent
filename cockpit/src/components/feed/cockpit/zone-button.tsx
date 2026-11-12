@@ -1,5 +1,6 @@
-// The round flight-screen button shared by the cockpit's side columns: an
-// unavailable control stays pressable and shows its reason in the cockpit toast.
+// The flight-screen button shared by the cockpit's side columns (a rounded
+// square, the shutter a circle): an unavailable control stays pressable and
+// shows its reason in the cockpit toast.
 
 import type { LucideIcon } from "lucide-react";
 
@@ -17,6 +18,7 @@ export function ZoneButton({
   size = "var(--cockpit-col)",
   testId,
   onRefused,
+  round = false,
 }: {
   icon: LucideIcon;
   label: string;
@@ -30,9 +32,12 @@ export function ZoneButton({
   testId?: string;
   /** Runs on a press while unavailable, beside showing the reason. */
   onRefused?: () => void;
+  /** A circle (the shutter); every other column button is a rounded square. */
+  round?: boolean;
 }) {
   const circle = cn(
-    "chrome-panel flex shrink-0 items-center justify-center !rounded-full transition-[transform,background-color] duration-150 ease-out",
+    "chrome-panel flex shrink-0 items-center justify-center transition-[transform,background-color] duration-150 ease-out",
+    round ? "!rounded-full" : "!rounded-[var(--fs-radius-sm)]",
     tone === "danger" && "!border-[var(--fs-warn)] text-[var(--fs-warn)]",
     tone === "active" && "!border-[var(--fs-crit)] !bg-[var(--fs-crit)] text-[var(--fs-stop-text)]",
   );
@@ -62,8 +67,10 @@ export function ZoneButton({
             {icon}
           </span>
           <span
-            className="chrome-label whitespace-nowrap text-center font-medium"
-            style={{ height: FLIGHT_PX.leftLabelH, fontSize: 11, lineHeight: `${FLIGHT_PX.leftLabelH}px` }}
+            // A panel plate under the caption, so it reads over a bright picture.
+            className="chrome-panel !rounded-[var(--fs-radius-sm)] whitespace-nowrap px-[6px] text-center font-medium"
+            style={{ height: FLIGHT_PX.leftLabelH, fontSize: 11, lineHeight: `${FLIGHT_PX.leftLabelH - 2}px`, color: "var(--fs-text)" }}
+            data-testid="zone-caption"
             aria-hidden
           >
             {caption}

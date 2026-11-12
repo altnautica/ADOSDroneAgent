@@ -1,7 +1,11 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { preflightTally } from "@/hooks/use-preflight-items";
 import { checklistPassable } from "@/lib/cockpit-flow";
 import { demoPilotData } from "@/lib/mock-layers";
 import { parsePilotState } from "@/shared/hud/cockpit-frames";
@@ -65,5 +69,29 @@ describe("the pre-flight sheet on a stale pilot frame", () => {
     const stale = render(2500);
     expect(rowState(stale, specText("flow.preflight.not_reported", { item: "Sticks centred" }))).toBe("Fail");
     expect(stale).not.toContain("<span>Sticks centred</span>");
+  });
+});
+
+describe("the pre-flight sheet's words", () => {
+  it("names each row's icon with the spec's result words", () => {
+    const src = readFileSync(path.resolve(__dirname, "preflight-sheet.tsx"), "utf8");
+    for (const w of ['aria-label="Pass"', 'aria-label="Warning"', 'aria-label="Fail"']) expect(src, w).not.toContain(w);
+    for (const k of ["setup.result.pass", "setup.result.warn", "setup.result.fail"]) expect(src, k).toContain(`specText("${k}")`);
+  });
+
+  it("a failing check reads as its failure, never as the passed wording", () => {
+    const html = renderToStaticMarkup(createElement(PreflightSheet));
+    // No telemetry: link, GNSS, battery and home all fail.
+    expect(html).toContain("<span>Home position not set</span>");
+    expect(html).not.toContain("<span>Home position set</span>");
+    expect(html).toContain(`aria-label="${specText("setup.result.fail")}"`);
+  });
+});
+
+describe("the Menu's pre-flight tally", () => {
+  it("counts the passed items and carries the worst state", () => {
+    expect(preflightTally([{ id: "a", label: "", state: "pass" }, { id: "b", label: "", state: "warn" }])).toEqual({ passed: 1, total: 2, state: "warn" });
+    expect(preflightTally([{ id: "a", label: "", state: "fail" }, { id: "b", label: "", state: "warn" }])).toEqual({ passed: 0, total: 2, state: "fail" });
+    expect(preflightTally([{ id: "a", label: "", state: "pass" }])).toEqual({ passed: 1, total: 1, state: "pass" });
   });
 });

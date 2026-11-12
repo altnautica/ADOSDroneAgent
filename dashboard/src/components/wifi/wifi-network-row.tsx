@@ -40,7 +40,7 @@ export function WifiNetworkRow({ network, isCurrent, isSaved, onSelect }: Props)
             </span>
           )}
           {isSaved && !isCurrent && (
-            <Badge variant="default" className="text-[10px] font-normal">
+            <Badge variant="neutral">
               {t("wifi.network.saved")}
             </Badge>
           )}

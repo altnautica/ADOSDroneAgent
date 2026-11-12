@@ -40,7 +40,7 @@ function ZoomPill() {
   const outLabel = specText("cockpit.zoom.out");
   return (
     <div
-      className="chrome-panel relative flex flex-col !rounded-full"
+      className="chrome-panel relative flex flex-col !rounded-[var(--fs-radius-sm)]"
       style={{ width: "var(--cockpit-col)", height: FLIGHT_PX.zoomH }}
       role="group"
       aria-label={level ?? specText("cockpit.zoom")}
@@ -55,7 +55,7 @@ function ZoomPill() {
       </button>
       {level && zoom > 1 ? (
         <span
-          className="chrome-panel chrome-label absolute right-full top-1/2 mr-[6px] -translate-y-1/2 whitespace-nowrap !rounded-full px-[8px]"
+          className="chrome-panel chrome-label absolute right-full top-1/2 mr-[6px] -translate-y-1/2 whitespace-nowrap !rounded-[var(--fs-radius-sm)] px-[8px]"
           style={{ fontSize: 12, lineHeight: "24px" }}
           data-testid="digital-zoom"
         >
@@ -93,6 +93,7 @@ export function RightColumn({ items, cameras }: { items: readonly RightItem[]; c
             testId="shutter"
             size="var(--cockpit-shutter)"
             tone={mode === "video" && recording ? "active" : "default"}
+            round
             onPress={() => runCockpitAction(mode === "photo" ? "camera.photo" : "camera.record")}
             reason={mode === "photo" ? photoReason : recordReason}
             onRefused={mode === "photo" ? () => reprobeOnNoVideo(photoReason, specText("camera.no_video"), refreshMav) : undefined}
@@ -115,12 +116,12 @@ export function RightColumn({ items, cameras }: { items: readonly RightItem[]; c
             style={{ width: FLIGHT_PX.modeW, height: FLIGHT_PX.modeH }}
             data-zone="photo_video_switch"
           >
-            <span className="chrome-panel flex h-[36px] w-full overflow-hidden !rounded-full p-[2px]" aria-hidden>
+            <span className="chrome-panel flex h-[36px] w-full overflow-hidden !rounded-[var(--fs-radius-sm)] p-[2px]" aria-hidden>
               {(["photo", "video"] as const).map((m) => (
                 <span
                   key={m}
                   className={cn(
-                    "flex h-full flex-1 items-center justify-center rounded-full transition-colors duration-150",
+                    "flex h-full flex-1 items-center justify-center rounded-[3px] transition-colors duration-150",
                     mode === m ? "bg-white/90 text-black" : "chrome-dim",
                   )}
                 >

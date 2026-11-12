@@ -20,7 +20,10 @@ import { useEffect, useRef } from "react";
 import { useElementSize } from "@/hooks/use-element-size";
 import { useMapChrome } from "@/hooks/use-map-chrome";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import { drawCentreMarks, drawReticle, type Palette } from "@/components/feed/hud-centre-marks";
 import { ALT_REF_BUTTON_H, HUD_UNIT_PX, altRefButtonPos, hudTapes } from "@/lib/hud-chrome";
+import { HIT_AREA } from "@/lib/flight-layout";
+import { cn } from "@/lib/utils";
 
 import {
   ROLL_TICKS,
@@ -42,69 +45,8 @@ const RAD = 180 / Math.PI;
 const MAV_TYPE_FIXED_WING = 1;
 const DASH = "—";
 
-interface Palette {
-  primary: string;
-  ink: string;
-  ink2: string;
-  glass: string;
-}
-
 function finite(v: number | null | undefined): v is number {
   return typeof v === "number" && Number.isFinite(v);
-}
-
-/** The centre reticle: two open brackets and a centre dot. */
-function drawReticle(ctx: CanvasRenderingContext2D, cx: number, cy: number, u: number, p: Palette) {
-  ctx.strokeStyle = p.ink;
-  ctx.lineWidth = Math.max(1.5, u * 0.08);
-  ctx.beginPath();
-  ctx.moveTo(cx - u * 1.6, cy);
-  ctx.lineTo(cx - u * 0.6, cy);
-  ctx.lineTo(cx - u * 0.6, cy + u * 0.4);
-  ctx.moveTo(cx + u * 1.6, cy);
-  ctx.lineTo(cx + u * 0.6, cy);
-  ctx.lineTo(cx + u * 0.6, cy + u * 0.4);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(cx, cy, u * 0.12, 0, Math.PI * 2);
-  ctx.stroke();
-}
-
-/** The clean centre: the reticle, a short horizon mark either side of it
- *  that follows roll and pitch (clamped near the centre), and the heading as
- *  a small readout above the reticle. Nothing else crosses the picture. */
-function drawCentreMarks(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  u: number,
-  p: Palette,
-  roll: number | null,
-  pitch: number | null,
-  heading: number | null,
-  font: (scale: number) => string,
-) {
-  drawReticle(ctx, cx, cy, u, p);
-  if (roll !== null && pitch !== null) {
-    const off = Math.max(-u * 4, Math.min(u * 4, pitch * u * 0.25));
-    ctx.save();
-    ctx.translate(cx, cy + off);
-    ctx.rotate((-roll * Math.PI) / 180);
-    ctx.strokeStyle = p.ink;
-    ctx.lineWidth = Math.max(1.5, u * 0.08);
-    ctx.beginPath();
-    ctx.moveTo(-u * 4.2, 0);
-    ctx.lineTo(-u * 2.4, 0);
-    ctx.moveTo(u * 2.4, 0);
-    ctx.lineTo(u * 4.2, 0);
-    ctx.stroke();
-    ctx.restore();
-  }
-  ctx.fillStyle = p.ink;
-  ctx.font = font(0.75);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(heading !== null ? `${String(Math.round(heading) % 360).padStart(3, "0")}°` : DASH, cx, cy - u * 1.6);
 }
 
 function draw(
@@ -472,7 +414,7 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
           type="button"
           onClick={() => setAltRef(altRef === "rel" ? "msl" : "rel")}
           aria-label={specText("hud.alt_ref.switch", { ref: specText(altRef === "rel" ? "hud.alt_ref.rel_long" : "hud.alt_ref.msl_long") })}
-          className="pointer-events-auto absolute rounded-md border border-hud-hair bg-hud-glass font-mono text-hud-ink"
+          className={cn(HIT_AREA, "chrome-panel pointer-events-auto absolute !rounded-[var(--fs-radius-sm)] font-mono")}
           style={{ left: pos.x, top: pos.y, height: ALT_REF_BUTTON_H, padding: `0 ${6 * scale}px`, fontSize: CHROME_TOKENS.type.label_px * scale }}
           data-testid="alt-ref-toggle"
         >

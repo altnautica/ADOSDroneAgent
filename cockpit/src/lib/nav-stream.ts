@@ -46,8 +46,10 @@ export const NAV_SILENT_MS = 15_000;
 export const NAV_STATUS_POLL_MS = 500;
 /** How long the stream may stay down before the status poll takes over. */
 export const NAV_STREAM_FALLBACK_MS = 5000;
-/** A status read not answered within this is aborted (and counts as failed). */
-export const NAV_STATUS_TIMEOUT_MS = 1000;
+/** A status read not answered within this is aborted (and counts as failed):
+ *  long enough for a slow radio link to answer, short enough that a dead
+ *  link reads stale within the pilot's 3 s link threshold. */
+export const NAV_STATUS_TIMEOUT_MS = 2500;
 
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;

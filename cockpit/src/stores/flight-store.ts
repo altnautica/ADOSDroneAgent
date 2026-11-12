@@ -34,6 +34,10 @@ export interface FlightState {
   /** `Date.now()` of the disarmed→armed edge, null while disarmed or before
    *  an arming has been seen (the flight timer shows a dash then). */
   armedSince: number | null;
+  /** `Date.now()` when the live GPS fix dropped below 3D, null at 3D or
+   *  better or without a live fix (`nextNoFixSince`). Shared by every
+   *  minimap, so a remount keeps its frame. */
+  noFixSince: number | null;
 }
 
 export const INITIAL_FLIGHT_STATE: FlightState = {
@@ -45,6 +49,7 @@ export const INITIAL_FLIGHT_STATE: FlightState = {
   lastLiveAt: null,
   armedAtLastLive: null,
   armedSince: null,
+  noFixSince: null,
 };
 
 export const useFlightStore = create<FlightState>(() => ({ ...INITIAL_FLIGHT_STATE }));

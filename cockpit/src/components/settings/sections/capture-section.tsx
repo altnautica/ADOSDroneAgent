@@ -2,6 +2,7 @@
 // world-engine extension's capture service records with. The extension answers
 // 404 through the plugin proxy when it is not installed on this node.
 
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -93,6 +94,7 @@ function ExposureGroup() {
 
   const request = draft ? exposureRequest(draft) : null;
   const dirty = draft != null && current != null && exposureDirty(draft, current);
+  useDirtyGuard(dirty, "settings-capture");
 
   const apply = async () => {
     if (!request) return;

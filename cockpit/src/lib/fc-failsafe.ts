@@ -12,8 +12,17 @@ import { useFlightStore } from "@/stores/flight-store";
 
 export { FC_FAILSAFE_MODES, FC_LAND_MODES, FC_RETURN_MODES } from "@/shared/hud/fc-failsafe-modes";
 
-/** The recovery holds the Mode sheet keeps live whatever else is pending. */
-export const FC_RECOVERY_MODES: Readonly<Record<string, true>> = { ...FC_FAILSAFE_MODES, BRAKE: true };
+/** The flight controller's recovery holds, the one set every surface reads:
+ *  each return and landing mode, Brake, and the hold modes of every family
+ *  (Copter Loiter, Alt Hold and PosHold; Plane Cruise, FBWA, QLoiter and
+ *  QHover; PX4 Position and Altitude). The Mode sheet keeps them live
+ *  whatever else is pending, and they take the short recovery hold. */
+export const FC_RECOVERY_MODES: Readonly<Record<string, true>> = {
+  ...FC_FAILSAFE_MODES,
+  ...Object.fromEntries(
+    ["BRAKE", "LOITER", "ALT_HOLD", "POSHOLD", "CRUISE", "FBWA", "QLOITER", "QHOVER", "POSITION", "ALTITUDE"].map((m) => [m, true as const]),
+  ),
+};
 
 /** HEARTBEAT `system_status` (MAV_STATE) values a failsafe reports. */
 const MAV_STATE_CRITICAL = 5;
@@ -63,6 +72,28 @@ export function noteCommandedModes(modes: readonly string[], now = Date.now()): 
     const mode = s.telemetry?.mode ?? null;
     if (mode !== (prev.telemetry?.mode ?? null)) observe(mode, Date.now());
   });
+}
+
+/** Record a return or landing this cockpit commanded at `at`, once the flight
+ *  controller's answer is in: a refusal claims nothing; an accepted answer,
+ *  or no answer, claims it only once the flight controller is seen in it
+ *  within the window; and a mode the flight controller was already in when
+ *  the command went out stays its own. */
+export function claimCommandedModes(
+  modes: readonly string[],
+  modeAtCommand: string | null | undefined,
+  ack: { observed?: boolean; accepted?: boolean } | null | undefined,
+  at: number,
+): void {
+  const before = modeAtCommand?.toUpperCase() ?? null;
+  if (before !== null && modes.some((m) => m.toUpperCase() === before)) return;
+  if (ack?.observed && !ack.accepted) return;
+  noteCommandedModes(modes, at);
+}
+
+/** The flight controller's mode right now (null when not reported). */
+export function currentFcMode(): string | null {
+  return useFlightStore.getState().telemetry?.mode ?? null;
 }
 
 /** Forget the last command (tests). */

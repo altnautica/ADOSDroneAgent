@@ -16,17 +16,20 @@
 //      approved or rejected after the operator compares fingerprints.
 //   4. Browser access (PIN).
 
+import { bindOutcome, bindView, type BindSession } from "@/lib/bind-phase";
 import { useCallback, useState } from "react";
 import { Check, KeyRound, Link2, Smartphone, Unlink, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { SetUpAccess } from "@/components/shell/set-up-access";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { ActionButton, Dot, EmptyNote, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
+import { ActionButton, Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { TextSettingRow } from "@/components/ui/setting-row";
 import { fmtCountdown } from "@/lib/format-status";
 import { acceptPairingCode, normalizePairingCode, PAIR_ACTION_GUARD, unpairCloud } from "@/lib/pairing-api";
+import { armedRefusalText } from "@/lib/radio-gate";
 import type { Tone } from "@/lib/tone";
 import { apiFetch } from "@/shared/api-fetch";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -59,20 +62,6 @@ interface PairPending {
   closes_at_ms?: number;
   pending?: unknown[];
 }
-interface BindSession {
-  state?: string;
-  phase?: string;
-  status?: string;
-  active?: boolean;
-  [k: string]: unknown;
-}
-
-function bindPhase(b: BindSession | null): string | null {
-  if (!b) return null;
-  const p = b.phase ?? b.state ?? b.status;
-  return typeof p === "string" && p ? p : null;
-}
-
 interface PhoneInvite {
   invite_id: string;
   label: string;
@@ -212,7 +201,12 @@ function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: 
     setBusy("unpair");
     unpairCloud()
       .then(() => toast.ok(t("cockpit.pair.unpaired")))
-      .catch((err: unknown) => toastFromError(err, t("pairing.page.unpairFailed")))
+      .catch((err: unknown) => {
+        // The agent refuses unpair while armed; say so rather than a status code.
+        const refusal = armedRefusalText(err);
+        if (refusal != null) toast.err(t("cockpit.radio.refused"), refusal);
+        else toastFromError(err, t("pairing.page.unpairFailed"));
+      })
       .finally(() => {
         setBusy(null);
         onChanged();
@@ -278,7 +272,11 @@ function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: 
             value={code}
             onChange={setCode}
             placeholder={t("pairing.accept.placeholder")}
-            inputMode="numeric"
+            // The code is six letters and digits: a digits-only keypad cannot
+            // type it.
+            inputMode="text"
+            autoCapitalize="characters"
+            maxLength={6}
             enabled={busy === null}
           />
           <ActionButton
@@ -311,6 +309,8 @@ export function PairScreen() {
   const pending = useResource<PairPending>(
     useCallback((s) => apiFetch<PairPending>("/api/v1/ground-station/pair/pending", { signal: s }), []),
     2000,
+    // The pair window is a ground-station route; other profiles answer 404.
+    { enabled: isGroundStation },
   );
   const bind = useResource<BindSession>(
     useCallback((s) => apiFetch<BindSession>("/api/wfb/pair/local-bind", { signal: s }), []),
@@ -323,7 +323,12 @@ export function PairScreen() {
     if (busy) return;
     setBusy("pair");
     try {
-      await apiFetch("/api/wfb/pair/local-bind", { method: "POST", body: {} });
+      // The POST holds until the rendezvous ends and answers with the
+      // finished session, so its reply is the bind's result.
+      const done = bindOutcome(await apiFetch<BindSession>("/api/wfb/pair/local-bind", { method: "POST", body: {} }));
+      if (done?.kind === "paired") toast.ok(t("cockpit.pair.bindResult.paired"));
+      else if (done?.kind === "failed") toast.err(t("cockpit.pair.bindResult.failed"), done.reason ?? undefined);
+      else if (done?.kind === "aborted") toast.err(t("cockpit.pair.bindResult.aborted"));
     } catch (err) {
       toastFromError(err, t("cockpit.pair.bindFailed"));
     } finally {
@@ -347,19 +352,23 @@ export function PairScreen() {
     }
   };
 
+  // Unknown until /api/wfb/pair has answered: a failed read is never "unpaired".
+  const rfKnown = rf.data != null;
   const rfPaired = rf.data?.paired ?? false;
-  const rfTone: Tone = rfPaired ? "ok" : "muted";
+  const rfTone: Tone = !rfKnown ? "warn" : rfPaired ? "ok" : "muted";
   const windowOpen = pending.data?.open ?? false;
-  const phase = bindPhase(bind.data);
+  const phase = bindView(bind.data);
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={rf.stale || info.stale}
       title={t("pairing.page.title")}
       actions={
         <span className="flex items-center gap-[0.5rem]">
           <Dot tone={rfTone} />
           <span className="text-[0.8rem] text-surface-foreground">
-            {rfPaired ? t("cockpit.pair.linked") : t("cockpit.pair.unpairedState")}
+            {t("cockpit.pair.radioState", {
+              state: !rfKnown ? DASH : rfPaired ? t("cockpit.pair.linked") : t("cockpit.pair.unpairedState"),
+            })}
           </span>
           <StaleBadge stale={rf.stale || info.stale} />
         </span>
@@ -376,7 +385,13 @@ export function PairScreen() {
         <CloudOwner info={info.data} onChanged={info.refresh} />
 
         <SectionHeader>{t("cockpit.pair.rfLink")}</SectionHeader>
-        {rfPaired ? (
+        {!rfKnown ? (
+          readFailed(rf) ? (
+            <ErrorNote onRetry={rf.refresh}>{t("cockpit.readFailed.wfbPair")}</ErrorNote>
+          ) : (
+            <EmptyNote>{t("common.loading")}</EmptyNote>
+          )
+        ) : rfPaired ? (
           <>
             <Row
               label={t("cockpit.pair.pairedDrone")}
@@ -404,7 +419,16 @@ export function PairScreen() {
         ) : (
           <>
             <EmptyNote>{t("cockpit.pair.noDrone")}</EmptyNote>
-            {phase ? <Row label={t("cockpit.pair.bindSession")} value={phase} tone="warn" /> : null}
+            {phase ? (
+              <Row
+                label={t("cockpit.pair.bindSession")}
+                value={t(phase.phaseKey)}
+                hint={phase.ageS != null ? t("cockpit.pair.bindAge", { s: phase.ageS }) : undefined}
+                tone="warn"
+                mono={false}
+              />
+            ) : null}
+            {phase?.error ? <Row label={t("cockpit.pair.bindError")} value={phase.error} tone="err" mono={false} /> : null}
             <div className="mt-[0.3rem]">
               <ActionButton
                 label={busy === "pair" ? t("cockpit.pair.opening") : t("cockpit.pair.pairDrone")}

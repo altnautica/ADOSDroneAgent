@@ -165,11 +165,11 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<StatusFullRe
 
     // The perception capability + tier, before `board` is moved into the payload.
     // Same canonical ados_offload::pick_tier decision the LAN /api/status uses,
-    // fed the same live backend-capability read, so the GCS Perception hub
-    // reads a consistent tier from either route.
-    let backend_inference_capable = crate::routes::status::live_backend_inference_capable().await;
+    // fed the same live detector read, so the GCS Perception hub reads a
+    // consistent tier from either route.
+    let detector = crate::routes::status::live_detector().await;
     let (npu_tops, has_accelerator, perception_tier, offload_target) =
-        crate::routes::status::perception_fields(&board, backend_inference_capable);
+        crate::routes::status::perception_fields(&board, detector);
 
     // Derived before the fields below move `fc_liveness`'s values out.
     let fc_reachable = super::status::derive_fc_reachable(&fc_liveness);

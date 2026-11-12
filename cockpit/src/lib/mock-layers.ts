@@ -8,7 +8,9 @@
 // follow-me cycle the pilot reports the follow-me skill as owner and the
 // overlays show its path detouring around an obstacle. Always present: an
 // orbit ring, home off the left edge, and a wall closing in on the right of
-// the frame.
+// the frame. `window.__adosDemoPilot` pins pilot fields over the scene (say an
+// input session on another surface) and stalls the layer frames while the
+// pilot keeps reporting, so a demo can show those states on demand.
 
 import { demoScene, DEMO_FOLLOW_SKILL } from "@/lib/mock-nav";
 import { ingestLayerFrame, parseNavFrame } from "@/lib/nav-stream";
@@ -26,8 +28,36 @@ const MISSION = {
   landing_seq: false,
 };
 
+/** Pilot fields laid over the scene's, and whether the layer frames stall. */
+const pins: { pilot: Record<string, unknown>; layersStalled: boolean } = { pilot: {}, layersStalled: false };
+
+/** Lay `patch` over the demo pilot frame (merged into earlier pins). */
+export function pinDemoPilot(patch: Record<string, unknown>): void {
+  pins.pilot = { ...pins.pilot, ...patch };
+}
+
+/** Stop (true) or resume (false) the demo layer frames; the pilot frame keeps
+ *  coming, so the layers go stale under a live pilot. */
+export function stallDemoLayers(stalled: boolean): void {
+  pins.layersStalled = stalled;
+}
+
+/** Drop every pin. */
+export function clearDemoPins(): void {
+  pins.pilot = {};
+  pins.layersStalled = false;
+}
+
+declare global {
+  interface Window {
+    /** Demo-only pins over the scripted feed (`?demo=1`). */
+    __adosDemoPilot?: { pin: typeof pinDemoPilot; stallLayers: typeof stallDemoLayers; clear: typeof clearDemoPins };
+  }
+}
+
 /** The demo pilot frame's wire payload at epoch ms `nowMs`: its owner is the
- *  scene's (the mission on the flight controller, or the follow-me skill). */
+ *  scene's (the mission on the flight controller, or the follow-me skill),
+ *  with any pinned fields laid over it. */
 export function demoPilotData(nowMs: number): Record<string, unknown> {
   const follow = demoScene(nowMs).scene === "follow";
   return {
@@ -47,6 +77,7 @@ export function demoPilotData(nowMs: number): Record<string, unknown> {
     plan_ned: [],
     readiness: [],
     mission: follow ? null : MISSION,
+    ...pins.pilot,
   };
 }
 
@@ -77,11 +108,14 @@ class MockLayerStream {
     if (this.timer !== null) return;
     this.startMs = Date.now();
     this.timer = window.setInterval(() => this.tick(), TICK_MS);
+    window.__adosDemoPilot = { pin: pinDemoPilot, stallLayers: stallDemoLayers, clear: clearDemoPins };
   }
 
   stop(): void {
     clearInterval(this.timer ?? undefined);
     this.timer = null;
+    delete window.__adosDemoPilot;
+    clearDemoPins();
   }
 
   private tick(): void {
@@ -93,6 +127,7 @@ class MockLayerStream {
 
     const pilot = parseNavFrame({ kind: "pilot", data: demoPilotData(now) });
     if (pilot) useNavStreamStore.getState().ingest(pilot);
+    if (pins.layersStalled) return;
 
     const missionItems = [
       { t: "wp", k: "wp:4", seq: 4, role: "next", x: 0.52 + sway, y: 0.41, gx: 0.52 + sway, gy: 0.63, dist_m: Math.max(5, 120 - t * 2), eta_s: Math.max(0, 42 - t), size: 0.25 },

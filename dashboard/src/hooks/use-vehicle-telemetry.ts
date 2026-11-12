@@ -25,6 +25,8 @@ export interface VehicleTelemetry {
   last_heartbeat?: string | null;
   /** The FC's PreArm/Arm STATUSTEXT from the last 10 s; absent while the FC link is down. */
   prearm?: string[];
+  /** EKF_STATUS_REPORT flags and their age, or null before the first. */
+  ekf?: { flags: number; age_ms: number } | null;
 }
 
 export function useVehicleTelemetry() {

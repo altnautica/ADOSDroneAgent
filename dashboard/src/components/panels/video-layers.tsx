@@ -16,7 +16,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
 import { useNavLease, useNavStatus, useNavVideoPanel } from "@/hooks/use-nav-status";
-import { CAMERA_ID, holdLayerDemand, LEASED_LAYERS, layersViewQuery, type DemandKind } from "@/lib/video-layer-lease";
+import { holdLayerDemand, LEASED_LAYERS, layersViewQuery, type DemandKind } from "@/lib/video-layer-lease";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/shared/api-fetch";
 import {
@@ -40,32 +40,35 @@ function videoSize(v: HTMLVideoElement | null): { videoW: number; videoH: number
 
 /** Hold a vision demand lease of `kind` while `active` (best effort: an
  *  unanswered POST still lapses after the hold). */
-function useLayerDemand(kind: DemandKind, active: boolean): void {
+function useLayerDemand(kind: DemandKind, active: boolean, cameraId: string): void {
   useEffect(() => {
     if (!active) return;
-    return holdLayerDemand(kind, (body) => void apiFetch("/api/vision/demand", { method: "POST", body }).catch(() => undefined), document);
-  }, [kind, active]);
+    return holdLayerDemand(kind, (body) => void apiFetch("/api/vision/demand", { method: "POST", body }).catch(() => undefined), document, cameraId);
+  }, [kind, active, cameraId]);
 }
 
 export function VideoLayers({
   active,
   videoRef,
   toggles,
+  cameraId,
 }: {
   /** True while the panel shows live video. */
   active: boolean;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   /** Leased layer id → on. */
   toggles: Readonly<Record<string, boolean>>;
+  /** The camera the layers are computed for. */
+  cameraId: string;
 }) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<{ engine: LayerEngine; store: LayerFrameStore; mission: string } | null>(null);
-  const view = layersViewQuery(toggles);
+  const view = layersViewQuery(toggles, cameraId);
   useNavVideoPanel();
   useNavLease(active ? view : null);
-  useLayerDemand("depth", active && toggles.depth === true);
-  useLayerDemand("surfaces", active && toggles.surfaces === true);
+  useLayerDemand("depth", active && toggles.depth === true, cameraId);
+  useLayerDemand("surfaces", active && toggles.surfaces === true, cameraId);
   const nav = useNavStatus();
 
   useEffect(() => {
@@ -74,8 +77,8 @@ export function VideoLayers({
     if (!active || !box || !canvas) return;
     const store = new LayerFrameStore();
     const engine = new LayerEngine(store, {
-      cameraId: CAMERA_ID,
-      layers: new Set(view.slice(CAMERA_ID.length + 1).split(",")),
+      cameraId,
+      layers: new Set(view.slice(cameraId.length + 1).split(",")),
       level: "route",
       videoW: 1280,
       videoH: 720,
@@ -116,7 +119,7 @@ export function VideoLayers({
       engine.stop();
       engineRef.current = null;
     };
-  }, [active, videoRef, view]);
+  }, [active, videoRef, view, cameraId]);
 
   // Every poll goes to the store: a repeated `ts_ms` is the agent's
   // keep-alive, which refreshes only the receipt time (at - age_ms) so a
@@ -174,7 +177,7 @@ export function LayerToggles({
   return (
     <div role="group" aria-label={LAYERS_LABEL} className="flex items-center gap-3 text-xs">
       {LEASED_LAYERS.map((l) => (
-        <label key={l.id} className="inline-flex cursor-pointer items-center gap-1.5">
+        <label key={l.id} className="inline-flex cursor-pointer items-center gap-1.5 max-md:min-h-11">
           <input
             type="checkbox"
             className="h-3.5 w-3.5 accent-primary"
@@ -186,6 +189,38 @@ export function LayerToggles({
         </label>
       ))}
     </div>
+  );
+}
+
+/** The camera the detections and layers follow; hidden with only the primary. */
+export function CameraSelect({
+  options,
+  value,
+  onChange,
+  label,
+}: {
+  options: readonly string[];
+  value: string;
+  onChange: (id: string) => void;
+  label: string;
+}) {
+  if (options.length < 2) return null;
+  return (
+    <label className="inline-flex items-center gap-1.5 text-xs">
+      <span className="text-muted-foreground">{label}</span>
+      <select
+        className="h-7 rounded-md border border-border bg-background px-2 text-xs"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        data-testid="camera-select"
+      >
+        {options.map((id) => (
+          <option key={id} value={id}>
+            {id}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

@@ -72,26 +72,68 @@ fn list_lines(core: &Core, items: &[String], selected: usize, height: usize) -> 
         .collect()
 }
 
+/// The help overlay: every key under the screen, in one column, or two when
+/// one does not fit the height; whatever still does not fit is counted, and
+/// the closing line always shows.
+fn help(f: &mut Frame, core: &Core, under: &[Ctx], out: &mut FrameOut) {
+    let t = &core.theme;
+    let screen = f.area();
+    let rows = keymap::help(under);
+    // Box rows: borders and the closing line.
+    let room = usize::from(screen.height.saturating_sub(2 + 2 + 1));
+    let two = rows.len() > room;
+    let w = if two {
+        screen.width.saturating_sub(2).min(110)
+    } else {
+        64
+    };
+    let per_col = if two {
+        rows.len().div_ceil(2)
+    } else {
+        rows.len()
+    };
+    let body = per_col.min(room);
+    let inner = frame_box(f, core, "Keys", w, body as u16 + 3, out);
+    let cols = if two { 2 } else { 1 };
+    let col_w = usize::from(inner.width).saturating_sub(cols - 1) / cols;
+    let shown = (body * cols).min(rows.len());
+    let cut = rows.len() - shown;
+    // With a cut, the last cell says how many keys did not fit.
+    let fit = if cut > 0 { shown - 1 } else { shown };
+    let cell = |i: usize| -> Vec<Span<'static>> {
+        let text = if i < fit {
+            let (k, d) = rows[i];
+            return vec![
+                Span::styled(format!("{k:>8}  "), t.accented()),
+                Span::styled(truncate(d, col_w.saturating_sub(10)), t.text()),
+            ];
+        } else if i == fit && cut > 0 {
+            format!("… {} more keys", cut + 1)
+        } else {
+            String::new()
+        };
+        vec![Span::styled(text, t.dim())]
+    };
+    let mut lines: Vec<Line> = (0..body)
+        .map(|r| {
+            let mut spans = cell(r);
+            if two {
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                spans.push(Span::raw(" ".repeat(col_w.saturating_sub(used) + 1)));
+                spans.extend(cell(r + body));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    lines.push(hint(core, "Esc close"));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out: &mut FrameOut) {
     let t = &core.theme;
     let screen = f.area();
     match overlay {
-        Overlay::Help => {
-            let rows = keymap::help(under);
-            let h = (rows.len() as u16 + 3).min(screen.height.saturating_sub(2));
-            let inner = frame_box(f, core, "Keys", 64, h, out);
-            let mut lines: Vec<Line> = rows
-                .iter()
-                .map(|(k, d)| {
-                    Line::from(vec![
-                        Span::styled(format!("{k:>8}  "), t.accented()),
-                        Span::styled(d.to_string(), t.text()),
-                    ])
-                })
-                .collect();
-            lines.push(hint(core, "Esc close"));
-            f.render_widget(Paragraph::new(lines), inner);
-        }
+        Overlay::Help => help(f, core, under, out),
         Overlay::Palette(p) => {
             let h = (p.ranked.len() as u16 + 4).clamp(6, 18);
             let inner = frame_box(f, core, "Command palette", 72, h, out);
@@ -276,7 +318,10 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             if !footer.is_empty() {
                 lines.push(Line::from(Span::styled(footer, t.accent_bold())));
             }
-            lines.push(hint(core, "Space toggle · Enter done · Esc cancel"));
+            // A dialog with its own footer words its keys there.
+            if c.footer.is_none() {
+                lines.push(hint(core, "Space toggle · Enter done · Esc cancel"));
+            }
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         }
         Overlay::Result(r) => {
@@ -338,14 +383,15 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
                 } else {
                     (" ", t.bright())
                 };
-                let mut spans = vec![
+                // The confirm mark always shows: the description gives way.
+                let mark = if action.confirm { "  (confirm)" } else { "" };
+                let room = usize::from(inner.width).saturating_sub(2 + 22 + mark.chars().count());
+                let spans = vec![
                     Span::styled(format!("{marker} "), t.accented()),
                     Span::styled(format!("{:<22}", action.label), style),
-                    Span::styled(action.desc, t.dim()),
+                    Span::styled(truncate(action.desc, room), t.dim()),
+                    Span::styled(mark, t.dim()),
                 ];
-                if action.confirm {
-                    spans.push(Span::styled("  (confirm)", t.dim()));
-                }
                 lines.push(Line::from(spans));
             }
             lines.push(Line::from(""));

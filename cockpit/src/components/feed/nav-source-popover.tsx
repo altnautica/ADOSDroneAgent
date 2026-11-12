@@ -9,7 +9,7 @@ import { useState } from "react";
 import { HoldButton } from "@/components/ui/hold-button";
 import { Sheet } from "@/components/ui/sheet";
 import { sendCommand } from "@/lib/api";
-import { EKF_AXES, EKF_SETS, ekfFlagWords, sourceWord } from "@/lib/ekf-sources";
+import { EKF_AXES, EKF_SETS, ekfFlagWords, extNavLine, sourceWord } from "@/lib/ekf-sources";
 import { ackText } from "@/lib/mav-result";
 import { cn } from "@/lib/utils";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -93,10 +93,7 @@ export default function NavSourcePopover({
         </table>
         <dl className="grid grid-cols-[auto_1fr] gap-x-[0.8rem] gap-y-[0.2rem] font-mono text-[0.8rem]">
           <dt className="text-muted-foreground">{specText("nav_source.ext_nav")}</dt>
-          <dd>
-            {nav?.extnavHealth ? nav.extnavHealth.toUpperCase() : "—"}
-            {nav?.odomRateHz != null ? ` · ${nav.odomRateHz.toFixed(1)} Hz` : ""}
-          </dd>
+          <dd data-testid="nav-source-extnav">{extNavLine(nav)}</dd>
           <dt className="text-muted-foreground">{specText("nav_source.gps")}</dt>
           <dd>
             {gps?.fix_type != null ? specText("nav_source.fix", { n: gps.fix_type }) : "—"}

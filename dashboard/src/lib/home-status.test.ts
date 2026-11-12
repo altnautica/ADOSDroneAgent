@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { vehicleLiveness } from "@/hooks/use-vehicle-liveness";
-import { freshNavFrames, homePill, homeStatusLines, type HomeStatusInputs } from "@/lib/home-status";
+import { freshNavFrames, homeNavSource, homePill, homeStatusLines, pillArmed, poseAgeText, type HomeStatusInputs } from "@/lib/home-status";
 import { parsePilotState } from "@/shared/hud/cockpit-frames";
 import storageCases from "@/shared/hud/fixtures/storage-cases.json";
 import { INITIAL_LIVENESS, nextLiveness } from "@/shared/hud/vehicle-live";
@@ -84,7 +84,7 @@ describe("home status card", () => {
     // 2 s after the frame left the pilot: stale, though the HTTP read is 0.5 s old.
     const stale = at(10_500);
     expect(stale).toMatchObject({ linkLoss: null, agl: null, sticks: null });
-    expect(freshNavFrames(body, 10_000, 10_500)).toEqual({ pilot: null, follow: null });
+    expect(freshNavFrames(body, 10_000, 10_500)).toEqual({ pilot: null, follow: null, nav: null });
     // A dead pilot: every poll answers at once, serving the kept frame with a growing age.
     const kept = { pilot: { age_ms: 2_100, data: pilot }, follow: { age_ms: 2_100, data: follow } };
     expect(homeStatusLines({ ...base, ...freshNavFrames(kept, 10_400, 10_500) })).toMatchObject({ linkLoss: null, agl: null, sticks: null });
@@ -119,7 +119,7 @@ describe("home status card", () => {
     const pilot = parsePilotState({ ...raw, readiness: [], statustext: [] });
     const noHome = { ...groundTel, home: null };
     const pill = homePill({ ...base, pilot, telemetry: noHome });
-    expect(pill.alerts.map((a) => [a.id, a.source, a.text])).toEqual([["preflight:home", "preflight", "Pre-flight: Home position set"]]);
+    expect(pill.alerts.map((a) => [a.id, a.source, a.text])).toEqual([["preflight:home", "preflight", "Home position not set"]]);
     expect(homePill({ ...base, pilot, telemetry: { ...noHome, armed: true } }).text).toBe("All systems OK");
     // A check a listed base alert already reports is not listed twice.
     const noFix = homePill({ ...base, pilot, telemetry: { ...groundTel, gps: { fix_type: 1 } } });
@@ -166,4 +166,30 @@ describe("home status card", () => {
       expect(pill.alerts.map((a) => ({ source: a.source, severity: a.severity }))).toEqual(c.expected);
     });
   }
+
+  it("hides the pre-flight items while the arm state is unknown", () => {
+    const noHome = { ...groundTel, home: null };
+    const unknown = parsePilotState({ ...raw, armed: null, readiness: [], statustext: [] });
+    expect(unknown?.armed).toBeNull();
+    const pill = homePill({ ...base, pilot: unknown, telemetry: noHome });
+    expect(pill.alerts.filter((a) => a.source === "preflight")).toEqual([]);
+    // Without a pilot frame and no arm state in telemetry it is unknown too.
+    const noArm = { ...noHome, armed: undefined };
+    expect(pillArmed({ pilot: null, telemetry: noArm })).toBeNull();
+    expect(pillArmed({ pilot: null, telemetry: noHome })).toBe(false);
+  });
+
+  it("raises the nav-source item from a live EKF report that has lost position", () => {
+    const pilot = parsePilotState({ ...raw, readiness: [], statustext: [] });
+    const pill = homePill({ ...base, pilot, telemetry: { ...groundTel, ekf: { flags: 0, age_ms: 100 } } });
+    expect(pill.alerts.map((a) => [a.id, a.source])).toContainEqual(["nav_source_degraded", "nav_source"]);
+    expect(homeNavSource({ telemetry: groundTel, live: true, nav: null }).kind).toBe("stale");
+  });
+
+  it("reads the pose age from the fresh nav frame", () => {
+    const body = { nav: { age_ms: 0, data: { mode: "vio", pose_age_ms: 42.4 } } };
+    const nav = freshNavFrames(body, 1_000, 1_000).nav;
+    expect(poseAgeText(nav)).toBe("Pose age 42 ms");
+    expect(poseAgeText(null)).toBeNull();
+  });
 });

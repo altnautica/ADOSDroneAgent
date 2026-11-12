@@ -7,6 +7,7 @@ import { getParams } from "@/lib/fc-config";
 import type { VehicleState } from "@/lib/types";
 import { EKF_FLAG, type NavSourceInput } from "@/shared/hud/nav-source";
 import type { NavState } from "@/shared/hud/nav-types";
+import { specText } from "@/shared/hud/spec-text";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 export const EKF_SETS = [1, 2, 3] as const;
@@ -93,4 +94,14 @@ export function navSourceInput(
     lastCommandedSet,
     params: params && Object.keys(params).length > 0 ? params : null,
   };
+}
+
+/** The nav-source popover's external-nav row: vision-nav's health, its
+ *  odometry rate and the age of its newest pose (`pose_age_ms`), each while
+ *  reported. */
+export function extNavLine(nav: Pick<NavState, "extnavHealth" | "odomRateHz" | "poseAgeMs"> | null): string {
+  const parts = [nav?.extnavHealth ? nav.extnavHealth.toUpperCase() : "—"];
+  if (nav?.odomRateHz != null) parts.push(`${nav.odomRateHz.toFixed(1)} Hz`);
+  if (nav?.poseAgeMs != null) parts.push(specText("nav_source.pose_age", { ms: Math.round(nav.poseAgeMs) }));
+  return parts.join(" · ");
 }

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { ReadErrorCard } from "@/components/read-error-card";
+import { ConfigToggle } from "@/components/settings/config-fields";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { RiskBadge } from "@/components/settings/risk-badge";
 import { Button } from "@/components/ui/button";
@@ -28,12 +30,14 @@ export function AdvancedSettings() {
   const [busy, setBusy] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  // Re-seed per value: a refetch after one write must not wipe another draft.
+  const read = config.data !== undefined;
   useEffect(() => {
-    if (config.data) {
-      setLogLevel((config.data.logging?.level?.toLowerCase() as LogLevel) ?? "info");
-      setBoardOverride(config.data.agent?.board_override ?? "");
-    }
-  }, [config.data]);
+    if (read) setLogLevel(initialLevel);
+  }, [read, initialLevel]);
+  useEffect(() => {
+    if (read) setBoardOverride(initialOverride);
+  }, [read, initialOverride]);
 
   async function applyLogLevel(next: LogLevel) {
     const previous = logLevel;
@@ -86,8 +90,26 @@ export function AdvancedSettings() {
     return true;
   }
 
+  if (config.isLoading) {
+    return <p className="text-[11px] text-muted-foreground">{t("settings.shared.readingConfig")}</p>;
+  }
+  if (config.isError || !config.data) {
+    return <ReadErrorCard message={t("settingsMore.advanced.readFailed")} onRetry={() => void config.refetch()} />;
+  }
+
   return (
     <div className="space-y-6">
+      <Card id="log-store">
+        <CardContent className="pt-5 pb-5">
+          <ConfigToggle
+            configKey="logging.store.enabled"
+            label={t("settingsMore.advanced.logStoreLabel")}
+            hint={t("settingsMore.advanced.logStoreHint")}
+            value={(config.data.logging as { store?: { enabled?: boolean } } | undefined)?.store?.enabled}
+          />
+        </CardContent>
+      </Card>
+
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
           <div className="flex items-center gap-2 text-sm font-semibold">

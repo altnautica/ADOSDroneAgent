@@ -5,10 +5,12 @@
 // rule) and is a real <button> so touch and the shared focus ring both drive it.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { toneClass, toneDotClass, type Tone } from "@/lib/tone";
+import "@/shared/i18n";
 
 /** A small round status dot. */
 export function Dot({ tone }: { tone: Tone }) {
@@ -301,7 +303,8 @@ export function ConfirmButton({
 /** A small right-aligned header badge that reads "stale" when a poll is failing
  *  (the honest-surface signal — the data may be old). */
 export function StaleBadge({ stale }: { stale?: boolean }) {
-  if (stale) return <span className="text-[0.75rem] text-warn">stale</span>;
+  const { t } = useTranslation();
+  if (stale) return <span className="text-[0.75rem] text-warn">{t("cockpit.stale")}</span>;
   return null;
 }
 
@@ -309,8 +312,23 @@ export function StaleBadge({ stale }: { stale?: boolean }) {
  *  that is not available on this profile. */
 export function EmptyNote({ children }: { children: ReactNode }) {
   return (
-    <div className="flex flex-1 items-center justify-center px-[1rem] text-center text-[0.82rem] text-muted-foreground">
+    <div className="flex flex-1 flex-col items-center justify-center px-[1rem] text-center text-[0.82rem] text-muted-foreground">
       {children}
+    </div>
+  );
+}
+
+/** A failed read: says it failed (never reads as empty or as a definite "none")
+ *  and offers a Retry that re-runs the read. */
+export function ErrorNote({ children, onRetry }: { children: ReactNode; onRetry: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div
+      role="alert"
+      className="flex flex-col items-center justify-center gap-[0.5rem] px-[1rem] py-[0.6rem] text-center text-[0.82rem] text-warn"
+    >
+      <span>{children}</span>
+      <ActionButton label={t("common.retry")} onClick={onRetry} />
     </div>
   );
 }

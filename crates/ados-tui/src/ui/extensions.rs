@@ -259,6 +259,10 @@ impl Tab for ExtensionsTab {
         vec![Ctx::Extensions, Ctx::List]
     }
 
+    fn has_panes(&self) -> bool {
+        true
+    }
+
     fn subs(&self, core: &Core) -> Vec<Sub> {
         let mut subs = vec![
             Sub::every_ms(ResourceId::Plugins, "/api/plugins", 8_000),

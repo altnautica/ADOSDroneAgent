@@ -142,7 +142,7 @@ describe("status pill", () => {
       storagePct: 98,
     });
     expect(a.map((x) => x.source).sort()).toEqual(["fc_prearm", "pilot_readiness", "storage"]);
-    expect(a.find((x) => x.source === "fc_prearm")!.text).toBe("Flight controller: Throttle below failsafe");
+    expect(a.find((x) => x.source === "fc_prearm")!.text).toBe("Throttle below failsafe");
     expect(a.find((x) => x.source === "storage")!.severity).toBe("critical");
   });
 
@@ -220,7 +220,7 @@ describe("status pill", () => {
     expect(a.map((x) => [x.id, x.source, x.severity, x.text])).toEqual([
       ["agent_unreachable", "link", "critical", "Agent unreachable"],
       ["controller_lost", "controller", "warning", "Controller lost"],
-      ["preflight:gps", "preflight", "warning", "Pre-flight: GNSS fix"],
+      ["preflight:gps", "preflight", "warning", "GNSS fix"],
     ]);
   });
 

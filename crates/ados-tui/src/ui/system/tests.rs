@@ -124,3 +124,26 @@ fn armed_or_unknown_refuses_lifecycle_actions() {
     assert!(app.core.overlays.is_empty());
     assert!(app.core.shell.is_none());
 }
+
+#[test]
+fn update_without_a_known_update_is_dim_and_says_why_on_press() {
+    let mut app = test_app();
+    fixtures(&mut app);
+    app.activate_tab(TabId::System);
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        text.contains("update the agent (no update known)"),
+        "{text}"
+    );
+
+    let mut tab = SystemTab::default();
+    tab.on_command(&mut app.core, Command::Update);
+    assert!(app.core.shell.is_none());
+    let last = app.core.toasts.history().last().map(|t| t.text.clone());
+    assert_eq!(last.as_deref(), Some("Update check unavailable"));
+
+    *app.core.latest.lock().unwrap() = Some("0.99.108".into());
+    tab.on_command(&mut app.core, Command::Update);
+    let last = app.core.toasts.history().last().map(|t| t.text.clone());
+    assert_eq!(last.as_deref(), Some("Already up to date"));
+}

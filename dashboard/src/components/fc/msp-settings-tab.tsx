@@ -247,7 +247,7 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
                         />
                       )}
                       <span
-                        className="text-muted-foreground/70 w-24 shrink-0 truncate text-[10px]"
+                        className="text-muted-foreground w-24 shrink-0 truncate text-[10px]"
                         title={hint}
                       >
                         {hint}

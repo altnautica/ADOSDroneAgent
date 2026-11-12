@@ -1,0 +1,1 @@
+import{n as e}from"./api-fetch-7GB0VyUK.js";function t(){return e(`/api/wfb`)}function n(t){return e(`/api/video/config`,{method:`POST`,body:t})}function r(t){return e(`/api/wfb/tx-power`,{method:`PUT`,body:{tx_power_dbm:t}})}export{n,r,t};

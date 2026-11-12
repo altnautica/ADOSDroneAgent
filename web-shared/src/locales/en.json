@@ -5,21 +5,22 @@
     "close": "Close",
     "loading": "Loading…",
     "dash": "—",
-    "refusedFallback": "This device refused the request."
+    "refusedFallback": "This device refused the request.",
+    "back": "Back"
   },
   "nav": {
     "home": "Home",
     "pairing": "Pairing",
     "extensions": "Extensions",
     "peripherals": "Peripherals",
-    "logs": "Logs",
+    "logs": "Agent logs",
     "diagnostics": "Diagnostics",
     "settings": "Settings",
     "telemetry": "Telemetry",
     "video": "Video",
-    "transmit": "WFB Transmit",
-    "receive": "WFB Receive",
-    "io": "Display & Joystick",
+    "transmit": "Radio transmit",
+    "receive": "Radio receive",
+    "io": "Controllers & display",
     "mesh": "Mesh",
     "sources": "Sources",
     "navigation": "navigation",
@@ -44,7 +45,14 @@
     "lora": "LoRa",
     "capture": "Capture",
     "sensors": "Sensors",
-    "aircraftSetup": "Aircraft setup"
+    "aircraftSetup": "Aircraft setup",
+    "feed": "Feed",
+    "node": "Node",
+    "link": "Radio link",
+    "uplink": "Uplink",
+    "system": "System",
+    "params": "Parameters",
+    "msp": "MSP"
   },
   "layout": {
     "settings": {
@@ -73,7 +81,9 @@
       "intro": "Live agent configuration. Risky changes (passwords, profile switches, board override) require explicit Save and a confirm prompt.",
       "captureBlurb": "Capture storage and camera exposure.",
       "sensorsBlurb": "Sensor hub, rig file and clock sources.",
-      "aircraftSetupBlurb": "Calibrate, configure and tune the flight controller."
+      "aircraftSetupBlurb": "Calibrate, configure and tune the flight controller.",
+      "skipToContent": "Skip to settings",
+      "sectionLabel": "Settings section"
     },
     "header": {
       "copyHost": "copy {{host}}",
@@ -341,11 +351,11 @@
   },
   "wfb": {
     "tx": {
-      "title": "WFB Transmit",
+      "title": "Radio transmit",
       "notRunning": "WFB-tx is not running. Plug in an RTL8812EU adapter; the agent starts the transmit pipeline once it detects one. Channel and TX power come from <code>video.wfb</code> in /etc/ados/config.yaml."
     },
     "rx": {
-      "title": "WFB Receive",
+      "title": "Radio receive",
       "notRunning": "WFB-rx is not running. Plug in an RTL8812EU adapter; the agent starts the receive pipeline once it detects one. Channel and TX power come from <code>video.wfb</code> in /etc/ados/config.yaml.",
       "fecCounts": "{{recovered}} ok · {{failed}} fail"
     },
@@ -374,7 +384,8 @@
     "state": {
       "connecting": "connecting",
       "error": "error",
-      "disabled": "disabled"
+      "disabled": "disabled",
+      "stale": "Stale"
     },
     "tuning": {
       "title": "Link tuning",
@@ -448,8 +459,8 @@
       "hintDrone": "WebRTC is preferred for low latency. HLS has ~3-5 s lag."
     },
     "route": {
-      "blurb": "Live stream, encoder configuration, camera assignment, and latency probe.",
-      "rescan": "Rescan",
+      "blurb": "Live stream, encoder configuration and latency probe.",
+      "rescan": "Refresh",
       "snapshot": "Snapshot",
       "snapshotFailed": "snapshot failed",
       "rescanFailed": "rescan failed",
@@ -457,7 +468,8 @@
       "radio": "Radio",
       "latency": "Latency",
       "camerasDetected": "Cameras detected",
-      "noCameras": "No cameras detected. Plug in a USB UVC camera or a MIPI-CSI module and Rescan."
+      "noCameras": "No cameras detected. Plug in a USB UVC camera or a MIPI-CSI module and Refresh.",
+      "camerasReadFailed": "Could not read the cameras from this node."
     },
     "error": {
       "noFrames": "No video frames received.",
@@ -468,7 +480,7 @@
   },
   "io": {
     "route": {
-      "title": "Display & Joystick",
+      "title": "Controllers & display",
       "blurb": "HDMI kiosk display, joystick / gamepad assignment, and Bluetooth pairings for this ground station.",
       "refresh": "Refresh"
     },
@@ -491,7 +503,10 @@
       "primary": "primary",
       "setting": "Setting…",
       "makePrimary": "Make primary",
-      "setPrimaryFailed": "Could not set the primary controller."
+      "setPrimaryFailed": "Could not set the primary controller.",
+      "primaryTitle": "Make {{name}} the primary controller?",
+      "primaryBody": "RC input moves to this controller.",
+      "armedRefused": "Disarm first: the vehicle is armed."
     },
     "bluetooth": {
       "title": "Bluetooth",
@@ -508,7 +523,8 @@
       "pairing": "Pairing…",
       "pairingFailed": "Pairing failed.",
       "pairedNotConnected": "Paired, but the device did not connect.",
-      "pairedConnected": "Paired and connected."
+      "pairedConnected": "Paired and connected.",
+      "readFailed": "Could not read the Bluetooth devices from this node."
     }
   },
   "telemetry": {
@@ -531,7 +547,7 @@
       "searchPlaceholder": "Search by name (e.g. BATT_LOW_VOLT)…",
       "modifiedOnly": "Modified only",
       "discard": "Discard",
-      "saveButton": "Save {{n}}",
+      "saveButton": "Write {{n}} to flight controller",
       "loading": "loading parameters…",
       "serviceUnreachable": "Couldn't reach the parameter service.",
       "priming": "Priming parameter cache from FC…",
@@ -543,15 +559,18 @@
       "emptyBody": "Connect a flight controller and the agent fires PARAM_REQUEST_LIST on connect so the table fills in automatically.",
       "setBits": "Set bits…",
       "noMatch": "No parameters match the current filter.",
-      "confirmTitle_one": "Save {{count}} parameter?",
-      "confirmTitle_other": "Save {{count}} parameters?",
+      "confirmTitle_one": "Write {{count}} parameter to the flight controller?",
+      "confirmTitle_other": "Write {{count}} parameters to the flight controller?",
       "confirmBody": "The agent will write each parameter to the FC and wait for a PARAM_VALUE ack (up to 2s per param).",
       "confirmPx4": "PX4 stores the parameter on write — there's no separate flash step.",
       "confirmArdupilot": "ArduPilot saves to EEPROM on receipt — there's no separate flash step.",
       "confirmWarning": "Bad parameter values can affect flight behaviour. Test on a bench rig first.",
-      "saveAll": "Save all",
+      "saveAll": "Write to flight controller",
       "writeBlockedArmed": "Vehicle is armed — parameter writes are blocked. Disarm to save changes.",
-      "writeBlockedUnknown": "Armed state not reported yet — parameter writes are blocked until the flight controller reports it disarmed."
+      "writeBlockedUnknown": "Armed state not reported yet — parameter writes are blocked until the flight controller reports it disarmed.",
+      "outOfRange": "(outside the documented range)",
+      "moreStaged_one": "…and {{count}} more",
+      "moreStaged_other": "…and {{count}} more"
     },
     "sensors": {
       "readFailed": "Couldn't read the vehicle state from the agent.",
@@ -590,7 +609,7 @@
     "sensors": {
       "accel": "Accel",
       "baro": "Baro",
-      "mag": "Mag",
+      "mag": "Compass",
       "gps": "GPS",
       "rangefinder": "Rangefinder",
       "opticalFlow": "Optical flow",
@@ -683,12 +702,21 @@
       "confirmAccessPointStops": "A drone runs no Wi-Fi access point, so the node's access point stops. A phone or laptop joined to it loses the node; reach it over another network.",
       "confirmRoleRestart": "ados-supervisor restarts to apply the role. This page may disconnect for a few seconds.",
       "armedTitle": "Vehicle is armed",
-      "applyAnyway": "Apply anyway"
+      "applyAnyway": "Apply anyway",
+      "source": {
+        "detected": "detected from hardware",
+        "tiebreaker": "picked by tiebreak",
+        "override": "set by override",
+        "default": "default",
+        "user": "set by the operator"
+      },
+      "suggested": "Suggested: {{profile}}",
+      "applySuggestion": "Apply suggestion"
     },
     "network": {
       "hotspotFailed": "Hotspot toggle failed.",
       "hotspotUpdated": "Hotspot updated.",
-      "hotspotTitle": "Setup hotspot",
+      "hotspotTitle": "Wi-Fi hotspot",
       "hotspotHintNamed": "Spins up a captive AP named <code>{{ssid}}</code> on wlan0 so a phone or laptop can join the agent over Wi-Fi and finish onboarding without a wired connection.",
       "hotspotHintUnnamed": "Spins up a captive AP on wlan0 so a phone or laptop can join the agent over Wi-Fi and finish onboarding without a wired connection. This agent has not reported the network name, so check the configured hotspot SSID on the rig before you go looking for it.",
       "hotspotWarning": "Enabling this disconnects any active Wi-Fi client link (the radio can host one or the other, not both).",
@@ -696,7 +724,9 @@
       "confirmBodyNamed": "The agent is currently joined to <current>{{current}}</current>. Enabling the setup hotspot will drop that link. The rig stays reachable via the <code>{{ssid}}</code> AP or any other uplink (ethernet, USB tether, 4G) until you toggle the hotspot back off.",
       "confirmBodyUnnamed": "The agent is currently joined to <current>{{current}}</current>. Enabling the setup hotspot will drop that link. The rig stays reachable via the setup AP or any other uplink (ethernet, USB tether, 4G) until you toggle the hotspot back off.",
       "aWifiNetwork": "a Wi-Fi network",
-      "confirmLabel": "Switch to AP"
+      "confirmLabel": "Switch to AP",
+      "disableTitle": "Turn the hotspot off?",
+      "disableBody": "Phones and laptops joined to the hotspot lose their connection, this page too if you reached it over the hotspot."
     },
     "cellular": {
       "modemEnabled": "Modem enabled.",
@@ -734,7 +764,13 @@
       "noModemManagerNote": "This node has no live modem manager, so signal and usage are not reported here. You can still configure the cellular uplink keys below; a ground-station node shows live modem status.",
       "uplinkHintConfig": "Enable an attached USB cellular modem as an uplink.",
       "apnHint": "The carrier access point name for your SIM.",
-      "configReadFailed": "Could not read the cellular config from this node."
+      "configReadFailed": "Could not read the cellular config from this node.",
+      "enableTitle": "Turn on the cellular uplink?",
+      "enableBody": "The node brings up the modem and may route traffic over it, which uses mobile data.",
+      "disableTitle": "Turn off the cellular uplink?",
+      "disableBody": "The node stops using the modem. If this page reaches the node over cellular, it disconnects.",
+      "apnConfirmTitle": "Change the APN?",
+      "apnConfirmBody": "The modem reconnects with the new APN. A cellular link drops for a moment, and stays down if the APN is wrong."
     },
     "region": {
       "countryUS": "United States",
@@ -767,7 +803,8 @@
       "confirmTitle": "Change operating region?",
       "confirmUnrestricted": "The radio will run unrestricted, with no region enforced. You are responsible for legal RF operation in your jurisdiction.",
       "confirmEnforce": "The radio will enforce <code>{{region}}</code> channel and power rules.",
-      "theRegion": "the region"
+      "theRegion": "the region",
+      "readFailed": "Could not read the region config from this node."
     },
     "mavlink": {
       "sourceAutoLabel": "Auto",
@@ -798,7 +835,9 @@
       "disabledSuffix": " (disabled)",
       "endpointsHint": "The MAVLink WebSocket bridge a ground station dials. Endpoints are managed at install time, so they are read-only here.",
       "notConfiguredTitle": "Not configured here",
-      "notConfiguredBody": "Message signing is owned by Mission Control in the browser; the agent does not persist key material, so there is nothing to set here. The flight controller's own MAVLink stream rates are negotiated per connection, not stored in the agent config. MAVLink WebSocket authentication enforcement lives on the Security page."
+      "notConfiguredBody": "Message signing is owned by Mission Control in the browser; the agent does not persist key material, so there is nothing to set here. The flight controller's own MAVLink stream rates are negotiated per connection, not stored in the agent config. MAVLink WebSocket authentication enforcement lives on the Security page.",
+      "sourceConfirmTitle": "Change the flight controller link?",
+      "sourceConfirmBody": "The agent reconnects to the flight controller over {{source}}. Telemetry and control drop until the new link answers, so check the port and baud first."
     },
     "camera": {
       "rotation0": "No rotation.",
@@ -808,7 +847,7 @@
       "readFailed": "Could not read the camera config from this node.",
       "notExposed": "Camera image settings are not exposed by this agent version.",
       "rotationTitle": "Rotation",
-      "rotationHint": "Clockwise image rotation applied by the encoder before the frame is compressed and sent to the live feed. The pipeline restarts to apply a change (the stretch is applied per-leg from the same config key).",
+      "rotationHint": "Clockwise image rotation applied by the encoder before the frame is compressed and sent to the live feed. Applies at the next video restart (the stretch is applied per-leg from the same config key).",
       "hflip": "Horizontal flip",
       "hflipHint": "Mirror the image left-to-right. Useful for a camera mounted facing backwards.",
       "vflip": "Vertical flip",
@@ -817,7 +856,7 @@
     "display": {
       "none": "none",
       "title": "Local kiosk display",
-      "description": "HDMI and SPI displays for the local kiosk renderer. Installing an overlay edits the boot config and needs a reboot; run it from the installer with <code>--upgrade --display &lt;id&gt;</code>.",
+      "description": "HDMI and SPI displays for the local kiosk renderer. Installing an overlay edits the boot config and needs a reboot; run it from the installer with <code>--upgrade --display ‹id›</code>.",
       "active": "Active",
       "loading": "loading…",
       "supportedOnBoard": "Supported on this board ({{board}})",
@@ -855,7 +894,9 @@
       "cfTokenLabel": "Tunnel token",
       "cfTokenPlaceholder": "Set a new token",
       "cfSetToken": "Set token",
-      "readingConfig": "Reading config…"
+      "readingConfig": "Reading config…",
+      "armedOverride": "The vehicle is armed. Applying this now can drop the link. Apply anyway?",
+      "leaveUnsaved": "Leave this page? Your unsaved changes are lost."
     },
     "capture": {
       "storageTitle": "Capture storage",
@@ -879,7 +920,8 @@
         "slow": "slow",
         "short": "short"
       },
-      "exposureSaved": "Exposure updated."
+      "exposureSaved": "Exposure updated.",
+      "storageReadFailed": "Could not read the storage status from this node."
     },
     "sensors": {
       "hubTitle": "Sensor hub",
@@ -914,14 +956,14 @@
       "wsEnforceOn": "WS auth enforcement on.",
       "wsEnforceOff": "WS auth enforcement off.",
       "wsEnforceError": "Could not change WS auth enforcement.",
-      "wsEnforceLabel": "Enforce MAVLink WS auth",
+      "wsEnforceLabel": "Enforce raw MAVLink WebSocket auth",
       "wsEnforceHint": "When on, the raw MAVLink WebSocket proxy rejects an off-box connection from a paired agent that presents no valid pairing key. On-box and unpaired connections stay open. Off by default: enabling it can lock out a ground station that has not been keyed.",
       "wsEnforceConfirmTitle": "Enforce MAVLink WS authentication?",
       "wsEnforceConfirmBody": "A paired agent will refuse an off-box MAVLink WebSocket connection that carries no valid pairing key. Make sure any ground station that talks to this node over the WebSocket bridge is paired first, or it will lose the link.",
       "wsEnforceConfirm": "Enforce",
       "readingConfig": "Reading config…",
       "readError": "Could not read the security config from this node.",
-      "apiKeyTitle": "Agent API key",
+      "apiKeyTitle": "Pairing API key",
       "badgeSet": "set",
       "badgeNotSet": "not set",
       "badgeUnknown": "unknown",
@@ -931,7 +973,7 @@
       "apiKeyNotSet": "This node is not paired, so no key is required yet. Its data routes answer the node itself and its hotspot, USB and link-local connections; a browser elsewhere on the LAN needs the dashboard PIN, and remote callers are refused. Pair this node from Mission Control to require a key.",
       "apiKeyConfiguredUnpaired": "A key is configured in security.api.api_key, but it is only enforced once the node is paired.",
       "apiKeyReadError": "Could not read the pairing state from this node.",
-      "pinTitle": "Dashboard access PIN",
+      "pinTitle": "Dashboard PIN",
       "pinReadError": "Could not read the dashboard PIN state from this node.",
       "pinSet": "A PIN gates off-box access to this on-box dashboard. Set or reset it from the access splash on a fresh visit, or from Mission Control's dashboard-access card. It is managed there, not here.",
       "pinNotSet": "No PIN is set, so off-box visitors reach this dashboard with the agent key alone. Set one from the access splash or from Mission Control's dashboard-access card.",
@@ -939,14 +981,20 @@
       "hmacHint": "Require an HMAC signature on authenticated requests. Only effective once an HMAC secret is provisioned; enabling it without one has no effect.",
       "setupTokenLabel": "Require a setup token",
       "setupTokenHint": "Require an X-ADOS-Setup-Token header on every setup mutation. Off trusts any browser served the setup webapp from this agent's own port (same-origin).",
-      "flagsUnavailable": "Auth enforcement flags are not exposed by this agent version."
+      "flagsUnavailable": "Auth enforcement flags are not exposed by this agent version.",
+      "wsDisableTitle": "Stop enforcing MAVLink WebSocket auth?",
+      "wsDisableBody": "Any client on the network can then read and command the MAVLink stream without a key.",
+      "setupTokenOnTitle": "Require the setup token?",
+      "setupTokenOnBody": "Setup requests without the token are refused, including from a browser that has not entered it.",
+      "setupTokenOffTitle": "Stop requiring the setup token?",
+      "setupTokenOffBody": "Anyone who can reach this node can then run setup."
     },
     "macPin": {
       "unknownAdapter": "unknown adapter",
       "chipset": "Chipset",
       "pinnedMac": "Pinned MAC",
       "currentMac": "Current MAC",
-      "source": "Source",
+      "source": "Detected by",
       "deferred": "Deferred: {{reason}}",
       "pinning": "Pinning…",
       "pinNextBoot": "Pin (next boot)",
@@ -959,7 +1007,7 @@
       "stillPinned": "The adapter is still pinned for the next boot.",
       "unpinned": "Unpinned.",
       "unpinError": "Could not unpin the adapter.",
-      "autoPinLabel": "Auto-pin a stable MAC",
+      "autoPinLabel": "Automatic MAC pinning",
       "autoPinHint": "Detect an onboard adapter with no hardware MAC (it randomizes each boot, churning this node's IP) and pin a stable address. The pin is written for the next boot and never touches the live link.",
       "liveRetagLabel": "Allow live re-tag",
       "liveRetagHint": "Let the agent re-tag the live interface to fix the IP this session without a reboot. Off by default because re-tagging drops any connection over that interface.",
@@ -1021,9 +1069,9 @@
       "formationCircle": "Circle",
       "formationCircleDesc": "Evenly spaced on a ring around the anchor.",
       "unavailable": "Swarm defaults are not exposed by this agent version.",
-      "configOnlyBanner": "<strong>Configuration only.</strong> These values persist to the node's config, but there is no runtime swarm consumer yet. They set the defaults a future swarm layer will read.",
+      "configOnlyBanner": "These values drive the onboard swarm runtime. It picks up a saved change within seconds and commands the flight controller while Enabled is on and the aircraft is in GUIDED.",
       "participationLabel": "Swarm participation",
-      "participationHint": "Persist this node's intent to join a swarm. No runtime consumer acts on it yet.",
+      "participationHint": "Persist this node's intent to join a swarm.",
       "roleLabel": "Role",
       "roleHint": "The node's intended swarm role (e.g. auto).",
       "formationTitle": "Default formation",
@@ -1032,7 +1080,9 @@
       "spacingHint": "The default inter-node spacing a formation should target.",
       "readError": "Could not read the swarm config from this node.",
       "title": "Swarm",
-      "configOnlyBadge": "config only"
+      "configOnlyBadge": "config only",
+      "enableTitle": "Turn the swarm runtime on?",
+      "enableBody": "The onboard swarm runtime commands the flight controller while Enabled is on and the aircraft is in GUIDED."
     },
     "selfHeal": {
       "readError": "Could not read the self-heal config from this node.",
@@ -1110,7 +1160,8 @@
       "predictionLine": "Time to reserve <v>{{eta}}</v> · drain <v>{{drain}}</v> · mean current <v>{{current}}</v>",
       "activeAnomalies": "Active anomalies",
       "recentEvents": "Recent events",
-      "eventLine": "<rule>{{rule}}</rule> {{state}} at {{value}}"
+      "eventLine": "<rule>{{rule}}</rule> {{state}} at {{value}}",
+      "orderNote": "Critical must stay below low: the agent refuses a pair in the wrong order. The flight controller's own failsafe is set on the controller, not here."
     },
     "advanced": {
       "logLevelFailed": "Log level update failed.",
@@ -1125,7 +1176,10 @@
       "saveOverride": "Save override",
       "confirmTitle": "Override the detected board?",
       "confirmBody": "HAL will use <slug>{{slug}}</slug> on the next config reload. If the slug is wrong, peripherals keyed on the board profile (display, GPIO, encoder API) may stop working until you clear the override.",
-      "applyOverride": "Apply override"
+      "applyOverride": "Apply override",
+      "logStoreLabel": "Keep logs on this node",
+      "logStoreHint": "Stores agent logs for the Logs page. Takes effect after the agent restarts.",
+      "readFailed": "Could not read the advanced config from this node."
     },
     "vision": {
       "readError": "Could not read the vision config from this node.",
@@ -1191,7 +1245,11 @@
       "parsing": "Parsing…",
       "install": "Install",
       "loading": "loading…",
-      "dropToInstall": "Drop the .adosplug to install"
+      "dropToInstall": "Drop the .adosplug to install",
+      "listFailed": "Could not read the installed extensions from this node.",
+      "removeTitle": "Remove {{name}}?",
+      "removeBody": "The extension stops and is removed from this node.",
+      "installUrl": "Install from URL"
     },
     "empty": {
       "title": "No extensions installed.",
@@ -1207,11 +1265,16 @@
       "parseFailed": "Extension parse failed."
     },
     "status": {
-      "enabled": "enabled",
-      "disabled": "disabled",
-      "signed": "signed",
-      "unsigned": "unsigned",
-      "permissionsGranted": "{{granted}}/{{total}} permissions granted"
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "signed": "Signed",
+      "unsigned": "Unsigned",
+      "permissionsGranted": "Agent permissions granted {{granted}}/{{total}}",
+      "installed": "Installed",
+      "running": "Running",
+      "failed": "Failed",
+      "incompatible": "Incompatible",
+      "unknown": "Unknown"
     },
     "actions": {
       "enable": "Enable",
@@ -1246,19 +1309,19 @@
     },
     "install": {
       "failed": "Install failed: {{detail}}",
-      "notGranted": "Plugin installed but not granted: {{missing}}.",
+      "notGranted": "Extension installed but not granted: {{missing}}.",
       "nowDisabled": "The extension is disabled.",
       "disableManually": "Disable it from the Extensions list.",
       "installed": "{{name}} installed.",
       "error": "Install error: {{message}}",
       "installing": "Installing {{name}}…",
       "title": "Install extension",
-      "description": "Review what this plugin is and what it will add. Permissions come on the next screen.",
+      "description": "Review what this extension is and what it will add. Permissions come on the next screen.",
       "byAuthor": "by {{author}}",
       "signedBy": "Signed by {{signer}}",
       "whatItDoes": "What it does",
-      "unsignedWarning": "This plugin is unsigned. Only install plugins from sources you trust.",
-      "pluginId": "Plugin id:",
+      "unsignedWarning": "This extension is unsigned. Only install extensions from sources you trust.",
+      "pluginId": "Extension id:",
       "cancel": "Cancel",
       "continue": "Continue",
       "approveTitle": "Approve permissions",
@@ -1266,10 +1329,16 @@
       "noPermissions": "No permissions declared.",
       "required": "required",
       "optional": "optional",
-      "understand": "I understand this plugin can take {{risk}}-risk actions.",
+      "understand": "I understand this extension can take {{risk}}-risk actions.",
       "wait": "Wait {{seconds}}…",
       "approve": "Approve and install"
-    }
+    },
+    "failure": {
+      "tampered": "Files changed since install. Reinstall the extension.",
+      "signerRevoked": "Its signer was revoked. Reinstall it from a trusted source.",
+      "other": "Stopped: {{reason}}"
+    },
+    "incompatible": "Not compatible with this agent version."
   },
   "pairing": {
     "subject": {
@@ -1287,18 +1356,19 @@
       "owner": "owner",
       "awaiting": "awaiting pair",
       "codeHidden": "The code is shown only on this node's own networks. Open the dashboard from the node's LAN, hotspot or USB link to read it.",
-      "unpairFailed": "unpair failed"
+      "unpairFailed": "Unpair failed."
     },
     "confirm": {
       "title": "Unpair this {{subject}}?",
-      "description": "Mission Control loses access until the node is paired again, and this dashboard asks for its PIN again."
+      "description": "Mission Control loses access until the node is paired again, and this dashboard asks for its PIN again.",
+      "flightWarning": "If the vehicle is flying, Mission Control loses it until it is paired again."
     },
     "accept": {
       "cardTitle": "Accept from Mission Control",
       "label": "Accept code from Mission Control",
-      "placeholder": "paste 6-digit code",
+      "placeholder": "6-character code",
       "pair": "Pair",
-      "failed": "pair failed",
+      "failed": "Could not accept the pairing code. Check it and try again.",
       "failedDefault": "Pairing failed. Check the code and try again.",
       "success": "paired successfully."
     },
@@ -1395,7 +1465,10 @@
       "found_other": "{{count}} found",
       "noNetworks": "No networks found. Tap Refresh to scan again.",
       "forgetTitle": "Forget this network?",
-      "forgetDescription": "Remove the saved credentials for <name>{{name}}</name>. The agent will not auto-reconnect until you join it again."
+      "forgetDescription": "Remove the saved credentials for <name>{{name}}</name>. The agent will not auto-reconnect until you join it again.",
+      "disconnectTitle": "Disconnect from {{ssid}}?",
+      "disconnectBody": "This page drops if you reached it over this network.",
+      "scanFailed": "Could not scan for Wi-Fi networks on this node."
     }
   },
   "uplink": {
@@ -1416,7 +1489,8 @@
       "standingDown": "standing down ({{reason}})",
       "unknown": "unknown",
       "broadcasting": "broadcasting",
-      "off": "off"
+      "off": "off",
+      "capUsed": "{{percent}} % of cap"
     },
     "toast": {
       "orderSaved": "Failover order saved.",
@@ -1441,24 +1515,30 @@
       "description": "The order the agent tries uplinks in. It falls to the next when the one above drops.",
       "moveUp": "Move {{name}} up",
       "moveDown": "Move {{name}} down",
-      "empty": "The agent has not reported a failover order yet."
+      "empty": "The agent has not reported a failover order yet.",
+      "confirmTitle": "Change the uplink order?",
+      "confirmBody": "{{name}} moves to position {{position}}. The node may switch its active uplink, which can drop this page for a few seconds."
     },
     "share": {
       "title": "Share uplink with AP clients",
-      "description": "NAT the active uplink out to devices joined to this node's access point, so a phone or laptop on the AP reaches the internet through the ground station."
+      "description": "NAT the active uplink out to devices joined to this node's access point, so a phone or laptop on the AP reaches the internet through the ground station.",
+      "confirmOnTitle": "Share the uplink?",
+      "confirmOnBody": "Devices on the hotspot get internet through this node's uplink.",
+      "confirmOffTitle": "Stop sharing the uplink?",
+      "confirmOffBody": "Devices on the hotspot lose internet access through this node."
     },
     "notGroundStation": "The uplink matrix, failover order and uplink sharing run on the ground-station uplink manager. This node is a <code>{{profile}}</code>; its network settings are the hotspot and Wi-Fi client below."
   },
   "logs": {
     "page": {
-      "title": "Logs",
+      "title": "Agent logs",
       "blurb": "Live tail of the agent's structured logger. Filter by level or logger name.",
       "resume": "Resume",
       "pause": "Pause"
     },
     "filter": {
       "level": "Level",
-      "anyLevel": "any",
+      "anyLevel": "Any",
       "logger": "Logger contains",
       "loggerPlaceholder": "filter by logger name (optional)"
     },
@@ -1467,13 +1547,19 @@
       "live": " (live)"
     },
     "empty": {
-      "loading": "loading…",
-      "noMatch": "no log entries match the filter.",
-      "noEntries": "no log entries yet.",
+      "loading": "Loading…",
+      "noMatch": "No log entries match the filter.",
+      "noEntries": "No log entries yet.",
       "hint": "Drop filters or restart a service to see fresh activity.",
       "storeOff": "The logging store is off or not answering, so this node has no log history to show.",
-      "storeOffHint": "It is off by default. While it is off the system journal is the log of record (journalctl -u ados-supervisor -f). To keep logs here, set logging.store.enabled: true in /etc/ados/config.yaml, then re-run the installer or `ados update`.",
+      "storeOffHint": "Turn on Settings › All settings › logging › store to keep a log history here. While it is off, the system journal is the log of record.",
       "storeError": "The logging store could not answer: {{warning}}."
+    },
+    "level": {
+      "debug": "Debug",
+      "info": "Info",
+      "warn": "Warning",
+      "error": "Error"
     }
   },
   "diagnostics": {
@@ -1506,12 +1592,12 @@
     },
     "reboot": {
       "queued": "Reboot queued.",
-      "queuedDetail": "The dashboard will reconnect when the board comes back.",
+      "queuedDetail": "The dashboard will reconnect when the companion computer comes back.",
       "failed": "Reboot failed.",
       "rebooting": "Rebooting…",
-      "button": "Reboot board",
-      "confirmTitle": "Reboot the board?",
-      "confirmDescription": "The agent shuts down all services and asks the kernel to reboot. The dashboard reconnects automatically once the board is back up (typically 30–60 seconds).",
+      "button": "Reboot companion computer",
+      "confirmTitle": "Reboot the companion computer?",
+      "confirmDescription": "The agent shuts down all services and asks the kernel to reboot. The dashboard reconnects automatically once the companion computer is back up (typically 30–60 seconds).",
       "confirm": "Reboot"
     }
   },
@@ -1603,7 +1689,11 @@
     "accuracy": "Accuracy (m)",
     "startSurvey": "Start survey",
     "baseOff": "Base off",
-    "baseSaved": "Base mode updated."
+    "baseSaved": "Base mode updated.",
+    "surveyTitle": "Restart the base survey?",
+    "baseOffTitle": "Turn the base off?",
+    "rtcmLoss_one": "{{count}} RTCM target loses corrections until the base is back.",
+    "rtcmLoss_other": "{{count}} RTCM targets lose corrections until the base is back."
   },
   "sensors": {
     "title": "Sensors",
@@ -1668,7 +1758,9 @@
       "E_CLOCK_NOT_READY": "The clock is not ready yet.",
       "other": "Capture refused: {{code}}"
     },
-    "storage": "About {{remaining}} of recording space left."
+    "storage": "About {{remaining}} of recording space left.",
+    "stopTitle": "Stop the capture session?",
+    "stopBody": "The session closes. Rec starts a new one."
   },
   "setupWizard": {
     "noFc": "No flight controller identified yet. Connect the flight controller to start setup.",
@@ -1699,7 +1791,8 @@
       "snapshots": "Parameter snapshots",
       "noSteps": "No step has stored a result yet.",
       "noSnapshots": "No snapshot yet."
-    }
+    },
+    "streamDown": "Live updates lost: reconnecting. The running step may be out of date."
   },
   "cockpit": {
     "video": {
@@ -1744,7 +1837,11 @@
     },
     "io": {
       "primarySet": "Primary controller set.",
-      "primaryGuard": "Hold to move RC input"
+      "primaryGuard": "Hold to move RC input",
+      "forget": "Forget",
+      "forgetGuard": "Hold to forget",
+      "forgotten": "Device forgotten.",
+      "forgetFailed": "Could not forget the device."
     },
     "gnss": {
       "receivers": "Receivers",
@@ -1755,7 +1852,30 @@
       "baseState": "Base state",
       "rtcm": "RTCM out",
       "surveyGuard": "Hold to restart survey",
-      "offGuard": "Hold to stop RTCM"
+      "offGuard": "Hold to stop RTCM",
+      "position": "{{lat}}, {{lon}}, {{h}} m",
+      "fixedAt": "Fixed at",
+      "setFixed": "Set fixed here",
+      "fixedGuard": "Hold to fix the base at {{pos}}",
+      "fixLabel": {
+        "none": "No fix",
+        "2d": "2D fix",
+        "3d": "3D fix",
+        "dgps": "DGPS",
+        "rtk_float": "RTK float",
+        "rtk_fixed": "RTK fixed"
+      },
+      "rtkLabel": {
+        "none": "none",
+        "float": "float",
+        "fixed": "fixed"
+      },
+      "baseStateLabel": {
+        "off": "Off",
+        "surveying": "Surveying",
+        "fixed": "Fixed",
+        "failed": "Failed"
+      }
     },
     "lora": {
       "mismatch": "mismatch",
@@ -1833,7 +1953,10 @@
       "saving": "Saving {{done}}/{{total}}…",
       "saveGuard_one": "Hold to write {{count}} parameter",
       "saveGuard_other": "Hold to write {{count}} parameters",
-      "vehicle": "Vehicle"
+      "vehicle": "Vehicle",
+      "outOfRange": "{{name}} must be between {{min}} and {{max}}. Nothing was staged.",
+      "rebootNeeded": "Saved. Reboot the flight controller for these to take effect.",
+      "nonDefault": "default {{value}}"
     },
     "msp": {
       "title": "MSP",
@@ -1866,30 +1989,50 @@
       "name": "Name",
       "reach": "Reach",
       "unpairOwner": "Unpair from Mission Control",
-      "holdToUnpair": "Hold to unpair",
+      "holdToUnpair": "Hold to unbind",
       "unpaired": "Unpaired from Mission Control.",
       "codeLabel": "Pairing code — enter in Mission Control",
       "linked": "linked",
       "unpairedState": "unpaired",
       "windowOpen": "Pair window open",
       "rfLink": "Drone RF link",
-      "pairedDrone": "Paired drone",
+      "pairedDrone": "Bound drone",
       "fingerprint": "Key fingerprint",
       "role": "Role",
       "autoPair": "Auto-pair",
       "on": "on",
       "off": "off",
-      "unpairDrone": "Unpair drone",
-      "rfUnpaired": "Drone unpaired. The RF key is wiped.",
-      "rfUnpairNote": "Wipes the RF key and disables auto-bind. The drone must be re-paired to reconnect.",
-      "noDrone": "No drone is paired to this node over the radio link.",
+      "unpairDrone": "Unbind drone",
+      "rfUnpaired": "Drone unbound. The radio key is wiped.",
+      "rfUnpairNote": "Wipes the radio key and disables auto-bind. The drone must be bound again to reconnect.",
+      "noDrone": "No drone is bound to this node over the radio link.",
       "bindSession": "Bind session",
       "opening": "Opening bind window…",
-      "pairDrone": "Pair a drone",
+      "pairDrone": "Bind a drone",
       "bindFailed": "Could not open the bind window.",
       "bindNote": "Opens a local bind window over the radio. Power the drone nearby; auto-bind completes the pair.",
       "browserAccess": "Access from a browser",
-      "browserAccessNote": "Unlock this node's data (status, video, command) from a browser on the trusted LAN by setting or entering its PIN."
+      "browserAccessNote": "Unlock this node's data (status, video, command) from a browser on the trusted LAN by setting or entering its PIN.",
+      "radioState": "Radio: {{state}}",
+      "bindPhase": {
+        "idle": "Idle",
+        "opening_tunnel": "Opening the bind channel",
+        "waiting_peer": "Waiting for the drone",
+        "transferring_keys": "Sending the key",
+        "applying_keys": "Applying the key",
+        "restarting_services": "Restarting the radio",
+        "paired": "Bound",
+        "failed": "Failed",
+        "aborted": "Stopped",
+        "unknown": "Unknown step"
+      },
+      "bindAge": "{{s}} s in this step",
+      "bindError": "Reason",
+      "bindResult": {
+        "paired": "Drone bound.",
+        "failed": "The bind failed.",
+        "aborted": "The bind was stopped before it finished."
+      }
     },
     "mesh": {
       "direct": "This node is a plain direct receiver, not in a mesh. Set the role to relay or receiver in Settings to join one.",
@@ -1915,7 +2058,7 @@
       "tabInstall": "Install",
       "back": "Installed",
       "pick": "Pick an extension to manage it.",
-      "unavailable": "Extensions are unavailable: {{error}}",
+      "unavailable": "Could not read the installed extensions.",
       "noneRunning": "No extensions are running on this node.",
       "noTab": "{{name}} has no node tab to show here.",
       "surfaces": "{{skills}} cockpit skills · {{panels}} surfaces",
@@ -1935,7 +2078,8 @@
       "sha256Hint": "Pin the archive; left empty, the install pins the bytes the preview fetched.",
       "sha256Invalid": "A SHA-256 is 64 hex characters.",
       "fetchUrl": "Preview from URL",
-      "slideInstall": "Slide to install"
+      "slideInstall": "Slide to install",
+      "incompatible": "This extension does not support this agent version, so it cannot be enabled."
     },
     "logs": {
       "countLive": "{{count}} live",
@@ -1943,7 +2087,7 @@
     },
     "peripherals": {
       "residualAbsent": "This node's peripheral service is not running, so there is no peripheral list.",
-      "unavailable": "Peripherals are unavailable: {{error}}"
+      "unavailable": "Could not read the peripherals."
     },
     "node": {
       "title": "Node",
@@ -2001,13 +2145,180 @@
       "mavlink": { "title": "MAVLink", "summary": "Flight-controller link", "armedNotice": "The vehicle is armed. A change to the flight-controller link needs your confirmation and can drop the link in flight.", "unknownNotice": "The vehicle's arm state is unknown. If it is armed, the node asks for confirmation before changing the flight-controller link.", "pendingPrompt": "Change {{field}} to {{value}}? This can drop the flight-controller link.", "fire": "Apply change", "hold": "Hold to apply" },
       "security": { "title": "Security", "summary": "PIN, API key and auth", "groupKey": "API key", "groupPin": "Dashboard PIN", "groupAuth": "Authentication", "rotate": "Rotate key", "rotateGuard": "Hold to rotate", "rotateFailed": "Could not rotate the API key.", "rotateNoKey": "The node answered the rotation without a new key.", "clearKey": "Clear key", "clearKeyGuard": "Hold to clear", "keyCleared": "Operator API key cleared. The pairing key still works.", "clearKeyGuardOwn": "Hold to clear; PIN next", "clearKeyOwn": "This panel signs in with the operator key. Clearing it signs the panel out, and it falls back to the dashboard PIN.", "clearKeyMaybeOwn": "This panel may be signing in with the operator key. If so, clearing it signs the panel out, and it falls back to the dashboard PIN.", "keyClearedOwn": "Operator API key cleared. This panel signed in with it, so enter the dashboard PIN to continue.", "clearKeyFailed": "Could not clear the API key.", "keyHint": "Rotating replaces the operator key in security.api.api_key, and this panel switches to the new one. Clearing removes it. The pairing key never changes here. Both work only on a direct reach of the node, not through a relay.", "newKeyTitle": "New API key", "newKeyBody": "Copy it now: the node does not show it again. This panel already uses it.", "rotatedAt": "Rotated {{at}}", "copy": "Copy", "copied": "Key copied.", "copyFailed": "Could not copy. Select the key and copy it by hand.", "done": "Done", "pinSetHere": "A PIN gates off-box access to this panel. Change or clear it below.", "pinNotSetHere": "No PIN is set, so off-box visitors need the agent key. Set one below.", "currentPin": "Current PIN", "problemCurrent": "Enter the current PIN.", "problemSame": "The new PIN is the same as the current one.", "changePin": "Change PIN", "changePinGuard": "Hold to change", "setPinGuard": "Hold to set", "pinChanged": "PIN changed.", "pinSaved": "PIN set.", "pinPeerLocked": "Too many attempts from this panel. Try again later.", "clearPin": "Clear PIN", "clearPinGuard": "Hold to clear", "pinCleared": "PIN cleared. Open sessions end when a new PIN is set.", "clearPinFailed": "Could not clear the PIN.", "wsEnforceSlide": "Slide to enforce" },
       "vision": { "title": "Vision", "summary": "Detection backend and threshold" },
-      "camera": { "title": "Camera", "summary": "Orientation and flip" },
+      "camera": { "title": "Camera", "summary": "Orientation and flip", "sourceOther": "Other…", "sourcePick": "Detected cameras", "sourceNone": "No cameras detected. Enter a device path.", "sourceReadFailed": "Could not read the camera list. Enter a device path." },
       "capture": { "title": "Capture", "summary": "Exposure and storage", "exposureFailed": "Could not update the exposure.", "storageFailed": "Could not read the capture storage." },
       "sensors": { "title": "Sensors", "summary": "Sensor rig and clock", "chooseFile": "Choose file", "noFile": "No file chosen", "rigReady": "{{name}} parsed as a JSON object, ready to replace the current rig.", "rigGuard": "Hold to replace" },
-      "swarm": { "title": "Swarm", "summary": "Swarm role and formation" },
+      "swarm": { "title": "Swarm", "summary": "Swarm role and formation", "enableSlide": "Slide to turn the swarm runtime on" },
       "discovery": { "title": "Discovery", "summary": "mDNS and access addresses", "mdnsPrompt": "Stop advertising over mDNS? Anyone reaching this node by its .local name loses it.", "mdnsFire": "Turn off mDNS", "mdnsHold": "Hold to turn off" },
       "display": { "title": "Display", "summary": "Attached display outputs" },
-      "advanced": { "title": "Advanced", "summary": "Log level and board override", "overrideGuard": "Hold to apply override" }
+      "advanced": { "title": "Advanced", "summary": "Log level and board override", "overrideGuard": "Hold to apply override" },
+      "root": {
+        "allSettings": "All settings",
+        "allSettingsSummary": "Every agent setting as stored",
+        "appearance": "Appearance",
+        "appearanceSummary": "Theme and glove mode on this panel",
+        "controls": "Controls",
+        "aircraftSetupSummary": "Calibrate, configure and tune the flight controller",
+        "controlsSummary": "Controller map, sticks, calibration, on-screen sticks and voice prompts"
+      },
+      "tree": {
+        "unknownGroup": "Unknown settings group.",
+        "noneOnNode": "None of these fields are present on this node.",
+        "notGroup": "This is not a settings group.",
+        "noFields": "No fields here.",
+        "readOnly": "Read-only",
+        "restart": "restart",
+        "listHint": "List · edit in config.yaml",
+        "items_one": "{{count}} item",
+        "items_other": "{{count}} items",
+        "fields_one": "{{count}} field",
+        "fields_other": "{{count}} fields",
+        "autoDetect": "auto-detect"
+      },
+      "leaf": {
+        "new": "New",
+        "noChange": "No change to save.",
+        "writeFailed": "Could not save the setting.",
+        "notPersisted": "Saved to memory but not written to disk. It will not survive a restart.",
+        "rebootNote": "Takes effect after a reboot. This change is not applied live.",
+        "hiddenNote": "This value is hidden. Enter a new value to replace it, or go back to keep it.",
+        "hiddenNew": "•••• (new value)",
+        "hidden": "•••• hidden",
+        "on": "On",
+        "off": "Off",
+        "placeholder": "Enter a value…",
+        "placeholderNew": "New value…",
+        "tapConfirm": "Tap again to confirm",
+        "enterNumber": "Enter a number",
+        "validNumber": "Enter a valid number",
+        "wholeNumber": "Must be a whole number",
+        "minimum": "Minimum is {{n}}",
+        "maximum": "Maximum is {{n}}",
+        "chooseValue": "Choose a value",
+        "unset": "unset",
+        "empty": "(empty)"
+      },
+      "appearance": {
+        "theme": "Theme",
+        "gloveMode": "Glove mode",
+        "themeSummary": "Night vision keeps the panel dim and green",
+        "gloveSummary": "Larger touch targets",
+        "themeDark": "Dark",
+        "themeLight": "Light",
+        "themeNvg": "Night vision"
+      },
+      "controls": {
+        "bindingNone": "None",
+        "calStart": "Start calibration",
+        "calDone": "Done (sticks released)",
+        "calClear": "Clear calibration",
+        "combos": "Combos: {{list}}",
+        "lockedSuffix": "{{binding}} (locked)"
+      }
+    },
+    "readFailed": {
+      "videoConfig": "Could not read the video link config.",
+      "cameras": "Could not read the camera list.",
+      "services": "Could not read the agent services.",
+      "wfb": "Could not read the radio link.",
+      "wfbPair": "Could not read the radio pairing state.",
+      "uplink": "Could not read the uplink state.",
+      "node": "Could not read this node's jobs.",
+      "logs": "Could not read the agent log.",
+      "btPaired": "Could not read the paired devices.",
+      "status": "Could not read the agent status.",
+      "config": "Could not read the configuration."
+    },
+    "stale": "Stale",
+    "link": {
+      "noHistory": "No link-quality history yet.",
+      "title": "Radio link",
+      "notAvailable": "The radio link is not available on this profile.",
+      "diagnosis": "Diagnosis",
+      "verdict": "Verdict",
+      "notClassified": "Not yet classified",
+      "framesSeen": "RF frames seen",
+      "framesSeenHint": "Captured off-air before decrypt (0 = a deaf radio)",
+      "decryptErrors": "Decrypt errors",
+      "decryptErrorsHint": "Wrong key or wrong link id",
+      "forwarded": "Forwarded",
+      "forwardedHint": "Decoded packets relayed to the video pipeline",
+      "signal": "Signal",
+      "rssi": "RSSI",
+      "snr": "SNR",
+      "noise": "Noise",
+      "loss": "Loss",
+      "bitrate": "Bitrate",
+      "mcs": "MCS",
+      "channelSection": "Channel",
+      "channel": "Channel",
+      "bandwidth": "Bandwidth",
+      "txPower": "TX power",
+      "regDomain": "Regulatory domain",
+      "packets": "Packets and FEC",
+      "received": "Received",
+      "lost": "Lost",
+      "fecRecovered": "FEC recovered",
+      "fecFailed": "FEC failed",
+      "rxSilent": "RX silent",
+      "history": "RSSI history (60 s)",
+      "adapter": "Adapter",
+      "iface": "Interface",
+      "chipset": "Chipset",
+      "injection": "Packet injection",
+      "injectionOk": "Working",
+      "injectionFailed": "Not working",
+      "restarts": "Restarts",
+      "pair": "Radio pairing",
+      "paired": "Paired",
+      "notPaired": "Not paired",
+      "peer": "Paired with",
+      "fingerprint": "Key fingerprint",
+      "linkKey": "Link key",
+      "autoPair": "Auto-pair",
+      "txPowerMax": "max {{dbm}}",
+      "seconds": "{{s}} s",
+      "state": {
+        "connected": "Connected",
+        "degraded": "Degraded",
+        "rf_unverified": "Radio not verified",
+        "connecting": "Connecting",
+        "searching": "Searching",
+        "disconnected": "Disconnected",
+        "stopped": "Stopped",
+        "unknown": "Unknown",
+        "stale": "Stale"
+      }
+    },
+    "uplink": {
+      "notAvailable": "The uplink matrix is not available on this profile.",
+      "lanes": "Lanes",
+      "order": "Order",
+      "sharing": "Sharing",
+      "dataCap": "Modem data cap",
+      "thisPeriod": "This period",
+      "used": "Used",
+      "noCap": "No cap set",
+      "signal": "Signal quality",
+      "iface": "Interface"
+    },
+    "shell": {
+      "menu": "Cockpit menu",
+      "rebootPending": "Changes pending: reboot to apply",
+      "rebootGuard": "Hold to reboot",
+      "videoRestartPending": "Changes pending: restart video to apply",
+      "videoRestarting": "Restarting video…",
+      "restartVideo": "Restart video",
+      "videoRestarted": "Video restarted. The changes are live.",
+      "videoRestartFailed": "Could not restart video.",
+      "reach": {
+        "unpairedTitle": "This node is not paired",
+        "signedOutTitle": "Not signed in to this node",
+        "unpairedBody": "It answers its own identity and nothing else, so every reading below is unavailable rather than empty.",
+        "signedOutBody": "It is paired, and this browser holds no credential for it, so its readings are unavailable rather than empty.",
+        "pairWithCode": "Pair it from Mission Control with code <code>{{code}}</code>, or reach it over its hotspot or a USB cable.",
+        "enterPin": "Enter this node's access PIN below to unlock it from this browser."
+      }
     }
   }
 }

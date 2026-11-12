@@ -4,6 +4,7 @@
 // and writes the `network.cellular.*` config leaves. Turning the uplink off and
 // changing the APN are slides; turning it on and the data cap write at once.
 
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -184,6 +185,7 @@ function CellularWrites({
   const apnDirty = apnDraft !== null && apnDraft.trim() !== apn;
   const capValue = capDraft ?? capGb ?? "";
   const capDirty = capDraft !== null && capDraft !== capGb;
+  useDirtyGuard(apnDirty || capDirty, "settings-cellular");
   const capParsed = parseCapGb(capValue);
 
   return (

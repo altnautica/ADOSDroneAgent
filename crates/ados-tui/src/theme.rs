@@ -182,6 +182,14 @@ impl Theme {
     pub fn info(&self) -> Color {
         color_for(self.tier, self.palette.info, Color::Blue)
     }
+    /// A target being followed.
+    pub fn track(&self) -> Color {
+        color_for(self.tier, self.palette.track, Color::Cyan)
+    }
+    /// A target being coasted through a short loss.
+    pub fn coast(&self) -> Color {
+        color_for(self.tier, self.palette.coast, Color::Magenta)
+    }
 
     // --- styles -----------------------------------------------------------
 

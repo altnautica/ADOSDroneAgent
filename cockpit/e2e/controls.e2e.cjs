@@ -10,7 +10,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-const { BASE, PAD_INIT, SHOTS, attr, mockAgent, runCases } = require("./harness.cjs");
+const { BASE, PAD_INIT, PILOT_AIR, SHOTS, VIEWPORTS, attr, mockAgent, pilotPage, runCases } = require("./harness.cjs");
 
 async function openControls(page) {
   // From the flight screen Settings is a tab of the Menu ("Go to"); from any
@@ -213,31 +213,16 @@ async function gimbalFlickCase(browser) {
 
 /** The alert column on the kiosk: a GPS alert card, the handover banner,
  *  "Sticks are with <surface>" and the layer chips ("Obstacles
- *  unavailable" once the demo layer feed stops for more than 2 s) all show
- *  at once, and no two of them overlap. */
+ *  unavailable" once the layer feed stops for more than 2 s) all show at
+ *  once, and no two of them overlap. On the demo (whose video never reads
+ *  lost, so the layers draw): its pins put the sticks with another surface
+ *  and a handover banner on the demo pilot, then stall its layer frames
+ *  while the pilot keeps reporting. */
 async function chipsCase(browser) {
   const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   const page = await ctx.newPage();
+  page.on("pageerror", (e) => console.log("pageerror:", String(e).slice(0, 400)));
   await page.addInitScript(PAD_INIT);
-  // The demo layer feed ticks every 50 ms: record those timers to stop them,
-  // and count their ticks to see that layer frames have arrived. Each tick
-  // also writes the demo's own pilot frame (no input session) into the store
-  // the pilot stream below writes, so while the feed runs "Sticks are with"
-  // is only drawn between a stream frame and the next tick.
-  await page.addInitScript(() => {
-    const set = window.setInterval.bind(window);
-    window.__feedTimers = [];
-    window.__feedTicks = 0;
-    window.setInterval = (fn, ms, ...rest) => {
-      if (ms !== 50) return set(fn, ms, ...rest);
-      const id = set((...a) => {
-        window.__feedTicks++;
-        return fn(...a);
-      }, ms, ...rest);
-      window.__feedTimers.push(id);
-      return id;
-    };
-  });
   await mockAgent(page, { profile: "ground_station" });
   await page.route("**/api/telemetry", (route) =>
     route.fulfill({
@@ -245,29 +230,24 @@ async function chipsCase(browser) {
       body: JSON.stringify({ armed: true, mode: "GUIDED", autopilot: 3, attitude: { roll: 0, pitch: 0, yaw: 0 }, position: { alt_rel: 3, heading: 0 }, velocity: { groundspeed: 0, climb: 0 }, gps: { fix_type: 1, satellites: 0 }, last_update: new Date().toISOString() }),
     }),
   );
-  const pushes = [];
-  await page.routeWebSocket(/\/api\/v1\/pilot\/stream/, (ws) => {
-    const state = {
-      owner: "pilot", control_mode: "ados", profile: "normal", avoid: "brake", armed: true, landed: false, vehicle_class: "multirotor", readiness: [], plan_ned: [],
+  await page.goto(`${BASE}?kiosk=1&demo=1`);
+  await page.waitForFunction(() => window.__adosDemoPilot !== undefined, null, { timeout: 10000 });
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator('[data-testid="layer-chip"]').count(), 0, "no chip while the layers are fresh");
+  await page.evaluate(() => {
+    window.__adosDemoPilot.pin({
+      owner: "pilot",
       input_session: { src: "bench", label: "Bench", session: 7 },
       banner: { text_key: "pilot.banner.ados_control", args: { profile: "NORMAL" }, until_ms: null },
-    };
-    const push = setInterval(() => ws.send(JSON.stringify({ kind: "pilot", ts_ms: Date.now(), data: state })), 100);
-    pushes.push(push);
-    ws.onMessage(() => undefined);
-    ws.onClose(() => clearInterval(push));
+    });
+    window.__adosDemoPilot.stallLayers(true);
   });
-  await page.goto(`${BASE}?kiosk=1&demo=1`);
-  await page.waitForFunction(() => window.__feedTicks >= 1, null, { timeout: 10000 });
-  assert.equal(await page.locator('[data-testid="layer-chip"]').count(), 0, "no chip while the layers are fresh");
-  // Stopping the feed leaves the pilot stream the only pilot writer.
-  await page.evaluate(() => window.__feedTimers.forEach((id) => clearInterval(id)));
   await page.waitForSelector('[data-testid="sticks-elsewhere"]', { state: "visible", timeout: 10000 });
   await page.waitForSelector('[data-testid="layer-chip"]', { state: "visible", timeout: 10000 });
   assert.ok((await page.locator('[data-testid="layer-chip"]').allInnerTexts()).includes("Obstacles unavailable"), "the obstacles chip shows");
   await page.waitForTimeout(500);
   await page.screenshot({ path: path.join(SHOTS, "kiosk-alert-column.png") });
-  const boxes = await page.$$eval('[data-testid="feed-notices"] > *, [data-testid="sticks-elsewhere"], [data-testid="handover-banner"], [data-testid="layer-chip"], [role="alert"] > div, [role="status"] > div.border-2', (els) =>
+  const boxes = await page.$$eval('[data-testid="feed-notices"] > *, [data-testid="sticks-elsewhere"], [data-testid="handover-banner"], [data-testid="layer-chip"], [role="alert"] > div, [data-testid="alert-row"]', (els) =>
     els.map((e) => {
       const r = e.getBoundingClientRect();
       return { what: (e.getAttribute("data-testid") ?? e.textContent ?? "").slice(0, 40), x: r.left, y: r.top, w: r.width, h: r.height };
@@ -285,9 +265,55 @@ async function chipsCase(browser) {
       assert.ok(!overlap || nested, `"${a.what}" overlaps "${b.what}": ${JSON.stringify(a)} ${JSON.stringify(b)}`);
     }
   }
-  pushes.forEach((p) => clearInterval(p));
   await ctx.close();
   console.log(`kiosk alert column: ${boxes.map((b) => b.what).join(" | ")}; no overlaps`);
+}
+
+/** Where the shell puts the Feed, and the top bar's room. A browser load is
+ *  framed beside the menu rail; the Full screen button draws it full bleed;
+ *  the kiosk is full bleed with no such button. At every size the chip keeps
+ *  its whole text until every movable item is in the Menu: it never
+ *  truncates to make room for an item the bar could have moved. */
+async function shellCase(browser) {
+  const shell = (page) => page.getAttribute("[data-shell]", "data-shell");
+  const sim = { pilot: PILOT_AIR, airborne: true };
+  {
+    const { ctx, page } = await pilotPage(browser, { width: 1920, height: 1080 }, sim);
+    assert.equal(await shell(page), "flight-framed", "a browser load frames the Feed");
+    assert.equal(await page.locator('[data-shell="flight-framed"] > nav').count(), 1, "the menu rail sits beside it");
+    await page.screenshot({ path: path.join(SHOTS, "shell-framed-1920x1080.png") });
+    await page.getByTestId("top-bar-fullscreen").click();
+    await page.waitForSelector('[data-shell="flight"]', { timeout: 3000 });
+    assert.equal(await page.locator("nav").count(), 0, "full screen draws no menu rail");
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(SHOTS, "shell-fullscreen-1920x1080.png") });
+    await ctx.close();
+  }
+  {
+    const { ctx, page } = await pilotPage(browser, { width: 1920, height: 1080 }, sim, "?kiosk=1");
+    assert.equal(await shell(page), "flight", "the kiosk is full bleed");
+    assert.equal(await page.getByTestId("top-bar-fullscreen").count(), 0, "the kiosk offers no Full screen button");
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(SHOTS, "shell-kiosk-1920x1080.png") });
+    await ctx.close();
+  }
+  for (const vp of VIEWPORTS) {
+    const { ctx, page } = await pilotPage(browser, vp, sim, "?kiosk=1");
+    // Let the bar settle: it moves one item a frame while it overflows.
+    await page.waitForTimeout(1500);
+    const bar = await page.$eval('[data-zone="top_bar"]', (el) => {
+      const text = el.querySelector('[data-testid="flight-state-chip"] .truncate');
+      return { moved: (el.getAttribute("data-moved") ?? "").split(" ").filter(Boolean).length, truncated: text ? text.scrollWidth > text.clientWidth + 1 : false };
+    });
+    if (bar.truncated) {
+      await page.screenshot({ path: path.join(SHOTS, `debug-chip-${vp.name}.png`) });
+      assert.equal(bar.moved, 5, `${vp.name}: the chip truncates only once every movable item is in the Menu (moved ${bar.moved})`);
+    }
+    if (vp.name === "compact") await page.screenshot({ path: path.join(SHOTS, "top-bar-compact-580x360.png") });
+    console.log(`${vp.name}: ${bar.moved} items in the Menu, chip ${bar.truncated ? "truncated (bar full)" : "whole"}`);
+    await ctx.close();
+  }
+  console.log("shell: framed by default, full bleed on Full screen and on the kiosk");
 }
 
 runCases({
@@ -296,4 +322,5 @@ runCases({
   recentre: recentreCase,
   "gimbal-flick": gimbalFlickCase,
   chips: chipsCase,
+  shell: shellCase,
 });

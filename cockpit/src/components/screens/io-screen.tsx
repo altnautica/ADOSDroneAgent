@@ -2,17 +2,20 @@
 // controller primary moves RC input to it, so it fires from a guarded button;
 // Bluetooth discovery and pairing are plain actions.
 
+import { getArmedReading, radioWriteBlock } from "@/lib/radio-gate";
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Bluetooth, Gamepad2, Monitor, RefreshCw } from "lucide-react";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { ActionButton, EmptyNote, Row, StaleBadge } from "@/components/ui/data";
+import { ActionButton, EmptyNote, ErrorNote, Row, StaleBadge } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { ListItem } from "@/components/ui/list-item";
 import {
   BT_SCAN_SECONDS,
   canMakePrimary,
+  forgetBt,
   getDisplay,
   getGamepads,
   getPairedBt,
@@ -37,6 +40,20 @@ export function IoScreen() {
   const gamepads = useResource(useCallback((s: AbortSignal) => getGamepads(s), []), 5_000, { enabled: tab === 0 });
   const display = useResource(useCallback((s: AbortSignal) => getDisplay(s), []), 10_000, { enabled: tab === 1 });
   const paired = useResource(useCallback((s: AbortSignal) => getPairedBt(s), []), 15_000, { enabled: tab === 2 });
+  const armed = useResource(useCallback((s: AbortSignal) => getArmedReading(s), []), 1_000, { enabled: tab === 0 });
+  // Making a pad primary moves RC input: never while armed or unknown.
+  const armedBlock = radioWriteBlock(armed.stale ? null : armed.data);
+
+  const forget = (mac: string) => {
+    setBusy(true);
+    forgetBt(mac)
+      .then(() => {
+        toast.ok(t("cockpit.io.forgotten"));
+        paired.refresh();
+      })
+      .catch((err: unknown) => toastFromError(err, t("cockpit.io.forgetFailed")))
+      .finally(() => setBusy(false));
+  };
 
   const makePrimary = (deviceId: string) => {
     setBusy(true);
@@ -82,6 +99,9 @@ export function IoScreen() {
         <EmptyNote>{t("io.gamepads.empty")}</EmptyNote>
       ) : (
         <div className="flex flex-col gap-[0.3rem]">
+          {armedBlock && pads.devices.length > 1 ? (
+            <p className="text-[0.8rem] text-warn">{t(`cockpit.radio.${armedBlock}`)}</p>
+          ) : null}
           {pads.devices.map((pad) => (
             <ListItem
               key={pad.deviceId}
@@ -95,7 +115,7 @@ export function IoScreen() {
                   <GuardedButton
                     label={t("io.gamepads.makePrimary")}
                     guardLabel={t("cockpit.io.primaryGuard")}
-                    disabled={!canMakePrimary(pads, pad.deviceId, busy)}
+                    disabled={!canMakePrimary(pads, pad.deviceId, busy, armedBlock)}
                     onFired={() => makePrimary(pad.deviceId)}
                   />
                 )
@@ -131,7 +151,9 @@ export function IoScreen() {
         <h2 className="pt-[0.4rem] text-[0.75rem] font-medium uppercase tracking-wider text-muted-foreground">
           {t("io.bluetooth.pairedHeading")}
         </h2>
-        {list.length === 0 ? (
+        {readFailed(paired) ? (
+          <ErrorNote onRetry={paired.refresh}>{t("cockpit.readFailed.btPaired")}</ErrorNote>
+        ) : list.length === 0 ? (
           <EmptyNote>{t("io.bluetooth.noPaired")}</EmptyNote>
         ) : (
           list.map((d) => (
@@ -140,8 +162,16 @@ export function IoScreen() {
               headline={d.name ?? d.mac}
               supporting={[d.mac, d.type].filter(Boolean).join(" · ")}
               trailing={
-                <span className={d.connected ? "text-[0.8rem] text-ok" : "text-[0.8rem] text-muted-foreground"}>
-                  {d.connected ? t("io.bluetooth.connected") : t("io.bluetooth.paired")}
+                <span className="flex items-center gap-[0.4rem]">
+                  <span className={d.connected ? "text-[0.8rem] text-ok" : "text-[0.8rem] text-muted-foreground"}>
+                    {d.connected ? t("io.bluetooth.connected") : t("io.bluetooth.paired")}
+                  </span>
+                  <GuardedButton
+                    label={t("cockpit.io.forget")}
+                    guardLabel={t("cockpit.io.forgetGuard")}
+                    disabled={busy}
+                    onFired={() => forget(d.mac)}
+                  />
                 </span>
               }
             />
@@ -171,7 +201,7 @@ export function IoScreen() {
   }
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={gamepads.stale || display.stale || paired.stale}
       title={t("io.route.title")}
       tabs={[t("io.gamepads.title"), t("io.display.title"), t("io.bluetooth.title")]}
       selectedTab={tab}

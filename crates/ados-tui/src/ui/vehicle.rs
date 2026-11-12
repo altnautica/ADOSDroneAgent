@@ -1,37 +1,37 @@
 //! Tab 2, Vehicle: attitude, heading, GPS, flight state, altitude and battery
 //! trends, battery packs, the pilot block (the cockpit's flight-state chip,
-//! mission, link loss, height and alerts), the autonomy block, and the
-//! sensor/clock row.
+//! mission, link loss, height and the status pill's alerts), the autonomy
+//! block, and the sensor/clock row.
 
 use std::time::Instant;
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::api_path::seg;
 use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
-use crate::model::autonomy::detection::{Detection, VISION_STATUS_PATH};
+use crate::model::autonomy::detection::{
+    Detection, Seen, DETECTIONS_LATEST_PATH, VISION_STATUS_PATH,
+};
 use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
-use crate::model::fix_label;
 use crate::model::skill_detail::{skill_detail_from_state, skill_state_topic};
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
-use crate::ui::widgets::{chip, kv, kv_text, panel};
 
 mod attitude;
 mod autonomy;
 pub(in crate::ui) mod chart;
 mod chip_line;
+mod layout;
 mod packs;
 mod pilot;
 mod read;
+mod readings;
 
 use chart::{line_chart, Trace};
-use chip_line::compass;
 use read::Read;
 
 /// What the Vehicle tab shows for an MSP flight controller.
@@ -40,12 +40,8 @@ pub const MSP_TEXT: &str =
 
 const HIDDEN_STALE: &str = "no fresh data from the agent · flight readings hidden";
 
-/// Rows of the attitude, flight, GPS and sensors band.
-const TOP_ROWS: u16 = 12;
-/// Rows of the trend charts, dropped first on a short terminal.
-const CHART_ROWS: u16 = 9;
-/// Rows the autonomy block keeps when the pilot block wants the column.
-const AUTONOMY_MIN_ROWS: u16 = 7;
+/// Where the gimbal says whether it takes rate commands.
+const GIMBAL_RATE_PATH: &str = "/api/v1/gimbal/rate";
 
 #[derive(Default)]
 pub struct VehicleTab {
@@ -65,6 +61,13 @@ pub struct VehicleTab {
     skill_topic: Option<String>,
     /// The owning skill's chip detail (`ORBIT 8 m`), from its echoed parameters.
     mode_detail: Option<String>,
+    /// When vehicle telemetry was last live, and the arm state then.
+    live_at: Option<Instant>,
+    armed_at_live: Option<bool>,
+    /// The detector's newest fresh batch.
+    seen: Option<Seen>,
+    /// Whether the gimbal takes rate commands; `None` while unknown.
+    gimbal: Option<bool>,
 }
 
 impl VehicleTab {
@@ -86,141 +89,6 @@ impl VehicleTab {
             }
             Some(_) => None,
         }
-    }
-
-    fn flight_panel(&self, f: &mut Frame, area: Rect, core: &Core, hidden: Option<&str>) {
-        let t = &core.theme;
-        let block = panel(t, core.sym, "Flight");
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        let mut lines = Vec::new();
-        let ident = [self.fc.vehicle.clone(), self.fc.firmware.clone()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ");
-        if !ident.is_empty() {
-            lines.push(kv_text(t, "Vehicle", 9, ident));
-        }
-        match (hidden, &self.tel) {
-            (None, Some(tel)) => {
-                let armed = match tel.armed {
-                    Some(true) => chip(t, "ARMED", t.error()),
-                    Some(false) => chip(t, "DISARMED", t.success()),
-                    None => Span::styled("arm state unknown", t.dim()),
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:<9} ", "Mode"), t.dim()),
-                    Span::styled(
-                        format!("{}  ", tel.mode.as_deref().unwrap_or("—")),
-                        t.bright(),
-                    ),
-                    armed,
-                ]));
-                let heading = tel
-                    .heading
-                    .map(|h| format!("{h:03.0}° {}", compass(h)))
-                    .unwrap_or_else(|| "—".into());
-                lines.push(kv_text(t, "Heading", 9, heading));
-                let mut speed = Vec::new();
-                if let Some(v) = tel.groundspeed {
-                    speed.push(format!("GS {v:.1} m/s"));
-                }
-                if let Some(v) = tel.climb {
-                    speed.push(format!("VS {v:+.1} m/s"));
-                }
-                if !speed.is_empty() {
-                    lines.push(kv_text(t, "Speed", 9, speed.join(" · ")));
-                }
-                let mut bat = Vec::new();
-                for (v, unit) in [(tel.voltage, "V"), (tel.current, "A"), (tel.remaining, "%")] {
-                    if let Some(v) = v {
-                        bat.push(format!("{v:.1} {unit}"));
-                    }
-                }
-                if let Some(c) = tel.temperature {
-                    bat.push(format!("{c:.0} °C"));
-                }
-                if !bat.is_empty() {
-                    lines.push(kv_text(t, "Battery", 9, bat.join(" · ")));
-                }
-                if tel.relayed {
-                    lines.push(kv(
-                        t,
-                        "Source",
-                        9,
-                        Span::styled("relayed by a peer", Style::default().fg(t.info())),
-                    ));
-                }
-            }
-            (why, _) => lines.push(Line::from(Span::styled(
-                why.unwrap_or_default().to_string(),
-                t.dim(),
-            ))),
-        }
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-    }
-
-    fn gps_panel(&self, f: &mut Frame, area: Rect, core: &Core, hidden: Option<&str>) {
-        let t = &core.theme;
-        let block = panel(t, core.sym, "GPS");
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        let lines = match (hidden, &self.tel) {
-            (None, Some(tel)) => {
-                let fix = tel.fix_type.map(fix_label).unwrap_or_else(|| "—".into());
-                let fix_color = match tel.fix_type {
-                    Some(n) if n >= 3 => t.success(),
-                    Some(2) => t.warning(),
-                    _ => t.error(),
-                };
-                let hdop = tel.eph.or(self.fc.hdop);
-                let mut l = vec![Line::from(vec![
-                    Span::styled(format!("{:<9} ", "Fix"), t.dim()),
-                    Span::styled(fix, Style::default().fg(fix_color)),
-                    Span::styled("  sats ", t.dim()),
-                    Span::styled(
-                        tel.satellites
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "—".into()),
-                        t.bright(),
-                    ),
-                    Span::styled("  HDOP ", t.dim()),
-                    Span::styled(
-                        hdop.map(|h| format!("{h:.1}"))
-                            .unwrap_or_else(|| "—".into()),
-                        t.bright(),
-                    ),
-                ])];
-                match tel.lat.zip(tel.lon) {
-                    Some((la, lo)) => {
-                        l.push(kv_text(t, "Position", 9, format!("{la:.6}, {lo:.6}")))
-                    }
-                    None => l.push(kv(
-                        t,
-                        "Position",
-                        9,
-                        Span::styled("no position yet", t.dim()),
-                    )),
-                }
-                let mut alt = Vec::new();
-                if let Some(a) = tel.alt_rel {
-                    alt.push(format!("{a:.1} m rel"));
-                }
-                if let Some(a) = tel.alt_msl {
-                    alt.push(format!("{a:.1} m MSL"));
-                }
-                if !alt.is_empty() {
-                    l.push(kv_text(t, "Altitude", 9, alt.join(" · ")));
-                }
-                l
-            }
-            (why, _) => vec![Line::from(Span::styled(
-                why.unwrap_or_default().to_string(),
-                t.dim(),
-            ))],
-        };
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn charts(&self, f: &mut Frame, area: Rect, core: &Core) {
@@ -252,37 +120,6 @@ impl VehicleTab {
             );
         }
     }
-
-    fn sensors(&self, f: &mut Frame, area: Rect, core: &Core, stale: bool) {
-        let t = &core.theme;
-        let block = panel(t, core.sym, "Sensors & clock");
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        if stale {
-            f.render_widget(
-                Paragraph::new(Span::styled("readings hidden (stale)", t.dim())),
-                inner,
-            );
-            return;
-        }
-        let Some(d) = core.dash() else { return };
-        let mut lines = Vec::new();
-        let conn = |v: Option<bool>| match v {
-            Some(true) => Span::styled(
-                format!("{} connected", core.sym.ok),
-                Style::default().fg(t.success()),
-            ),
-            Some(false) => Span::styled(
-                format!("{} not connected", core.sym.err),
-                Style::default().fg(t.error()),
-            ),
-            None => Span::styled("not reported", t.dim()),
-        };
-        lines.push(kv(t, "Hub", 7, conn(d.hub_connected)));
-        lines.push(kv(t, "FC", 7, conn(d.sensors_fc_connected)));
-        lines.extend(crate::ui::profile_row::packed_lines(t, d, inner.width));
-        f.render_widget(Paragraph::new(lines), inner);
-    }
 }
 
 impl Tab for VehicleTab {
@@ -297,6 +134,8 @@ impl Tab for VehicleTab {
             Sub::every_ms(ResourceId::Battery, "/api/v1/battery", 2000),
             Sub::every_ms(ResourceId::NavStatus, NAV_STATUS_PATH, 500),
             Sub::every_ms(ResourceId::VisionStatus, VISION_STATUS_PATH, 1000),
+            Sub::every_ms(ResourceId::DetectionsLatest, DETECTIONS_LATEST_PATH, 1000),
+            Sub::every_ms(ResourceId::GimbalRate, GIMBAL_RATE_PATH, 10_000),
         ];
         // While a skill owns the aircraft: its manifest once (the state
         // topic), then the parameters it echoes, for the chip's detail.
@@ -316,13 +155,34 @@ impl Tab for VehicleTab {
 
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
         let slot = core.slot(id);
-        if *id == ResourceId::VisionStatus {
-            // An unreachable engine (a 503) is no detector, not the last answer.
-            self.detection = slot
-                .filter(|s| s.error.is_none())
-                .and_then(|s| s.value.as_ref())
-                .and_then(Detection::from_status);
-            return;
+        // An unreachable engine (a 503) is no detector, not the last answer;
+        // a gimbal that does not answer (a 404 on an older agent) takes no rates.
+        let good = slot
+            .filter(|s| s.error.is_none())
+            .and_then(|s| s.value.as_ref());
+        match id {
+            ResourceId::VisionStatus => {
+                self.detection = good.and_then(Detection::from_status).map(|d| Detection {
+                    seen: self.seen.clone(),
+                    ..d
+                });
+                return;
+            }
+            ResourceId::DetectionsLatest => {
+                self.seen = good.and_then(Seen::from_latest);
+                if let Some(d) = &mut self.detection {
+                    d.seen = self.seen.clone();
+                }
+                return;
+            }
+            ResourceId::GimbalRate => {
+                let failed = slot.is_some_and(|s| s.error.is_some());
+                self.gimbal = good
+                    .map(|v| v.get("available").and_then(serde_json::Value::as_bool) == Some(true))
+                    .or(failed.then_some(false));
+                return;
+            }
+            _ => {}
         }
         if let Some(err) = slot.and_then(|s| s.error.clone()) {
             // A failed read keeps the last good model, marked stale.
@@ -363,6 +223,10 @@ impl Tab for VehicleTab {
             ResourceId::Telemetry => {
                 let tel = Telemetry::from_value(v);
                 self.hist.record(&tel);
+                if tel.vehicle {
+                    self.live_at = Some(core.now);
+                    self.armed_at_live = tel.armed;
+                }
                 self.tel = Some(tel);
             }
             ResourceId::Snapshot => self.fc = FcIdent::from_snapshot(v),
@@ -425,64 +289,57 @@ impl Tab for VehicleTab {
         let stale = core.stale();
         let hidden = self.hidden(core);
         let hidden = hidden.as_deref();
-        let pilot_lines = self.pilot_lines(core);
+        let pilot_rows = self.pilot_lines(core);
         let packs_hidden = stale.then_some(HIDDEN_STALE);
-        // Pilot and Autonomy share the lower right column. Each wants its
-        // lines plus a border; on a short terminal the trend charts go first,
-        // then each block shows what fits and says how many lines it cut.
-        let (pilot_need, auto_need) = if packs_hidden.is_some() {
-            (3, 3)
+        // The Pilot block takes its rows first; the trend charts go before
+        // anything else, and never show readings the agent did not refresh.
+        let (pilot, pilot_min, auto_need) = if packs_hidden.is_some() {
+            (3, 3, 3)
         } else {
             (
-                pilot_lines.len() as u16 + 2,
+                pilot_rows.len() as u16 + 2,
+                pilot::min_rows(&pilot_rows),
                 autonomy::line_count(core, self.auto.as_ref(), self.detection.as_ref()) as u16 + 2,
             )
         };
-        let charts = if area.height >= TOP_ROWS + CHART_ROWS + pilot_need + auto_need {
-            CHART_ROWS
-        } else {
-            0
-        };
-        let rows = Layout::vertical([
-            Constraint::Length(TOP_ROWS),
-            Constraint::Length(charts),
-            Constraint::Min(4),
-        ])
-        .split(area);
-        let top = Layout::horizontal([
-            Constraint::Length(36),
-            Constraint::Min(30),
-            Constraint::Length(40),
-        ])
-        .split(rows[0]);
-        attitude::render(f, top[0], core, self.tel.as_ref(), hidden);
-        let mid = Layout::vertical([Constraint::Length(7), Constraint::Min(3)]).split(top[1]);
-        self.flight_panel(f, mid[0], core, hidden);
-        self.gps_panel(f, mid[1], core, hidden);
-        self.sensors(f, top[2], core, stale);
-        if charts > 0 {
-            self.charts(f, rows[1], core);
+        let short = layout::is_short(area.height, pilot_min);
+        let flight = self.flight_lines(core, hidden, short);
+        let gps = self.gps_lines(core, hidden);
+        let plan = layout::plan(
+            area,
+            &layout::Needs {
+                pilot,
+                pilot_min,
+                autonomy: auto_need,
+                flight: flight.len() as u16 + 2,
+                gps: gps.len() as u16 + 2,
+                charts: !stale,
+            },
+        );
+        if let Some(r) = plan.attitude {
+            attitude::render(f, r, core, self.tel.as_ref(), hidden);
         }
-        let lower =
-            Layout::horizontal([Constraint::Min(40), Constraint::Length(52)]).split(rows[2]);
+        readings::draw(f, plan.flight, core, "Flight", flight);
+        readings::draw(f, plan.gps, core, "GPS", gps);
+        if let Some(r) = plan.sensors {
+            let lines = self.sensor_lines(core, stale, r.width.saturating_sub(2));
+            readings::draw(f, r, core, "Sensors & clock", lines);
+        }
+        if let Some(r) = plan.charts {
+            self.charts(f, r, core);
+        }
         packs::render(
             f,
-            lower[0],
+            plan.packs,
             core,
             self.bat.as_ref(),
             packs_hidden,
             self.bat_read.failed_note(core.now).as_deref(),
         );
-        let h = lower[1].height;
-        // The pilot block (the flight state, failsafe and alerts) first; the
-        // autonomy block keeps at least a few rows and counts what it cut.
-        let pilot_h = pilot_need.min(h.saturating_sub(auto_need.min(AUTONOMY_MIN_ROWS)));
-        let right =
-            Layout::vertical([Constraint::Length(pilot_h), Constraint::Min(3)]).split(lower[1]);
-        pilot::render(f, right[0], core, pilot_lines, packs_hidden);
+        pilot::render(f, plan.pilot, core, pilot_rows, packs_hidden);
         autonomy::render(
             f,
-            right[1],
+            plan.autonomy,
             core,
             self.auto.as_ref(),
             self.detection.as_ref(),

@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { Circle, Flag, Square } from "lucide-react";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { ActionButton, Dot, EmptyNote, Row, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { ActionButton, Dot, EmptyNote, ErrorNote, Row, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { TextSettingRow } from "@/components/ui/setting-row";
 import { captureControls, captureErrorKey, getCaptureState, startBody } from "@/lib/capture-model";
@@ -55,7 +55,11 @@ export function CaptureScreen() {
   if (!capture.ready) {
     body = <EmptyNote>{t("common.loading")}</EmptyNote>;
   } else if (!state) {
-    body = <EmptyNote>{capture.status === 404 ? t("capture.extensionMissing") : t("capture.loadFailed")}</EmptyNote>;
+    body = capture.status === 404 ? (
+      <EmptyNote>{t("capture.extensionMissing")}</EmptyNote>
+    ) : (
+      <ErrorNote onRetry={capture.refresh}>{t("capture.loadFailed")}</ErrorNote>
+    );
   } else {
     const c = captureControls(state, room, floor, busy);
     const fl = c.floor;
@@ -124,7 +128,7 @@ export function CaptureScreen() {
   }
 
   return (
-    <ConsoleScaffold title={t("capture.title")} actions={<StaleBadge stale={capture.stale && capture.data != null} />}>
+    <ConsoleScaffold stale={capture.stale && capture.data != null} title={t("capture.title")} actions={<StaleBadge stale={capture.stale && capture.data != null} />}>
       {body}
     </ConsoleScaffold>
   );

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { TAB_ORDER } from "@/nav/navigator";
+import { TAB_ORDER } from "@/nav/screen-table";
 import { useDirtyStore } from "@/stores/dirty-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 

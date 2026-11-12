@@ -440,6 +440,66 @@ async fn a_detector_change_or_reset_is_refused_while_armed_and_force_passes() {
     assert!(!is_guarded("GET", "/api/vision/detector"));
 }
 
+#[tokio::test]
+async fn unpairing_is_refused_while_armed_and_force_passes() {
+    // Unpairing cuts the ground control station off the vehicle.
+    let uri = "/api/pairing/unpair";
+    let (status, hits) = send_armed("POST", uri, "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(hits, 0);
+    let (status, hits) = send_armed("POST", &format!("{uri}?force=1"), "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hits, 1);
+    assert!(!is_guarded("GET", "/api/pairing/info"));
+    assert!(!is_guarded("POST", "/api/pairing/claim"));
+}
+
+#[tokio::test]
+async fn a_plugin_grant_or_revoke_is_refused_while_armed_and_force_passes() {
+    for (method, uri, body) in [
+        (
+            "POST",
+            "/api/plugins/com.example.follow/grant",
+            r#"{"permission_id":"mavlink.command"}"#,
+        ),
+        (
+            "DELETE",
+            "/api/plugins/com.example.follow/perms/mavlink.command",
+            "",
+        ),
+    ] {
+        let (status, hits) = send_armed(method, uri, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{method} {uri}");
+        assert_eq!(hits, 0, "{method} {uri}");
+        let (status, hits) = send_armed(method, &format!("{uri}?force=1"), body).await;
+        assert_eq!(status, StatusCode::OK, "{method} {uri}");
+        assert_eq!(hits, 1, "{method} {uri}");
+    }
+    assert!(!is_guarded(
+        "GET",
+        "/api/plugins/com.example.follow/perms/mavlink.command"
+    ));
+    assert!(!is_guarded(
+        "DELETE",
+        "/api/plugins/com.example.follow/perms/"
+    ));
+    assert!(!is_guarded("DELETE", "/api/plugins//perms/mavlink.command"));
+}
+
+#[tokio::test]
+async fn a_primary_gamepad_change_is_refused_while_armed_and_force_passes() {
+    // Making another controller primary moves the RC input mid-flight.
+    let uri = "/api/v1/ground-station/gamepads/primary";
+    let body = r#"{"device_id":"pad-2"}"#;
+    let (status, hits) = send_armed("PUT", uri, body).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(hits, 0);
+    let (status, hits) = send_armed("PUT", uri, r#"{"device_id":"pad-2","force":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hits, 1);
+    assert!(!is_guarded("GET", "/api/v1/ground-station/gamepads"));
+}
+
 #[test]
 fn setup_reset_is_not_guarded() {
     assert!(!is_guarded("POST", "/api/v1/setup/reset"));
@@ -541,6 +601,13 @@ fn the_guarded_set_covers_each_link_dropping_action() {
         ("POST", "/api/plugins/com.example.nav/disable"),
         ("DELETE", "/api/plugins/com.example.nav"),
         ("POST", "/api/v1/peripherals/ados.rtl8812eu-radio/action"),
+        ("POST", "/api/pairing/unpair"),
+        ("POST", "/api/plugins/com.example.nav/grant"),
+        (
+            "DELETE",
+            "/api/plugins/com.example.nav/perms/mavlink.command",
+        ),
+        ("PUT", "/api/v1/ground-station/gamepads/primary"),
     ] {
         assert!(is_guarded(method, path), "{method} {path} must be guarded");
     }

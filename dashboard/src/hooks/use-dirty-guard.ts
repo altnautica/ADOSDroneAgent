@@ -1,13 +1,12 @@
-// Prompts the user via the browser's native beforeunload dialog when
-// they try to close or reload the tab while a settings form has
-// unsaved changes. The custom message is ignored by all modern
-// browsers; setting `returnValue` is what triggers the prompt.
-//
-// Note: this does NOT fire for in-app `navigate()` calls. React
-// Router's NavLink won't trigger it. It only catches real tab close,
-// reload, or external-URL navigation. That's the intended scope.
+// Guards a settings form with unsaved changes against both ways of leaving:
+// - closing or reloading the tab: the browser's native beforeunload prompt
+//   (the custom text is ignored by modern browsers; `returnValue` triggers it);
+// - in-app navigation (a nav link, Back): the router blocks it and asks.
 
 import { useEffect } from "react";
+import { useBlocker } from "react-router-dom";
+
+import i18n from "@/shared/i18n";
 
 export function useDirtyGuard(dirty: boolean) {
   useEffect(() => {
@@ -19,4 +18,13 @@ export function useDirtyGuard(dirty: boolean) {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirty]);
+
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) => dirty && currentLocation.pathname !== nextLocation.pathname,
+  );
+  useEffect(() => {
+    if (blocker.state !== "blocked") return;
+    if (window.confirm(i18n.t("settings.shared.leaveUnsaved"))) blocker.proceed();
+    else blocker.reset();
+  }, [blocker]);
 }

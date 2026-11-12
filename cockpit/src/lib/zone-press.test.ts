@@ -43,6 +43,20 @@ describe("an unavailable flight control explains itself on press", () => {
     }
   });
 
+  it("the skill confirm sheet and the skill picker draw no hard-coded words", () => {
+    for (const f of ["../components/feed/skill-confirm-sheet.tsx", "../components/feed/skill-picker/skill-picker.tsx"]) {
+      const s = src(f);
+      expect(s, f).not.toMatch(/(aria-label|label|title|Label)="[A-Z][a-z]/);
+      expect(s, f).not.toMatch(/(aria-label|label|title|Label)=\{`/);
+      expect(s, f).not.toMatch(/label: "[A-Z][a-z]/);
+      expect(s, f).not.toMatch(/`Hold to confirm|"Gamepad: hold|Takeoff altitude|takeoff altitude/);
+    }
+    const sheet = src("../components/feed/skill-confirm-sheet.tsx");
+    for (const key of ["confirm.hold_to_confirm", "setup.confirm.hold", "setup.action.cancel", "confirm.input_hint_panel", "stop.input_hint", "flow.launch.alt_m"]) {
+      expect(sheet, key).toContain(`"${key}"`);
+    }
+  });
+
   it("the follow controls, follow range and on-screen sticks take their words from the spec", () => {
     const files = [
       "../components/feed/follow-rail.tsx",

@@ -4,14 +4,18 @@
 // The dashboard is the primary setup surface; the cockpit renders the same
 // wizard for the kiosk and the field.
 
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { useFcSetup } from "@/shared/setup-wizard/use-fc-setup";
 import { WizardView } from "@/shared/setup-wizard/wizard-view";
 
 export function AircraftSetupSettings() {
   const setup = useFcSetup();
+  // Below md the split step card is too narrow: stack it, as the cockpit
+  // does in portrait.
+  const wide = useMediaQuery("(min-width: 768px)");
   return (
     <div className="px-4 py-4 lg:px-6">
-      <WizardView setup={setup} layout="split" />
+      <WizardView setup={setup} layout={wide ? "split" : "stacked"} />
     </div>
   );
 }

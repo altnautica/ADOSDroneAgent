@@ -118,7 +118,7 @@ function HardwareItemRow({ item }: { item: HardwareCheckItem }) {
         aria-expanded={expanded}
       >
         <Chevron
-          className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground/60"
+          className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground"
           aria-hidden
         />
         <Icon

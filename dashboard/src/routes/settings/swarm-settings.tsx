@@ -7,7 +7,6 @@ import {
   ConfigTextField,
   ConfigToggle,
 } from "@/components/settings/config-fields";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfig } from "@/hooks/use-config";
 
@@ -85,6 +84,9 @@ function SwarmSection() {
             label={t("settingsMore.swarm.participationLabel")}
             hint={t("settingsMore.swarm.participationHint")}
             value={swarm.enabled}
+            confirm={(next) =>
+              next ? { title: t("settingsMore.swarm.enableTitle"), description: t("settingsMore.swarm.enableBody") } : null
+            }
           />
         </CardContent>
       </Card>
@@ -118,7 +120,7 @@ function SwarmSection() {
               hint={t("settingsMore.swarm.spacingHint")}
               value={swarm.default_spacing}
               integer
-              min={0}
+              min={1}
             />
           </div>
         </CardContent>
@@ -132,7 +134,7 @@ export function SwarmSettings() {
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
+    return <p className="text-[11px] text-muted-foreground">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
@@ -146,9 +148,6 @@ export function SwarmSettings() {
     <section className="space-y-3">
       <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
         {t("settingsMore.swarm.title")}
-        <Badge variant="default" className="font-normal">
-          {t("settingsMore.swarm.configOnlyBadge")}
-        </Badge>
       </div>
       <SwarmSection />
     </section>

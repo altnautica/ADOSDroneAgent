@@ -41,7 +41,7 @@ export function Card({
       aria-disabled={!enabled || undefined}
       aria-current={current ? "page" : undefined}
       className={cn(
-        "touch-target flex flex-col items-start gap-[0.25rem] rounded-xl p-[0.7rem] text-left transition-transform duration-quick focus-visible:scale-[1.03] motion-reduce:transition-none",
+        "touch-target flex flex-col items-start gap-[0.25rem] rounded-md p-[0.7rem] text-left transition-transform duration-quick focus-visible:scale-[1.03] motion-reduce:transition-none",
         emphasis ? "min-h-[6.5rem]" : "min-h-[4.5rem]",
         current ? "bg-primary text-primary-foreground" : "bg-muted text-surface-foreground hover:bg-border",
       )}

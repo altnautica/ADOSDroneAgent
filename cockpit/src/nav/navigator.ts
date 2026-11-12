@@ -53,10 +53,12 @@ export interface ScreenSpec {
   /** Optional menu icon. */
   icon?: LucideIcon;
   kind: ScreenKind;
-  /** When true, the screen paints edge-to-edge (its own L0/L2 layers) and the
-   *  shell floats its chrome translucently on top — the Feed's video view. When
-   *  false (the default), the screen renders in a framed content region with
-   *  solid chrome. */
+  /** When true, the screen may paint edge-to-edge (its own L0/L2 layers): the
+   *  shell draws it full-bleed with no chrome while the cockpit is full screen
+   *  (the kiosk, or the top bar's Full screen button), and otherwise frames it
+   *  beside the menu rail without the status strip or action bar. When false
+   *  (the default), the screen renders in a framed content region with solid
+   *  chrome. */
   fullBleed?: boolean;
   /** The profiles the tab appears on (the mesh / uplink screens are
    *  receive-side concepts only a ground station has). Absent = shown on every
@@ -74,23 +76,6 @@ export interface ScreenSpec {
 /** The fallback tab: the Feed, the pilot's flying view. A profile's own home
  *  tab (`homeTabFor`) takes over once the profile is known. */
 export const DEFAULT_TAB_ID = "feed";
-
-/** The ordered tab ids, left-to-right / top-to-bottom in the menu. The store
- *  uses this order to move the button/gamepad focus ring across the menu; the
- *  registry builds each screen against the same id. Detail screens are not
- *  listed here. */
-export const TAB_ORDER: readonly string[] = [
-  "feed",
-  "node",
-  "link",
-  "mesh",
-  "sources",
-  "pair",
-  "uplink",
-  "system",
-  "extensions",
-  "settings",
-];
 
 /** How the node's flight controller is configured: `mavlink` (ArduPilot, PX4)
  *  or `msp` (Betaflight, iNav). */

@@ -253,7 +253,7 @@ export function WifiSection() {
             onClick={scan.run}
           />
         </div>
-        {scan.networks.length === 0 && !scan.scanning ? <EmptyNote>{t("wifi.panel.noNetworks")}</EmptyNote> : null}
+        {scan.networks.length === 0 && !scan.scanning && !scan.failed ? <EmptyNote>{t("wifi.panel.noNetworks")}</EmptyNote> : null}
         {scan.networks.map((n) => {
           const isCurrent = n.in_use || (n.ssid !== "" && n.ssid === current?.ssid);
           const rawSec = securityLabel(n.security);

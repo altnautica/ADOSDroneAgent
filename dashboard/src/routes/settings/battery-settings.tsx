@@ -77,7 +77,7 @@ function LiveSection() {
   const health = useBatteryHealth();
 
   if (health.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.battery.readingState")}</p>;
+    return <p className="text-[11px] text-muted-foreground">{t("settingsMore.battery.readingState")}</p>;
   }
   if (health.isError || !health.data) {
     return (
@@ -121,7 +121,7 @@ function ThresholdSection() {
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
+    return <p className="text-[11px] text-muted-foreground">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
@@ -150,20 +150,33 @@ function ThresholdSection() {
           hint={t("settingsMore.battery.monitoringHint")}
           value={battery.enabled}
         />
-        {THRESHOLD_FIELDS.map((f) => (
-          <div key={f.key} className="border-t border-border pt-5">
-            <ConfigNumberField
-              configKey={`battery.${f.key}`}
-              id={`battery-${f.key}`}
-              label={t(f.labelKey)}
-              hint={t(f.hintKey)}
-              value={battery[f.key]}
-              integer
-              min={f.min}
-              max={f.max}
-            />
-          </div>
-        ))}
+        <p className="text-xs text-muted-foreground">{t("settingsMore.battery.orderNote")}</p>
+        {THRESHOLD_FIELDS.map((f) => {
+          // Critical stays below low: each bound follows the other's saved value,
+          // so a refused pair never reaches the agent.
+          const min =
+            f.key === "low_cell_mv" && typeof battery.critical_cell_mv === "number"
+              ? Math.max(f.min, battery.critical_cell_mv + 1)
+              : f.min;
+          const max =
+            f.key === "critical_cell_mv" && typeof battery.low_cell_mv === "number"
+              ? Math.min(f.max, battery.low_cell_mv - 1)
+              : f.max;
+          return (
+            <div key={f.key} className="border-t border-border pt-5">
+              <ConfigNumberField
+                configKey={`battery.${f.key}`}
+                id={`battery-${f.key}`}
+                label={t(f.labelKey)}
+                hint={t(f.hintKey)}
+                value={battery[f.key]}
+                integer
+                min={min}
+                max={max}
+              />
+            </div>
+          );
+        })}
       </CardContent>
     </Card>
   );
@@ -176,7 +189,7 @@ export function BatterySettings() {
       <section className="space-y-3">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
           {t("settingsMore.battery.livePacks")}
-          <Badge variant="default" className="font-normal">
+          <Badge variant="neutral">
             {t("settingsMore.battery.refresh")}
           </Badge>
         </div>

@@ -56,14 +56,17 @@ class ResolvedTier(str, enum.Enum):
     The agent resolves the tier from the live board and offload-link signals
     (``ados_offload::pick_tier``) and reports it as ``perceptionTier`` on
     ``/api/status``. The resolved domain is a SUPERSET of the intent: it drops
-    ``auto`` (already decided) and adds ``hybrid`` (a light local model plus the
-    node) and ``none`` (no perception path — odometry only). So a resolved tier
+    ``auto`` (already decided) and adds ``cpu`` (the detector runs on the
+    drone's own CPU), ``hybrid`` (a light local model plus the node) and
+    ``none`` (no perception path — odometry only). So a resolved tier
     must never be forced back through :class:`ExecutionTier`, which has no
-    ``hybrid`` / ``none`` member and would raise on them.
+    ``cpu`` / ``hybrid`` / ``none`` member and would raise on them.
     """
 
     LOCAL = "local"
     """Inference ran on the drone's own accelerator."""
+    CPU = "cpu"
+    """Inference ran on the drone's own CPU (no accelerator in use)."""
     OFFLOAD = "offload"
     """Inference ran on the paired compute node; detections streamed back."""
     HYBRID = "hybrid"

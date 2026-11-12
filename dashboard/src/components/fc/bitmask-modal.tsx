@@ -57,7 +57,7 @@ export function BitmaskModal({ open, onOpenChange, name, bitmask, value, onApply
 
         <div className="max-h-72 overflow-y-auto space-y-1 pr-1">
           {bits.map(([bit, label]) => (
-            <label key={bit} className="flex items-center gap-2 text-xs cursor-pointer py-0.5">
+            <label key={bit} className="flex items-center gap-2 text-xs cursor-pointer py-0.5 max-md:min-h-11">
               <input
                 type="checkbox"
                 className="accent-primary"

@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { ChevronRight, List } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { markRebootPending, type WriteResult } from "@/stores/config-store";
 import type { AgentConfig, ConfigValue } from "@/lib/types";
@@ -24,9 +25,10 @@ import { Toggle } from "@/components/settings/widgets";
 
 /** A small accent "restart" chip flagging a reboot-gated path. */
 function RestartChip() {
+  const { t } = useTranslation();
   return (
     <span className="rounded-full bg-warn/20 px-[0.4rem] py-[0.05rem] text-[0.75rem] font-medium uppercase tracking-wide text-warn">
-      restart
+      {t("cockpit.settingsSections.tree.restart")}
     </span>
   );
 }
@@ -44,6 +46,7 @@ interface PathRowProps {
 /** Render one config path as a drill / toggle / editor row. Returns null when
  *  the path is absent on this profile (a curated leaf that does not exist). */
 export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRowProps) {
+  const { t } = useTranslation();
   const value = getAtPath(config, path);
   const [busy, setBusy] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
@@ -69,7 +72,7 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
           {reboot ? <RestartChip /> : null}
         </div>
         <div className="flex shrink-0 items-center gap-[0.4rem] text-muted-foreground">
-          <span className="text-[0.75rem]">{count} field{count === 1 ? "" : "s"}</span>
+          <span className="text-[0.75rem]">{t("cockpit.settingsSections.tree.fields", { count })}</span>
           <ChevronRight className="h-[1.2rem] w-[1.2rem]" aria-hidden />
         </div>
       </button>
@@ -85,13 +88,11 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
           <List className="h-[1rem] w-[1rem] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0">
             <div className="truncate text-[0.9rem] text-surface-foreground">{name}</div>
-            <div className="truncate text-[0.75rem] text-muted-foreground">
-              list · edit in config.yaml
-            </div>
+            <div className="truncate text-[0.75rem] text-muted-foreground">{t("cockpit.settingsSections.tree.listHint")}</div>
           </div>
         </div>
         <span className="shrink-0 font-mono text-[0.78rem] text-muted-foreground">
-          {arr.length} item{arr.length === 1 ? "" : "s"}
+          {t("cockpit.settingsSections.tree.items", { count: arr.length })}
         </span>
       </div>
     );
@@ -103,10 +104,10 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
       <div className="flex items-center justify-between gap-[0.6rem] rounded-md bg-input/20 px-[0.7rem] py-[0.4rem]">
         <div className="min-w-0">
           <div className="truncate text-[0.9rem] text-surface-foreground">{name}</div>
-          <div className="truncate text-[0.75rem] text-muted-foreground">read-only</div>
+          <div className="truncate text-[0.75rem] text-muted-foreground">{t("cockpit.settingsSections.tree.readOnly")}</div>
         </div>
         <span className="shrink-0 font-mono text-[0.82rem] text-muted-foreground">
-          {value === "" ? "auto-detect" : formatDisplayValue(path, value)}
+          {value === "" ? t("cockpit.settingsSections.tree.autoDetect") : formatDisplayValue(path, value)}
         </span>
       </div>
     );

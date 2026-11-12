@@ -66,7 +66,10 @@ export function useAcceptCode() {
 export function useUnpair() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => apiFetch("/api/pairing/unpair", { method: "POST" }),
+    // Unpairing cuts Mission Control off the vehicle: the agent refuses it
+    // while armed unless forced (`withArmedRetry`).
+    mutationFn: (force: boolean = false) =>
+      apiFetch(force ? "/api/pairing/unpair?force=1" : "/api/pairing/unpair", { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["pairing-info"] }),
   });
 }

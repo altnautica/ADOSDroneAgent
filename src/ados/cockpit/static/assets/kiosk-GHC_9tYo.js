@@ -1,1 +1,0 @@
-var e=typeof window<`u`&&new URLSearchParams(window.location.search).get(`kiosk`)===`1`;function t(){return e}export{t};

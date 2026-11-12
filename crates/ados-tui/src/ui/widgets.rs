@@ -72,13 +72,22 @@ pub fn render_cells(frame: &mut Frame, t: &Theme, inner: Rect, cells: Vec<Cell>)
                 ratio,
                 label,
                 color,
-            } => frame.render_widget(
-                Gauge::default()
-                    .gauge_style(Style::default().fg(color))
-                    .ratio(ratio.clamp(0.0, 1.0))
-                    .label(Span::styled(label, Style::default().fg(t.on_accent()))),
-                rect,
-            ),
+            } => {
+                // The label sits centred: over the fill only once the bar
+                // passes half, so below that it needs the text colour.
+                let label_style = if ratio < 0.5 {
+                    t.text()
+                } else {
+                    Style::default().fg(t.on_accent())
+                };
+                frame.render_widget(
+                    Gauge::default()
+                        .gauge_style(Style::default().fg(color))
+                        .ratio(ratio.clamp(0.0, 1.0))
+                        .label(Span::styled(label, label_style)),
+                    rect,
+                )
+            }
             Cell::Spark { data, max, color } => {
                 let mut spark = Sparkline::default()
                     .data(newest(&data, rect.width))
@@ -136,6 +145,32 @@ pub fn truncate(text: &str, width: usize) -> String {
     }
     let mut out: String = text.chars().take(width - 1).collect();
     out.push('…');
+    out
+}
+
+/// A line cut to `width` display columns, its last kept span ending in `…`
+/// when anything was cut, so a value is never clipped mid-word unmarked.
+pub fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if total <= width {
+        return line;
+    }
+    let mut left = width;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let n = span.content.chars().count();
+        if n < left {
+            left -= n;
+            spans.push(span);
+            continue;
+        }
+        // This span crosses the edge: keep what fits, then the mark.
+        let kept: String = span.content.chars().take(left.saturating_sub(1)).collect();
+        spans.push(Span::styled(format!("{kept}…"), span.style));
+        break;
+    }
+    let mut out = Line::from(spans);
+    out.style = line.style;
     out
 }
 

@@ -174,8 +174,10 @@ export interface PendingWrite {
 
 /** What the gate needs from the drone's pilot state (the `pilot` nav kind). */
 export interface PilotView {
-  armed: boolean;
-  landed: boolean;
+  /** Null while the pilot has not heard the flight controller: possibly
+   *  airborne. */
+  armed: boolean | null;
+  landed: boolean | null;
   vehicleClass: VehicleClass | null;
   /** The flight controller is in its own failsafe return or landing. */
   fcFailsafe?: boolean;
@@ -247,8 +249,16 @@ function disabled(reason: string): SkillState {
 }
 
 /** The arm requirement against an arm state and a landed state (null =
- *  unknown). Returns the reason it fails, or null when it holds. */
-export function armGateReason(req: ArmRequirement, armed: boolean, landed: boolean | null): string | null {
+ *  unknown). Returns the reason it fails, or null when it holds. An unknown
+ *  arm state (the pilot has not heard the flight controller) counts as
+ *  possibly airborne: what needs it armed (Land, Return home, Pause) stays
+ *  offered, and what needs it disarmed or landed (Arm, Take off, Disarm)
+ *  says why it waits. */
+export function armGateReason(req: ArmRequirement, armed: boolean | null, landed: boolean | null): string | null {
+  if (armed === null) {
+    if (req === "any" || req === "armed") return null;
+    return req === "disarmed" ? refusalText("no_fc_link") : refusalText("landed_unknown");
+  }
   switch (req) {
     case "any":
       return null;
@@ -291,7 +301,7 @@ function resolveBuiltin(skill: Skill, b: BuiltinBinding, ctx: SkillContext): Ski
   // The arm state: the pilot's own (with landed), else telemetry, where a
   // disarmed vehicle counts as landed and an armed one's landed state is
   // unknown. A blind send on a stale link reads the last known state.
-  let armed: boolean;
+  let armed: boolean | null;
   let landed: boolean | null;
   if (pilot) {
     armed = pilot.armed;

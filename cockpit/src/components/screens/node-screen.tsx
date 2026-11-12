@@ -9,7 +9,8 @@ import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { EmptyNote, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { EmptyNote, ErrorNote, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { ListItem } from "@/components/ui/list-item";
 import { TwoPane } from "@/components/ui/two-pane";
@@ -66,11 +67,21 @@ export function NodeScreen() {
           {tab === 0 ? (
             <TwoPane
               showDetailInPortrait={selected !== null}
-              list={<JobList jobs={jobs.data ?? []} selectedId={jobId} onSelect={setJobId} />}
+              list={
+                readFailed(jobs) ? (
+                  <ErrorNote onRetry={jobs.refresh}>{t("cockpit.readFailed.node")}</ErrorNote>
+                ) : (
+                  <JobList jobs={jobs.data ?? []} selectedId={jobId} onSelect={setJobId} />
+                )
+              }
               detail={selected ? <JobDetail job={selected} onCancelled={jobs.refresh} /> : <EmptyNote>{t("cockpit.node.pickJob")}</EmptyNote>}
             />
           ) : (
-            <SessionList sessions={sessions.data ?? []} />
+            readFailed(sessions) ? (
+              <ErrorNote onRetry={sessions.refresh}>{t("cockpit.readFailed.node")}</ErrorNote>
+            ) : (
+              <SessionList sessions={sessions.data ?? []} />
+            )
           )}
         </div>
       </div>
@@ -78,7 +89,7 @@ export function NodeScreen() {
   }
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={status.stale || jobs.stale}
       title={t("cockpit.node.title")}
       onBack={selected ? () => setJobId(null) : undefined}
       backLabel={t("cockpit.node.back")}

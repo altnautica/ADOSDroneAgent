@@ -34,10 +34,10 @@ describe("cockpit alerts", () => {
 describe("the status pill's pilot, agent, controller and pre-flight inputs", () => {
   const pilot = (over: Partial<PilotState> = {}) => ({ at: 1000, data: { holdReason: null, armed: false, landed: true, ...over } as PilotState });
   const checks = [
-    { id: "link", label: "Vehicle link fresh", ok: false },
-    { id: "gps", label: "GPS fix 3D or better", ok: false },
-    { id: "home", label: "Home position set", ok: false },
-    { id: "battery", label: "Battery above the low band", ok: true },
+    { id: "link", label: "Vehicle link fresh", fail: "Vehicle link not fresh", ok: false },
+    { id: "gps", label: "GPS fix 3D or better", fail: "GPS fix below 3D", ok: false },
+    { id: "home", label: "Home position set", fail: "Home position not set", ok: false },
+    { id: "battery", label: "Battery above the low band", fail: "Battery in the low band", ok: true },
   ];
   const base = { pilot: pilot(), nowMs: 1500, statusStale: false, armed: false, checks, alerts: [] };
 

@@ -183,7 +183,7 @@ export function LoraView({
         </div>
       )}
       {chips.map((c, i) => (
-        <Badge key={`${c.kind}-${i}`} variant="warn" className="mr-2">
+        <Badge key={`${c.kind}-${i}`} variant="warning" className="mr-2">
           {chipText(c, t)}
         </Badge>
       ))}

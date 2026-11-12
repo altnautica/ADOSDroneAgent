@@ -21,9 +21,11 @@ import {
   flyHereFc,
   launchGoto,
   mapPickAction,
+  mapPickRefusal,
   sendFcReposition,
 } from "@/lib/fly-here";
 import { distanceMeters, type LatLon } from "@/lib/minimap-geometry";
+import { toast } from "@/shared/api/toast";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
@@ -74,10 +76,18 @@ export function useFlyHere(locate: (clientX: number, clientY: number) => MapPick
   const [sending, setSending] = useState(false);
 
   const freshPilot = pilot !== null && pilotFresh(pilot.at, now) ? pilot.data : null;
-  const action = mapPickAction(pilot?.data ?? null, pilot ? now - pilot.at : Infinity, flyHereFc(telemetry ?? null, live, freshPilot));
+  const ageMs = pilot ? now - pilot.at : Infinity;
+  const fc = flyHereFc(telemetry ?? null, live, freshPilot);
+  const action = mapPickAction(pilot?.data ?? null, ageMs, fc);
+  // Route null with a known reason: a pick says why as a toast, no dialog.
+  const refusal = mapPickRefusal(pilot?.data ?? null, ageMs, fc);
   const flying = action === "pilot" || action === "fc";
 
   const pick = (clientX: number, clientY: number) => {
+    if (refusal !== null) {
+      toast.err(refusalText(refusal));
+      return;
+    }
     const p = locate(clientX, clientY);
     if (!p) return;
     if (flying && p.ll) {
@@ -101,7 +111,7 @@ export function useFlyHere(locate: (clientX: number, clientY: number) => MapPick
   );
 
   const handlers: MapPressHandlers | null =
-    action === null
+    action === null && refusal === null
       ? null
       : {
           onPointerDown: (e) => {

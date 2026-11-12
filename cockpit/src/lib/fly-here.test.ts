@@ -10,7 +10,9 @@ import {
   flyHerePosition,
   launchGoto,
   localToLatLon,
+  fcLanded,
   mapPickAction,
+  mapPickRefusal,
   offsetFromDrone,
   unprojectEN,
 } from "@/lib/fly-here";
@@ -52,7 +54,8 @@ describe("fly here", () => {
   // and anything else does nothing.
   it.each(flyHereCases.map((c) => [c.name, c] as const))("%s", (_name, c) => {
     const p = parsePilotState(c.input.pilot);
-    const ground = p !== null && c.input.pilot_age_ms < 2000 && (p.landed || !p.armed);
+    // Only a reported landed or disarmed state is the ground; unknown is possibly airborne.
+    const ground = p !== null && c.input.pilot_age_ms < 2000 && (p.landed === true || p.armed === false);
     expect(mapPickAction(p, c.input.pilot_age_ms, c.input.fc)).toBe(c.expected.route ?? (ground ? "launch" : null));
   });
 
@@ -62,10 +65,27 @@ describe("fly here", () => {
     expect(flyHereFc(t, true, pilot({ fcModeName: null, landed: true }))).toEqual({ guided: false, armed: true, landed: true });
     expect(flyHereFc({ armed: true, mode: "guided" } as VehicleState, true, pilot({ fcModeName: null, landed: false }))).toEqual({ guided: true, armed: true, landed: false });
     expect(flyHereFc({ armed: false, mode: "GUIDED" } as VehicleState, true, pilot({ fcModeName: "GUIDED" }))?.armed).toBe(false);
-    // Landed is known only from a fresh pilot state; a stale link knows nothing.
+    // With no fresh pilot (or one whose FC link is down) the flight
+    // controller's own landed state decides; with neither nothing is known.
     expect(flyHereFc(t, true, null)).toBeNull();
+    expect(flyHereFc({ ...t, landed_state: "in_air" }, true, null)).toEqual({ guided: false, armed: true, landed: false });
+    expect(flyHereFc({ ...t, landed_state: "on_ground" }, true, pilot({ landed: null }))).toEqual({ guided: false, armed: true, landed: true });
+    expect(flyHereFc({ ...t, landed_state: "in_air" }, true, pilot({ landed: true }))?.landed).toBe(true);
     expect(flyHereFc(t, false, pilot({}))).toBeNull();
     expect(flyHereFc(null, true, pilot({}))).toBeNull();
+  });
+
+  it("reads the FC's landed state; a take-off or landing is off the ground", () => {
+    expect(fcLanded("on_ground")).toBe(true);
+    for (const s of ["in_air", "takeoff", "landing"] as const) expect(fcLanded(s), s).toBe(false);
+    expect(fcLanded(undefined)).toBeNull();
+    expect(fcLanded(null)).toBeNull();
+  });
+
+  it("names why a picked point does nothing, and nothing when it does something", () => {
+    expect(mapPickRefusal(pilot({}), 100, null)).toBeNull();
+    expect(mapPickRefusal(pilot({ armed: false, landed: true }), 100, null)).toBeNull();
+    expect(mapPickRefusal(pilot({}), 5000, null)).toBe("pilot_stale");
   });
 
   it("prefills the Launch go-to with whole metres north/east of the vehicle", () => {

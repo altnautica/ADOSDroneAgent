@@ -2,6 +2,8 @@ import { Cpu } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
+import { ReadErrorCard } from "@/components/read-error-card";
+import { ApiError } from "@/shared/api-fetch";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
@@ -77,7 +79,18 @@ export function PeripheralsRoute() {
         <p className="text-sm text-muted-foreground">{t("peripherals.page.loading")}</p>
       )}
 
-      {!list.isLoading && items.length === 0 && (
+      {list.isError && (
+        <ReadErrorCard
+          message={
+            list.error instanceof ApiError && list.error.status === 501
+              ? t("cockpit.peripherals.residualAbsent")
+              : t("cockpit.peripherals.unavailable")
+          }
+          onRetry={() => void list.refetch()}
+        />
+      )}
+
+      {!list.isLoading && !list.isError && items.length === 0 && (
         <Card>
           <CardContent className="pt-5 pb-5 flex items-start gap-3">
             <Cpu className="h-5 w-5 text-muted-foreground mt-0.5" />

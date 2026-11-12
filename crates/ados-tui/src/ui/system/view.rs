@@ -213,18 +213,20 @@ fn agent(f: &mut Frame, area: Rect, core: &Core) {
             Span::styled(what.to_string(), if on { t.text() } else { t.dim() }),
         ])
     };
-    let local = !core.target.remote;
+    let can_update = core.update_available().is_some();
     lines.push(key(
         "u",
-        if local {
+        if core.target.remote {
+            "update (local only)"
+        } else if can_update {
             "update the agent"
         } else {
-            "update (local only)"
+            "update the agent (no update known)"
         },
-        local,
+        can_update,
     ));
     lines.push(key("S", "restart the supervisor", true));
-    lines.push(key("X", "reboot the host", true));
+    lines.push(key("X", "reboot the companion computer", true));
     f.render_widget(Paragraph::new(lines), inner);
 }
 

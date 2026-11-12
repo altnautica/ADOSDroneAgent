@@ -5,11 +5,16 @@
 
 import { useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Menu } from "@/components/ui/menu";
+import { OnScreenKeyboard } from "@/components/settings/on-screen-keyboard";
+import { OnScreenNumpad } from "@/components/settings/on-screen-numpad";
 import { Toggle } from "@/components/settings/widgets";
 import type { AnchorRect } from "@/lib/menu-placement";
+import { useWantsKeyboard } from "@/hooks/use-wants-keyboard";
 import { cn } from "@/lib/utils";
+import "@/shared/i18n";
 
 export function SettingRow({
   title,
@@ -121,6 +126,8 @@ export function TextSettingRow({
   placeholder,
   enabled = true,
   inputMode,
+  maxLength,
+  autoCapitalize,
 }: {
   title: string;
   summary?: ReactNode;
@@ -129,19 +136,51 @@ export function TextSettingRow({
   placeholder?: string;
   enabled?: boolean;
   inputMode?: "text" | "numeric" | "decimal" | "url";
+  maxLength?: number;
+  autoCapitalize?: "off" | "characters" | "words" | "sentences";
 }) {
+  const { t } = useTranslation();
+  // On the kiosk panel, or driven by a pad or the panel's buttons, there is
+  // no keyboard: focusing the field opens the on-screen one.
+  const [keyboard, setKeyboard] = useState(false);
+  const wantsKeyboard = useWantsKeyboard();
+  const numeric = inputMode === "numeric" || inputMode === "decimal";
+  const set = (next: string) => onChange(maxLength != null ? next.slice(0, maxLength) : next);
   return (
-    <SettingRow title={title} summary={summary} enabled={enabled}>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={!enabled}
-        placeholder={placeholder}
-        inputMode={inputMode}
-        aria-label={title}
-        className="touch-target w-[clamp(7.5rem,40%,14rem)] rounded-md border border-border bg-input px-[0.6rem] text-[0.9rem] text-surface-foreground focus:border-primary focus:outline-none"
-      />
-    </SettingRow>
+    <>
+      <SettingRow title={title} summary={summary} enabled={enabled}>
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => set(e.target.value)}
+          onFocus={() => {
+            if (wantsKeyboard) setKeyboard(true);
+          }}
+          disabled={!enabled}
+          placeholder={placeholder}
+          inputMode={inputMode}
+          maxLength={maxLength}
+          autoCapitalize={autoCapitalize}
+          aria-label={title}
+          className="touch-target w-[clamp(7.5rem,40%,14rem)] rounded-md border border-border bg-input px-[0.6rem] text-[0.9rem] text-surface-foreground focus:border-primary focus:outline-none"
+        />
+      </SettingRow>
+      {keyboard && enabled ? (
+        <div className="flex flex-col gap-[0.3rem]" data-testid="text-row-keyboard">
+          {numeric ? (
+            <OnScreenNumpad value={value} onChange={set} bound={{ int: inputMode === "numeric" }} />
+          ) : (
+            <OnScreenKeyboard value={value} onChange={set} placeholder={placeholder} />
+          )}
+          <button
+            type="button"
+            onClick={() => setKeyboard(false)}
+            className="touch-target self-end rounded-lg bg-input px-[0.9rem] text-[0.85rem] text-surface-foreground"
+          >
+            {t("common.close")}
+          </button>
+        </div>
+      ) : null}
+    </>
   );
 }

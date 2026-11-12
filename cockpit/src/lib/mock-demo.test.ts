@@ -4,6 +4,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { layerFrames } from "@/lib/layer-frames";
 import { mockLayerStream } from "@/lib/mock-layers";
 import { mockNavStream } from "@/lib/mock-nav";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -40,5 +41,31 @@ describe("demo feed", () => {
       }
     }
     expect(seen).toEqual(new Set(["mission_fc", "skill"]));
+  });
+
+  it("pins pilot fields over the scene and stalls the layers under a live pilot", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    vi.stubGlobal("window", globalThis);
+    mockLayerStream.start();
+    await vi.advanceTimersByTimeAsync(100);
+    const demo = window.__adosDemoPilot!;
+    demo.pin({ input_session: { src: "bench", label: "Bench", session: 7 } });
+    demo.stallLayers(true);
+    await vi.advanceTimersByTimeAsync(100);
+    const pilotAt = useNavStreamStore.getState().pilot!.at;
+    const obstaclesSeen = layerFrames.obstacles.seen;
+    await vi.advanceTimersByTimeAsync(500);
+    const pilot = useNavStreamStore.getState().pilot!;
+    expect(pilot.data.inputSession?.label).toBe("Bench");
+    expect(pilot.at).toBeGreaterThan(pilotAt);
+    expect(layerFrames.obstacles.seen).toBe(obstaclesSeen);
+    // Stopping the feed drops the pins and the hook.
+    mockLayerStream.stop();
+    expect(window.__adosDemoPilot).toBeUndefined();
+    mockLayerStream.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(useNavStreamStore.getState().pilot!.data.inputSession ?? null).toBeNull();
+    expect(layerFrames.obstacles.seen).not.toBe(obstaclesSeen);
   });
 });

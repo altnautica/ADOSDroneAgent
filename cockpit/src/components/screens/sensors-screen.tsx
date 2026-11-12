@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { Upload } from "lucide-react";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { ActionButton, Dot, EmptyNote, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
+import { ActionButton, Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
 import { ListItem } from "@/components/ui/list-item";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { getClock, getSensors, rigRejection, sensorTone } from "@/lib/sensors-model";
@@ -102,7 +102,7 @@ export function SensorsScreen() {
   if (!sensors.ready) {
     body = <EmptyNote>{t("common.loading")}</EmptyNote>;
   } else if (!s) {
-    body = <EmptyNote>{t("sensors.loadFailed")}</EmptyNote>;
+    body = <ErrorNote onRetry={sensors.refresh}>{t("sensors.loadFailed")}</ErrorNote>;
   } else if (!s.present) {
     body = (
       <div className="flex flex-col gap-[0.4rem]">
@@ -184,7 +184,7 @@ export function SensorsScreen() {
   }
 
   return (
-    <ConsoleScaffold title={t("sensors.title")} actions={<StaleBadge stale={sensors.stale || clock.stale} />}>
+    <ConsoleScaffold stale={sensors.stale || clock.stale} title={t("sensors.title")} actions={<StaleBadge stale={sensors.stale || clock.stale} />}>
       {body}
     </ConsoleScaffold>
   );

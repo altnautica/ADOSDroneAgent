@@ -9,6 +9,32 @@ use super::s;
 /// the detector is running on).
 pub const VISION_STATUS_PATH: &str = "/api/vision/status";
 
+/// The engine's newest detection batch, read as the dashboard reads it.
+pub const DETECTIONS_LATEST_PATH: &str = "/api/vision/detections/latest";
+
+/// What the newest batch found: the object count and its camera.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Seen {
+    pub count: usize,
+    pub camera: Option<String>,
+}
+
+impl Seen {
+    /// The batch a `/latest` reply carries; `None` when it carries none
+    /// (vision off, or a stale batch).
+    pub fn from_latest(v: &Value) -> Option<Self> {
+        if v.get("available").and_then(Value::as_bool) != Some(true)
+            || v.get("stale").and_then(Value::as_bool) == Some(true)
+        {
+            return None;
+        }
+        Some(Self {
+            count: v.get("detections")?.as_array()?.len(),
+            camera: s(v, "camera_id"),
+        })
+    }
+}
+
 /// Where the detector runs: the engine detects on a camera only while a
 /// consumer holds it (`on_demand`), or on every captured camera (`always`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -18,6 +44,8 @@ pub struct Detection {
     pub detecting: Vec<String>,
     /// The depth layer, when the engine reports it.
     pub depth: Option<DepthLayer>,
+    /// The newest batch's count, when the engine reports a fresh one.
+    pub seen: Option<Seen>,
 }
 
 /// The depth layer: whether its model is installed, and where the depth grid
@@ -117,18 +145,25 @@ impl Detection {
             mode: s(d, "mode"),
             detecting,
             depth: v.get("depth").and_then(DepthLayer::from_block),
+            seen: None,
         })
     }
 
-    /// `idle`, or `detecting: main, belly`. The engine's status reports, per
-    /// camera, only whether detection runs there (and the leases holding it),
-    /// not how many objects it found, so no count is shown.
+    /// `idle`, or `detecting: main, belly`, then what the newest batch found
+    /// (`· 3 objects on main`) while the detector runs and the batch is fresh.
     pub fn word(&self) -> String {
         if self.detecting.is_empty() {
-            "idle".to_string()
-        } else {
-            format!("detecting: {}", self.detecting.join(", "))
+            return "idle".to_string();
         }
+        let mut word = format!("detecting: {}", self.detecting.join(", "));
+        if let Some(seen) = &self.seen {
+            let noun = if seen.count == 1 { "object" } else { "objects" };
+            word.push_str(&format!(" · {} {noun}", seen.count));
+            if let Some(cam) = &seen.camera {
+                word.push_str(&format!(" on {cam}"));
+            }
+        }
+        word
     }
 }
 

@@ -27,6 +27,7 @@ export function NetworkSettings() {
   const [hotspot, setHotspot] = useState(initialHotspot);
   const [busy, setBusy] = useState(false);
   const [pendingEnable, setPendingEnable] = useState(false);
+  const [pendingDisable, setPendingDisable] = useState(false);
 
   useEffect(() => {
     if (status.data) {
@@ -59,10 +60,10 @@ export function NetworkSettings() {
   }
 
   function onToggle(next: boolean) {
-    // Disabling the AP is never destructive — just turn it off.
+    // Turning the AP off drops every phone and laptop joined to it,
+    // possibly this browser: confirm first.
     if (!next) {
-      setHotspot(false);
-      void commitHotspot(false);
+      setPendingDisable(true);
       return;
     }
     // Enabling the AP commandeers wlan0. If the rig has an active
@@ -121,6 +122,18 @@ export function NetworkSettings() {
 
       <WifiPanel />
 
+      <ConfirmDialog
+        open={pendingDisable}
+        onOpenChange={setPendingDisable}
+        title={t("settings.network.disableTitle")}
+        description={t("settings.network.disableBody")}
+        confirmLabel={t("settings.shared.confirm")}
+        destructive
+        onConfirm={async () => {
+          setHotspot(false);
+          await commitHotspot(false);
+        }}
+      />
       <ConfirmDialog
         open={pendingEnable}
         onOpenChange={(open) => {

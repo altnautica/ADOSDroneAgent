@@ -271,6 +271,10 @@ impl Tab for GroundTab {
         vec![Ctx::Page(PageKeys::Ground), Ctx::List]
     }
 
+    fn has_panes(&self) -> bool {
+        true
+    }
+
     fn subs(&self, _core: &Core) -> Vec<Sub> {
         vec![
             Sub::every_ms(ResourceId::Gnss, "/api/v1/gnss", 2000),

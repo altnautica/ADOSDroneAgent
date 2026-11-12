@@ -203,7 +203,7 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
                     "text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border",
                     s.present
                       ? "border-ok/40 text-ok"
-                      : "border-muted-foreground/30 text-muted-foreground/60",
+                      : "border-muted-foreground/30 text-muted-foreground",
                   )}
                 >
                   {t(s.labelKey)}

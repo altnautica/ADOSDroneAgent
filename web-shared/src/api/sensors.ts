@@ -131,11 +131,15 @@ export function rateVerdict(row: Pick<SensorRow, "rate_hz" | "expected_hz">): Ra
 export function formatSigma(sigmaNs: number): string {
   if (sigmaNs < 0) return "—";
   if (sigmaNs >= 1_000_000) return `${(sigmaNs / 1_000_000).toFixed(2)} ms`;
+  if (sigmaNs < 1000) return `${Math.round(sigmaNs)} ns`;
   return `${(sigmaNs / 1000).toFixed(0)} µs`;
 }
 
 export function putGnssBase(
-  body: { mode: "off" } | { mode: "survey"; min_dur_s: number; accuracy_m: number },
+  body:
+    | { mode: "off" }
+    | { mode: "survey"; min_dur_s: number; accuracy_m: number }
+    | { mode: "fixed"; lat_deg: number; lon_deg: number; h_ellipsoid_m: number },
 ): Promise<GnssBase> {
   return apiFetch<GnssBase>("/api/v1/gnss/base", { method: "PUT", body });
 }

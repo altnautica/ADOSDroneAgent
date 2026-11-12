@@ -1,16 +1,10 @@
 import { AlertCircle, ArrowUpCircle, Check, Download, ExternalLink, Shield } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  type CatalogEntry,
-  type CatalogResponse,
-  catalogView,
-  installState,
-} from "@/lib/plugin-catalog";
-import { apiFetch } from "@/shared/api-fetch";
+import { usePluginCatalog } from "@/hooks/use-plugin-catalog";
+import { type CatalogEntry, catalogView, installState } from "@/lib/plugin-catalog";
 
 interface Props {
   /** Installed plugin id → installed version. */
@@ -51,13 +45,7 @@ const RISK_TONE = {
 
 export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
   const { t } = useTranslation();
-  // The catalog is compiled into the agent, so it cannot change while the page
-  // is open: fetch once, never poll.
-  const catalog = useQuery<CatalogResponse>({
-    queryKey: ["plugin-catalog"],
-    queryFn: ({ signal }) => apiFetch<CatalogResponse>("/api/v1/plugins/catalog", { signal }),
-    staleTime: Infinity,
-  });
+  const catalog = usePluginCatalog();
 
   const view = catalogView(catalog.data, catalog.error, catalog.isPending);
   if (view.kind === "loading" || view.kind === "empty") return null;

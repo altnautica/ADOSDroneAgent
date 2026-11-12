@@ -15,8 +15,10 @@ import { useTranslation } from "react-i18next";
 
 import { Field, FieldPanel, OptionSheet, PickerChip, ValueEntry } from "@/components/fc/fc-editors";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { ActionButton, EmptyNote } from "@/components/ui/data";
+import { ActionButton, EmptyNote, ErrorNote } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { GuardedButton } from "@/components/ui/guarded-button";
+import { SearchField } from "@/components/ui/search-field";
 import { ListItem } from "@/components/ui/list-item";
 import { SettingRow } from "@/components/ui/setting-row";
 import { TwoPane } from "@/components/ui/two-pane";
@@ -46,6 +48,7 @@ export function MspScreen() {
 
   let body;
   if (!identity.ready) body = <EmptyNote>{t("cockpit.msp.identifying")}</EmptyNote>;
+  else if (readFailed(identity)) body = <ErrorNote onRetry={identity.refresh}>{t("cockpit.readFailed.status")}</ErrorNote>;
   else if (!fw) body = <EmptyNote>{t("cockpit.msp.notMsp")}</EmptyNote>;
   else if (tab === 0)
     body = (
@@ -199,14 +202,7 @@ function SettingsTab({
   return (
     <div className="flex h-full min-h-0 flex-col gap-[0.5rem]">
       <div className="flex flex-wrap items-center gap-[0.5rem]">
-        <input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t("fc.settings.searchPlaceholder", { fw: fwLabel(firmware) })}
-          aria-label={t("fc.settings.searchPlaceholder", { fw: fwLabel(firmware) })}
-          className="touch-target min-w-[12rem] flex-1 rounded-md border border-border bg-input px-[0.6rem] text-[0.9rem] text-surface-foreground"
-        />
+        <SearchField value={search} onChange={setSearch} placeholder={t("fc.settings.searchPlaceholder", { fw: fwLabel(firmware) })} />
         <ActionButton
           label={t("telemetry.params.discard")}
           disabled={dirtyCount === 0 || saving}

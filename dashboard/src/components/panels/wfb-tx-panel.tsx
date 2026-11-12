@@ -1,4 +1,3 @@
-import type { TFunction } from "i18next";
 import { Antenna } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 
@@ -9,15 +8,22 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { useWfb } from "@/hooks/use-wfb";
+import { useNow } from "@/hooks/use-now";
+import { useWfb, WFB_POLL_MS } from "@/hooks/use-wfb";
+import { liveData } from "@/lib/freshness";
+import { cn } from "@/lib/utils";
+import { wfbStale, wfbStateBadge } from "@/lib/wfb-state";
 import { fmtBitrate, fmtNum } from "@/shared/format";
 
 export function WfbTxPanel() {
   const { t } = useTranslation();
   const wfb = useWfb();
-  const w = wfb.data;
+  const now = useNow(1_000);
+  // Agent down: the last read is not shown as current.
+  const w = liveData(wfb, WFB_POLL_MS, now);
 
   const state = (w?.state ?? "unknown").toLowerCase();
+  const stale = wfbStale(state);
   const iface = w?.interface ?? "";
   const channel = w?.actual_channel ?? null;
   const freq = w?.frequency_mhz ?? null;
@@ -33,7 +39,7 @@ export function WfbTxPanel() {
   const adapterMissing =
     state === "disabled" || (state === "error" && !iface);
 
-  const badge = stateBadge(state, t);
+  const badge = wfbStateBadge(state, t);
 
   return (
     <Card>
@@ -42,13 +48,13 @@ export function WfbTxPanel() {
           <Antenna className="h-3.5 w-3.5" />
           {t("wfb.tx.title")}
           {badge && (
-            <Badge variant={badge.variant} className="font-normal ml-auto">
+            <Badge variant={badge.variant} className="ml-auto">
               {badge.label}
             </Badge>
           )}
         </CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className={cn(stale && "opacity-50")}>
         {adapterMissing ? (
           <p className="text-xs text-muted-foreground">
             <Trans i18nKey="wfb.tx.notRunning" components={{ code: <code /> }} />
@@ -116,23 +122,4 @@ export function WfbTxPanel() {
       </CardContent>
     </Card>
   );
-}
-
-function stateBadge(
-  state: string,
-  t: TFunction,
-): { label: string; variant: "ok" | "warn" | "info" | "default" } | null {
-  switch (state) {
-    case "active":
-    case "ready":
-      return { label: state, variant: "ok" };
-    case "connecting":
-      return { label: t("wfb.state.connecting"), variant: "info" };
-    case "error":
-      return { label: t("wfb.state.error"), variant: "warn" };
-    case "disabled":
-      return { label: t("wfb.state.disabled"), variant: "default" };
-    default:
-      return state ? { label: state, variant: "default" } : null;
-  }
 }

@@ -1406,9 +1406,11 @@ async fn pairing_unpair_clears_pairing_json_and_mints_a_code() {
     let relay_secret = dir.path().join("relay-peer-secret");
     std::fs::write(&relay_secret, "0".repeat(64)).unwrap();
 
+    // No vehicle state reaches the harness, so the armed interlock counts the
+    // drone as armed; the override is how a disarmed-unknown unpair goes through.
     let (status, body) = unix_post(
         &h.socket,
-        "/api/pairing/unpair",
+        "/api/pairing/unpair?force=1",
         Some(("X-ADOS-Key", "ados_K")),
         "",
     )
@@ -1449,7 +1451,8 @@ async fn pairing_unpair_is_409_when_not_paired() {
     let dir = tempfile::tempdir().unwrap();
     // No pairing file → unpaired.
     let h = start(dir.path(), None).await;
-    let (status, body) = unix_post(&h.socket, "/api/pairing/unpair", None, "").await;
+    // `force=1`: past the armed interlock (no vehicle state reaches the harness).
+    let (status, body) = unix_post(&h.socket, "/api/pairing/unpair?force=1", None, "").await;
     assert!(
         status.contains("409"),
         "unpair while unpaired must be 409: {status}"

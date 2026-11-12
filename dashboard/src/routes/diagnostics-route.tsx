@@ -13,11 +13,16 @@ import { PageShell } from "@/components/page-shell";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { useNow } from "@/hooks/use-now";
 import { useResource } from "@/hooks/use-resource";
+import { liveData } from "@/lib/freshness";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtNum } from "@/shared/format";
 import { rebootAgent } from "@/shared/api/setup-actions";
 import { toast, toastFromError } from "@/shared/api/toast";
+
+const SYSTEM_POLL_MS = 5_000;
+const SERVICES_POLL_MS = 8_000;
 
 // Every numeric field is null in the degraded body the agent serves when its
 // metrics store is unreachable (`available: false`).
@@ -61,19 +66,23 @@ interface ServicesResponse {
 
 export function DiagnosticsRoute() {
   const { t } = useTranslation();
-  const sys = useResource<SystemSnapshot>("system", "/api/system", 5000);
+  const sys = useResource<SystemSnapshot>("system", "/api/system", SYSTEM_POLL_MS);
   const services = useResource<ServicesResponse | ServiceEntry[]>(
     "services",
     "/api/services",
-    8000,
+    SERVICES_POLL_MS,
   );
+  // Agent down: the last read is not shown as current (values dash out).
+  const now = useNow(1_000);
+  const sysData = liveData(sys, SYSTEM_POLL_MS, now);
+  const svcData = liveData(services, SERVICES_POLL_MS, now);
 
-  const items: ServiceEntry[] = Array.isArray(services.data)
-    ? services.data
-    : (services.data?.services ?? []);
-  const systemdAvailable: boolean = Array.isArray(services.data)
+  const items: ServiceEntry[] = Array.isArray(svcData)
+    ? svcData
+    : (svcData?.services ?? []);
+  const systemdAvailable: boolean = Array.isArray(svcData)
     ? true
-    : (services.data?.systemd_available ?? true);
+    : (svcData?.systemd_available ?? true);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<
@@ -117,9 +126,9 @@ export function DiagnosticsRoute() {
     }
   }
 
-  const cpuPct = sys.data?.cpu_percent ?? null;
-  const memPct = sys.data?.memory_percent ?? null;
-  const diskPct = sys.data?.disk_percent ?? null;
+  const cpuPct = sysData?.cpu_percent ?? null;
+  const memPct = sysData?.memory_percent ?? null;
+  const diskPct = sysData?.disk_percent ?? null;
   const cpuTone =
     cpuPct != null && cpuPct > 80
       ? "err"
@@ -132,14 +141,14 @@ export function DiagnosticsRoute() {
       : memPct != null && memPct > 60
         ? "warn"
         : "ok";
-  const cpuCount = sys.data?.cpu_count ?? null;
-  const memUsed = sys.data?.memory_used_mb ?? null;
-  const memTotal = sys.data?.memory_total_mb ?? null;
-  const diskUsed = sys.data?.disk_used_gb ?? null;
-  const diskTotal = sys.data?.disk_total_gb ?? null;
+  const cpuCount = sysData?.cpu_count ?? null;
+  const memUsed = sysData?.memory_used_mb ?? null;
+  const memTotal = sysData?.memory_total_mb ?? null;
+  const diskUsed = sysData?.disk_used_gb ?? null;
+  const diskTotal = sysData?.disk_total_gb ?? null;
 
-  const firstTemp = sys.data
-    ? Object.entries(sys.data.temperatures)[0]
+  const firstTemp = sysData
+    ? Object.entries(sysData.temperatures)[0]
     : null;
 
   return (

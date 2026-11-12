@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 import { useParamsStore } from "@/stores/params-store";
 
 import { displayValue, type ParamSetResponse, type ParamsResponse } from "./param-display";
+import { StagedList } from "./staged-list";
 
 export function MavlinkParams() {
   const { t } = useTranslation();
@@ -201,7 +202,7 @@ export function MavlinkParams() {
               className="pl-8"
             />
           </div>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground whitespace-nowrap cursor-pointer">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground whitespace-nowrap cursor-pointer max-md:min-h-11">
             <input
               type="checkbox"
               checked={modifiedOnly}
@@ -416,7 +417,7 @@ export function MavlinkParams() {
                           className="w-28 h-7 text-xs"
                         />
                       )}
-                      <span className="text-muted-foreground/70 w-24 shrink-0 truncate text-[10px]" title={hint}>
+                      <span className="text-muted-foreground w-24 shrink-0 truncate text-[10px]" title={hint}>
                         {hint}
                       </span>
                     </div>
@@ -444,6 +445,7 @@ export function MavlinkParams() {
               {t("telemetry.params.confirmBody")}{" "}
               {isPx4 ? t("telemetry.params.confirmPx4") : t("telemetry.params.confirmArdupilot")}
             </p>
+            <StagedList drafts={drafts} meta={meta} />
             <p className="text-xs text-muted-foreground">
               {t("telemetry.params.confirmWarning")}
             </p>

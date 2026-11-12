@@ -63,7 +63,7 @@ pub fn display(kind: &Kind, value: Option<&Value>, secret: bool, revealed: bool)
     match (kind, v) {
         (_, Value::Null) => "none".into(),
         (Kind::Bool, Value::Bool(b)) => if *b { "on" } else { "off" }.into(),
-        (_, Value::String(s)) if s.is_empty() => "\"\"".into(),
+        (_, Value::String(s)) if s.is_empty() => "—".into(),
         (_, Value::String(s)) => s.clone(),
         (Kind::Opaque, other) => compact(other),
         (_, other) => other.to_string(),
@@ -278,6 +278,16 @@ mod tests {
                 true
             ),
             "hunter2"
+        );
+    }
+
+    #[test]
+    fn an_empty_string_reads_as_a_dash_not_json() {
+        let k = Kind::Str { pattern: None };
+        assert_eq!(display(&k, Some(&json!("")), false, false), "—");
+        assert_eq!(
+            display(&k, Some(&json!("/dev/ttyS0")), false, false),
+            "/dev/ttyS0"
         );
     }
 }

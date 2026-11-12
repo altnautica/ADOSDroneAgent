@@ -6,7 +6,7 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { Dot, EmptyNote, StaleBadge } from "@/components/ui/data";
+import { Dot, EmptyNote, ErrorNote, StaleBadge } from "@/components/ui/data";
 import { ListItem } from "@/components/ui/list-item";
 import { parsePeripherals, sinceParts } from "@/lib/peripherals";
 import { useNavStore } from "@/stores/nav-store";
@@ -28,7 +28,7 @@ export function PeripheralsScreen() {
   let body;
   if (list.status === 501 && !list.data) body = <EmptyNote>{t("cockpit.peripherals.residualAbsent")}</EmptyNote>;
   else if (!list.ready) body = <EmptyNote>{t("peripherals.page.loading")}</EmptyNote>;
-  else if (list.error && !list.data) body = <EmptyNote>{t("cockpit.peripherals.unavailable", { error: list.error })}</EmptyNote>;
+  else if (list.error && !list.data) body = <ErrorNote onRetry={list.refresh}>{t("cockpit.peripherals.unavailable")}</ErrorNote>;
   else if (items.length === 0) body = <EmptyNote>{t("peripherals.empty.title")}</EmptyNote>;
   else {
     body = (
@@ -67,7 +67,7 @@ export function PeripheralsScreen() {
   }
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={list.stale}
       title={t("peripherals.page.title")}
       onBack={() => useNavStore.getState().back()}
       actions={<StaleBadge stale={list.stale} />}

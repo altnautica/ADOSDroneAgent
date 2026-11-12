@@ -35,6 +35,19 @@ describe("one nav-status poller for every reader", () => {
     };
   }
 
+  it("never lets a reader fetch or poll on its own", () => {
+    expect(navStatusReaderOptions).toMatchObject({ enabled: false, refetchInterval: false, retry: false });
+    // A mounted reader with no poller makes no request at all.
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const queryFn = vi.fn(() => Promise.resolve({}));
+    const observer = new QueryObserver<NavStatusBody>(client, { ...navStatusReaderOptions, queryFn });
+    const unsubscribe = observer.subscribe(() => undefined);
+    vi.advanceTimersByTime(5_000);
+    unsubscribe();
+    expect(queryFn).not.toHaveBeenCalled();
+  });
+
   it("makes one request per tick with two readers mounted out of phase", async () => {
     vi.useFakeTimers();
     const client = new QueryClient();

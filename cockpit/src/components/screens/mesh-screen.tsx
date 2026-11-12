@@ -140,7 +140,7 @@ export function MeshScreen() {
   }
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={mesh.stale && kind === "ok"}
       title={t("panels.mesh.title")}
       actions={
         <span className="flex items-center gap-[0.5rem]">

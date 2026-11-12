@@ -1,6 +1,6 @@
 // The screen registry — the single source of the cockpit's screens. The shell
 // resolves the active screen from here; the menu lists the `tab` screens in
-// TAB_ORDER. Later stages replace a screen's `render` (or add `detail` screens
+// registry order (TAB_ORDER, derived below). Later stages replace a screen's `render` (or add `detail` screens
 // opened via `open-detail`) without touching the shell or the navigator.
 //
 // Feed is wired now (video + HUD); Link/Mesh/Pair/Uplink/System read their live
@@ -10,29 +10,7 @@
 // bound to that path — so the shell's detail stack + hardware "back" drive the
 // drill without a static screen per config group.
 
-import {
-  Gauge,
-  Radio,
-  Server,
-  Network,
-  Link2,
-  SlidersHorizontal,
-  Cpu,
-  Settings,
-  Blocks,
-  Layers,
-  ScrollText,
-  Usb,
-  Wrench,
-  Terminal,
-  Video,
-  Antenna,
-  RadioTower,
-  Satellite,
-  Activity,
-  Gamepad2,
-  ScanLine,
-} from "lucide-react";
+import { Settings } from "lucide-react";
 
 import { FeedScreen } from "@/components/screens/feed-screen";
 import {
@@ -59,6 +37,8 @@ import {
   CaptureScreen,
 } from "@/nav/lazy-screens";
 import { DEFAULT_TAB_ID, homeTabId, tabVisibleFor, type FcFamily, type ScreenSpec } from "@/nav/navigator";
+import { SCREEN_TABLE } from "@/nav/screen-table";
+import i18n from "@/shared/i18n";
 import type { GroundRole } from "@/shared/api/types";
 import type { AgentProfile } from "@/shared/use-profile";
 
@@ -67,188 +47,39 @@ import type { AgentProfile } from "@/shared/use-profile";
  *  `@path`). */
 const SETTINGS_DETAIL_PREFIX = "settings:";
 
-const SCREENS: ScreenSpec[] = [
-  {
-    id: "feed",
-    title: "Feed",
-    icon: Gauge,
-    kind: "tab",
-    fullBleed: true,
-    render: () => <FeedScreen />,
+const RENDERS: Record<string, ScreenSpec["render"]> = {
+  feed: () => <FeedScreen />,
+  node: () => <NodeScreen />,
+  capture: () => <CaptureScreen />,
+  link: () => <LinkScreen />,
+  video: () => <VideoScreen />,
+  transmit: () => <TransmitScreen />,
+  lora: () => <LoraScreen />,
+  gnss: () => <GnssScreen />,
+  sensors: () => <SensorsScreen />,
+  io: () => <IoScreen />,
+  mesh: () => <MeshScreen />,
+  sources: () => <SourcesScreen />,
+  pair: () => <PairScreen />,
+  uplink: () => <UplinkScreen />,
+  system: (ctx) => <SystemScreen dispatch={ctx.dispatch} />,
+  peripherals: () => <PeripheralsScreen />,
+  "aircraft-setup": () => <AircraftSetupScreen />,
+  logs: () => <LogsScreen />,
+  extensions: () => <ExtensionsScreen />,
+  params: () => <ParamsScreen />,
+  msp: () => <MspScreen />,
+  settings: (ctx) => <SettingsScreen path="~" dispatch={ctx.dispatch} />,
+};
+
+const SCREENS: ScreenSpec[] = SCREEN_TABLE.map((meta) => ({
+  ...meta,
+  // Read at render time, so the label follows the active language.
+  get title() {
+    return i18n.t(meta.labelKey);
   },
-  {
-    id: "node",
-    title: "Node",
-    icon: Server,
-    kind: "tab",
-    profiles: ["workstation", "compute"],
-    render: () => <NodeScreen />,
-  },
-  {
-    // The visor's home (HOME_BY_PROFILE.visor): the world-engine capture session.
-    id: "capture",
-    title: "Capture",
-    icon: ScanLine,
-    kind: "tab",
-    profiles: ["visor"],
-    render: () => <CaptureScreen />,
-  },
-  {
-    id: "link",
-    title: "Link",
-    icon: Radio,
-    kind: "tab",
-    render: () => <LinkScreen />,
-  },
-  {
-    id: "video",
-    title: "Video",
-    icon: Video,
-    kind: "tab",
-    profiles: ["drone", "visor"],
-    render: () => <VideoScreen />,
-  },
-  {
-    id: "transmit",
-    title: "Transmit",
-    icon: Antenna,
-    kind: "tab",
-    profiles: ["drone"],
-    render: () => <TransmitScreen />,
-  },
-  {
-    id: "lora",
-    title: "LoRa",
-    icon: RadioTower,
-    kind: "tab",
-    profiles: ["drone", "ground_station"],
-    render: () => <LoraScreen />,
-  },
-  {
-    id: "gnss",
-    title: "GNSS",
-    icon: Satellite,
-    kind: "tab",
-    profiles: ["ground_station", "visor"],
-    render: () => <GnssScreen />,
-  },
-  {
-    id: "sensors",
-    title: "Sensors",
-    icon: Activity,
-    kind: "tab",
-    profiles: ["drone", "visor"],
-    render: () => <SensorsScreen />,
-  },
-  {
-    id: "io",
-    title: "IO",
-    icon: Gamepad2,
-    kind: "tab",
-    profiles: ["ground_station"],
-    render: () => <IoScreen />,
-  },
-  {
-    id: "mesh",
-    title: "Mesh",
-    icon: Network,
-    kind: "tab",
-    profiles: ["ground_station"],
-    // A direct ground station is not in a mesh.
-    roles: ["relay", "receiver"],
-    render: () => <MeshScreen />,
-  },
-  {
-    id: "sources",
-    title: "Sources",
-    icon: Layers,
-    kind: "tab",
-    profiles: ["ground_station"],
-    // Only a receiver combines fragments from relays.
-    roles: ["receiver"],
-    render: () => <SourcesScreen />,
-  },
-  {
-    id: "pair",
-    title: "Pair",
-    icon: Link2,
-    kind: "tab",
-    render: () => <PairScreen />,
-  },
-  {
-    id: "uplink",
-    title: "Uplink",
-    icon: SlidersHorizontal,
-    kind: "tab",
-    profiles: ["ground_station"],
-    render: () => <UplinkScreen />,
-  },
-  {
-    id: "system",
-    title: "System",
-    icon: Cpu,
-    kind: "tab",
-    render: (ctx) => <SystemScreen dispatch={ctx.dispatch} />,
-  },
-  {
-    id: "peripherals",
-    title: "Peripherals",
-    icon: Usb,
-    // Opened from the System screen with `open-detail`.
-    kind: "detail",
-    render: () => <PeripheralsScreen />,
-  },
-  {
-    id: "aircraft-setup",
-    title: "Aircraft setup",
-    icon: Wrench,
-    // Opened from Settings and from the flight-state chip's "Set up aircraft".
-    kind: "detail",
-    profiles: ["drone", "ground_station"],
-    render: () => <AircraftSetupScreen />,
-  },
-  {
-    id: "logs",
-    title: "Logs",
-    icon: ScrollText,
-    kind: "detail",
-    render: () => <LogsScreen />,
-  },
-  {
-    id: "extensions",
-    title: "Extensions",
-    icon: Blocks,
-    kind: "tab",
-    // Lists every running extension and hosts its tabs and panels; a node with
-    // none shows a plain empty state.
-    render: () => <ExtensionsScreen />,
-  },
-  {
-    id: "params",
-    title: "Params",
-    icon: Wrench,
-    kind: "tab",
-    profiles: ["drone", "visor"],
-    fcFamily: "mavlink",
-    render: () => <ParamsScreen />,
-  },
-  {
-    id: "msp",
-    title: "MSP",
-    icon: Terminal,
-    kind: "tab",
-    profiles: ["drone", "visor"],
-    fcFamily: "msp",
-    render: () => <MspScreen />,
-  },
-  {
-    id: "settings",
-    title: "Settings",
-    icon: Settings,
-    kind: "tab",
-    render: (ctx) => <SettingsScreen path="~" dispatch={ctx.dispatch} />,
-  },
-];
+  render: RENDERS[meta.id],
+}));
 
 const REGISTRY = new Map<string, ScreenSpec>(SCREENS.map((s) => [s.id, s]));
 
@@ -283,7 +114,9 @@ export function getScreen(id: string): ScreenSpec {
     const path = id.slice(SETTINGS_DETAIL_PREFIX.length);
     return {
       id,
-      title: "Settings",
+      get title() {
+        return i18n.t("nav.settings");
+      },
       icon: Settings,
       kind: "detail",
       render: (ctx) => <SettingsScreen path={path} dispatch={ctx.dispatch} />,

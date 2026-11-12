@@ -24,14 +24,14 @@ function StateCard({
   title: string;
   children: ReactNode;
   badge: string;
-  badgeVariant: "ok" | "warn" | "default";
+  badgeVariant: "success" | "warning" | "neutral";
 }) {
   return (
     <Card>
       <CardContent className="pt-5 pb-5 space-y-2">
         <div className="flex items-center justify-between gap-3">
           <span className="text-sm font-semibold">{title}</span>
-          <Badge variant={badgeVariant} className="font-normal">
+          <Badge variant={badgeVariant}>
             {badge}
           </Badge>
         </div>
@@ -50,6 +50,7 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
   const config = useConfig();
   const [checked, setChecked] = useState(value ?? false);
   const [pendingEnable, setPendingEnable] = useState(false);
+  const [pendingDisable, setPendingDisable] = useState(false);
 
   useEffect(() => {
     setChecked(value ?? false);
@@ -68,12 +69,11 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
     }
   }
 
+  // Both directions ask: on can lock out unauthenticated clients, off is a
+  // downgrade.
   function onToggle(next: boolean) {
-    if (next) {
-      setPendingEnable(true);
-      return;
-    }
-    void commit(false);
+    if (next) setPendingEnable(true);
+    else setPendingDisable(true);
   }
 
   return (
@@ -105,6 +105,14 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
           return commit(true);
         }}
       />
+      <ConfirmDialog
+        open={pendingDisable}
+        onOpenChange={setPendingDisable}
+        title={t("settingsMore.security.wsDisableTitle")}
+        description={t("settingsMore.security.wsDisableBody")}
+        destructive
+        onConfirm={() => commit(false)}
+      />
     </>
   );
 }
@@ -120,7 +128,7 @@ export function SecuritySettings() {
   });
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
+    return <p className="text-[11px] text-muted-foreground">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
@@ -152,7 +160,7 @@ export function SecuritySettings() {
                 ? t("settingsMore.security.badgeSet")
                 : t("settingsMore.security.badgeNotSet")
         }
-        badgeVariant={apiKey.state === "required" ? "ok" : "default"}
+        badgeVariant={apiKey.state === "required" ? "success" : "neutral"}
       >
         {apiKey.state === "unknown" ? (
           <>{t("settingsMore.security.apiKeyReadError")}</>
@@ -185,10 +193,10 @@ export function SecuritySettings() {
         }
         badgeVariant={
           pin.data?.locked
-            ? "warn"
+            ? "warning"
             : pin.data?.pin_set
-              ? "ok"
-              : "default"
+              ? "success"
+              : "neutral"
         }
       >
         {pin.isError ? (
@@ -207,18 +215,14 @@ export function SecuritySettings() {
             <WsEnforceToggle value={config.data?.mavlink?.ws_proxy_enforce_auth} />
             <div className="border-t border-border pt-5">
               <ConfigToggle
-                configKey="security.hmac_enabled"
-                label={t("settingsMore.security.hmacLabel")}
-                hint={t("settingsMore.security.hmacHint")}
-                value={security.hmac_enabled}
-              />
-            </div>
-            <div className="border-t border-border pt-5">
-              <ConfigToggle
                 configKey="security.setup_token_required"
                 label={t("settingsMore.security.setupTokenLabel")}
                 hint={t("settingsMore.security.setupTokenHint")}
                 value={security.setup_token_required}
+                confirm={(next) => ({
+                  title: next ? t("settingsMore.security.setupTokenOnTitle") : t("settingsMore.security.setupTokenOffTitle"),
+                  description: next ? t("settingsMore.security.setupTokenOnBody") : t("settingsMore.security.setupTokenOffBody"),
+                })}
               />
             </div>
           </CardContent>

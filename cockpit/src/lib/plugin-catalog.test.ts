@@ -45,7 +45,7 @@ describe("install list", () => {
         { status: "enabled" },
       ],
     });
-    expect(r).toEqual({ pluginId: "a", version: "1.0.0", status: "running", enabled: true, signed: true, granted: 1, declared: 2 });
+    expect(r).toEqual({ pluginId: "a", version: "1.0.0", status: "running", enabled: true, signed: true, granted: 1, declared: 2, failureReason: null });
     expect(parseInstalls({ installs: [{ plugin_id: "b", status: "disabled" }] })[0]).toMatchObject({ enabled: false, signed: false });
   });
 });

@@ -207,7 +207,7 @@ const SWARM_ROWS: &[Row] = &[
         "",
         "swarm.enabled",
         "Swarm participation",
-        "Persist this node's intent to join a swarm. No runtime consumer acts on it yet.",
+        "Lets the onboard swarm runtime command the flight controller while the aircraft is in GUIDED.",
     ),
     row(
         "",

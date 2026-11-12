@@ -7,7 +7,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useNow } from "@/hooks/use-now";
 import { useResource } from "@/hooks/use-resource";
+import { liveData } from "@/lib/freshness";
 import { fmtBitrate } from "@/shared/format";
 
 // GET /api/v1/ground-station/wfb/receiver/combined — the receiver's combined
@@ -27,22 +29,26 @@ interface ReceiverRelays {
   stale: boolean;
 }
 
+const SOURCES_POLL_MS = 2_000;
+
 export function SourcesPanel() {
   const { t } = useTranslation();
   const combined = useResource<ReceiverCombined>(
     "gs-receiver-combined",
     "/api/v1/ground-station/wfb/receiver/combined",
-    2_000,
+    SOURCES_POLL_MS,
   );
   const relays = useResource<ReceiverRelays>(
     "gs-receiver-relays",
     "/api/v1/ground-station/wfb/receiver/relays",
-    2_000,
+    SOURCES_POLL_MS,
   );
-
-  const c = combined.data;
+  // Agent down: the last read is not shown as current.
+  const now = useNow(1_000);
+  const c = liveData(combined, SOURCES_POLL_MS, now);
+  const r = liveData(relays, SOURCES_POLL_MS, now);
   const stale = c?.stale === true;
-  const perSource = relays.data?.stale ? null : (relays.data?.relays ?? null);
+  const perSource = r?.stale ? null : (r?.relays ?? null);
 
   return (
     <Card>
@@ -51,7 +57,7 @@ export function SourcesPanel() {
           <Layers className="h-3.5 w-3.5" />
           {t("panels.sources.title")}
           {stale && (
-            <span className="ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-warn/40 text-warn">
+            <span className="ml-auto text-xs px-1.5 py-0.5 rounded border border-warn/40 text-warn">
               {t("panels.sources.stale")}
             </span>
           )}
@@ -78,10 +84,10 @@ export function SourcesPanel() {
 
         {perSource && perSource.length > 0 && (
           <ul className="pt-3 mt-3 border-t border-border/50 space-y-1 text-xs font-mono">
-            {perSource.map((r) => (
-              <li key={r.mac} className="flex justify-between gap-2 text-muted-foreground">
-                <span className="truncate">{r.mac}</span>
-                <span>{t("panels.sources.frags", { frags: r.fragments.toLocaleString() })}</span>
+            {perSource.map((relay) => (
+              <li key={relay.mac} className="flex justify-between gap-2 text-muted-foreground">
+                <span className="truncate">{relay.mac}</span>
+                <span>{t("panels.sources.frags", { frags: relay.fragments.toLocaleString() })}</span>
               </li>
             ))}
           </ul>

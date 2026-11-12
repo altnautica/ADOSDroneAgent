@@ -49,8 +49,9 @@ async function sequenceCase(browser) {
   const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
   const line = page.getByTestId("launch-sequence");
   await line.waitFor({ state: "visible", timeout: 5000 });
-  // The same line the chip's launching rule writes.
-  assert.match(await line.innerText(), /Taking off · TAKE OFF/);
+  // The same line the chip's launching rule writes, word for word.
+  assert.match(await line.innerText(), /Taking off · CLIMB/);
+  assert.match(await page.getByTestId("flight-state-chip").innerText(), /Taking off · CLIMB/);
   await page.getByTestId("flight-state-chip").click();
   await sheetSettled(page);
   assert.ok(await line.isVisible(), "the step and Abort stay on screen with the Mode sheet open");

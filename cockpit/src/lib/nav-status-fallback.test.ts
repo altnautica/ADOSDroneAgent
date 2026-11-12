@@ -145,6 +145,10 @@ describe("stream fallback", () => {
     stop();
   });
 
+  it("gives a status read 2.5 s before aborting it, more than a slow radio link needs", () => {
+    expect(NAV_STATUS_TIMEOUT_MS).toBe(2500);
+  });
+
   it("aborts a hung status read after its timeout and drops the reduced rate", async () => {
     let calls = 0;
     let aborted = 0;

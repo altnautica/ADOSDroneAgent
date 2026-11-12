@@ -59,13 +59,13 @@ function fmtEta(s: number | null): string {
 }
 
 const PREDICTION = {
-  idle: { labelKey: "settingsMore.battery.predIdle", variant: "default" },
-  normal: { labelKey: "settingsMore.battery.predDraining", variant: "ok" },
-  high: { labelKey: "settingsMore.battery.predDrainingFast", variant: "warn" },
-  past: { labelKey: "settingsMore.battery.predPastReserve", variant: "err" },
+  idle: { labelKey: "settingsMore.battery.predIdle", variant: "neutral" },
+  normal: { labelKey: "settingsMore.battery.predDraining", variant: "success" },
+  high: { labelKey: "settingsMore.battery.predDrainingFast", variant: "warning" },
+  past: { labelKey: "settingsMore.battery.predPastReserve", variant: "error" },
 } as const satisfies Record<
   BatteryPredictionState,
-  { labelKey: string; variant: "default" | "ok" | "warn" | "err" }
+  { labelKey: string; variant: "neutral" | "success" | "warning" | "error" }
 >;
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -123,7 +123,7 @@ function AnomalyRow({ a }: { a: BatteryAnomaly }) {
   return (
     <div className="flex items-center justify-between gap-3 text-xs">
       <div className="flex items-center gap-2">
-        <Badge variant={a.severity === "critical" ? "err" : "warn"}>
+        <Badge variant={a.severity === "critical" ? "error" : "warning"}>
           {t(SEVERITY_LABEL[a.severity])}
         </Badge>
         <span className="font-medium">{t(RULE_LABEL[a.rule])}</span>
@@ -151,7 +151,7 @@ export function BatteryPackCard({ pack }: { pack: BatteryPack }) {
           <div className="text-sm font-semibold">{t("settingsMore.battery.packTitle", { id: pack.id })}</div>
           <div className="flex items-center gap-2">
             <Badge variant={prediction.variant}>{t(prediction.labelKey)}</Badge>
-            {pack.anomalies.length === 0 && <Badge variant="ok">{t("settingsMore.battery.healthy")}</Badge>}
+            {pack.anomalies.length === 0 && <Badge variant="success">{t("settingsMore.battery.healthy")}</Badge>}
           </div>
         </div>
 

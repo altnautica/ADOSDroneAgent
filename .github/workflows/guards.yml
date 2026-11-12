@@ -360,6 +360,36 @@ jobs:
       - name: Rust sizes are within the ratchet
         run: python scripts/check-rust-size.py
 
+  ts-size:
+    name: Web app sources stay within the size ratchet
+    runs-on: ubuntu-latest
+    steps:
+      # Every .ts/.tsx file under cockpit/src, dashboard/src and web-shared/src
+      # is held to 500 lines; a file past it must be listed in
+      # .ts-size-baseline and may shrink but never grow.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Check catches a planted oversize file
+        run: |
+          set -uo pipefail
+          fail=0
+          if ! node scripts/check-ts-size.mjs; then
+            echo "SELF-TEST FAILED: the clean tree does not pass"; fail=1
+          fi
+          planted=web-shared/src/planted-oversize.ts
+          seq 1 501 | sed 's#^#// #' > "$planted"
+          rc=0; node scripts/check-ts-size.mjs || rc=$?
+          rm -f "$planted"
+          if [ "$rc" -ne 1 ]; then echo "SELF-TEST FAILED: a new 501-line file exited $rc, expected 1"; fail=1; fi
+          exit "$fail"
+
+      - name: Web app sources are within the ratchet
+        run: node scripts/check-ts-size.mjs
+
   reference-data:
     name: Docs reference data is current
     runs-on: ubuntu-latest

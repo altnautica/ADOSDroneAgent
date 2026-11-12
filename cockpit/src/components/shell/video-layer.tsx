@@ -21,6 +21,7 @@ export function VideoLayer({
   whepUrl,
   hlsUrl,
   reconnectKey,
+  hasSource = true,
   onSnapshot,
 }: {
   /** WHEP endpoint for the active leg (`/whep`, or `/whep?camera=<id>`). */
@@ -29,6 +30,9 @@ export function VideoLayer({
   hlsUrl: string;
   /** Changing this tears the session down and dials again. */
   reconnectKey?: string;
+  /** False when the agent reports no video source (`videoHasSource`): the
+   *  note says so rather than dialling an endpoint that cannot answer. */
+  hasSource?: boolean;
   /** A secondary instance (the picture-in-picture inset) receives its
    *  snapshot here instead, so it never overwrites the main video's state in
    *  the feed store. */
@@ -49,7 +53,7 @@ export function VideoLayer({
 
   const k = classScale(useWidthClass().widthClass);
 
-  const note = videoNote(snapshot.state, whepUrl !== "" || hlsUrl !== "");
+  const note = videoNote(snapshot.state, hasSource && (whepUrl !== "" || hlsUrl !== ""));
 
   return (
     <div className="absolute inset-0 z-0 bg-letterbox">

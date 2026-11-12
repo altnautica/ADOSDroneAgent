@@ -18,6 +18,7 @@ import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/shared/hud/link-loss";
 import { specText } from "@/shared/hud/spec-text";
+import { severityTextColor } from "@/shared/hud/status-pill";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
 import { speak } from "@/stores/voice-store";
 
@@ -32,7 +33,7 @@ function GateRing({ progress }: { progress: number }) {
   const r = 26;
   const c = 2 * Math.PI * r;
   return (
-    <div className="flex items-center gap-[10px] rounded-full border border-hud-hair bg-hud-glass-strong px-[14px] py-[6px] backdrop-blur-hud" role="status" data-testid="gate-ring">
+    <div className="chrome-panel flex items-center gap-[10px] px-[14px] py-[6px]" role="status" data-testid="gate-ring">
       <svg width="64" height="64" viewBox="0 0 64 64" aria-hidden>
         <circle cx="32" cy="32" r={r} fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="6" />
         <circle
@@ -48,7 +49,7 @@ function GateRing({ progress }: { progress: number }) {
           className="text-primary"
         />
       </svg>
-      <span className="text-[15px] font-semibold text-hud-ink">{specText("flow.gate.centre_sticks")}</span>
+      <span className="text-[15px] font-semibold">{specText("flow.gate.centre_sticks")}</span>
     </div>
   );
 }
@@ -84,16 +85,17 @@ export function FlightOverlays() {
         <div
           role="status"
           data-testid="launch-sequence"
-          className="pointer-events-auto flex items-center gap-[12px] rounded-lg border border-hud-hair bg-hud-glass-strong px-[14px] py-[6px] backdrop-blur-hud"
+          className="chrome-panel pointer-events-auto flex items-center gap-[12px] px-[14px] py-[6px]"
         >
-          <span className="text-[15px] font-semibold text-hud-ink">
+          <span className="text-[15px] font-semibold">
             {specText("chip.taking_off", { step: launchStepUpper(seq.step) })}
           </span>
           <button
             type="button"
             onClick={abortLaunch}
             data-testid="launch-abort"
-            className="min-h-[48px] rounded-lg border border-err bg-err/20 px-[14px] text-[15px] font-semibold text-err"
+            className="min-h-[48px] rounded-[var(--fs-radius-sm)] border border-err bg-err/20 px-[14px] text-[15px] font-semibold"
+            style={{ color: severityTextColor("critical") }}
           >
             {specText("flow.launch.abort")}
           </button>
@@ -104,7 +106,7 @@ export function FlightOverlays() {
           role="alert"
           data-testid="low-battery-banner"
           data-severity={bannerSeverity("low_battery_rth")}
-          className={`pointer-events-auto flex w-full max-w-[704px] items-center gap-[12px] rounded-lg border px-[14px] py-[8px] text-on-status ${SEVERITY_CLASS[bannerSeverity("low_battery_rth")]}`}
+          className={`pointer-events-auto flex w-full max-w-[704px] items-center gap-[12px] rounded-[var(--fs-radius)] border px-[14px] py-[8px] text-on-status ${SEVERITY_CLASS[bannerSeverity("low_battery_rth")]}`}
         >
           <div className="flex-1">
             <div className="text-[16px] font-semibold">{lowBatteryLine(pilot.rthCountdownS)}</div>
@@ -113,7 +115,7 @@ export function FlightOverlays() {
           <button
             type="button"
             onClick={() => void sendPilotAction("rth_cancel")}
-            className="min-h-[48px] rounded-lg border border-on-status px-[14px] font-semibold"
+            className="min-h-[48px] rounded-[var(--fs-radius-sm)] border border-on-status px-[14px] font-semibold"
           >
             {specText("flow.low_battery.cancel")}
           </button>
@@ -124,20 +126,20 @@ export function FlightOverlays() {
           role="alert"
           data-testid="link-loss-banner"
           data-severity={bannerSeverity("link_loss")}
-          className={`rounded-lg border px-[14px] py-[6px] text-[15px] font-semibold text-on-status ${SEVERITY_CLASS[bannerSeverity("link_loss")]}`}
+          className={`rounded-[var(--fs-radius)] border px-[14px] py-[6px] text-[15px] font-semibold text-on-status ${SEVERITY_CLASS[bannerSeverity("link_loss")]}`}
         >
           {linkLossLine(pilot)}
         </div>
       ) : null}
       {banner ? (
-        <div role="status" data-testid="handover-banner" className="w-full max-w-[704px] rounded-lg border border-hud-hair bg-hud-glass-strong px-[14px] py-[8px] text-center text-[16px] font-semibold text-hud-ink backdrop-blur-hud">
+        <div role="status" data-testid="handover-banner" className="chrome-panel w-full max-w-[704px] px-[14px] py-[8px] text-center text-[16px] font-semibold">
           {banner}
         </div>
       ) : null}
       {pilot.gate?.pending ? <GateRing progress={pilot.gate.progress} /> : null}
       {elsewhere ? (
-        <div className="pointer-events-auto flex items-center gap-[10px] rounded-lg border border-hud-hair bg-hud-glass-strong px-[12px] py-[6px] backdrop-blur-hud" data-testid="sticks-elsewhere">
-          <span className="text-[14px] text-hud-ink">{specText("flow.sticks_with", { label: elsewhere.label })}</span>
+        <div className="chrome-panel pointer-events-auto flex items-center gap-[10px] px-[12px] py-[6px]" data-testid="sticks-elsewhere">
+          <span className="text-[14px]">{specText("flow.sticks_with", { label: elsewhere.label })}</span>
           <HoldButton holdMs={holdMs("take_control")} onFired={() => takePilotSession()} className="min-h-[48px]">
             {specText("flow.sticks_take_over")}
           </HoldButton>

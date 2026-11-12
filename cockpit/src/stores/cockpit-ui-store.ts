@@ -7,6 +7,7 @@
 import type { RefObject } from "react";
 import { create } from "zustand";
 
+import { isKiosk } from "@/lib/kiosk";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
@@ -51,11 +52,18 @@ interface CockpitUiState {
   closeSheet: () => void;
   nextCard: (dir?: 1 | -1) => void;
   setShutterMode: (mode: "photo" | "video") => void;
+  /** The Feed fills the screen with no shell chrome: always on the kiosk,
+   *  and in a browser after the top bar's Full screen button
+   *  (`lib/fullscreen`). Otherwise the shell frames it beside the menu. */
+  flightFullscreen: boolean;
+  setFlightFullscreen: (v: boolean) => void;
 }
 
 export const useCockpitUiStore = create<CockpitUiState>((set, get) => ({
   sheet: null,
   card: "map",
+  flightFullscreen: isKiosk(),
+  setFlightFullscreen: (flightFullscreen) => set({ flightFullscreen }),
   shutterMode: "video",
   launchRefusal: null,
   setLaunchRefusal: (launchRefusal) => set({ launchRefusal }),

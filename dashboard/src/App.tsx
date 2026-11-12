@@ -20,6 +20,8 @@ import {
 } from "@/route-table";
 
 function routeElement(entry: RouteEntry) {
+  // Home is the index route; its table path only redirects there.
+  if (entry.key === "home") return <Navigate to="/" replace />;
   const Page = ROUTE_COMPONENTS[entry.key as RouteKey];
   if (!entry.profiles) return <Page />;
   return (

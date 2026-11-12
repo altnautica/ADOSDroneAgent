@@ -66,9 +66,11 @@ import { gridMeasures } from "@/lib/cockpit-layout";
 import { effectiveLayers, pluginLayerId } from "@/lib/cockpit-view";
 import { mountablePanels } from "@/lib/extensions";
 import { cameraLabel, feedCameras, pickPipCamera, resolveLegVideoUrls } from "@/lib/feed-legs";
+import { videoHasSource } from "@/lib/flight-layout";
 import { isKiosk } from "@/lib/kiosk";
 import { resolveActiveCameraId } from "@/lib/overlay-geometry";
-import { connectPilotLink } from "@/lib/pilot-link";
+import { connectPilotLink, pilotLinkSource } from "@/lib/pilot-link";
+import { isDemoMode } from "@/lib/utils";
 import { useProfile } from "@/shared/use-profile";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
@@ -135,13 +137,15 @@ export function FeedScreen() {
   const flightNavCapable = isDrone || groundStation;
   useNavStream(flightNavCapable || localVisionCapable);
   const video = useFeedStore((s) => s.video);
+  const statusVideo = useStatusStore((s) => s.status?.video);
 
-  // The operator link to the pilot and the stick stream , only on a
-  // node that flies; the actions every binding fires through.
-  useEffect(() => (flightNavCapable ? connectPilotLink(isKiosk() && groundStation ? "kiosk" : "cockpit") : undefined), [
-    flightNavCapable,
-    groundStation,
-  ]);
+  // The operator link to the pilot and the stick stream, only on a node
+  // that flies and never in demo mode; the actions every binding fires
+  // through.
+  useEffect(() => {
+    const source = pilotLinkSource({ flies: flightNavCapable, groundStation, kiosk: isKiosk(), demo: isDemoMode() });
+    return source ? connectPilotLink(source) : undefined;
+  }, [flightNavCapable, groundStation]);
   usePilotInput();
   useEffect(() => registerCameraActions(groundStation), [groundStation]);
   useEffect(() => registerFeedActions(), []);
@@ -176,7 +180,7 @@ export function FeedScreen() {
   const layers = effectiveLayers(level, layerFlags, view, pluginOverlayIds);
 
   const slots: FeedSlots = {
-    video: <VideoLayer whepUrl={whepUrl} hlsUrl={hlsUrl} reconnectKey={reconnectKey} />,
+    video: <VideoLayer whepUrl={whepUrl} hlsUrl={hlsUrl} reconnectKey={reconnectKey} hasSource={videoHasSource(statusVideo, roster.length)} />,
     layers: (
       <>
         <ExtensionVideoOverlays

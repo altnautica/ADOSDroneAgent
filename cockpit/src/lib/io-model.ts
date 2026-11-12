@@ -97,8 +97,8 @@ export function pairOutcome(raw: unknown): { outcome: PairOutcome; error: string
 /** Whether a controller may be made primary: it must not already be, and no
  *  other write may be in flight. Making one primary moves RC input, so the
  *  screen fires it from a guarded button. */
-export function canMakePrimary(pads: Gamepads, deviceId: string, busy: boolean): boolean {
-  return !busy && pads.primaryId !== deviceId && pads.devices.some((d) => d.deviceId === deviceId);
+export function canMakePrimary(pads: Gamepads, deviceId: string, busy: boolean, armedBlock: string | null): boolean {
+  return !busy && armedBlock === null && pads.primaryId !== deviceId && pads.devices.some((d) => d.deviceId === deviceId);
 }
 
 export async function getGamepads(signal?: AbortSignal): Promise<Gamepads> {
@@ -117,6 +117,10 @@ export async function scanBt(): Promise<BtDevice[]> {
 }
 export async function pairBt(mac: string): Promise<{ outcome: PairOutcome; error: string | null }> {
   return pairOutcome(await apiFetch<unknown>(`${BASE}/bluetooth/pair`, { method: "POST", body: { mac } }));
+}
+/** Forget (unpair) a Bluetooth device. */
+export function forgetBt(mac: string): Promise<unknown> {
+  return apiFetch(`${BASE}/bluetooth/${encodeURIComponent(mac)}`, { method: "DELETE" });
 }
 export function setPrimaryGamepad(deviceId: string): Promise<unknown> {
   return apiFetch(`${BASE}/gamepads/primary`, { method: "PUT", body: { device_id: deviceId } });

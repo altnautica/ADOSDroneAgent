@@ -14,7 +14,7 @@ const EXPECT: [(&str, &str); 18] = [
     ("link", "Link"),
     ("video", "Video"),
     ("params", "ATC_RAT_RLL_P"),
-    ("params-write", "Write parameters"),
+    ("params-write", "to the flight controller?"),
     ("extensions", "INSTALLED"),
     ("logs", "Level"),
     ("system", "Services"),

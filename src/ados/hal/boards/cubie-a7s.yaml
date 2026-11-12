@@ -75,10 +75,10 @@ compute:
   # SoCs — a733/sun60iw2 matches neither) and falls through to the CPU-ONNX
   # backend (below) or, on a build without the `onnx` feature, the
   # detection-less mock. `npu_tops` therefore must NEVER be read alone as
-  # "local inference is running": `/api/status`'s `perceptionTier` gates on
-  # the vision engine's LIVE-reported backend capability
-  # (`crates/ados-control/src/routes/status.rs::live_backend_inference_capable`),
-  # not this static field.
+  # "local inference is running": `/api/status`'s `perceptionTier` follows
+  # where the vision engine's LIVE backend runs its detector (`local` on an
+  # accelerator, `cpu` on the ONNX backend; `crates/ados-control/src/routes/
+  # status/perception.rs::live_detector`), not this static field.
   npu_tops: 3.0
   # No VIP9000 backend in-tree (see above) ⇒ the Cortex-A76 pair runs
   # detection instead via the in-process ONNX CPU backend, once ados-vision

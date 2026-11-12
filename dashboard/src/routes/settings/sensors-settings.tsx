@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ReadErrorCard } from "@/components/read-error-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,7 +39,7 @@ function HubCard({ sensors }: { sensors: SensorsStatus | undefined }) {
             <div className="font-mono text-xs">{hub.transport}</div>
             <div className="text-xs text-muted-foreground">{t("settings.sensors.status")}</div>
             <div>
-              <Badge variant={hub.connected ? "ok" : "err"}>
+              <Badge variant={hub.connected ? "success" : "error"}>
                 {hub.connected ? t("sensors.connected") : t("sensors.disconnected")}
               </Badge>
             </div>
@@ -134,7 +135,11 @@ function ClockCard() {
         <CardTitle>{t("settings.sensors.clockTitle")}</CardTitle>
       </CardHeader>
       <CardContent className="text-sm">
-        {!c?.present ? (
+        {clock.isError ? (
+          <ReadErrorCard message={t("sensors.loadFailed")} onRetry={() => void clock.refetch()} />
+        ) : clock.isLoading ? (
+          <p className="text-muted-foreground">{t("common.loading")}</p>
+        ) : !c?.present ? (
           <p className="text-muted-foreground">{t("sensors.notConfigured")}</p>
         ) : (
           <table className="w-full text-left text-xs">
@@ -154,7 +159,7 @@ function ClockCard() {
                   <td className="py-1">{s.id}</td>
                   <td>{s.kind}</td>
                   <td>
-                    <Badge variant={s.locked ? "ok" : "default"}>
+                    <Badge variant={s.locked ? "success" : "neutral"}>
                       {s.locked ? t("sensors.locked") : t("sensors.unlocked")}
                     </Badge>
                   </td>
@@ -172,11 +177,21 @@ function ClockCard() {
 }
 
 export function SensorsSettings() {
+  const { t } = useTranslation();
   const sensors = useResource<SensorsStatus>("sensors", SENSORS_PATH, 5_000);
   return (
     <div className="space-y-6">
-      <HubCard sensors={sensors.data} />
-      <RigCard sensors={sensors.data} />
+      {/* A failed or pending read is never "not configured". */}
+      {sensors.isError ? (
+        <ReadErrorCard message={t("sensors.loadFailed")} onRetry={() => void sensors.refetch()} />
+      ) : sensors.isLoading ? (
+        <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
+      ) : (
+        <>
+          <HubCard sensors={sensors.data} />
+          <RigCard sensors={sensors.data} />
+        </>
+      )}
       <ClockCard />
     </div>
   );

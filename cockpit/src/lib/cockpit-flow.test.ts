@@ -97,7 +97,7 @@ describe("launch sequence and the chip", () => {
         expect(chip.text).toBe(`Taking off · ${launchStepUpper(sequence.step)}`);
       }
     }
-    expect(launchStepUpper("takeoff")).toBe("TAKE OFF");
+    expect(launchStepUpper("takeoff")).toBe("CLIMB");
   });
 });
 

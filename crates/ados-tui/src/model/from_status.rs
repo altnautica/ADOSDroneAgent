@@ -128,6 +128,15 @@ impl Dashboard {
         if let Some(tel) = full.get("telemetry").filter(|t| t.is_object()) {
             self.read_telemetry(tel);
         }
+        // The status pill's storage item, from the same source on every
+        // profile (`web-shared/src/hud/storage.ts`).
+        let pct = |path: [&str; 2]| {
+            full.get(path[0])
+                .and_then(|b| b.get(path[1]))
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite())
+        };
+        self.storage_pct = pct(["health", "disk_percent"]).or_else(|| pct(["system", "disk_pct"]));
     }
 
     /// Read a router snapshot. The snapshot is nested (battery / gps /

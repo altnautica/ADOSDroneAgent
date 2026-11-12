@@ -87,7 +87,7 @@ fn vehicle_renders_attitude_gps_charts_and_packs() {
         "Voltage 16.4 V",
         "Pack 0",
         "div 450 mV",
-        "ETA 7:00 to 25 %",
+        "7:00 to reserve",
         "cell divergence",
         "c4▼",
     ] {
@@ -165,11 +165,11 @@ fn the_autonomy_block_shows_follow_nav_lidar_and_map_as_words() {
     let text = draw(&mut app, 120, 40);
     for want in [
         "Autonomy",
-        "coasting #12 1.4 s",
+        "COASTING #12 1.4 s",
         "10.2 m ± 0.6 m",
-        "smart",
-        "set 1 · ext nav good",
-        "30 Hz · GPS no GPS",
+        "Reacquire SMART",
+        "Set 1 · Ext nav Good",
+        "30 Hz · GPS No fix",
         "min 2.5 m · 10 Hz",
         "120000 pts · 850 m²",
         "210/614 MB (34%) · voxel 10 cm",
@@ -420,7 +420,7 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
         "Avoid     ",
         "Follow    ",
         "Range     10.2 m",
-        "Reacquire smart",
+        "Reacquire SMART",
         "Nav       ",
         "Odometry  30 Hz",
         "Lidar     min 2.5 m",
@@ -434,7 +434,7 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
     }
     assert!(text.contains("last good read 0 s ago"), "{text}");
     let buf = draw_buffer(&mut app, 160, 48);
-    assert_dim(&app, &buf, "coasting #12");
+    assert_dim(&app, &buf, "COASTING #12");
     assert_dim(&app, &buf, "120000 pts");
 }
 
@@ -482,7 +482,7 @@ fn a_pilot_kind_without_an_age_reads_stale() {
 
 #[test]
 fn the_gps_panel_and_the_odometry_row_name_a_fix_alike() {
-    for (fix, word) in [(0, "no GPS"), (1, "no fix"), (7, "static"), (8, "PPP")] {
+    for (fix, word) in [(0, "No fix"), (1, "No fix"), (7, "static"), (8, "PPP")] {
         let mut app = live_app();
         let mut tel = telemetry();
         tel["gps"]["fix_type"] = json!(fix);
@@ -545,7 +545,8 @@ fn the_pilot_panel_reads_its_rows_from_the_spec() {
         "Mission   No mission loaded on the drone",
         "Link loss → Return home",
         "AGL       4.2 m (AGL)",
-        "Alerts    1 warning",
+        "Alerts    2 warnings",
+        "Battery 1: cell divergence",
         "No downward rangefinder",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
@@ -580,9 +581,10 @@ fn the_pilot_panel_on_a_mission_with_the_link_lost() {
         "Mission   WP 4/6",
         "Link loss Link lost: Land in 4 s",
         "AGL       8.4 m (HOME)",
-        "Alerts    2 warnings",
+        "Alerts    3 warnings",
+        "Battery 1: cell divergence",
         "EKF3 IMU0 yaw inconsistent",
-        "Flight controller: Compass not calibrated",
+        "▲ Compass not calibrated",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
@@ -730,4 +732,101 @@ fn the_chip_reads_the_owning_skills_detail_from_its_plugin() {
     );
     let text = draw(&mut app, 160, 48);
     assert!(text.contains("State     FOLLOW · ORBIT 8 m"), "{text}");
+}
+
+#[test]
+fn a_failsafe_frame_keeps_its_pilot_rows_at_80_by_24() {
+    let mut app = live_app();
+    let mut nav = busy_nav_status();
+    nav["pilot"]["data"]["fc_failsafe"] = json!(true);
+    nav["pilot"]["data"]["failsafe_cause"] = json!("fc");
+    land(&mut app, ResourceId::NavStatus, nav);
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(true, false),
+    );
+    let text = draw(&mut app, 80, 24);
+    for want in ["State ", "Failsafe", "Link loss", "Alerts "] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+}
+
+#[test]
+fn a_stale_feed_draws_no_trend_charts_from_its_history() {
+    let mut app = live_app();
+    assert!(draw(&mut app, 120, 40).contains("Altitude 42.5 m"));
+    feed(
+        &mut app,
+        drone(),
+        ProfileRoutes::default(),
+        Duration::from_secs(30),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("flight readings hidden"), "{text}");
+    for gone in [
+        "Altitude 42.5",
+        "Voltage 16.4",
+        "Current 12.1",
+        "Remaining 87",
+    ] {
+        assert!(!text.contains(gone), "{gone:?} drawn while stale\n{text}");
+    }
+}
+
+#[test]
+fn the_detector_row_counts_the_newest_fresh_batch() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(true, false),
+    );
+    land(
+        &mut app,
+        ResourceId::DetectionsLatest,
+        json!({"available": true, "stale": false, "camera_id": "main",
+               "detections": [{}, {}, {}]}),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("3 objects on main"), "{text}");
+
+    land(
+        &mut app,
+        ResourceId::DetectionsLatest,
+        json!({"available": true, "stale": true, "camera_id": "main",
+               "detections": [{}, {}, {}]}),
+    );
+    assert!(!draw(&mut app, 120, 40).contains("3 objects"));
+}
+
+#[test]
+fn the_odometry_block_shows_the_pose_age_in_spec_words() {
+    let mut app = live_app();
+    let mut body = nav_status();
+    body["nav"]["data"]["pose_age_ms"] = json!(42.0);
+    land(&mut app, ResourceId::NavStatus, body);
+    let text = draw(&mut app, 160, 48);
+    assert!(
+        row(&text, "Pose      ").contains("Pose age 42 ms"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_pilot_block_names_the_gimbal_once_it_answers() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 100),
+    );
+    assert!(!draw(&mut app, 160, 48).contains("takes rate commands"));
+    land(&mut app, ResourceId::GimbalRate, json!({"available": true}));
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("takes rate commands"), "{text}");
+    assert!(
+        row(&text, "Sticks    ").starts_with("Sticks    Sticks are with"),
+        "{text}"
+    );
 }

@@ -219,16 +219,24 @@ pub fn installed(core: &Core, install: &Install) -> Vec<Line<'static>> {
                 let ts = entry
                     .get("ts_ms")
                     .and_then(Value::as_i64)
-                    .map(|v| format!("  ts {v}"))
+                    .map(|v| format!("  {}", age_text(v, now_ms())))
                     .unwrap_or_default();
                 out.push(Line::from(vec![
                     Span::styled(format!("  {topic}"), t.accented()),
                     Span::styled(ts, t.dim()),
                 ]));
                 let payload = entry.get("payload").unwrap_or(entry);
-                let pretty = serde_json::to_string_pretty(payload).unwrap_or_default();
-                for l in pretty.lines() {
-                    out.push(Line::from(Span::styled(format!("    {l}"), t.text())));
+                let rows = flatten(payload);
+                let width = rows
+                    .iter()
+                    .map(|(k, _)| k.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                for (k, v) in rows {
+                    out.push(Line::from(vec![
+                        Span::styled(format!("    {k:<width$}  "), t.dim()),
+                        Span::styled(v, t.text()),
+                    ]));
                 }
             }
         }
@@ -283,4 +291,102 @@ pub fn catalog(core: &Core, entry: &CatalogEntry) -> Vec<Line<'static>> {
         t.dim(),
     )));
     out
+}
+
+/// A published payload as `key value` rows: nested keys joined with `.`,
+/// lists of plain values on one line, no braces or quotes.
+fn flatten(v: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    flatten_into("", v, &mut out);
+    out
+}
+
+fn flatten_into(key: &str, v: &Value, out: &mut Vec<(String, String)>) {
+    let join = |k: &str| {
+        if key.is_empty() {
+            k.to_string()
+        } else {
+            format!("{key}.{k}")
+        }
+    };
+    match v {
+        Value::Object(map) if !map.is_empty() => {
+            for (k, child) in map {
+                flatten_into(&join(k), child, out);
+            }
+        }
+        Value::Array(items) if items.iter().any(|i| i.is_object() || i.is_array()) => {
+            for (i, child) in items.iter().enumerate() {
+                flatten_into(&format!("{key}[{i}]"), child, out);
+            }
+        }
+        Value::Array(items) => {
+            let text: Vec<String> = items.iter().map(scalar).collect();
+            let joined = if text.is_empty() {
+                "—".to_string()
+            } else {
+                text.join(", ")
+            };
+            out.push((key.to_string(), joined));
+        }
+        other => {
+            let key = if key.is_empty() { "value" } else { key };
+            out.push((key.to_string(), scalar(other)));
+        }
+    }
+}
+
+fn scalar(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => if *b { "yes" } else { "no" }.into(),
+        Value::String(s) if !s.is_empty() => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => "—".into(),
+    }
+}
+
+/// `3 s ago` / `4 min ago` / `2 h ago` for an epoch-ms timestamp.
+fn age_text(ts_ms: i64, now_ms: i64) -> String {
+    let s = ((now_ms - ts_ms) / 1000).max(0);
+    match s {
+        0..=119 => format!("{s} s ago"),
+        120..=7199 => format!("{} min ago", s / 60),
+        _ => format!("{} h ago", s / 3600),
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod state_text_tests {
+    use super::{age_text, flatten};
+    use serde_json::json;
+
+    #[test]
+    fn published_state_reads_as_key_value_rows_with_an_age() {
+        let rows = flatten(&json!({
+            "mode": "track", "locked": true, "target": {"id": 7, "label": ""},
+            "ids": [1, 2], "note": null
+        }));
+        let mut text: Vec<String> = rows.iter().map(|(k, v)| format!("{k} {v}")).collect();
+        text.sort();
+        assert_eq!(
+            text,
+            [
+                "ids 1, 2",
+                "locked yes",
+                "mode track",
+                "note —",
+                "target.id 7",
+                "target.label —"
+            ]
+        );
+        assert_eq!(age_text(1_000, 4_000), "3 s ago");
+        assert_eq!(age_text(0, 600_000), "10 min ago");
+    }
 }

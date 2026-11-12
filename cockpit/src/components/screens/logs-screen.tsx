@@ -12,12 +12,14 @@ import { useTranslation } from "react-i18next";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { useNavStore } from "@/stores/nav-store";
-import { ActionButton, EmptyNote, StaleBadge } from "@/components/ui/data";
+import { ActionButton, EmptyNote, ErrorNote, StaleBadge } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { SelectSettingRow, TextSettingRow } from "@/components/ui/setting-row";
 import {
   appendToTail,
   EMPTY_TAIL,
   fmtLogTime,
+  foldLevel,
   LOG_LEVELS,
   logsPollPath,
   openLogStream,
@@ -40,10 +42,16 @@ const ROW_PX = 26;
 const LEVEL_CLASS: Record<string, string> = {
   DEBUG: "text-muted-foreground",
   INFO: "text-surface-foreground",
-  WARNING: "text-warn",
+  WARN: "text-warn",
   ERROR: "text-err",
-  CRITICAL: "text-err font-semibold",
 };
+
+const LEVEL_KEYS = {
+  DEBUG: "logs.level.debug",
+  INFO: "logs.level.info",
+  WARN: "logs.level.warn",
+  ERROR: "logs.level.error",
+} as const;
 
 export function LogsScreen() {
   const { t } = useTranslation();
@@ -106,7 +114,7 @@ export function LogsScreen() {
   else if (empty.kind === "noMatch") emptyText = t("logs.empty.noMatch");
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={pollFallback && poll.stale}
       title={t("logs.page.title")}
       onBack={() => useNavStore.getState().back()}
       actions={
@@ -128,7 +136,7 @@ export function LogsScreen() {
             title={t("logs.filter.level")}
             options={LOG_LEVELS}
             value={level}
-            optionLabel={(l) => l || t("logs.filter.anyLevel")}
+            optionLabel={(l) => (l ? t(LEVEL_KEYS[l]) : t("logs.filter.anyLevel"))}
             onSelect={changeLevel}
           />
           <TextSettingRow
@@ -138,7 +146,9 @@ export function LogsScreen() {
             placeholder={t("logs.filter.loggerPlaceholder")}
           />
         </div>
-        {entries.length === 0 ? (
+        {entries.length === 0 && pollFallback && readFailed(poll) ? (
+          <ErrorNote onRetry={poll.refresh}>{t("cockpit.readFailed.logs")}</ErrorNote>
+        ) : entries.length === 0 ? (
           <EmptyNote>
             {emptyText}
             {empty.kind === "storeOff" ? (
@@ -178,12 +188,28 @@ function VirtualLog({ entries, follow }: { entries: LogEntry[]; follow: boolean 
   }, [entries, follow]);
 
   const { start, end } = visibleWindow(entries.length, ROW_PX, scroll.top, scroll.height);
+  // The row a panel or pad user expanded with select: the top visible one.
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const topRow = Math.min(entries.length - 1, Math.floor(scroll.top / ROW_PX));
 
   return (
     <div
       ref={ref}
       role="log"
       aria-label={t("logs.page.title")}
+      // Focusable so a panel or pad (arrow keys) can scroll it a row at a time
+      // and select can open the top row's full message.
+      tabIndex={0}
+      onKeyDown={(e) => {
+        const el = e.currentTarget;
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          el.scrollTop += e.key === "ArrowDown" ? ROW_PX : -ROW_PX;
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          setExpanded((x) => (x === topRow ? null : topRow));
+        }
+      }}
       className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border font-mono text-[0.75rem]"
       onScroll={(e) => {
         const el = e.currentTarget;
@@ -191,6 +217,11 @@ function VirtualLog({ entries, follow }: { entries: LogEntry[]; follow: boolean 
         setScroll({ top: el.scrollTop, height: el.clientHeight });
       }}
     >
+      {expanded != null && entries[expanded] ? (
+        <div className="sticky top-0 z-10 whitespace-pre-wrap break-words border-b border-border bg-surface px-[0.6rem] py-[0.4rem]">
+          {entries[expanded].message}
+        </div>
+      ) : null}
       <div style={{ height: entries.length * ROW_PX, position: "relative" }}>
         {entries.slice(start, end).map((e, i) => {
           const index = start + i;
@@ -201,7 +232,7 @@ function VirtualLog({ entries, follow }: { entries: LogEntry[]; follow: boolean 
               style={{ top: index * ROW_PX, height: ROW_PX }}
             >
               <span className="shrink-0 tabular-nums text-muted-foreground">{fmtLogTime(e.timestamp)}</span>
-              <span className={cn("w-[4.5rem] shrink-0", LEVEL_CLASS[e.level] ?? "")}>{e.level}</span>
+              <span className={cn("w-[4.5rem] shrink-0", LEVEL_CLASS[foldLevel(e.level)] ?? "")}>{foldLevel(e.level)}</span>
               <span className="max-w-[14rem] shrink-0 truncate text-muted-foreground">{e.logger}</span>
               <span className="min-w-0 flex-1 truncate" title={e.message}>
                 {e.message}

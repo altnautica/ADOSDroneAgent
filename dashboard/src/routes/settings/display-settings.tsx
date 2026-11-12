@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Monitor } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { ReadErrorCard } from "@/components/read-error-card";
 import { RiskBadge } from "@/components/settings/risk-badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiFetch } from "@/shared/api-fetch";
@@ -46,14 +47,18 @@ export function DisplaySettings() {
             />
           </p>
 
-          <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground uppercase tracking-wider">
-              {t("settings.display.active")}
+          {opts.isError ? (
+            <ReadErrorCard message={t("io.display.readFailed")} onRetry={() => void opts.refetch()} />
+          ) : (
+            <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
+              <div className="text-xs text-muted-foreground uppercase tracking-wider">
+                {t("settings.display.active")}
+              </div>
+              <div className="font-mono mt-0.5">
+                {opts.isLoading ? t("settings.display.loading") : current}
+              </div>
             </div>
-            <div className="font-mono mt-0.5">
-              {opts.isLoading ? t("settings.display.loading") : current}
-            </div>
-          </div>
+          )}
 
           {opts.data && opts.data.supported.length > 0 && (
             <div>

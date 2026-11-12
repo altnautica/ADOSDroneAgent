@@ -16,7 +16,7 @@ export function SelfHealSettings() {
 
   if (config.isLoading) {
     return (
-      <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>
+      <p className="text-[11px] text-muted-foreground">{t("settingsMore.security.readingConfig")}</p>
     );
   }
   if (config.isError) {

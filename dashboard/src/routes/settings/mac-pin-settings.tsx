@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ReadErrorCard } from "@/components/read-error-card";
 import { ConfigToggle } from "@/components/settings/config-fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,12 +16,12 @@ const ADAPTERS_KEY = ["mac-adapters"] as const;
 function StateBadge({ state }: { state: string }) {
   const variant =
     state === "pinned"
-      ? "ok"
+      ? "success"
       : state === "candidate" || state === "deferred"
-        ? "warn"
-        : "default";
+        ? "warning"
+        : "neutral";
   return (
-    <Badge variant={variant} className="font-normal">
+    <Badge variant={variant}>
       {state}
     </Badge>
   );
@@ -155,6 +156,9 @@ export function MacPinSettings() {
 
   return (
     <div className="space-y-6">
+      {config.isError && (
+        <ReadErrorCard message={t("cockpit.readFailed.config")} onRetry={() => void config.refetch()} />
+      )}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-5">
           <ConfigToggle
@@ -179,13 +183,11 @@ export function MacPinSettings() {
           {t("settingsMore.macPin.trackedAdapters")}
         </div>
         {adapters.isError ? (
-          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-            {t("settingsMore.macPin.readError")}
-          </div>
+          <ReadErrorCard message={t("settingsMore.macPin.readError")} onRetry={() => void adapters.refetch()} />
         ) : adapters.isLoading ? (
-          <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.macPin.reading")}</p>
+          <p className="text-[11px] text-muted-foreground">{t("settingsMore.macPin.reading")}</p>
         ) : !list || list.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground/70">
+          <p className="text-[11px] text-muted-foreground">
             {t("settingsMore.macPin.empty")}
           </p>
         ) : (

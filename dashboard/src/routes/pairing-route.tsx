@@ -2,7 +2,9 @@ import { useState } from "react";
 import { Link2, Unlink, Plus, Smartphone } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { RfLinkCard } from "@/components/pairing/rf-link-card";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
+import { withArmedRetry } from "@/shared/api/armed-retry";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -132,7 +134,7 @@ function AcceptCodeForm() {
       </div>
       {accept.isError && (
         <p className="text-xs text-destructive">
-          {accept.error instanceof Error ? accept.error.message : t("pairing.accept.failed")}
+          {t("pairing.accept.failed")}
         </p>
       )}
       {accept.isSuccess && (
@@ -148,6 +150,7 @@ export function PairingRoute() {
   const unpair = useUnpair();
   const { profile } = useNodeIdentity();
   const [confirmUnpair, setConfirmUnpair] = useState(false);
+  const [armedPrompt, setArmedPrompt] = useState<{ resolve: (ok: boolean) => void } | null>(null);
   const subject =
     profile === "ground_station"
       ? t("pairing.subject.groundStation")
@@ -195,7 +198,7 @@ export function PairingRoute() {
           {info.data &&
             (paired ? (
               <div className="space-y-2">
-                <Badge variant="ok">{t("pairing.page.paired")}</Badge>
+                <Badge variant="success">{t("pairing.page.paired")}</Badge>
                 <div className="grid grid-cols-[110px_1fr] gap-y-1 text-sm">
                   <span className="text-xs text-muted-foreground">{t("pairing.page.owner")}</span>
                   <span className="font-mono truncate">{info.data.owner_id ?? "—"}</span>
@@ -220,12 +223,12 @@ export function PairingRoute() {
               </div>
             ))}
           {unpair.isError && (
-            <p className="pt-2 text-xs text-destructive">
-              {unpair.error instanceof Error ? unpair.error.message : t("pairing.page.unpairFailed")}
-            </p>
+            <p className="pt-2 text-xs text-destructive">{t("pairing.page.unpairFailed")}</p>
           )}
         </CardContent>
       </Card>
+
+      {(profile === "drone" || profile === "ground_station") && <RfLinkCard />}
 
       {!paired && (
         <Card>
@@ -244,12 +247,37 @@ export function PairingRoute() {
         open={confirmUnpair}
         onOpenChange={setConfirmUnpair}
         title={t("pairing.confirm.title", { subject })}
-        description={t("pairing.confirm.description")}
+        description={
+          <>
+            <p>{t("pairing.confirm.description")}</p>
+            <p className="mt-2 text-warn">{t("pairing.confirm.flightWarning")}</p>
+          </>
+        }
         confirmLabel={t("pairing.page.unpair")}
         destructive
         onConfirm={async () => {
-          await unpair.mutateAsync().catch(() => undefined);
+          await withArmedRetry(
+            (force) => unpair.mutateAsync(force),
+            () => {
+              setConfirmUnpair(false);
+              return new Promise<boolean>((resolve) => setArmedPrompt({ resolve }));
+            },
+          ).catch(() => undefined);
         }}
+      />
+      <ConfirmDialog
+        open={armedPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            armedPrompt?.resolve(false);
+            setArmedPrompt(null);
+          }
+        }}
+        title={t("settings.profile.armedTitle")}
+        description={t("settings.shared.armedOverride")}
+        confirmLabel={t("pairing.page.unpair")}
+        destructive
+        onConfirm={() => armedPrompt?.resolve(true)}
       />
     </div>
   );

@@ -1,11 +1,14 @@
-import type { TFunction } from "i18next";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
+import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
+import { COARSE_HIT_AREA } from "@/lib/hit-area";
+import { cellularCapDetail, legKey, legLabel, moveEntry } from "@/lib/uplink-view";
+import { cn } from "@/lib/utils";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import {
   getGsNetwork,
@@ -17,56 +20,9 @@ import { toast, toastFromError } from "@/shared/api/toast";
 
 const POLL_MS = 5_000;
 
-const LEG_LABEL_KEYS = {
-  eth0: "uplink.leg.ethernet",
-  ethernet: "uplink.leg.ethernet",
-  wlan0_client: "uplink.leg.wifi",
-  wifi_client: "uplink.leg.wifi",
-  wwan0: "uplink.leg.cellular",
-  modem_4g: "uplink.leg.cellular",
-  usb0: "uplink.leg.usb",
-  usb: "uplink.leg.usb",
-  ap: "uplink.leg.ap",
-} as const;
-
-function legLabel(token: string, t: TFunction): string {
-  const key = (LEG_LABEL_KEYS as Record<string, (typeof LEG_LABEL_KEYS)[keyof typeof LEG_LABEL_KEYS]>)[token];
-  return key ? t(key) : token;
-}
-
-/** Normalise an uplink token to one of the five matrix rows, or null when it is
- * a token we do not render a dedicated row for. */
-function legKey(token: string): "ethernet" | "wifi" | "cellular" | "usb" | "ap" | null {
-  switch (token) {
-    case "eth0":
-    case "ethernet":
-      return "ethernet";
-    case "wlan0_client":
-    case "wifi_client":
-      return "wifi";
-    case "wwan0":
-    case "modem_4g":
-      return "cellular";
-    case "usb0":
-    case "usb":
-      return "usb";
-    case "ap":
-      return "ap";
-    default:
-      return null;
-  }
-}
-
-/** Move `list[index]` by `delta`; null when out of range (nothing to write). */
-function moveEntry(list: readonly string[], index: number, delta: -1 | 1): string[] | null {
-  const target = index + delta;
-  if (index < 0 || index >= list.length) return null;
-  if (target < 0 || target >= list.length) return null;
-  const next = [...list];
-  const [moved] = next.splice(index, 1);
-  next.splice(target, 0, moved);
-  return next;
-}
+// The order arrows grow to a 44 px square on a phone.
+const ARROW_CLASS =
+  "inline-flex items-center justify-center rounded border border-border p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40 max-md:h-11 max-md:w-11";
 
 interface LegState {
   state: string;
@@ -79,37 +35,32 @@ function LegRow({
   label,
   leg,
   active,
+  stale,
 }: {
   label: string;
   leg: LegState;
   active: boolean;
+  /** The last read failed: the values are the last known ones, dimmed. */
+  stale: boolean;
 }) {
   const { t } = useTranslation();
   return (
     <li className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-2">
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-sm text-foreground">{label}</span>
-        {active && (
-          <Badge variant="ok" className="font-normal">
+        {active && !stale && (
+          <Badge variant="success">
             {t("uplink.state.active")}
           </Badge>
         )}
       </div>
-      <div className="flex shrink-0 items-baseline gap-2">
+      <div className={cn("flex shrink-0 items-baseline gap-2", stale && "opacity-50")}>
         {leg.detail && (
           <span className="font-mono text-[11px] text-muted-foreground">
             {leg.detail}
           </span>
         )}
-        <span
-          className={
-            leg.known
-              ? "text-xs text-muted-foreground"
-              : "text-xs text-muted-foreground/70"
-          }
-        >
-          {leg.state}
-        </span>
+        <span className="text-xs text-muted-foreground">{leg.state}</span>
       </div>
     </li>
   );
@@ -126,6 +77,12 @@ function GsUplinkMatrix() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [savingPriority, setSavingPriority] = useState(false);
   const [savingShare, setSavingShare] = useState(false);
+  // A write that can move or cut this page's own link waits for a confirm.
+  const [pending, setPending] = useState<
+    | { kind: "order"; next: string[]; name: string; position: number }
+    | { kind: "share"; enabled: boolean }
+    | null
+  >(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -191,11 +148,10 @@ function GsUplinkMatrix() {
     if (!modem.enabled)
       return { state: t("uplink.state.disabled"), known: true, detail: null };
     const raw = typeof modem.state === "string" ? modem.state : null;
-    const pct = typeof modem.percent === "number" ? `${modem.percent.toFixed(0)}%` : null;
     return {
       state: raw ?? notReported,
       known: raw !== null,
-      detail: pct,
+      detail: cellularCapDetail(modem.percent, t),
     };
   })();
 
@@ -223,11 +179,17 @@ function GsUplinkMatrix() {
 
   const priority = net?.priority ?? null;
   const shareKnown = net != null && typeof net.share_uplink === "boolean";
+  // Values from before the last failed read stay on screen, marked stale.
+  const stale = loadFailed && net != null;
 
-  async function onMovePriority(index: number, delta: -1 | 1) {
+  function askMove(index: number, delta: -1 | 1) {
     if (savingPriority || !priority) return;
     const next = moveEntry(priority, index, delta);
     if (!next) return;
+    setPending({ kind: "order", next, name: legLabel(priority[index], t), position: index + delta + 1 });
+  }
+
+  async function onSavePriority(next: string[]) {
     setSavingPriority(true);
     try {
       const res = await setUplinkPriority(next);
@@ -235,6 +197,7 @@ function GsUplinkMatrix() {
       toast.ok(t("uplink.toast.orderSaved"));
     } catch (err) {
       toastFromError(err, t("uplink.toast.orderFailed"));
+      throw err;
     } finally {
       setSavingPriority(false);
     }
@@ -259,6 +222,7 @@ function GsUplinkMatrix() {
       }
     } catch (err) {
       toastFromError(err, t("uplink.toast.shareFailed"));
+      throw err;
     } finally {
       setSavingShare(false);
     }
@@ -268,7 +232,10 @@ function GsUplinkMatrix() {
     <Card>
       <CardContent className="pt-5 pb-5 space-y-5">
         <div className="space-y-1">
-          <div className="text-sm font-semibold">{t("uplink.matrix.title")}</div>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            {t("uplink.matrix.title")}
+            {stale && <Badge variant="warning">{t("cockpit.stale")}</Badge>}
+          </div>
           <p className="text-xs text-muted-foreground">
             {t("uplink.matrix.description")}
           </p>
@@ -292,18 +259,18 @@ function GsUplinkMatrix() {
             {activeToken ? (
               legLabel(activeToken, t)
             ) : (
-              <span className="text-muted-foreground/70">{t("uplink.active.none")}</span>
+              <span className="text-muted-foreground">{t("uplink.active.none")}</span>
             )}
           </div>
         </div>
 
         {/* The matrix, one row per leg. */}
         <ul className="flex flex-col gap-1">
-          <LegRow label={t("uplink.leg.ethernet")} leg={ethernetLeg} active={activeLeg === "ethernet"} />
-          <LegRow label={t("uplink.leg.wifi")} leg={wifiLeg} active={activeLeg === "wifi"} />
-          <LegRow label={t("uplink.leg.cellular")} leg={cellularLeg} active={activeLeg === "cellular"} />
-          <LegRow label={t("uplink.leg.usb")} leg={usbLeg} active={activeLeg === "usb"} />
-          <LegRow label={t("uplink.leg.ap")} leg={apLeg} active={activeLeg === "ap"} />
+          <LegRow label={t("uplink.leg.ethernet")} leg={ethernetLeg} active={activeLeg === "ethernet"} stale={stale} />
+          <LegRow label={t("uplink.leg.wifi")} leg={wifiLeg} active={activeLeg === "wifi"} stale={stale} />
+          <LegRow label={t("uplink.leg.cellular")} leg={cellularLeg} active={activeLeg === "cellular"} stale={stale} />
+          <LegRow label={t("uplink.leg.usb")} leg={usbLeg} active={activeLeg === "usb"} stale={stale} />
+          <LegRow label={t("uplink.leg.ap")} leg={apLeg} active={activeLeg === "ap"} stale={stale} />
         </ul>
 
         {/* Failover priority ladder. */}
@@ -323,24 +290,24 @@ function GsUplinkMatrix() {
                     {idx + 1}
                   </span>
                   <span className="flex-1 text-sm">{legLabel(token, t)}</span>
-                  <span className="font-mono text-[10px] text-muted-foreground/70">
+                  <span className="font-mono text-[10px] text-muted-foreground">
                     {token}
                   </span>
                   <button
                     type="button"
-                    onClick={() => void onMovePriority(idx, -1)}
+                    onClick={() => askMove(idx, -1)}
                     disabled={savingPriority || idx === 0}
                     aria-label={t("uplink.failover.moveUp", { name: legLabel(token, t) })}
-                    className="rounded border border-border p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+                    className={cn(ARROW_CLASS, COARSE_HIT_AREA)}
                   >
                     <ArrowUp className="h-3 w-3" aria-hidden="true" />
                   </button>
                   <button
                     type="button"
-                    onClick={() => void onMovePriority(idx, 1)}
+                    onClick={() => askMove(idx, 1)}
                     disabled={savingPriority || idx === priority.length - 1}
                     aria-label={t("uplink.failover.moveDown", { name: legLabel(token, t) })}
-                    className="rounded border border-border p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+                    className={cn(ARROW_CLASS, COARSE_HIT_AREA)}
                   >
                     <ArrowDown className="h-3 w-3" aria-hidden="true" />
                   </button>
@@ -348,7 +315,7 @@ function GsUplinkMatrix() {
               ))}
             </ol>
           ) : (
-            <p className="text-[11px] text-muted-foreground/70">
+            <p className="text-[11px] text-muted-foreground">
               {t("uplink.failover.empty")}
             </p>
           )}
@@ -365,12 +332,37 @@ function GsUplinkMatrix() {
             </div>
             <Switch
               checked={net?.share_uplink === true}
-              onCheckedChange={(v) => void onShareToggle(v)}
+              onCheckedChange={(v) => setPending({ kind: "share", enabled: v })}
               disabled={savingShare}
               aria-label={t("uplink.share.title")}
             />
           </div>
         )}
+        <ConfirmDialog
+          open={pending !== null}
+          onOpenChange={(open) => {
+            if (!open) setPending(null);
+          }}
+          title={
+            pending?.kind === "order"
+              ? t("uplink.failover.confirmTitle")
+              : pending?.enabled
+                ? t("uplink.share.confirmOnTitle")
+                : t("uplink.share.confirmOffTitle")
+          }
+          description={
+            pending?.kind === "order"
+              ? t("uplink.failover.confirmBody", { name: pending.name, position: pending.position })
+              : pending?.enabled
+                ? t("uplink.share.confirmOnBody")
+                : t("uplink.share.confirmOffBody")
+          }
+          destructive={pending?.kind === "share" && !pending.enabled}
+          onConfirm={async () => {
+            if (pending?.kind === "order") await onSavePriority(pending.next);
+            else if (pending?.kind === "share") await onShareToggle(pending.enabled);
+          }}
+        />
       </CardContent>
     </Card>
   );

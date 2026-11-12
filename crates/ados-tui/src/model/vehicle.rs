@@ -74,6 +74,8 @@ pub struct Telemetry {
     /// while at most `LOCAL_POSITION_FRESH_MS` old (the agent passes it on
     /// until 5 s); an unknown age is not fresh.
     pub local_pos: Option<(f64, f64)>,
+    /// The FC's EKF status flags and the report's age (ms).
+    pub ekf: Option<(u32, u64)>,
 }
 
 impl Telemetry {
@@ -131,6 +133,10 @@ impl Telemetry {
                         .and_then(Value::as_u64)
                         .is_some_and(|a| a <= LOCAL_POSITION_FRESH_MS)
                 }),
+            ekf: walk(v, &["ekf", "flags"])
+                .and_then(Value::as_u64)
+                .and_then(|f| u32::try_from(f).ok())
+                .zip(walk(v, &["ekf", "age_ms"]).and_then(Value::as_u64)),
         }
     }
 }
@@ -188,6 +194,10 @@ impl VehicleHistory {
 pub struct Anomaly {
     pub rule: String,
     pub critical: bool,
+    /// At warning or critical: an alert, not a note.
+    pub alerts: bool,
+    /// The engine marked it cleared.
+    pub cleared: bool,
     pub value: Option<f64>,
     pub threshold: Option<f64>,
 }
@@ -267,11 +277,16 @@ fn pack(p: &Value) -> Pack {
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
-                    .map(|x| Anomaly {
-                        rule: s(x, &["rule"]).unwrap_or_default(),
-                        critical: x.get("severity").and_then(Value::as_str) == Some("critical"),
-                        value: f(x, &["value"]),
-                        threshold: f(x, &["threshold"]),
+                    .map(|x| {
+                        let severity = x.get("severity").and_then(Value::as_str);
+                        Anomaly {
+                            rule: s(x, &["rule"]).unwrap_or_default(),
+                            critical: severity == Some("critical"),
+                            alerts: matches!(severity, Some("critical" | "warning")),
+                            cleared: x.get("cleared_at_ms").is_some_and(|c| !c.is_null()),
+                            value: f(x, &["value"]),
+                            threshold: f(x, &["threshold"]),
+                        }
                     })
                     .collect()
             })

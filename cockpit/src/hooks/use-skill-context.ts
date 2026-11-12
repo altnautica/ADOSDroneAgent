@@ -43,8 +43,9 @@ function buildContext(i: ContextInputs): SkillContext {
     linkReason: !i.fcConnected && i.relayed ? RELAYED_LINK_REASON : undefined,
     pilot: p
       ? {
-          armed: p.data.armed === true,
-          landed: p.data.landed !== false,
+          // Unknown stays unknown: the gate reads it as possibly airborne.
+          armed: p.data.armed,
+          landed: p.data.landed,
           vehicleClass: p.data.vehicleClass,
           fcFailsafe: p.data.fcFailsafe,
           fresh: i.now - p.at <= PILOT_FRESH_MS,

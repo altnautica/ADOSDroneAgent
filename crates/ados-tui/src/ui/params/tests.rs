@@ -101,6 +101,11 @@ fn a_batch_unstages_acked_items_and_reports_the_tally() {
     app.tabs.params.store.stage("ATC_RAT_RLL_P", 0.2);
     app.tabs.params.write(&mut app.core);
     assert_eq!(app.core.overlays.len(), 1, "the confirm lists the batch");
+    let Some(crate::overlay::Overlay::Confirm(c)) = app.core.overlays.last() else {
+        panic!("expected the write confirm");
+    };
+    assert_eq!(c.title, "Write 2 to flight controller");
+    assert_eq!(c.body[0], "Write 2 parameters to the flight controller?");
     app.core.overlays.clear();
     app.tabs.params.submit_batch(&mut app.core);
 

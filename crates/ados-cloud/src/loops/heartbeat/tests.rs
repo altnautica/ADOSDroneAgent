@@ -298,6 +298,20 @@ fn cloud_beacon_carries_the_perception_tier() {
 }
 
 #[test]
+fn a_cpu_detector_board_beacons_the_cpu_tier() {
+    // No NPU, but the profile declares the in-process CPU detector: the
+    // beacon reports the same `cpu` tier `/api/status` does, never `none`.
+    let board = HeartbeatBase {
+        board_npu_tops: 0.0,
+        board_local_inference: true,
+        ..base()
+    };
+    let v = build_payload(&board, None);
+    assert_eq!(v["hasAccelerator"], false);
+    assert_eq!(v["perceptionTier"], "cpu");
+}
+
+#[test]
 fn enrichment_folds_over_the_native_base() {
     // The producer supplies CPU/temperature + a populated radio block, in the
     // frozen wire shape. They overlay the native zeros.

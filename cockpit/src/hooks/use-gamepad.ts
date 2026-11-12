@@ -98,27 +98,33 @@ export function nativeInputActive(): boolean {
   return c.stationKiosk && (c.groundInput === null || c.groundInput.nativeSticks === true);
 }
 
-function engineContext(): EngineContext {
+/** What the gesture engine's conditions read. A pilot whose landed state is
+ *  unknown (its FC link is down) counts as airborne, so the on-ground
+ *  gestures stay off; with no pilot at all it is null. */
+export function engineContext(): EngineContext {
   const p = pilotNow();
   return {
     pickerOpen: useInputStore.getState().pickerOpen,
-    landed: p ? p.landed !== false : null,
+    landed: p ? p.landed === true : null,
     rthActive: rthModeActive(p?.fcModeName),
     vehicleVtol: p?.vehicleClass === "vtol",
     nativeSafety: nativeInputActive(),
   };
 }
 
+/** The pad's feedback (lightbar, rumble) for a pilot state. An unknown arm
+ *  state (the pilot's FC link is down) counts as armed: possibly airborne. */
 export function feedbackView(p: PilotState): FeedbackView {
+  const armed = p.armed !== false;
   const warnings = p.readiness.filter((r) => !r.ok && r.severity === "warn").map((r) => r.id);
   if (p.holdReason) warnings.push(`hold:${p.holdReason}`);
-  const criticals = p.armed ? p.readiness.filter((r) => !r.ok && r.severity === "block").map((r) => r.id) : [];
+  const criticals = armed ? p.readiness.filter((r) => !r.ok && r.severity === "block").map((r) => r.id) : [];
   if (p.linkLossInS !== null) criticals.push("link_loss");
   return {
     owner: p.owner,
     skillId: p.skill ? `${p.skill.pluginId}:${p.skill.skillId}` : null,
     controlMode: p.controlMode,
-    armed: p.armed === true,
+    armed,
     warnings,
     criticals,
   };

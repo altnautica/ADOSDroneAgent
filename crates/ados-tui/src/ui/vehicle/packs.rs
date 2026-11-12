@@ -8,8 +8,19 @@ use ratatui::widgets::{Bar, BarChart, BarGroup, Paragraph};
 use ratatui::Frame;
 
 use crate::app::Core;
+use crate::model::spec_text::spec_text;
 use crate::model::vehicle::{eta_text, Batteries, Pack};
-use crate::ui::widgets::{chip, panel};
+use crate::ui::widgets::{chip, panel, truncate_line};
+
+/// The prediction state as words; `normal` needs none.
+fn prediction_word(state: &str) -> Option<&'static str> {
+    match state {
+        "idle" => Some("not discharging"),
+        "high" => Some("high draw"),
+        "past" => Some("at or below reserve"),
+        _ => None,
+    }
+}
 
 /// Cell bars are drawn above this floor so a few hundred mV of spread is
 /// visible (2.5 V is the plausibility floor).
@@ -98,10 +109,7 @@ fn pack(f: &mut Frame, area: Rect, core: &Core, p: &Pack, reserve: Option<i64>) 
     } else {
         format!("Pack {}", p.id)
     };
-    let mut spans = vec![
-        Span::styled(format!("{name} "), t.accent_bold()),
-        Span::styled(format!("{} ", p.source), t.dim()),
-    ];
+    let mut spans = vec![Span::styled(format!("{name} "), t.accent_bold())];
     if p.stale {
         spans.push(chip(t, "STALE", t.warning()));
         spans.push(Span::raw(" "));
@@ -117,14 +125,29 @@ fn pack(f: &mut Frame, area: Rect, core: &Core, p: &Pack, reserve: Option<i64>) 
     push("", p.remaining.map(|v| format!("{v:.0} %")));
     push("", p.temperature.map(|v| format!("{v:.0} °C")));
     push("div ", p.divergence_mv.map(|v| format!("{v:.0} mV")));
-    if let Some(eta) = p.eta_s {
-        let to = reserve.map(|r| format!(" to {r} %")).unwrap_or_default();
-        let state = p.prediction_state.as_deref().unwrap_or("");
-        push("ETA ", Some(format!("{}{to} ({state})", eta_text(eta))));
-    } else if let Some(state) = &p.prediction_state {
-        push("prediction ", Some(state.clone()));
+    // Time to reserve in the spec's words, the reserve as a dim suffix and
+    // the prediction state as words; at the reserve, the state alone.
+    let state = p.prediction_state.as_deref().and_then(prediction_word);
+    let eta = p
+        .eta_s
+        .filter(|_| p.prediction_state.as_deref() != Some("past"));
+    match eta {
+        Some(eta) => push(
+            "",
+            Some(spec_text("battery.to_reserve", &[("t", &eta_text(eta))])),
+        ),
+        None => push("", state.map(str::to_string)),
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
+    if eta.is_some() {
+        if let Some(r) = reserve {
+            spans.push(Span::styled(format!(" (reserve {r} %)"), t.dim()));
+        }
+        if let Some(s) = state {
+            spans.push(Span::styled(format!(" · {s}"), t.dim()));
+        }
+    }
+    let line = truncate_line(Line::from(spans), usize::from(rows[0].width));
+    f.render_widget(Paragraph::new(line), rows[0]);
 
     if !p.cells.is_empty() {
         let bars: Vec<Bar> = p

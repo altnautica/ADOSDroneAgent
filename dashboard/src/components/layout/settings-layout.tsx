@@ -23,7 +23,7 @@ import {
 import { Suspense } from "react";
 import type { ParseKeys } from "i18next";
 import { useTranslation } from "react-i18next";
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import type { AllowedProfile } from "@/components/profile-gate";
 import { RouteFallback } from "@/components/route-fallback";
@@ -249,12 +249,25 @@ const SECTIONS: SectionLink[] = [
 export function SettingsLayout() {
   const { t } = useTranslation();
   const profile = useNodeProfile();
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
   // Settings sections read the setup status; the layout keeps it fresh while
   // any settings page is open.
   useStatus({ poll: true });
+  const groups = GROUP_ORDER.map((group) => ({
+    group,
+    links: SECTIONS.filter((s) => s.group === group && sectionVisible(s.allow, profile)),
+  })).filter((g) => g.links.length > 0);
+  const current = SECTIONS.find((s) => pathname === s.to || pathname.startsWith(`${s.to}/`))?.to ?? "";
 
   return (
     <div className="container mx-auto px-4 py-6 max-w-5xl">
+      <a
+        href="#settings-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:rounded-md focus:bg-background focus:px-3 focus:py-2 focus:ring-1 focus:ring-ring"
+      >
+        {t("layout.settings.skipToContent")}
+      </a>
       <header className="mb-6 flex items-start gap-3">
         <ShieldAlert className="h-6 w-6 text-warn mt-0.5 shrink-0" />
         <div>
@@ -265,16 +278,32 @@ export function SettingsLayout() {
         </div>
       </header>
 
+      {/* Below md the 17-link nav would push the page off screen: a select. */}
+      <label className="mb-4 block md:hidden">
+        <span className="mb-1 block text-xs text-muted-foreground">{t("layout.settings.sectionLabel")}</span>
+        <select
+          className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
+          value={current}
+          onChange={(e) => navigate(e.target.value)}
+        >
+          {groups.map(({ group, links }) => (
+            <optgroup key={group} label={t(GROUP_LABEL_KEYS[group])}>
+              {links.map((s) => (
+                <option key={s.to} value={s.to}>
+                  {t(s.labelKey)}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </label>
+
       <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-6">
-        <nav className="space-y-4">
-          {GROUP_ORDER.map((group) => {
-            const links = SECTIONS.filter(
-              (s) => s.group === group && sectionVisible(s.allow, profile),
-            );
-            if (links.length === 0) return null;
+        <nav className="hidden md:block space-y-4">
+          {groups.map(({ group, links }) => {
             return (
               <div key={group} className="space-y-1">
-                <div className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
+                <div className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                   {t(GROUP_LABEL_KEYS[group])}
                 </div>
                 {links.map((s) => {
@@ -307,7 +336,7 @@ export function SettingsLayout() {
           })}
         </nav>
 
-        <main className="min-w-0">
+        <main id="settings-content" tabIndex={-1} className="min-w-0 focus:outline-none">
           <Suspense fallback={<RouteFallback />}>
             <Outlet />
           </Suspense>

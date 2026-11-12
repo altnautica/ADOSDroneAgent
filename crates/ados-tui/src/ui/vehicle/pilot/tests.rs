@@ -173,3 +173,9 @@ fn the_row_labels_are_the_spec_strings() {
         assert!(text.contains(&label), "no {label:?} row\n{text}");
     }
 }
+
+#[test]
+fn an_operation_the_spec_does_not_know_reads_as_other() {
+    assert_eq!(super::op_text("orbit_here"), "Other (orbit_here)");
+    assert_ne!(super::op_text("goto"), "Other (goto)");
+}

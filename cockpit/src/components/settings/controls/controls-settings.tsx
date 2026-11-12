@@ -11,10 +11,11 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Lock } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { listCockpitActions, subscribeCockpitActions, cockpitActionsVersion } from "@/lib/cockpit-actions";
 import { specText } from "@/shared/hud/spec-text";
-import { DRAWINGS, PAD_COLORS, padKindOf, type Hotspot } from "@/lib/pad/art";
+import "@/shared/i18n";
 import {
   conflictedControls,
   actionOffered,
@@ -42,11 +43,16 @@ import {
   type PadBinding,
 } from "@/lib/pad/ds4-map";
 import { playPattern, type RumblePattern } from "@/lib/pad/rumble";
-import { actionLabel, hotspotLabel } from "@/lib/pad/labels";
+import { actionLabel } from "@/lib/pad/labels";
+import { useTourCapturesPad } from "@/components/controls/tour-stage";
+import { useDraftGuard } from "@/hooks/use-draft-guard";
+import { stickModeTap } from "@/lib/pad/stick-mode-gate";
 import { cn } from "@/lib/utils";
 import { syncRefusedText, useControlsStore } from "@/stores/controls-store";
-import { useInputStore, type PadSample } from "@/stores/input-store";
+import { useInputStore } from "@/stores/input-store";
 import { useVoiceStore, voiceSupported } from "@/stores/voice-store";
+
+import { PadDrawingView } from "./pad-drawing-view";
 
 const GESTURES: readonly Gesture[] = ["press", "tap", "hold", "double_tap"];
 const GROUP_LABEL: Record<string, string> = {
@@ -64,130 +70,6 @@ function useRegistry(): Map<string, string> {
     void v;
     return new Map(listCockpitActions().map((a) => [a.id, a.label]));
   }, [v]);
-}
-
-function pressedControl(pad: PadSample | null, control: ControlId): boolean {
-  if (!pad) return false;
-  if (control === "l2") return pad.l2 > 0.05;
-  if (control === "r2") return pad.r2 > 0.05;
-  const i = BUTTON_INDEX[control];
-  return i !== undefined && pad.pressed[i] === true;
-}
-
-function HotspotShape({ h, ...rest }: { h: Hotspot } & React.SVGProps<SVGElement>) {
-  const props = rest as React.SVGProps<SVGCircleElement & SVGRectElement & SVGPathElement>;
-  if (h.shape === "circle") return <circle cx={h.geom.cx} cy={h.geom.cy} r={h.geom.r} {...props} />;
-  if (h.shape === "rect") return <rect x={h.geom.x} y={h.geom.y} width={h.geom.w} height={h.geom.h} rx={h.geom.rx} {...props} />;
-  return <path d={h.geom.d} {...props} />;
-}
-
-function hotspotCentre(h: Hotspot): [number, number] {
-  if (h.shape === "circle") return [h.geom.cx, h.geom.cy];
-  if (h.shape === "rect") return [h.geom.x + h.geom.w / 2, h.geom.y + h.geom.h / 2];
-  const m = /M\s*([-\d.]+)[ ,]+([-\d.]+)/i.exec(h.geom.d);
-  return m ? [Number(m[1]), Number(m[2])] : [0, 0];
-}
-
-function PadDrawingView({
-  rows,
-  selected,
-  onSelect,
-  conflicted,
-  deadzone,
-  registry,
-}: {
-  rows: readonly PadBinding[];
-  selected: ControlId | null;
-  onSelect: (c: ControlId) => void;
-  conflicted: ReadonlySet<ControlId>;
-  deadzone: number;
-  registry: ReadonlyMap<string, string>;
-}) {
-  const pad = useInputStore((s) => s.pad);
-  const kind = pad ? padKindOf(pad.id) : useControlsStore.getState().pad;
-  const d = DRAWINGS[kind];
-  const [vx, vy, vw, vh] = d.art.viewBox;
-  return (
-    <svg viewBox={`${vx - 160} ${vy} ${vw + 320} ${vh}`} className="w-full max-w-[960px]" role="img" aria-label="Controller" data-testid="pad-drawing">
-      {d.art.paths.map((p) => {
-        const on = p.control ? pressedControl(pad, p.control) : false;
-        return (
-          <path
-            key={p.id}
-            d={p.d}
-            fill={on ? PAD_COLORS.pressed : "none"}
-            stroke={PAD_COLORS.art_stroke}
-            strokeWidth={d.art.strokeWidth}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            opacity={p.role === "detail" ? 0.6 : 1}
-          />
-        );
-      })}
-      {(["stick_l", "stick_r"] as const).map((c) => {
-        const h = d.hotspots[c];
-        if (!h || h.shape !== "circle") return null;
-        const s = pad ? (c === "stick_l" ? pad.sticks.l : pad.sticks.r) : ([0, 0] as const);
-        return (
-          <g key={c} pointerEvents="none">
-            <circle cx={h.geom.cx} cy={h.geom.cy} r={h.geom.r * deadzone} fill="none" stroke={PAD_COLORS.deadzone_ring} strokeDasharray="4 4" />
-            <circle cx={h.geom.cx + s[0] * h.geom.r} cy={h.geom.cy + s[1] * h.geom.r} r={8} fill={PAD_COLORS.pressed} data-testid={`${c}-dot`} />
-          </g>
-        );
-      })}
-      {(["l2", "r2"] as const).map((c) => {
-        const h = d.hotspots[c];
-        if (!h) return null;
-        const [cx, cy] = hotspotCentre(h);
-        const v = pad ? (c === "l2" ? pad.l2 : pad.r2) : 0;
-        return (
-          <g key={`${c}-bar`} pointerEvents="none">
-            <rect x={cx - 30} y={cy - 46} width={60} height={8} fill="none" stroke={PAD_COLORS.art_stroke} />
-            <rect x={cx - 30} y={cy - 46} width={60 * v} height={8} fill={PAD_COLORS.pressed} />
-          </g>
-        );
-      })}
-      {CONTROL_IDS.map((c) => {
-        const h = d.hotspots[c];
-        if (!h) return null;
-        const label = hotspotLabel(rows, c, registry);
-        const [ax, ay] = h.label_anchor;
-        const [hx, hy] = hotspotCentre(h);
-        const lx = h.label_side === "left" ? vx - 150 : h.label_side === "right" ? vx + vw + 10 : ax;
-        const anchor = h.label_side === "left" ? "start" : h.label_side === "right" ? "start" : "middle";
-        const bad = conflicted.has(c);
-        return (
-          <g key={c}>
-            {label ? (
-              <>
-                <polyline points={`${hx},${hy} ${ax},${ay} ${h.label_side === "left" || h.label_side === "right" ? lx + (h.label_side === "left" ? 140 : 0) : ax},${ay}`} fill="none" stroke={bad ? PAD_COLORS.conflict : "rgba(237,237,237,0.45)"} strokeWidth={1.5} />
-                <text x={lx} y={ay + 5} textAnchor={anchor} fontSize={18} fill={bad ? PAD_COLORS.conflict : "#EDEDED"}>
-                  {label}
-                </text>
-              </>
-            ) : null}
-            <HotspotShape
-              h={h}
-              data-control={c}
-              data-selected={selected === c ? "true" : undefined}
-              data-conflict={bad ? "true" : undefined}
-              role="button"
-              aria-label={CONTROL_LABELS[c]}
-              tabIndex={0}
-              onClick={() => onSelect(c)}
-              onKeyDown={(e: React.KeyboardEvent) => {
-                if (e.key === "Enter") onSelect(c);
-              }}
-              fill={pressedControl(pad, c) ? `${PAD_COLORS.pressed}66` : "transparent"}
-              stroke={bad ? PAD_COLORS.conflict : selected === c ? PAD_COLORS.pressed : "transparent"}
-              strokeWidth={bad || selected === c ? 4 : 0}
-              style={{ cursor: "pointer" }}
-            />
-          </g>
-        );
-      })}
-    </svg>
-  );
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -221,12 +103,13 @@ function ActionSelect({ value, onChange, registry, label, gesture }: { value: st
               : null}
           </optgroup>
         ))}
-      <option value="none">None</option>
+      <option value="none">{specText("controls.action.none")}</option>
     </select>
   );
 }
 
 function ControlEditor({ control, registry }: { control: ControlId; registry: ReadonlyMap<string, string> }) {
+  const { t } = useTranslation();
   const draft = useControlsStore((s) => s.draft);
   const setDraft = useControlsStore((s) => s.setDraft);
   const [error, setError] = useState<string | null>(null);
@@ -285,11 +168,15 @@ function ControlEditor({ control, registry }: { control: ControlId; registry: Re
       })}
       {rows.some(({ r }) => r.with.length > 0) ? (
         <div className="text-[0.75rem] text-muted-foreground">
-          Combos:{" "}
-          {rows
-            .filter(({ r }) => r.with.length > 0)
-            .map(({ r }) => `${[r.control, ...r.with].map((c) => CONTROL_LABELS[c]).join(" + ")} → ${actionLabel(r.action, registry)}${r.locked ? " (locked)" : ""}`)
-            .join(" · ")}
+          {t("cockpit.settingsSections.controls.combos", {
+            list: rows
+              .filter(({ r }) => r.with.length > 0)
+              .map(({ r }) => {
+                const binding = `${[r.control, ...r.with].map((c) => CONTROL_LABELS[c]).join(" + ")} → ${actionLabel(r.action, registry)}`;
+                return r.locked ? t("cockpit.settingsSections.controls.lockedSuffix", { binding }) : binding;
+              })
+              .join(" · "),
+          })}
         </div>
       ) : null}
     </div>
@@ -297,6 +184,7 @@ function ControlEditor({ control, registry }: { control: ControlId; registry: Re
 }
 
 function CalibrationCard() {
+  const { t } = useTranslation();
   const pad = useInputStore((s) => s.pad);
   const deadzone = useControlsStore((s) => s.deadzone);
   const setDeadzone = useControlsStore((s) => s.setDeadzone);
@@ -316,7 +204,7 @@ function CalibrationCard() {
       <div className="flex gap-[0.4rem]">
         {!running ? (
           <button type="button" disabled={!pad} onClick={() => { setCal(null); setRunning(true); }} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem] disabled:opacity-45">
-            Start calibration
+            {t("cockpit.settingsSections.controls.calStart")}
           </button>
         ) : (
           <button
@@ -328,12 +216,12 @@ function CalibrationCard() {
             }}
             className="min-h-[48px] rounded-lg border border-primary bg-primary/25 px-[0.8rem] text-[0.85rem] disabled:opacity-45"
           >
-            Done (sticks released)
+            {t("cockpit.settingsSections.controls.calDone")}
           </button>
         )}
         {pad ? (
           <button type="button" onClick={() => setCalibration(pad.id, null)} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
-            Clear calibration
+            {t("cockpit.settingsSections.controls.calClear")}
           </button>
         ) : null}
       </div>
@@ -347,6 +235,7 @@ function CalibrationCard() {
 }
 
 export function ControlsSettings() {
+  const { t } = useTranslation();
   const registry = useRegistry();
   const pad = useInputStore((s) => s.pad);
   const announced = useInputStore((s) => s.padAnnounced);
@@ -359,11 +248,34 @@ export function ControlsSettings() {
   const fileRef = useRef<HTMLInputElement>(null);
   const voice = useVoiceStore();
   const rumbleIdx = useRef(0);
+  // Known on the ground and disarmed: the same proof the tour uses to take
+  // the pad. A stick-mode switch needs it, then a second tap to confirm.
+  const grounded = useTourCapturesPad();
+  const [modePending, setModePending] = useState<string | null>(null);
+  const [modeNote, setModeNote] = useState<"refused" | "confirm" | null>(null);
+  const tapMode = (m: "mode1" | "mode2") => {
+    const tap = stickModeTap(s.stickMode, m, modePending, grounded);
+    if (tap.kind === "switch") {
+      s.setStickMode(m);
+      setModePending(null);
+      setModeNote(null);
+    } else if (tap.kind === "confirm") {
+      setModePending(m);
+      setModeNote("confirm");
+    } else if (tap.kind === "refused") {
+      setModePending(null);
+      setModeNote("refused");
+    }
+  };
 
   const conflicts = findConflicts(s.draft);
   const conflicted = conflictedControls(s.draft, conflicts);
   const missing = missingLocked(s.draft);
   const dirty = JSON.stringify(s.draft) !== JSON.stringify(s.bindings);
+  // The draft lives in the store and outlives this page; leaving asks first,
+  // and "discard" really drops it so the editor never shows a map the Feed
+  // is not running.
+  useDraftGuard(dirty, "controls-bindings", s.discardDraft);
 
   // "Press a control": the next pressed button selects its control.
   useEffect(() => {
@@ -401,11 +313,16 @@ export function ControlsSettings() {
         {pad && !pad.standard ? <span className="text-warn">{specText("controls.not_standard")}</span> : null}
         <div className="flex overflow-hidden rounded-lg border border-border" role="radiogroup" aria-label={specText("controls.stick_mode")}>
           {(["mode2", "mode1"] as const).map((m) => (
-            <button key={m} type="button" role="radio" aria-checked={s.stickMode === m} onClick={() => s.setStickMode(m)} className={cn("min-h-[40px] px-[0.6rem]", s.stickMode === m && "bg-primary/30")}>
+            <button key={m} type="button" role="radio" aria-checked={s.stickMode === m} onClick={() => tapMode(m)} className={cn("touch-target px-[0.6rem]", s.stickMode === m && "bg-primary/30", modePending === m && "ring-2 ring-inset ring-primary")}>
               {specText(`controls.${m}`)}
             </button>
           ))}
         </div>
+        {modeNote ? (
+          <span role="status" className={modeNote === "refused" ? "text-warn" : "text-muted-foreground"} data-testid="stick-mode-note">
+            {specText(modeNote === "refused" ? "controls.stick_mode_refused" : "controls.stick_mode_confirm")}
+          </span>
+        ) : null}
         <span className="text-muted-foreground" data-testid="controls-profile">
           {specText(isDefaultBindings(s.bindings) ? "controls.profile.ados_default" : "controls.profile.user")}
         </span>
@@ -444,7 +361,7 @@ export function ControlsSettings() {
         </button>
         {dirty ? (
           <button type="button" onClick={s.discardDraft} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
-            Discard
+            {t("cockpit.settingsSections.dirtyDiscard")}
           </button>
         ) : null}
         <button type="button" onClick={s.resetToDefault} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">

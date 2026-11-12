@@ -279,18 +279,8 @@ impl VideoTab {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if urls.is_empty() {
-            let state = core
-                .dash()
-                .map(|d| d.video_state.clone())
-                .unwrap_or_default();
-            let msg = format!(
-                "No viewer URL: the video pipeline is {}",
-                if state.is_empty() {
-                    "not reported"
-                } else {
-                    &state
-                }
-            );
+            let state = core.dash().map(|d| d.video_state.as_str()).unwrap_or("");
+            let msg = no_viewer_text(state);
             f.render_widget(Paragraph::new(Span::styled(msg, t.dim())), inner);
             return;
         }
@@ -408,3 +398,17 @@ impl Tab for VideoTab {
 
 #[cfg(test)]
 mod tests;
+
+/// Why the viewer list is empty, from the pipeline state, in a sentence.
+fn no_viewer_text(state: &str) -> String {
+    match state {
+        "running" | "streaming" => {
+            "The pipeline is running but has not reported a viewer URL".to_string()
+        }
+        "" | "unknown" => "No viewer URL: the pipeline state is not reported".to_string(),
+        "starting" => "No viewer URL yet: the pipeline is starting".to_string(),
+        "stopped" | "idle" | "inactive" => "No viewer URL: the pipeline is stopped".to_string(),
+        "error" | "failed" => "No viewer URL: the pipeline failed".to_string(),
+        other => format!("No viewer URL: the pipeline reports {other}"),
+    }
+}

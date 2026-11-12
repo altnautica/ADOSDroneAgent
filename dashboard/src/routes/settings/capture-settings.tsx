@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ReadErrorCard } from "@/components/read-error-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useResource } from "@/hooks/use-resource";
+import { exposureError, gainError } from "@/lib/exposure-draft";
 import {
   CAPTURE_STATE_PATH,
   isExtensionMissing,
@@ -34,7 +36,9 @@ function StorageCard() {
         <CardTitle>{t("settings.capture.storageTitle")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
-        {!s ? (
+        {storage.isError ? (
+          <ReadErrorCard message={t("settings.capture.storageReadFailed")} onRetry={() => void storage.refetch()} />
+        ) : !s ? (
           <p className="text-muted-foreground">{t("common.loading")}</p>
         ) : !s.present ? (
           <p className="text-muted-foreground">{t("settings.capture.storageAbsent")}</p>
@@ -58,7 +62,7 @@ function StorageCard() {
                 </div>
                 <div className="text-xs text-muted-foreground">{t("settings.capture.state")}</div>
                 <div>
-                  <Badge variant={s.capture.state === "ok" ? "ok" : s.capture.state === "full" ? "err" : "warn"}>
+                  <Badge variant={s.capture.state === "ok" ? "success" : s.capture.state === "full" ? "error" : "warning"}>
                     {s.capture.state}
                   </Badge>
                 </div>
@@ -86,10 +90,20 @@ function ExposureCard() {
     retry: (count, err) => !isExtensionMissing(err) && count < 2,
   });
   const current = capture.data?.exposure ?? null;
-  const [draft, setDraft] = useState<CaptureExposure | null>(null);
+  // Numbers are kept as typed text so a bad entry shows its error.
+  const [draft, setDraft] = useState<
+    (Omit<CaptureExposure, "exposure_us" | "gain"> & { exposure_us: string; gain: string }) | null
+  >(null);
   const [busy, setBusy] = useState(false);
+  const seed = current
+    ? {
+        ...current,
+        exposure_us: current.exposure_us == null ? "" : String(current.exposure_us),
+        gain: current.gain == null ? "" : String(current.gain),
+      }
+    : null;
   useEffect(() => {
-    if (current) setDraft({ ...current });
+    if (seed) setDraft(seed);
     // Re-seed only when the agent's values change, not on every poll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.locked, current?.exposure_us, current?.gain, current?.mode]);
@@ -98,7 +112,7 @@ function ExposureCard() {
     if (!draft) return;
     setBusy(true);
     try {
-      await putCaptureExposure(draft);
+      await putCaptureExposure({ ...draft, exposure_us: Number(draft.exposure_us), gain: Number(draft.gain) });
       toast.ok(t("settings.capture.exposureSaved"));
       await qc.invalidateQueries({ queryKey: ["capture-state"] });
     } catch (err) {
@@ -108,13 +122,16 @@ function ExposureCard() {
     }
   }
 
-  const valid =
+  const expErr = draft ? exposureError(draft.exposure_us, t) : null;
+  const gainErr = draft ? gainError(draft.gain, t) : null;
+  const dirty =
     draft != null &&
-    draft.exposure_us != null &&
-    draft.exposure_us > 0 &&
-    draft.gain != null &&
-    draft.gain > 0 &&
-    draft.mode != null;
+    seed != null &&
+    (draft.locked !== seed.locked ||
+      draft.exposure_us.trim() !== seed.exposure_us ||
+      draft.gain.trim() !== seed.gain ||
+      draft.mode !== seed.mode);
+  const valid = draft != null && expErr === null && gainErr === null && draft.mode != null;
 
   return (
     <Card>
@@ -124,6 +141,8 @@ function ExposureCard() {
       <CardContent className="space-y-3 text-sm">
         {isExtensionMissing(capture.error) ? (
           <p className="text-muted-foreground">{t("capture.extensionMissing")}</p>
+        ) : capture.isError ? (
+          <ReadErrorCard message={t("capture.loadFailed")} onRetry={() => void capture.refetch()} />
         ) : !draft ? (
           <p className="text-muted-foreground">{t("common.loading")}</p>
         ) : (
@@ -136,7 +155,7 @@ function ExposureCard() {
               />
               <Label htmlFor="exposure-locked">{t("settings.capture.locked")}</Label>
               {current?.locked && current.applied === false && (
-                <Badge variant="warn">{t("settings.capture.notApplied")}</Badge>
+                <Badge variant="warning">{t("settings.capture.notApplied")}</Badge>
               )}
             </div>
             <div className="flex flex-wrap items-end gap-3">
@@ -146,13 +165,9 @@ function ExposureCard() {
                   id="exposure-us"
                   className="w-28"
                   inputMode="numeric"
-                  value={draft.exposure_us == null ? "" : String(draft.exposure_us)}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      exposure_us: e.target.value.trim() === "" ? null : Number(e.target.value),
-                    })
-                  }
+                  value={draft.exposure_us}
+                  aria-invalid={expErr !== null}
+                  onChange={(e) => setDraft({ ...draft, exposure_us: e.target.value })}
                 />
               </div>
               <div className="space-y-1">
@@ -161,13 +176,9 @@ function ExposureCard() {
                   id="exposure-gain"
                   className="w-24"
                   inputMode="decimal"
-                  value={draft.gain == null ? "" : String(draft.gain)}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      gain: e.target.value.trim() === "" ? null : Number(e.target.value),
-                    })
-                  }
+                  value={draft.gain}
+                  aria-invalid={gainErr !== null}
+                  onChange={(e) => setDraft({ ...draft, gain: e.target.value })}
                 />
               </div>
               <div className="space-y-1">
@@ -188,10 +199,15 @@ function ExposureCard() {
                   ))}
                 </select>
               </div>
-              <Button size="sm" disabled={busy || !valid} onClick={apply}>
+              <Button size="sm" disabled={busy || !valid || !dirty} onClick={apply}>
                 {t("settings.shared.apply")}
               </Button>
             </div>
+            {(expErr || gainErr) && (
+              <p className="text-xs text-destructive" role="alert">
+                {expErr ?? gainErr}
+              </p>
+            )}
           </>
         )}
       </CardContent>

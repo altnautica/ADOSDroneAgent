@@ -6,6 +6,34 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.108] - 2026-11-12
+
+### Changed
+
+- Browser cockpit: the Feed opens inside the cockpit shell beside the menu rail, with a Full screen button in the top bar (`Exit full screen` to return; the browser's own exit also returns). The HDMI kiosk stays full bleed and has no such button. The dashboard's Cockpit launcher just opens `/cockpit`.
+- Cockpit and dashboard chrome follow the sharper, quieter style: smaller radii, near-opaque panels with light blur, hairline borders and no shadows, one control height across the top bar. The flight-state chip is an outline in its state colour with a dot and the second line inline; the status pill is a dot plus text; dashboard badges are outlines with sentence-case text.
+- Alert banners sit on a dark panel with only a light severity tint, and severity colours used as small text are lightened to readable values. The heading readout and the left-column captions keep a halo or panel over bright video.
+- The take-off line reads "Taking off · Climb"; failing pre-flight items read as their failure ("No home position"), and flight-controller pre-arm items lose the "Flight controller:" prefix.
+- `perceptionTier` reports `cpu` when the vision engine runs its detector on the CPU; `ados-offload` 0.2.0 adds `PerceptionTier::Cpu` and the Python SDK's `ResolvedTier.CPU`.
+- Unpair, plugin permission grant/revoke and the primary-gamepad write are refused while the vehicle is armed (`?force=1` overrides), and the cockpit and dashboard ask before forcing them.
+- The terminal UI's vehicle screen: each follow phase has its own glyph and colour, detection counts come from the latest detections, unknown surface operations read `Other (<op>)`, the navigation-source warning joins the status alerts, pose age shows in the Autonomy block, and an unknown arm state reads as possibly airborne.
+
+### Added
+
+- Cockpit: the pose age in the navigation-source popover; a camera source picker in Settings; an on-screen keyboard for Params and MSP on the kiosk; a passed/total pre-flight count in the Menu; the confirm sheets show each action's message and spec-keyed hints; a refusal toast (no dialog) when Fly Here is pressed while it is not offered.
+- Dashboard: a camera selector shared by the detections and layers panels; the pose age on the navigation card; an "Apply suggestion" path after hardware re-detection; the extension failure reason and a readable status; armed-retry confirms on unpair and network writes; a dirty-form guard on settings pages.
+- A TypeScript size ratchet (`scripts/check-ts-size.mjs`, 500 lines per file under `cockpit/src`, `dashboard/src` and `web-shared/src`) with a Guards job.
+- Shared spec keys for the pilot setup errors, the zoom-off-stage notice, skill parameter steps and the take-off step word.
+
+### Fixed
+
+- Cockpit: the link cell on a ground station reads the age of the newest pilot or telemetry frame instead of always "No link"; the video placeholder says there is no source when the agent's video is stopped; recovery modes count as commanded here only after an accepted (or observed) acknowledgement and never when the flight controller was already in that mode; one recovery-mode set; an acknowledgement line clears only its own text; zoom and frame crop follow the rendered video; the nav status poll waits 2.5 s; `?demo=1` no longer opens the live pilot link alongside the scripted feed; emergency stop may be bound to several controls; the minimap frame toggle, map zoom and altitude-reference toggle take a 48 px press; the compact minimap's north label clears the card title; a minimap opened later keeps the no-fix timer.
+- Cockpit: unknown arm state (no flight controller link) shows no tips, marks none seen, offers Land rather than Take off and hides pre-flight pill items; the FC Fly Here route uses the telemetry landed state when the pilot frame is not fresh.
+- Shared rules: the FC Fly Here route is not offered while a fresh pilot frame reports a failsafe; AR edge chips keep their plate and text readable when a layer is dimmed.
+- Logs: the logger filter matches the logger column on `/api/logs` and `/api/logs/stream`.
+- Dashboard: raw codes and enums on the header, mesh, WFB and profile pages read as words; read errors show a retryable card instead of an empty page; Wi-Fi, cellular and uplink switches confirm before dropping the link; parameter writes list what will change; controls meet the 48 px hit target.
+- Terminal UI: the vehicle tab no longer drops the pilot and readings panes on short terminals; settings lines truncate instead of wrapping; help and overlays fit the window.
+
 ## [0.109.107] - 2026-11-12
 
 ### Fixed

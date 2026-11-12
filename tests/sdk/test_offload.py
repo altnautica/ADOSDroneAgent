@@ -16,9 +16,10 @@ from ados.sdk.offload import (
 
 
 def test_resolved_tier_parse_is_total_and_never_raises():
-    # The host reports one of local/offload/hybrid/none; parse maps each and
+    # The host reports one of local/cpu/offload/hybrid/none; parse maps each and
     # degrades an unexpected value to the on-drone default rather than raising.
     assert ResolvedTier.parse("local") is ResolvedTier.LOCAL
+    assert ResolvedTier.parse("cpu") is ResolvedTier.CPU
     assert ResolvedTier.parse("offload") is ResolvedTier.OFFLOAD
     assert ResolvedTier.parse("hybrid") is ResolvedTier.HYBRID
     assert ResolvedTier.parse("none") is ResolvedTier.NONE

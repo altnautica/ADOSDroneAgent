@@ -179,4 +179,19 @@ describe("the frame grab at a digital zoom", () => {
     expect(frameCrop(1280, 720, 2)).toEqual({ sx: 320, sy: 180, sw: 640, sh: 360 });
     expect(frameCrop(1280, 720, 4)).toEqual({ sx: 480, sy: 270, sw: 320, sh: 180 });
   });
+
+  it("crops from the rendered picture: a letterboxed side stays whole until the zoom pushes it off the box", () => {
+    // A 4:3 frame on a 16:9 stage: pillarboxed, 960 of 1280 px wide.
+    expect(frameCrop(640, 480, 1, 1280, 720)).toEqual({ sx: 0, sy: 0, sw: 640, sh: 480 });
+    // At 1.25× the picture is 1200 px wide, still inside the box: the whole width shows.
+    const c = frameCrop(640, 480, 1.25, 1280, 720);
+    expect(c.sx).toBeCloseTo(0);
+    expect(c.sw).toBeCloseTo(640);
+    expect(c.sh).toBeCloseTo(384);
+    expect(c.sy).toBeCloseTo(48);
+    // At 2× it is 1920 wide: 1280 of it shows, two thirds of the frame.
+    const d = frameCrop(640, 480, 2, 1280, 720);
+    expect(d.sw).toBeCloseTo(640 * (1280 / 1920));
+    expect(d.sh).toBeCloseTo(240);
+  });
 });

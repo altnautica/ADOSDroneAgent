@@ -5,25 +5,20 @@
 // sets read once per FC link, and vision-nav's `nav.state` from the nav
 // stream. A tap opens the source-set popover (its own lazy chunk).
 
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Compass, Satellite, ScanLine, Waves } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-import { useNow } from "@/hooks/use-now";
+import { useNavSource } from "@/hooks/use-nav-source";
 import { useWidthClass } from "@/hooks/use-width-class";
-import { loadEkfSourceParams, navSourceInput } from "@/lib/ekf-sources";
+import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { navSourceTextEn, type NavSourceKind, type NavTone } from "@/shared/hud/nav-source";
 import { specText } from "@/shared/hud/spec-text";
-import { navSourceTextEn, resolveNavSource, type NavSourceKind, type NavTone } from "@/shared/hud/nav-source";
-import { useFlightStore } from "@/stores/flight-store";
-import { useNavStreamStore } from "@/stores/nav-stream-store";
-import { useStatusStore } from "@/stores/status-store";
+import { severityTextColor } from "@/shared/hud/status-pill";
 
 const NavSourcePopover = lazy(() => import("@/components/feed/nav-source-popover"));
-
-/** vision-nav's report counts while younger than this (§3). */
-export const NAV_STATE_FRESH_MS = 2000;
 
 const ICON: Record<NavSourceKind, LucideIcon> = {
   dr: Compass,
@@ -33,36 +28,22 @@ const ICON: Record<NavSourceKind, LucideIcon> = {
   stale: Satellite,
 };
 
-const TONE: Record<NavTone, string> = {
-  good: "text-hud-good",
-  warn: "text-hud-warn",
-  crit: "text-hud-crit",
-  muted: "text-hud-muted",
+/** The icon in the tone's colour; the words in the panel's text colours (a
+ *  severity hue is too dark as small text). */
+const TONE: Record<NavTone, { icon: string; text: string }> = {
+  good: { icon: CHROME_TOKENS.severity_ok, text: "var(--fs-text)" },
+  warn: { icon: CHROME_TOKENS.severity_warning, text: severityTextColor("warning") },
+  crit: { icon: CHROME_TOKENS.severity_critical, text: severityTextColor("critical") },
+  muted: { icon: CHROME_TOKENS.text_dim, text: "var(--fs-text-dim)" },
 };
 
 export function NavSourceChip() {
   const { widthClass } = useWidthClass();
-  const telemetry = useFlightStore((s) => s.telemetry);
-  const live = useFlightStore((s) => s.live);
-  const fcConnected = useStatusStore((s) => s.status?.fc_connected === true);
-  const nav = useNavStreamStore((s) => s.nav);
-  const lastCommandedSet = useNavStreamStore((s) => s.lastCommandedSet);
-  const params = useNavStreamStore((s) => s.ekfParams);
-  const now = useNow(nav ? 1000 : null);
+  const { result, freshNav, params } = useNavSource(false);
   const [open, setOpen] = useState(false);
-
-  // The source sets, once per FC link.
-  useEffect(() => {
-    if (!fcConnected) return;
-    const ac = new AbortController();
-    void loadEkfSourceParams(ac.signal).catch(() => undefined);
-    return () => ac.abort();
-  }, [fcConnected]);
-
-  const freshNav = nav && now - nav.at <= NAV_STATE_FRESH_MS ? nav.data : null;
-  const result = resolveNavSource(navSourceInput(telemetry, live, freshNav, lastCommandedSet, params));
   const text = navSourceTextEn(result);
   const Icon = ICON[result.kind];
+  const tone = TONE[result.tone];
   const showWord = widthClass !== "compact" && text.word !== null;
 
   return (
@@ -74,12 +55,13 @@ export function NavSourceChip() {
         aria-label={`${specText("cockpit.status.source.nav_source")}: ${text.label}${text.word ? `, ${text.word}` : ""}`}
         className={cn(
           HIT_AREA,
-          "flex h-[40px] shrink-0 items-center gap-[4px] whitespace-nowrap rounded-md px-[4px] font-mono text-[12px] leading-[15px] hover:bg-hud-hair",
+          "flex h-[var(--fs-control)] shrink-0 items-center gap-[4px] whitespace-nowrap rounded-[var(--fs-radius-sm)] px-[4px] font-mono hover:bg-white/10",
         )}
+        style={{ color: tone.text }}
       >
-        <Icon className={cn("h-[14px] w-[14px]", TONE[result.tone])} aria-hidden />
-        <span className={TONE[result.tone]}>{text.label}</span>
-        {showWord ? <span className={cn("font-semibold", TONE[result.tone])}>{text.word}</span> : null}
+        <Icon className="chrome-icon" style={{ color: tone.icon }} aria-hidden />
+        <span>{text.label}</span>
+        {showWord ? <span className="font-semibold">{text.word}</span> : null}
       </button>
       {open ? (
         <Suspense fallback={null}>

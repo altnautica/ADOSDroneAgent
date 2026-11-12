@@ -80,6 +80,8 @@ export interface InstallRow {
   signed: boolean;
   granted: number;
   declared: number;
+  /** Why the host failed to start it, when it did. */
+  failureReason: string | null;
 }
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -102,9 +104,32 @@ export function parseInstalls(body: unknown): InstallRow[] {
         signed: typeof r.signer_id === "string" && r.signer_id.length > 0,
         granted: perms.filter((p) => isObj(p) && p.granted === true).length,
         declared: perms.length,
+        failureReason: typeof r.failure_reason === "string" && r.failure_reason ? r.failure_reason : null,
       },
     ];
   });
+}
+
+const STATUS_KEYS = {
+  installed: "extensions.status.installed",
+  enabled: "extensions.status.enabled",
+  running: "extensions.status.running",
+  disabled: "extensions.status.disabled",
+  failed: "extensions.status.failed",
+  incompatible: "extensions.status.incompatible",
+} as const;
+
+/** The label key for an install's status (unknown text reads as unknown). */
+export function installStatusKey(status: string | null): (typeof STATUS_KEYS)[keyof typeof STATUS_KEYS] | "extensions.status.unknown" {
+  return status && status in STATUS_KEYS ? STATUS_KEYS[status as keyof typeof STATUS_KEYS] : "extensions.status.unknown";
+}
+
+/** The status tone: a failed start is an error, an incompatible one a warning. */
+export function installStatusTone(status: string | null): "ok" | "err" | "warn" | "muted" {
+  if (status === "running") return "ok";
+  if (status === "failed") return "err";
+  if (status === "incompatible") return "warn";
+  return "muted";
 }
 
 /** A URL the operator typed is usable when it is http(s); the agent applies

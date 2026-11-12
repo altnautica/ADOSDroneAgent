@@ -101,7 +101,10 @@ function OfflineHome({
 function RegionChip() {
   const { t } = useTranslation();
   const config = useConfig();
-  const reg = config.data?.network?.regulatory;
+  // The posture shows only once the config is read: an unread config never
+  // reads as Unrestricted.
+  if (!config.data || config.isError) return null;
+  const reg = config.data.network?.regulatory;
   const mode = modeFromConfig(reg);
   const region = regionFromConfig(reg);
   const unrestricted = mode !== "region" || !region;
@@ -117,7 +120,7 @@ function RegionChip() {
       className={cn(
         "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
         unrestricted
-          ? "border-amber-500/40 bg-amber-500/5 text-amber-200 hover:bg-amber-500/10"
+          ? "border-warn/60 text-warn hover:bg-warn/10"
           : "border-border bg-card text-muted-foreground hover:bg-accent/30",
       )}
     >

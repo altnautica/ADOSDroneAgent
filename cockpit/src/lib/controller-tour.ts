@@ -16,11 +16,28 @@ export function tourStage(padReported: boolean, padAnnounced: boolean, seen: boo
   return padAnnounced ? "press" : "none";
 }
 
-/** Whether the vehicle is in the air: the live pilot state's `armed &&
- *  !landed`, else (no live pilot) the heartbeat's arm state. */
+/** Whether the vehicle is (possibly) in the air: from the live pilot state,
+ *  unless it reports disarmed or landed (an unknown arm state counts as
+ *  airborne), else (no live pilot) the heartbeat's arm state. */
 export function tourAirborne(pilot: { armed: boolean | null; landed: boolean | null } | null, telemetryArmed: boolean | null | undefined): boolean {
-  if (pilot) return pilot.armed === true && pilot.landed === false;
+  if (pilot) return pilot.armed !== false && pilot.landed !== true;
   return telemetryArmed === true;
+}
+
+/** The tips' arm inputs. From the live pilot: its arm state as reported,
+ *  null while unknown (its FC link is down), and airborne null with either
+ *  unknown, so no tip shows and none is marked seen. With no live pilot the
+ *  heartbeat decides: a known arm dismisses a tip, and an unknown arm state
+ *  counts as possibly airborne. */
+export function tipsArmState(
+  pilot: { armed: boolean | null; landed: boolean | null } | null,
+  telemetryArmed: boolean | null | undefined,
+): { armed: boolean | null; airborne: boolean | null } {
+  if (pilot) {
+    const unknown = pilot.armed === null || pilot.landed === null;
+    return { armed: pilot.armed, airborne: unknown ? null : pilot.armed && !pilot.landed };
+  }
+  return { armed: telemetryArmed === true, airborne: telemetryArmed !== false };
 }
 
 /** Whether the tour card may capture the pad (so Cross does not also start a
@@ -33,7 +50,7 @@ export function tourCapturesPad(
   pilot: { armed: boolean | null; landed: boolean | null } | null,
   telemetry: { live: boolean; armed: boolean | null | undefined },
 ): boolean {
-  if (pilot) return pilot.landed !== false && pilot.armed !== true;
+  if (pilot) return pilot.armed === false && pilot.landed !== false;
   return telemetry.live && telemetry.armed === false;
 }
 

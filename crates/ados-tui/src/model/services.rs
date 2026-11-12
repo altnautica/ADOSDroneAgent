@@ -16,17 +16,40 @@ impl Dashboard {
         let Some(services) = status_full.get("services").and_then(Value::as_array) else {
             return;
         };
-        let states = services
-            .iter()
-            .filter_map(|svc| svc.get("state").and_then(Value::as_str))
-            .filter(|state| !matches!(*state, "inactive" | "idle"));
+        let units = services.iter().filter_map(|svc| {
+            let state = svc.get("state").and_then(Value::as_str)?;
+            let name = svc.get("name").and_then(Value::as_str).unwrap_or("");
+            (!matches!(state, "inactive" | "idle")).then_some((name, state))
+        });
         let (mut total, mut running) = (0, 0);
-        for state in states {
+        let mut first_failed = None;
+        for (name, state) in units {
             total += 1;
             running += usize::from(state == "active");
+            if state != "active" && first_failed.is_none() && !name.is_empty() {
+                first_failed = Some(name.trim_end_matches(".service").to_string());
+            }
         }
         self.services_total = total;
         self.services_running = running;
+        self.first_failed = first_failed;
+    }
+
+    /// What makes the verdict DEGRADED, in words, for the line under it:
+    /// the first unit down, else a lost flight controller.
+    pub fn health_cause(&self) -> Option<String> {
+        if self.health() != Health::Degraded {
+            return None;
+        }
+        Some(match &self.first_failed {
+            Some(name) => format!("{name} failed"),
+            None if self.services_running < self.services_total => format!(
+                "{} of {} services down",
+                self.services_total - self.services_running,
+                self.services_total
+            ),
+            None => "flight controller lost".to_string(),
+        })
     }
 }
 
@@ -86,7 +109,24 @@ mod tests {
             ]}));
             assert_eq!((dash.services_running, dash.services_total), (1, 2));
             assert_eq!(dash.health(), Health::Degraded, "{state}");
+            assert_eq!(dash.health_cause().as_deref(), Some("ados-video failed"));
         }
+    }
+
+    #[test]
+    fn a_lost_flight_controller_is_named_as_the_cause() {
+        let mut status = setup_status();
+        status["mavlink"] = json!({"connected": false});
+        let mut dash = Dashboard::from_status(&status);
+        dash.merge_services(&json!({"services": [row("ados-control", "active", "running")]}));
+        assert_eq!(dash.health(), Health::Degraded);
+        assert_eq!(
+            dash.health_cause().as_deref(),
+            Some("flight controller lost")
+        );
+
+        let healthy = Dashboard::from_status(&setup_status());
+        assert_eq!(healthy.health_cause(), None);
     }
 
     #[test]

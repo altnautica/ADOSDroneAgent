@@ -4,6 +4,7 @@
 // ground station, so it waits behind a slide; the PIN and key actions are
 // guarded.
 
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useCallback, useState, type ReactNode } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -259,6 +260,7 @@ function PinGroup() {
   const [pin, setPin] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
+  useDirtyGuard(current !== "" || pin !== "" || confirm !== "", "settings-security-pin");
 
   const form = { pinSet, current, pin, confirm };
   const problem = pinFormProblem(form);

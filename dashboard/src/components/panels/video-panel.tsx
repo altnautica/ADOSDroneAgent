@@ -11,8 +11,9 @@ import { fmtBitrate, fmtNum } from "@/shared/format";
 import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 import { cn } from "@/lib/utils";
 import { VideoDetections } from "@/components/panels/video-detections";
-import { GimbalBadge, LayerToggles, VideoLayers } from "@/components/panels/video-layers";
-import { defaultLeasedLayers } from "@/lib/video-layer-lease";
+import { CameraSelect, GimbalBadge, LayerToggles, VideoLayers } from "@/components/panels/video-layers";
+import { useResource } from "@/hooks/use-resource";
+import { cameraOptions, DEFAULT_CAMERA_ID, defaultLeasedLayers } from "@/lib/video-layer-lease";
 import { useProfile } from "@/shared/use-profile";
 import { useVideoTransport } from "@/shared/use-video-transport";
 import type { TransportKind } from "@/shared/video-transport";
@@ -58,6 +59,10 @@ export function VideoPanel() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [retryToken, setRetryToken] = useState(0);
   const [layerToggles, setLayerToggles] = useState(defaultLeasedLayers);
+  // One camera choice drives both the detection boxes and the layers.
+  const [cameraId, setCameraId] = useState(DEFAULT_CAMERA_ID);
+  const roster = useResource<{ cameras?: { id?: unknown }[] }>("video-roster", "/api/video/roster", 30_000);
+  const cameras = useMemo(() => cameraOptions(roster.data), [roster.data]);
   // Object URL of a still frame grabbed from the live stream, fetched with the
   // credential when every live transport failed, and when the agent took it.
   const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
@@ -210,6 +215,7 @@ export function VideoPanel() {
               toggles={layerToggles}
               onChange={(id, on) => setLayerToggles((s) => ({ ...s, [id]: on }))}
             />
+            <CameraSelect options={cameras} value={cameraId} onChange={setCameraId} label={t("nav.camera")} />
             <GimbalBadge />
           </div>
         )}
@@ -222,8 +228,8 @@ export function VideoPanel() {
             autoPlay
             playsInline
           />
-          {!isGround && <VideoLayers active={state === "live"} videoRef={videoRef} toggles={layerToggles} />}
-          {!isGround && <VideoDetections active={state === "live"} videoRef={videoRef} />}
+          {!isGround && <VideoLayers active={state === "live"} videoRef={videoRef} toggles={layerToggles} cameraId={cameraId} />}
+          {!isGround && <VideoDetections active={state === "live"} videoRef={videoRef} cameraId={cameraId} />}
           {showSnapshot && snapshotUrl && (
             <img
               src={snapshotUrl}
@@ -232,7 +238,7 @@ export function VideoPanel() {
             />
           )}
           {state !== "live" && state !== "frozen" && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-scrim text-xs text-muted-foreground">
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-scrim text-xs text-white/70">
               {state === "idle" && (
                 <>
                   <VideoOff className="h-6 w-6 opacity-60" aria-hidden />

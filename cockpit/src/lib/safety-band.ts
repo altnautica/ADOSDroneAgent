@@ -1,50 +1,7 @@
-// Pure state mapping for the Feed's safety band: reach badge, arm state,
-// link, video and battery. The pre-flight checks live in the shared
-// `@/shared/hud/preflight`. Unknown is always a dash, never a fabricated value.
+// The flight screen's clock format (battery time to reserve, flight timer).
+// Unknown is always a dash, never a fabricated value.
 
-import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
-import { batteryReading } from "@/shared/hud/battery";
 import { DASH } from "@/shared/format";
-import type { AgentProfile } from "@/shared/use-profile";
-import type { VideoTransportSnapshot } from "@/shared/video-transport";
-
-export type ReachBadge = "DIRECT" | "LAN" | "VIA GROUND";
-
-/** How the vehicle on screen is reached from this panel: a ground station
- *  shows its relayed aircraft, a drone viewed on-box is direct, and a drone
- *  viewed from another machine is over the LAN. */
-export function reachBadge(profile: AgentProfile | null, hostname: string): ReachBadge | null {
-  if (profile === "ground_station") return "VIA GROUND";
-  if (profile !== "drone" && profile !== "visor") return null;
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" ? "DIRECT" : "LAN";
-}
-
-export function armLabel(live: boolean, armed: boolean | undefined): string {
-  if (!live || armed === undefined) return DASH;
-  return armed ? "ARMED" : "DISARMED";
-}
-
-/** The link chip: heartbeat age on a drone, RSSI on a ground station. */
-export function linkLabel(status: GsStatus | null): string {
-  const age = status?.heartbeat_age_s;
-  if (typeof age === "number" && Number.isFinite(age)) return `HB ${age.toFixed(1)}s`;
-  const rssi = status?.link?.rssi_dbm;
-  if (typeof rssi === "number" && Number.isFinite(rssi)) return `${Math.round(rssi)} dBm`;
-  return DASH;
-}
-
-export function videoLabel(v: VideoTransportSnapshot): string {
-  switch (v.state) {
-    case "live":
-      return v.highLatency ? "LIVE · HIGH LAT" : "LIVE";
-    case "frozen":
-      return "FROZEN";
-    case "failed":
-      return "NO VIDEO";
-    default:
-      return "CONNECTING";
-  }
-}
 
 /** `m:ss`, or `h:mm:ss` past an hour. */
 export function fmtClock(seconds: number | null): string {
@@ -54,19 +11,4 @@ export function fmtClock(seconds: number | null): string {
   const mm = Math.floor((s % 3600) / 60);
   const ss = String(s % 60).padStart(2, "0");
   return h > 0 ? `${h}:${String(mm).padStart(2, "0")}:${ss}` : `${mm}:${ss}`;
-}
-
-/** Battery chip: percent plus time to reserve when the battery engine has it. */
-export function batteryLabel(battery: BatteryHealth | null, t: VehicleState | null): string {
-  const r = batteryReading(battery, t);
-  if (!r) return DASH;
-  return r.timeToReserveS !== null ? `${Math.round(r.pct)}% ${fmtClock(r.timeToReserveS)}` : `${Math.round(r.pct)}%`;
-}
-
-
-/** Seconds since an ISO stamp, or null when absent or unparseable. */
-export function secondsSince(iso: string | null | undefined, nowMs: number): number | null {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? Math.max(0, (nowMs - t) / 1000) : null;
 }

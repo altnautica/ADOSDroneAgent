@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { useResource } from "@/hooks/use-resource";
 import { GNSS_PATH, putGnssBase, type GnssStatus } from "@/shared/api/sensors";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -21,6 +22,8 @@ export function GnssPanel() {
   const [minDur, setMinDur] = useState("300");
   const [accuracy, setAccuracy] = useState("2.0");
   const [busy, setBusy] = useState(false);
+  // Survey restarts and base off both stop the RTCM corrections drones use.
+  const [baseConfirm, setBaseConfirm] = useState<"survey" | "off" | null>(null);
   const g = gnss.data;
 
   async function setBase(survey: boolean) {
@@ -77,7 +80,7 @@ export function GnssPanel() {
                     <td>{r.sats}</td>
                     <td>{r.hdop == null ? t("common.dash") : fmtNum(r.hdop, 1)}</td>
                     <td>
-                      <Badge variant={r.pps_locked ? "ok" : "default"}>
+                      <Badge variant={r.pps_locked ? "success" : "neutral"}>
                         {r.pps_locked ? t("gnss.ppsLocked") : t("gnss.ppsFree")}
                       </Badge>
                     </td>
@@ -89,7 +92,7 @@ export function GnssPanel() {
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-muted-foreground">{t("gnss.base")}</span>
-                  <Badge variant={g.base.state === "failed" ? "err" : g.base.state === "off" ? "default" : "ok"}>
+                  <Badge variant={g.base.state === "failed" ? "error" : g.base.state === "off" ? "neutral" : "success"}>
                     {g.base.state}
                   </Badge>
                   {g.base.state === "surveying" && (
@@ -119,10 +122,10 @@ export function GnssPanel() {
                     <Label htmlFor="gnss-acc">{t("gnss.accuracy")}</Label>
                     <Input id="gnss-acc" className="w-24" inputMode="decimal" value={accuracy} onChange={(e) => setAccuracy(e.target.value)} />
                   </div>
-                  <Button size="sm" disabled={busy || !surveyValid} onClick={() => setBase(true)}>
+                  <Button size="sm" disabled={busy || !surveyValid} onClick={() => setBaseConfirm("survey")}>
                     {t("gnss.startSurvey")}
                   </Button>
-                  <Button size="sm" variant="outline" disabled={busy || g.base.mode === "off"} onClick={() => setBase(false)}>
+                  <Button size="sm" variant="outline" disabled={busy || g.base.mode === "off"} onClick={() => setBaseConfirm("off")}>
                     {t("gnss.baseOff")}
                   </Button>
                 </div>
@@ -131,6 +134,17 @@ export function GnssPanel() {
           </>
         )}
       </CardContent>
+      <ConfirmDialog
+        open={baseConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) setBaseConfirm(null);
+        }}
+        title={baseConfirm === "off" ? t("gnss.baseOffTitle") : t("gnss.surveyTitle")}
+        description={t("gnss.rtcmLoss", { count: g?.base?.rtcm_out.targets ?? 0 })}
+        confirmLabel={baseConfirm === "off" ? t("gnss.baseOff") : t("gnss.startSurvey")}
+        destructive={baseConfirm === "off"}
+        onConfirm={() => setBase(baseConfirm === "survey")}
+      />
     </Card>
   );
 }

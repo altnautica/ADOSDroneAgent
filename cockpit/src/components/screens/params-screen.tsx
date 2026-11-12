@@ -8,12 +8,14 @@
 // (`GET /api/telemetry`). A Betaflight/iNav FC has no parameter cache: it is
 // configured on the MSP screen.
 
+import { nonDefault, outOfRange, paramMatches } from "@/lib/params-entry";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { BitmaskSheet, Field, FieldPanel, OptionSheet, PickerChip, ValueEntry } from "@/components/fc/fc-editors";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { ActionButton, EmptyNote, ProgressBar, StaleBadge } from "@/components/ui/data";
+import { SearchField } from "@/components/ui/search-field";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { ListItem } from "@/components/ui/list-item";
 import { SettingRow, SwitchSettingRow } from "@/components/ui/setting-row";
@@ -35,6 +37,7 @@ import { loadParamMetadata, type ParamMetadata } from "@/shared/api/param-metada
 import { buildRows, categoryCounts, filterRows, formatParamValue, paramWriteBlock, type ParamRow } from "@/shared/api/params";
 import { toast } from "@/shared/api/toast";
 import { DASH, fmtNum, fmtPct, fmtVoltage } from "@/shared/format";
+import { mavFixWord, mavHdop } from "@/lib/mav-gps";
 import "@/shared/i18n";
 import { useResource } from "@/shared/use-resource";
 
@@ -71,7 +74,7 @@ export function ParamsScreen() {
   else body = <SensorsTab />;
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={identity.stale}
       title={t("cockpit.params.title")}
       tabs={[t("telemetry.tabs.parameters"), t("telemetry.tabs.sensors")]}
       selectedTab={tab}
@@ -106,14 +109,21 @@ function ParametersTab({ identity }: { identity: FcIdentity | null }) {
   const rows = useMemo(() => buildRows(params.data?.params ?? {}), [params.data]);
   const counts = useMemo(() => categoryCounts(rows), [rows]);
   const visible = useMemo(
-    () => filterRows(rows, { category, search, modifiedOnly, modified: new Set(drafts.keys()) }),
-    [rows, category, search, modifiedOnly, drafts],
+    () =>
+      filterRows(rows, { category, search: "", modifiedOnly, modified: new Set(drafts.keys()) }).filter((r) =>
+        paramMatches(r.name, meta?.get(r.name), search),
+      ),
+    [rows, category, search, modifiedOnly, drafts, meta],
   );
 
   async function save() {
     setProgress({ done: 0, total: drafts.size });
     const out = await saveParamDrafts(drafts, postParam, (done, total) => setProgress({ done, total }));
     for (const name of out.acked) discardDraft(name);
+    // A parameter the FC reads only at boot is written but not yet live.
+    if (out.acked.some((name) => meta?.get(name)?.rebootRequired)) {
+      toast.info(t("cockpit.params.rebootNeeded"));
+    }
     for (const f of out.failed) toast.err(t("telemetry.params.saveItemFailed", { name: f.name }), f.message);
     setProgress(null);
     params.refresh();
@@ -205,7 +215,10 @@ function ParametersTab({ identity }: { identity: FcIdentity | null }) {
         const draft = drafts.get(row.name);
         const current = draft ? draft.draft : row.value;
         const hint = paramHint(m);
-        const summary = [displayValue(current, m), hint].filter(Boolean).join(" · ");
+        const def = nonDefault(current, m);
+        const summary = [displayValue(current, m), def == null ? null : t("cockpit.params.nonDefault", { value: formatParamValue(def) }), hint]
+          .filter(Boolean)
+          .join(" · ");
         const readOnly = m?.readOnly === true;
         let control;
         if (m?.values && m.values.size > 0) {
@@ -237,7 +250,9 @@ function ParametersTab({ identity }: { identity: FcIdentity | null }) {
               disabled={readOnly}
               onCommit={(text) => {
                 const v = parseEntry(text);
+                const range = v === null ? null : outOfRange(v, m);
                 if (v === null) toast.err(t("cockpit.params.badNumber", { name: row.name }));
+                else if (range) toast.err(t("cockpit.params.outOfRange", { name: row.name, min: range.min, max: range.max }));
                 else setDraft(row.name, row.value, v);
               }}
             />
@@ -262,14 +277,7 @@ function ParametersTab({ identity }: { identity: FcIdentity | null }) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-[0.5rem]">
       <div className="flex flex-wrap items-center gap-[0.5rem]">
-        <input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t("telemetry.params.searchPlaceholder")}
-          aria-label={t("telemetry.params.searchPlaceholder")}
-          className="touch-target min-w-[12rem] flex-1 rounded-md border border-border bg-input px-[0.6rem] text-[0.9rem] text-surface-foreground"
-        />
+        <SearchField value={search} onChange={setSearch} placeholder={t("telemetry.params.searchPlaceholder")} />
         <div className="min-w-[12rem]">
           <SwitchSettingRow title={t("telemetry.params.modifiedOnly")} checked={modifiedOnly} onChange={setModifiedOnly} />
         </div>
@@ -328,6 +336,7 @@ function SensorsTab() {
   const deg = (rad: number | null | undefined) => (rad == null ? DASH : `${fmtNum((rad * 180) / Math.PI, 1)}°`);
   const lat = v?.position?.lat;
   const lon = v?.position?.lon;
+  const fixWord = mavFixWord(v?.gps?.fix_type);
   return (
     <div className="grid grid-cols-1 gap-[0.5rem] landscape:grid-cols-3">
       <FieldPanel title={t("telemetry.sensors.attitude")}>
@@ -344,9 +353,9 @@ function SensorsTab() {
         <Field label={t("telemetry.sensors.remaining")} value={fmtPct(v?.battery?.remaining ?? null)} />
       </FieldPanel>
       <FieldPanel title={t("telemetry.sensors.gps")}>
-        <Field label={t("telemetry.sensors.fixType")} value={v?.gps?.fix_type != null ? String(v.gps.fix_type) : DASH} />
+        <Field label={t("telemetry.sensors.fixType")} value={fixWord ? t(`cockpit.gnss.fixLabel.${fixWord}`) : DASH} />
         <Field label={t("telemetry.sensors.sats")} value={v?.gps?.satellites != null ? String(v.gps.satellites) : DASH} />
-        <Field label={t("telemetry.sensors.hdop")} value={fmtNum(v?.gps?.eph ?? null, 2)} />
+        <Field label={t("telemetry.sensors.hdop")} value={fmtNum(mavHdop(v?.gps?.eph), 2)} />
         <Field label={t("telemetry.sensors.position")} value={lat != null && lon != null ? `${fmtNum(lat, 5)}, ${fmtNum(lon, 5)}` : DASH} />
         <Field
           label={t("telemetry.sensors.altRel")}

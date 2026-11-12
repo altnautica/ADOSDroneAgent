@@ -10,6 +10,12 @@ pub(super) fn now_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Read the full HAL board dict from the board sidecar the detector persists. A
+/// present, well-formed JSON object is returned verbatim; an absent file, a read
+/// error, or a non-object body degrades to `{}`.
+///
+/// Shared with the consolidated `/api/status/full` route, which serves the same
+/// board block from the same sidecar.
 pub(crate) fn read_board(path: &Path) -> Value {
     match std::fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {

@@ -7,6 +7,11 @@
 //! its offset/limit contract. An unreachable or failing store is an empty page
 //! with a `warning` naming why, not a `500`: log history is observability, not
 //! flight.
+//!
+//! The `service` filter is "logger contains": a substring match on the entry's
+//! `logger` (the row's `target`, else its `source`), applied here for both the
+//! page and the live tail. It is never passed to the store as `source`, which
+//! is an exact match on a column the logger often does not show.
 
 use axum::extract::Query;
 use axum::response::{IntoResponse, Response};
@@ -51,14 +56,17 @@ async fn logs_from(client: &LogdQueryClient, q: LogsQuery) -> Response {
     }
     let level = q.level.as_deref().filter(|l| !l.is_empty());
     let service = q.service.as_deref().filter(|s| !s.is_empty());
-    let want = (q.offset + q.limit).min(MAX_LIMIT);
+    // A logger filter is applied here, after the read, so it gets the widest
+    // window the store will give.
+    let want = if service.is_some() {
+        MAX_LIMIT
+    } else {
+        (q.offset + q.limit).min(MAX_LIMIT)
+    };
     let mut params: Vec<(&str, String)> =
         vec![("kind", "logs".to_string()), ("limit", want.to_string())];
     if let Some(l) = level {
         params.push(("level", l.to_ascii_lowercase()));
-    }
-    if let Some(s) = service {
-        params.push(("source", s.to_string()));
     }
     let path = format!(
         "/v1/query?{}",
@@ -94,7 +102,7 @@ async fn logs_from(client: &LogdQueryClient, q: LogsQuery) -> Response {
         .iter()
         .filter_map(Value::as_object)
         .map(legacy_entry)
-        .filter(|e| service.is_none_or(|s| e["logger"].as_str().unwrap_or("").contains(s)))
+        .filter(|e| logger_matches(e, service))
         .filter(|e| {
             level_upper
                 .as_deref()
@@ -133,6 +141,11 @@ fn legacy_entry(row: &serde_json::Map<String, Value>) -> Value {
         "logger": text("target").or_else(|| text("source")).unwrap_or(""),
         "message": text("msg").unwrap_or(""),
     })
+}
+
+/// Whether an entry passes the "logger contains" filter (none set passes all).
+fn logger_matches(entry: &Value, service: Option<&str>) -> bool {
+    service.is_none_or(|s| entry["logger"].as_str().unwrap_or("").contains(s))
 }
 
 /// The `GET /api/logs/stream` filters.
@@ -182,9 +195,7 @@ async fn pump_tail(
     if let Some(l) = q.level.as_deref().filter(|l| !l.is_empty()) {
         params.push(("level", l.to_ascii_lowercase()));
     }
-    if let Some(s) = q.service.as_deref().filter(|s| !s.is_empty()) {
-        params.push(("source", s.to_string()));
-    }
+    let service = q.service.as_deref().filter(|s| !s.is_empty());
     let path = format!(
         "/v1/tail?{}",
         crate::ipc::logd_client::encode_query(&params)
@@ -207,7 +218,7 @@ async fn pump_tail(
         while let Some(end) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=end).collect();
             let line = String::from_utf8_lossy(&line);
-            if let Some(out) = sse_frame(line.trim_end_matches(['\r', '\n'])) {
+            if let Some(out) = sse_frame(line.trim_end_matches(['\r', '\n']), service) {
                 // The client went away: dropping the upstream body closes the tail.
                 if tx.send_data(bytes::Bytes::from(out)).await.is_err() {
                     return;
@@ -239,8 +250,9 @@ async fn open_tail(socket: &std::path::Path, path: &str) -> Option<hyper::body::
     resp.status().is_success().then(|| resp.into_body())
 }
 
-/// One upstream SSE line as the downstream frame, or `None` to drop it.
-fn sse_frame(line: &str) -> Option<String> {
+/// One upstream SSE line as the downstream frame, or `None` to drop it (an
+/// unparsed line, or an entry the logger filter `service` excludes).
+fn sse_frame(line: &str, service: Option<&str>) -> Option<String> {
     if line.starts_with(':') {
         return Some(format!("{line}\n\n"));
     }
@@ -250,71 +262,11 @@ fn sse_frame(line: &str) -> Option<String> {
     if row.get("kind").and_then(Value::as_str) == Some("lagged") {
         return Some(": tail lagged\n\n".to_string());
     }
-    Some(format!("data: {}\n\n", legacy_entry(row)))
+    let entry = legacy_entry(row);
+    logger_matches(&entry, service).then(|| format!("data: {entry}\n\n"))
 }
 
+// The test file sits beside this one: a `logs/` directory is gitignored.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(id: i64, level: &str, target: &str, msg: &str) -> Value {
-        json!({"id": id, "ts_us": 1_700_000_000_000_000i64 + id, "level": level, "target": target, "source": "src", "msg": msg})
-    }
-
-    #[test]
-    fn a_store_row_maps_to_the_entry_shape() {
-        let e = legacy_entry(row(7, "warn", "ados_video", "hi").as_object().unwrap());
-        assert_eq!(e["seq"], 7);
-        assert_eq!(e["level"], "WARN");
-        assert_eq!(e["logger"], "ados_video");
-        assert_eq!(e["message"], "hi");
-        assert!(e["timestamp"]
-            .as_str()
-            .unwrap()
-            .starts_with("2023-11-14T22:13:20"));
-    }
-
-    #[test]
-    fn a_row_without_a_timestamp_is_not_stamped_now() {
-        let e = legacy_entry(json!({"id": 1, "msg": "x"}).as_object().unwrap());
-        assert!(e["timestamp"].is_null());
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_store_is_an_empty_page_with_a_warning() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = LogdQueryClient::new(dir.path().join("absent.sock"));
-        let q = LogsQuery {
-            level: None,
-            service: None,
-            limit: 50,
-            offset: 0,
-        };
-        let resp = logs_from(&client, q).await;
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["entries"], json!([]));
-        assert_eq!(v["warning"], "logging store unavailable");
-    }
-
-    #[test]
-    fn tail_lines_become_entry_frames_and_notices_become_comments() {
-        assert_eq!(
-            sse_frame(": keep-alive").as_deref(),
-            Some(": keep-alive\n\n")
-        );
-        assert_eq!(
-            sse_frame(r#"data: {"kind":"lagged","skipped":4}"#).as_deref(),
-            Some(": tail lagged\n\n")
-        );
-        let frame = sse_frame(&format!("data: {}", row(3, "info", "ados_radio", "up"))).unwrap();
-        let v: Value = serde_json::from_str(frame.trim().strip_prefix("data: ").unwrap()).unwrap();
-        assert_eq!(v["logger"], "ados_radio");
-        assert_eq!(v["level"], "INFO");
-        assert!(sse_frame("event: x").is_none());
-        assert!(sse_frame("data: not json").is_none());
-    }
-}
+#[path = "logs_tests.rs"]
+mod tests;

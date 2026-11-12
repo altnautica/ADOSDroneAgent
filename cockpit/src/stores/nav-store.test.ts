@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { TAB_ORDER } from "@/nav/navigator";
+import { TAB_ORDER } from "@/nav/screen-table";
 import { useNavStore } from "@/stores/nav-store";
 
-/** The tabs a drone shows: the ground-station and compute screens are hidden. */
-const DRONE_TABS = TAB_ORDER.filter((id) => id !== "mesh" && id !== "sources" && id !== "uplink" && id !== "node");
+/** The tabs a drone shows: the ground-station, visor and compute screens are hidden. */
+const DRONE_HIDDEN = new Set(["mesh", "sources", "uplink", "node", "capture", "gnss", "io"]);
+const DRONE_TABS = TAB_ORDER.filter((id) => !DRONE_HIDDEN.has(id));
 
 function reset(tabs: string[] = [...TAB_ORDER], active = tabs[0], chosen = false) {
   useNavStore.setState({

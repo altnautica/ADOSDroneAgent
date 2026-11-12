@@ -1,7 +1,10 @@
 // Every flight-controller mode the Mode sheet offers, per firmware family,
 // with its confirm tier. Names are the ones `POST /api/command` `mode`
-// accepts (the agent's mode table: `ados-protocol` flight_modes). Hold-type
-// recovery modes need an 800 ms hold; every other mode a 1500 ms hold.
+// accepts (the agent's mode table: `ados-protocol` flight_modes). The
+// recovery modes (`FC_RECOVERY_MODES`, the one recovery set) need an 800 ms
+// hold; every other mode a 1500 ms hold.
+
+import { FC_RECOVERY_MODES } from "@/lib/fc-failsafe";
 
 export type FcFamily = "copter" | "plane" | "px4";
 
@@ -14,16 +17,15 @@ export interface FcMode {
 const RECOVERY_HOLD_MS = 800;
 const MODE_HOLD_MS = 1500;
 
-function modes(recovery: readonly string[], all: readonly [string, string][]): FcMode[] {
+function modes(all: readonly [string, string][]): FcMode[] {
   return all.map(([name, label]) => ({
     name,
     label,
-    holdMs: recovery.includes(name) ? RECOVERY_HOLD_MS : MODE_HOLD_MS,
+    holdMs: FC_RECOVERY_MODES[name] ? RECOVERY_HOLD_MS : MODE_HOLD_MS,
   }));
 }
 
 const COPTER = modes(
-  ["LOITER", "ALT_HOLD", "POSHOLD", "BRAKE", "RTL", "SMART_RTL", "LAND"],
   [
     ["LOITER", "Loiter"],
     ["POSHOLD", "PosHold"],
@@ -46,7 +48,6 @@ const COPTER = modes(
 );
 
 const PLANE = modes(
-  ["LOITER", "RTL", "CRUISE", "FBWA", "QLOITER", "QHOVER", "QRTL", "QLAND"],
   [
     ["LOITER", "Loiter"],
     ["CRUISE", "Cruise"],
@@ -71,7 +72,6 @@ const PLANE = modes(
 );
 
 const PX4 = modes(
-  ["POSITION", "ALTITUDE", "LOITER", "RTL", "LAND"],
   [
     ["POSITION", "Position"],
     ["ALTITUDE", "Altitude"],

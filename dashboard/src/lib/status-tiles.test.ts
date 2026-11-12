@@ -92,3 +92,18 @@ describe("FC tile (MSP)", () => {
     expect(t.severity).toBe("ok");
   });
 });
+
+describe("agent down", () => {
+  it("dashes every tile whose source is not live", () => {
+    const all = buildTiles({ snapshot: undefined, status: undefined, fcVariant: undefined, fcReachable: undefined, pairing: undefined });
+    for (const label of ["MAV", "PAIR", "VID"]) {
+      const t = all.find((x) => x.label === label);
+      expect([label, t?.value, t?.sub, t?.severity]).toEqual([label, "—", "—", "idle"]);
+    }
+  });
+
+  it("does not let a live local cloud mode stand in for an unread pairing state", () => {
+    const t = tile({ snapshot: snapshot(false, "", "local"), pairing: undefined }, "PAIR");
+    expect([t.value, t.sub]).toEqual(["—", "—"]);
+  });
+});

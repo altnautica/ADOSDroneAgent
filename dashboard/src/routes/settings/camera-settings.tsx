@@ -17,7 +17,7 @@ export function CameraSettings() {
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">{t("settings.shared.readingConfig")}</p>;
+    return <p className="text-[11px] text-muted-foreground">{t("settings.shared.readingConfig")}</p>;
   }
   if (config.isError) {
     return (

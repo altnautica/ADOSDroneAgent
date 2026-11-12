@@ -13,7 +13,7 @@
 // a tap outside, with the controller moving between its entries and its
 // button hints shown while a gamepad is connected.
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { ArrowLeft, ClipboardCheck, Eye, Gamepad2, LayoutDashboard, Navigation, Wrench } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -24,16 +24,19 @@ import { Card } from "@/components/ui/card";
 import { Sheet } from "@/components/ui/sheet";
 import { usePadStatus } from "@/hooks/use-gamepad";
 import { useFreshPilot } from "@/hooks/use-pilot";
+import { preflightTally, usePreflightItems } from "@/hooks/use-preflight-items";
 import { useRoster } from "@/hooks/use-roster";
+import { useWidthClass } from "@/hooks/use-width-class";
 import { openAircraftSetup } from "@/lib/aircraft-setup";
 import { VIEW_LABELS } from "@/lib/cockpit-view";
 import { mountablePanels } from "@/lib/extensions";
 import { feedCameras } from "@/lib/feed-legs";
-import { movedItems } from "@/lib/flight-layout";
+import { menuTextPx, movedItems } from "@/lib/flight-layout";
 import { isKiosk } from "@/lib/kiosk";
 import { menuEntries, type MenuEntryId } from "@/lib/quick-menu-model";
 import { getScreen, tabScreens } from "@/nav/registry";
 import { specText } from "@/shared/hud/spec-text";
+import { severityTextColor } from "@/shared/hud/status-pill";
 import { useNodeIdentity } from "@/shared/use-profile";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
@@ -45,22 +48,47 @@ import { useTopBarStore } from "@/stores/top-bar-store";
 /** The Settings screen's Controls page. */
 const CONTROLS_SCREEN_ID = "settings:!controls";
 
-function MenuRow({ icon: Icon, label, onClick, entry }: { icon: LucideIcon; label: string; onClick: () => void; entry: MenuEntryId }) {
+function MenuRow({
+  icon: Icon,
+  label,
+  detail,
+  onClick,
+  entry,
+}: {
+  icon: LucideIcon;
+  label: string;
+  detail?: ReactNode;
+  onClick: () => void;
+  entry: MenuEntryId;
+}) {
+  const fontSize = menuTextPx(useWidthClass().widthClass);
   return (
     <button
       type="button"
       onClick={onClick}
       data-menu-entry={entry}
       className="touch-target flex min-h-[48px] w-full items-center gap-[10px] rounded-md border border-border px-[12px] text-left text-surface-foreground hover:bg-muted"
+      style={{ fontSize }}
     >
       <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden />
       {label}
+      {detail}
     </button>
   );
 }
 
 function MenuHeading({ children }: { children: string }) {
   return <h3 className="mb-[4px] mt-[4px] text-[12px] uppercase tracking-wide text-muted-foreground">{children}</h3>;
+}
+
+/** The Pre-flight row's passed/total, coloured by the worst item. */
+function PreflightDetail() {
+  const t = preflightTally(usePreflightItems());
+  return (
+    <span style={{ color: severityTextColor(t.state === "fail" ? "critical" : t.state === "warn" ? "warning" : "ok") }} data-testid="menu-preflight-count">
+      {`· ${t.passed}/${t.total}`}
+    </span>
+  );
 }
 
 export function QuickMenu() {
@@ -77,6 +105,7 @@ export function QuickMenu() {
   const panels = extensions.flatMap((ext) => mountablePanels(ext, "cockpit.panel").map((p) => ({ ext, p })));
   const [openPanel, setOpenPanel] = useState<string | null>(null);
   const kiosk = isKiosk();
+  const { widthClass } = useWidthClass();
   const movedCount = useTopBarStore((s) => s.movedCount);
   const view = useCockpitViewStore((s) => s.view);
   const cycleView = useCockpitViewStore((s) => s.cycleView);
@@ -111,7 +140,7 @@ export function QuickMenu() {
       case "layers":
         return <LayersMenuSection />;
       case "preflight":
-        return <MenuRow entry={id} icon={ClipboardCheck} label={specText("cockpit.menu.preflight")} onClick={() => sheet("preflight")} />;
+        return <MenuRow entry={id} icon={ClipboardCheck} label={specText("cockpit.menu.preflight")} detail={<PreflightDetail />} onClick={() => sheet("preflight")} />;
       case "modes":
         return <MenuRow entry={id} icon={Navigation} label={specText("cockpit.menu.modes")} onClick={() => sheet("mode")} />;
       case "controls":
@@ -127,6 +156,7 @@ export function QuickMenu() {
                   type="button"
                   onClick={() => setOpenPanel(`${ext.pluginId}:${p.id}`)}
                   className="touch-target min-h-[56px] rounded-md bg-muted px-[8px] text-surface-foreground hover:bg-border"
+                  style={{ fontSize: menuTextPx(widthClass) }}
                 >
                   {p.title}
                 </button>

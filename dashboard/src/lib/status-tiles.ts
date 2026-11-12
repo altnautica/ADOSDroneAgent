@@ -30,7 +30,13 @@ export interface TileInputs {
   pairing: { paired: boolean; pairing_code: string | null } | undefined;
 }
 
+/** A tile whose source is not live: it claims nothing. */
+function unknownTile(label: string, icon: LucideIcon): Tile {
+  return { label, icon, value: "—", sub: "—", severity: "idle" };
+}
+
 function fcTile(snap: DashboardSnapshot | undefined, fcVariant: TileInputs["fcVariant"], fcReachable: TileInputs["fcReachable"]): Tile {
+  if (!snap && fcVariant === undefined) return unknownTile(i18n.t("panels.tiles.mav"), Radio);
   const fcConnected = snap?.fc?.connected ?? false;
   const variant = mspVariant(fcVariant);
   // A Betaflight/iNav FC speaks MSP (no MAVLink heartbeat), so `fc.connected`
@@ -84,6 +90,9 @@ function hwTile(status: SetupStatus | undefined): Tile {
 
 function pairTile(cloudMode: string | null, code: string, pairing: TileInputs["pairing"]): Tile {
   const label = i18n.t("panels.tiles.pair");
+  // Pairing state not live: claim nothing (a still-live cloud mode does not
+  // stand in for it).
+  if (pairing === undefined) return unknownTile(label, KeyRound);
   // LAN pairing works in every cloud mode, so a paired node reads paired first.
   if (pairing?.paired === true) {
     return { label, icon: KeyRound, value: i18n.t("panels.tiles.paired"), sub: i18n.t("panels.tiles.linked"), severity: "ok" };
@@ -92,19 +101,20 @@ function pairTile(cloudMode: string | null, code: string, pairing: TileInputs["p
   if (cloudMode === "local" && !code) {
     return { label, icon: KeyRound, value: i18n.t("panels.tiles.notApplicable"), sub: i18n.t("panels.tiles.localMode"), severity: "idle" };
   }
-  if (pairing?.paired === false) {
+  if (!pairing.paired) {
     return code
       ? { label, icon: KeyRound, value: code, sub: i18n.t("panels.tiles.codeRotates"), severity: "info" }
       : { label, icon: KeyRound, value: "—", sub: i18n.t("panels.tiles.unpaired"), severity: "idle" };
   }
-  // Pairing state not read yet: claim nothing.
-  return { label, icon: KeyRound, value: "—", sub: "—", severity: "idle" };
+  return unknownTile(label, KeyRound);
 }
 
 export function buildTiles({ snapshot: s, status: cfg, fcVariant, fcReachable, pairing }: TileInputs): Tile[] {
   const vState = s?.video?.state ?? "unknown";
   const vBitrate = s?.video?.bitrate_kbps ?? 0;
-  const vid: Tile = {
+  const vid: Tile = !s
+    ? unknownTile(i18n.t("panels.tiles.vid"), Video)
+    : {
     label: i18n.t("panels.tiles.vid"),
     icon: Video,
     value: vBitrate > 0 ? fmtBitrate(vBitrate) : vState,

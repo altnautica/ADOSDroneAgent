@@ -1,4 +1,5 @@
 import { Plug, Upload } from "lucide-react";
+import { ReadErrorCard } from "@/components/read-error-card";
 import {
   useCallback,
   useEffect,
@@ -9,28 +10,27 @@ import {
 import { Trans, useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
+import { InstalledRow, type InstallEntry } from "@/components/plugins/installed-row";
 import { PluginInstallDialog } from "@/components/plugins/install-dialog";
 import { RegistryGrid } from "@/components/plugins/registry-grid";
+import { UrlInstall } from "@/components/plugins/url-install";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { usePluginCatalog } from "@/hooks/use-plugin-catalog";
 import { useResource } from "@/hooks/use-resource";
+import { installName } from "@/lib/plugin-install-view";
 import { apiFetch } from "@/shared/api-fetch";
 import {
   parsePlugin,
+  removePlugin,
   type PluginManifestSummary,
   type PluginSource,
 } from "@/shared/api/plugin-install";
 import { toast, toastFromError } from "@/shared/api/toast";
 import { cn } from "@/lib/utils";
-
-interface InstallEntry {
-  plugin_id: string;
-  version?: string;
-  status?: string;
-  signer_id?: string | null;
-  permissions?: Record<string, { granted: boolean }>;
-}
 
 interface PluginsListResponse {
   installs: InstallEntry[];
@@ -39,14 +39,18 @@ interface PluginsListResponse {
 export function ExtensionsRoute() {
   const { t } = useTranslation();
   const list = useResource<PluginsListResponse>("plugins", "/api/plugins", 8000);
+  const catalog = usePluginCatalog();
 
   const installs = list.data?.installs ?? [];
   const installedVersions = new Map(installs.map((i) => [i.plugin_id, i.version] as const));
+  const nameOf = (id: string) => installName(id, catalog.data?.plugins);
 
   const [confirm, setConfirm] = useState<{
     plugin: InstallEntry;
     action: "enable" | "disable";
   } | null>(null);
+  const [removing, setRemoving] = useState<InstallEntry | null>(null);
+  const [keepData, setKeepData] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [installSource, setInstallSource] = useState<PluginSource | null>(null);
@@ -57,6 +61,7 @@ export function ExtensionsRoute() {
   const [dragOver, setDragOver] = useState(false);
 
   async function applyAction(plugin: InstallEntry, action: "enable" | "disable") {
+    const name = nameOf(plugin.plugin_id);
     try {
       await apiFetch(
         `/api/plugins/${encodeURIComponent(plugin.plugin_id)}/${action}`,
@@ -64,8 +69,8 @@ export function ExtensionsRoute() {
       );
       toast.ok(
         action === "enable"
-          ? t("extensions.toast.enabled", { id: plugin.plugin_id })
-          : t("extensions.toast.disabled", { id: plugin.plugin_id }),
+          ? t("extensions.toast.enabled", { id: name })
+          : t("extensions.toast.disabled", { id: name }),
       );
       list.refetch();
     } catch (err) {
@@ -73,6 +78,18 @@ export function ExtensionsRoute() {
         err,
         action === "enable" ? t("extensions.toast.enableFailed") : t("extensions.toast.disableFailed"),
       );
+      throw err;
+    }
+  }
+
+  async function applyRemove(plugin: InstallEntry) {
+    try {
+      await removePlugin(plugin.plugin_id, keepData);
+      toast.ok(t("cockpit.extensions.removed", { id: nameOf(plugin.plugin_id) }));
+      list.refetch();
+    } catch (err) {
+      toastFromError(err, t("cockpit.extensions.removeFailed"));
+      throw err;
     }
   }
 
@@ -169,7 +186,11 @@ export function ExtensionsRoute() {
         <p className="text-sm text-muted-foreground">{t("extensions.page.loading")}</p>
       )}
 
-      {!list.isLoading && installs.length === 0 && (
+      {list.isError && (
+        <ReadErrorCard message={t("extensions.page.listFailed")} onRetry={() => void list.refetch()} />
+      )}
+
+      {!list.isLoading && !list.isError && installs.length === 0 && (
         <Card>
           <CardContent className="pt-5 pb-5 flex items-start gap-3">
             <Plug className="h-5 w-5 text-muted-foreground mt-0.5" />
@@ -190,72 +211,21 @@ export function ExtensionsRoute() {
       )}
 
       <div className="space-y-2">
-        {installs.map((p) => {
-          const enabled = p.status === "enabled" || p.status === "running";
-          const grantedCount = p.permissions
-            ? Object.values(p.permissions).filter((g) => g.granted).length
-            : 0;
-          const totalCount = p.permissions
-            ? Object.keys(p.permissions).length
-            : 0;
-          return (
-            <Card key={p.plugin_id}>
-              <CardContent className="pt-4 pb-4 flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-mono text-sm">{p.plugin_id}</span>
-                    {p.version && (
-                      <span className="text-[10px] text-muted-foreground font-mono">
-                        {`v${p.version}`}
-                      </span>
-                    )}
-                    <span
-                      className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-                        enabled
-                          ? "border-ok/40 text-ok"
-                          : "border-muted-foreground/40 text-muted-foreground"
-                      }`}
-                    >
-                      {p.status ?? (enabled ? t("extensions.status.enabled") : t("extensions.status.disabled"))}
-                    </span>
-                    {p.signer_id ? (
-                      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                        {t("extensions.status.signed")}
-                      </span>
-                    ) : (
-                      <span className="text-[10px] uppercase tracking-wider text-destructive">
-                        {t("extensions.status.unsigned")}
-                      </span>
-                    )}
-                  </div>
-                  {totalCount > 0 && (
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {t("extensions.status.permissionsGranted", {
-                        granted: grantedCount,
-                        total: totalCount,
-                      })}
-                    </p>
-                  )}
-                </div>
-                <div className="shrink-0 flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant={enabled ? "outline" : "default"}
-                    onClick={() =>
-                      setConfirm({
-                        plugin: p,
-                        action: enabled ? "disable" : "enable",
-                      })
-                    }
-                  >
-                    {enabled ? t("extensions.actions.disable") : t("extensions.actions.enable")}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
+        {installs.map((p) => (
+          <InstalledRow
+            key={p.plugin_id}
+            install={p}
+            name={nameOf(p.plugin_id)}
+            onToggle={(action) => setConfirm({ plugin: p, action })}
+            onRemove={() => {
+              setKeepData(true);
+              setRemoving(p);
+            }}
+          />
+        ))}
       </div>
+
+      <UrlInstall busy={parsing} onInstall={(source) => void beginInstall(source)} />
 
       <RegistryGrid
         installedVersions={installedVersions}
@@ -277,8 +247,8 @@ export function ExtensionsRoute() {
         title={
           confirm
             ? confirm.action === "enable"
-              ? t("extensions.confirm.enableTitle", { id: confirm.plugin.plugin_id })
-              : t("extensions.confirm.disableTitle", { id: confirm.plugin.plugin_id })
+              ? t("extensions.confirm.enableTitle", { id: nameOf(confirm.plugin.plugin_id) })
+              : t("extensions.confirm.disableTitle", { id: nameOf(confirm.plugin.plugin_id) })
             : ""
         }
         description={
@@ -292,6 +262,31 @@ export function ExtensionsRoute() {
         destructive={confirm?.action === "disable"}
         onConfirm={async () => {
           if (confirm) await applyAction(confirm.plugin, confirm.action);
+        }}
+      />
+
+      <ConfirmDialog
+        open={!!removing}
+        onOpenChange={(open) => {
+          if (!open) setRemoving(null);
+        }}
+        title={removing ? t("extensions.page.removeTitle", { name: nameOf(removing.plugin_id) }) : ""}
+        description={
+          <div className="space-y-3">
+            <p>{t("extensions.page.removeBody")}</p>
+            <div className="flex items-start gap-3">
+              <Switch id="ext-keep-data" checked={keepData} onCheckedChange={setKeepData} />
+              <div>
+                <Label htmlFor="ext-keep-data">{t("cockpit.extensions.keepData")}</Label>
+                <p className="text-xs">{t("cockpit.extensions.keepDataHint")}</p>
+              </div>
+            </div>
+          </div>
+        }
+        confirmLabel={t("cockpit.extensions.remove")}
+        destructive
+        onConfirm={async () => {
+          if (removing) await applyRemove(removing);
         }}
       />
 

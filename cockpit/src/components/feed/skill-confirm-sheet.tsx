@@ -20,7 +20,7 @@ import { executeSkill } from "@/lib/skill-runner";
 import { resolveSkillState } from "@/lib/skills";
 import { stopHoldText, stopSheetBody, stopSheetTitle } from "@/lib/stop-sheet";
 import { cn } from "@/lib/utils";
-import { specText } from "@/shared/hud/spec-text";
+import { hasSpecText, specText } from "@/shared/hud/spec-text";
 import { useConfirmStore } from "@/stores/confirm-store";
 
 export function SkillConfirmSheet() {
@@ -114,6 +114,9 @@ function ConfirmSheet() {
   const holding = since !== null;
   const shownProgress = holding ? progress : 0;
   const danger = skill.confirm.kind === "hold_confirm";
+  // A builtin's spec body (`confirm.<id>.message`); a plugin skill has none.
+  const messageKey = `confirm.${skill.id}.message`;
+  const message = !danger && hasSpecText(messageKey) ? specText(messageKey) : null;
 
   const confirmControl = (
     <button
@@ -138,7 +141,7 @@ function ConfirmSheet() {
         aria-hidden
       />
       <span className="relative text-[0.9rem]">
-        {danger ? stopHoldText(holding, holdMs, progress) : `Hold to confirm (${(holdMs / 1000).toFixed(1)} s)`}
+        {danger ? stopHoldText(holding, holdMs, progress) : specText("confirm.hold_to_confirm", { s: (holdMs / 1000).toFixed(1) })}
       </span>
     </button>
   );
@@ -156,16 +159,14 @@ function ConfirmSheet() {
       initialFocus={confirmRef}
       closeLabel={specText("setup.action.cancel")}
       hints={[
-        { command: "activate", label: "Hold to confirm" },
-        { command: "back", label: "Cancel" },
+        { command: "activate", label: specText("setup.confirm.hold") },
+        { command: "back", label: specText("setup.action.cancel") },
       ]}
       footer={
         <>
           <div ref={confirmRef}>{confirmControl}</div>
           <p className="mt-[0.4rem] text-center text-[0.75rem] text-muted-foreground">
-            {danger
-              ? "Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select twice"
-              : "Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select"}
+            {specText(danger ? "stop.input_hint" : "confirm.input_hint_panel")}
           </p>
         </>
       }
@@ -175,16 +176,21 @@ function ConfirmSheet() {
           {stopSheetBody()}
         </p>
       ) : null}
+      {message ? (
+        <p className="mb-[0.6rem] text-[0.85rem] text-surface-foreground" data-testid="confirm-sheet-body">
+          {message}
+        </p>
+      ) : null}
       {skill.takesAltitude ? (
         <NumberSettingRow
-          title="Takeoff altitude"
+          title={specText("flow.launch.alt_m")}
           value={altitudeM}
           onChange={setAltitude}
           min={LAUNCH.altMinM}
           max={LAUNCH.altMaxM}
           format={(m) => `${m} m`}
-          decrementLabel="Lower takeoff altitude"
-          incrementLabel="Raise takeoff altitude"
+          decrementLabel={specText("confirm.altitude_down")}
+          incrementLabel={specText("confirm.altitude_up")}
         />
       ) : null}
     </Sheet>

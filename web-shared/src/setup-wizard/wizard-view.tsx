@@ -77,17 +77,29 @@ export function WizardView({
 
   return (
     <div data-focus-rings={focusRings} style={style} className="flex flex-col gap-[1em] text-foreground">
+      {status && setup.loadError ? (
+        <Note tone="err">
+          {t("setupWizard.loadError", { error: setup.loadError })}{" "}
+          <button type="button" onClick={() => void setup.refresh()} className={`underline ${FOCUS_RING}`}>
+            {t("common.retry")}
+          </button>
+        </Note>
+      ) : null}
       {body}
     </div>
   );
 }
 
-function Note({ children, tone }: { children: ReactNode; tone?: "err" }) {
+const NOTE_TONE = {
+  err: "border-err/40 bg-err/10 text-err",
+  warn: "border-warn/40 bg-warn/10 text-warn",
+  none: "border-border bg-card text-muted-foreground",
+};
+
+function Note({ children, tone }: { children: ReactNode; tone?: "err" | "warn" }) {
   return (
     <p
-      className={`rounded-lg border px-[1em] py-[0.8em] text-[1em] ${
-        tone === "err" ? "border-err/40 bg-err/10 text-err" : "border-border bg-card text-muted-foreground"
-      }`}
+      className={`rounded-lg border px-[1em] py-[0.8em] text-[1em] ${NOTE_TONE[tone ?? "none"]}`}
     >
       {children}
     </p>
@@ -152,6 +164,7 @@ function WizardPanel({
   setup: FcSetupController;
   layout: "split" | "stacked";
 }) {
+  const { t } = useTranslation();
   const [picked, setPicked] = useState<string | null>(null);
   const isRunning = wizard.state === "running";
   // While the wizard runs the screen follows the engine; otherwise the operator
@@ -190,6 +203,11 @@ function WizardPanel({
       ) : null}
 
       {setup.requestError && !step ? <Note tone="err">{setup.requestError}</Note> : null}
+      {isRunning && !setup.streamUp ? (
+        <Note tone="warn">
+          <span data-testid="setup-stream-down">{t("setupWizard.streamDown")}</span>
+        </Note>
+      ) : null}
 
       <div
         className={

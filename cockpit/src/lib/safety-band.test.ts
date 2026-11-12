@@ -1,33 +1,23 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { armLabel, batteryLabel, linkLabel, reachBadge, videoLabel } from "@/lib/safety-band";
-import type { GsStatus } from "@/lib/types";
+import * as band from "@/lib/safety-band";
+import { fmtClock } from "@/lib/safety-band";
 
-describe("safety band mapping", () => {
-  it("names the reach", () => {
-    expect(reachBadge("drone", "localhost")).toBe("DIRECT");
-    expect(reachBadge("drone", "192.168.1.50")).toBe("LAN");
-    expect(reachBadge("ground_station", "localhost")).toBe("VIA GROUND");
-    expect(reachBadge(null, "localhost")).toBeNull();
+describe("the flight clock format", () => {
+  it("reads m:ss, h:mm:ss past an hour, and a dash for unknown", () => {
+    expect(fmtClock(240)).toBe("4:00");
+    expect(fmtClock(3725)).toBe("1:02:05");
+    expect(fmtClock(null)).toBe("—");
+    expect(fmtClock(-1)).toBe("—");
+    expect(fmtClock(Number.NaN)).toBe("—");
   });
 
-  it("shows a dash for every unknown value", () => {
-    expect(armLabel(false, true)).toBe("—");
-    expect(linkLabel(null)).toBe("—");
-    expect(batteryLabel(null, { battery: { voltage: 0, current: null, remaining: 0, temperature: null } })).toBe("—");
-  });
-
-  it("formats known values", () => {
-    expect(armLabel(true, true)).toBe("ARMED");
-    expect(linkLabel({ heartbeat_age_s: 0.42 } as GsStatus)).toBe("HB 0.4s");
-    expect(
-      batteryLabel(
-        { enabled: true, stale: false, updated_at_ms: 1, packs: [{ id: 0, stale: false, remaining_pct: 62, prediction: { eta_s: 240 } }] },
-        null,
-      ),
-    ).toBe("62% 4:00");
-    expect(videoLabel({ state: "failed", transport: null, highLatency: false, error: null, width: null, height: null })).toBe(
-      "NO VIDEO",
-    );
+  it("is all the module carries: the old band's label helpers are gone", () => {
+    expect(Object.keys(band)).toEqual(["fmtClock"]);
+    const src = readFileSync(path.resolve(__dirname, "safety-band.ts"), "utf8");
+    for (const name of ["reachBadge", "armLabel", "linkLabel", "videoLabel", "batteryLabel"]) expect(src, name).not.toContain(name);
   });
 });

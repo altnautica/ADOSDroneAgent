@@ -15,6 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { Switch } from "@/components/ui/switch";
+import { ConfirmDialog } from "@/components/settings/confirm-dialog";
+import { toggleView } from "@/lib/config-toggle";
 import { useConfig } from "@/hooks/use-config";
 import { putConfigChecked } from "@/shared/api/apply-actions";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -45,6 +47,7 @@ export function ConfigToggle({
   value,
   disabled = false,
   onCommitted,
+  confirm,
 }: {
   configKey: string;
   label: string;
@@ -52,18 +55,26 @@ export function ConfigToggle({
   value: boolean | undefined;
   disabled?: boolean;
   onCommitted?: (next: boolean) => void;
+  /** The question to ask before writing `next`, or null to write at once. */
+  confirm?: (next: boolean) => { title: string; description: string } | null;
 }) {
   const { t } = useTranslation();
   const config = useConfig();
-  const [checked, setChecked] = useState(value ?? false);
+  // `checked` holds the optimistic value; undefined until the key is read.
+  const [checked, setChecked] = useState(value);
+  const [writing, setWriting] = useState(false);
+  const [asking, setAsking] = useState<{ next: boolean; title: string; description: string } | null>(null);
 
   useEffect(() => {
-    setChecked(value ?? false);
+    setChecked(value);
   }, [value]);
+
+  const view = toggleView(checked, writing, disabled);
 
   async function apply(next: boolean) {
     const previous = checked;
     setChecked(next);
+    setWriting(true);
     try {
       await putConfigChecked(configKey, String(next));
       toast.ok(t("settings.shared.saved"));
@@ -72,6 +83,8 @@ export function ConfigToggle({
     } catch (err) {
       setChecked(previous);
       toastFromError(err, t("settings.shared.saveFailed"));
+    } finally {
+      setWriting(false);
     }
   }
 
@@ -83,12 +96,30 @@ export function ConfigToggle({
           <p className="text-xs text-muted-foreground leading-relaxed">{hint}</p>
         )}
       </div>
-      <Switch
-        checked={checked}
-        onCheckedChange={(v) => void apply(v)}
-        disabled={disabled}
-        aria-label={label}
-      />
+      <div className="flex shrink-0 items-center gap-2">
+        {view.unknown ? <span className="text-xs text-muted-foreground">{t("common.dash")}</span> : null}
+        <Switch
+          checked={view.checked}
+          onCheckedChange={(v) => {
+            const q = confirm?.(v) ?? null;
+            if (q) setAsking({ next: v, ...q });
+            else void apply(v);
+          }}
+          disabled={view.disabled}
+          aria-label={label}
+        />
+      </div>
+      {confirm ? (
+        <ConfirmDialog
+          open={asking !== null}
+          onOpenChange={(open) => {
+            if (!open) setAsking(null);
+          }}
+          title={asking?.title ?? ""}
+          description={asking?.description ?? ""}
+          onConfirm={() => (asking ? apply(asking.next) : undefined)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -248,24 +279,27 @@ export function ConfigTextField({
   );
 }
 
-/** An enum config key rendered as a radio-card group. Writes immediately on
- * selection, with rollback on failure. */
+/** An enum config key rendered as a radio-card group. Writes on selection,
+ * with rollback on failure; with `confirm`, a selection waits for a yes. */
 export function ConfigEnumField<T extends string>({
   configKey,
   value,
   options,
   columns = 2,
   disabled = false,
+  confirm,
 }: {
   configKey: string;
   value: T | undefined;
   options: ReadonlyArray<{ value: T; label: string; description?: string }>;
   columns?: 1 | 2 | 3;
   disabled?: boolean;
+  confirm?: (next: T) => { title: string; description: string };
 }) {
   const { t } = useTranslation();
   const config = useConfig();
   const [selected, setSelected] = useState<T | null>(value ?? null);
+  const [asking, setAsking] = useState<T | null>(null);
 
   useEffect(() => {
     setSelected(value ?? null);
@@ -282,15 +316,36 @@ export function ConfigEnumField<T extends string>({
     } catch (err) {
       setSelected(previous);
       toastFromError(err, t("settings.shared.saveFailed"));
+      throw err;
     }
   }
 
+  const words = asking !== null && confirm ? confirm(asking) : null;
   return (
-    <RadioCardGroup
-      value={selected}
-      onChange={(v) => void apply(v)}
-      options={options}
-      columns={columns}
-    />
+    <>
+      <RadioCardGroup
+        value={selected}
+        onChange={(v) => {
+          if (v === selected) return;
+          if (confirm) setAsking(v);
+          else void apply(v).catch(() => undefined);
+        }}
+        options={options}
+        columns={columns}
+      />
+      {confirm && (
+        <ConfirmDialog
+          open={asking !== null}
+          onOpenChange={(open) => {
+            if (!open) setAsking(null);
+          }}
+          title={words?.title ?? ""}
+          description={words?.description ?? ""}
+          onConfirm={async () => {
+            if (asking !== null) await apply(asking);
+          }}
+        />
+      )}
+    </>
   );
 }

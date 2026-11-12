@@ -10,6 +10,7 @@ import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
 import { NumberSettingRow } from "@/components/ui/number-setting-row";
 import { SlideToConfirm } from "@/components/ui/slide-to-confirm";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { armedRefusalText, getArmedReading, radioWriteBlock } from "@/lib/radio-gate";
 import { txAdapterMissing, txPowerBlock, txPowerBounds } from "@/lib/transmit-model";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -33,6 +34,7 @@ export function TransmitScreen() {
   const bounds = txPowerBounds(w);
   const current = typeof w?.tx_power_dbm === "number" ? w.tx_power_dbm : null;
   const value = draft ?? current ?? bounds?.min ?? 1;
+  useDirtyGuard(draft !== null && draft !== current, "transmit-power");
   const block = txPowerBlock(value, current, bounds, radioWriteBlock(armed.stale ? null : armed.data));
 
   const apply = () => {
@@ -126,7 +128,7 @@ export function TransmitScreen() {
   }
 
   return (
-    <ConsoleScaffold title={t("cockpit.transmit.title")} actions={<StaleBadge stale={wfb.stale} />}>
+    <ConsoleScaffold stale={wfb.stale} title={t("cockpit.transmit.title")} actions={<StaleBadge stale={wfb.stale} />}>
       {body}
     </ConsoleScaffold>
   );

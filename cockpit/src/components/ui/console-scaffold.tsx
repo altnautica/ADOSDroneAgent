@@ -11,11 +11,13 @@
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { HintBar, type Hint } from "@/components/ui/hint-bar";
 import { pushCommandHandler } from "@/lib/command-stack";
 import { activateFocused, firstFocusable, holdsFocus, moveFocus, trackFocusRing } from "@/lib/focus-nav";
 import { cn } from "@/lib/utils";
+import "@/shared/i18n";
 import { useNavStore } from "@/stores/nav-store";
 
 export interface ConsoleScaffoldProps {
@@ -28,20 +30,25 @@ export interface ConsoleScaffoldProps {
   onSelectTab?: (index: number) => void;
   actions?: ReactNode;
   hints?: Hint[];
+  /** The screen's reads have gone stale: the body dims so last-known values
+   *  never read as live. */
+  stale?: boolean;
   children: ReactNode;
 }
 
 export function ConsoleScaffold({
   title,
   onBack,
-  backLabel = "Back",
+  backLabel,
   tabs = [],
   selectedTab = 0,
   onSelectTab,
   actions,
   hints = [],
+  stale = false,
   children,
 }: ConsoleScaffoldProps) {
+  const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const latest = useRef({ onBack, tabs, selectedTab, onSelectTab });
@@ -106,7 +113,7 @@ export function ConsoleScaffold({
             aria-selected={i === selectedTab}
             onClick={() => onSelectTab?.(i)}
             className={cn(
-              "flex min-h-[max(2.25rem,36px)] shrink-0 items-center rounded-xl px-[0.75rem] text-[0.85rem] font-medium",
+              "touch-target flex shrink-0 items-center rounded-xl px-[0.75rem] text-[0.85rem] font-medium",
               i === selectedTab ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted",
             )}
           >
@@ -123,7 +130,7 @@ export function ConsoleScaffold({
           <button
             type="button"
             onClick={onBack}
-            aria-label={backLabel}
+            aria-label={backLabel ?? t("common.back")}
             className="touch-target flex items-center justify-center rounded-full text-surface-foreground hover:bg-muted"
           >
             <ArrowLeft className="h-[1.3rem] w-[1.3rem]" aria-hidden />
@@ -137,7 +144,11 @@ export function ConsoleScaffold({
         {actions ? <div className="flex shrink-0 items-center gap-[0.25rem]">{actions}</div> : null}
       </div>
       {tabPills ? <div className="shrink-0 px-[0.5rem] pb-[0.3rem] landscape:hidden">{tabPills}</div> : null}
-      <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto p-[0.6rem]">
+      <div
+        ref={bodyRef}
+        data-stale={stale || undefined}
+        className={cn("min-h-0 flex-1 overflow-y-auto p-[0.6rem] transition-opacity", stale && "opacity-60 saturate-50")}
+      >
         {children}
       </div>
       <HintBar hints={hints} />

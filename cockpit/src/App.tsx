@@ -4,6 +4,8 @@
 // events onto the one NavCommand set the navigator consumes, so all three
 // sources drive the same menu.
 
+import { useEffect } from "react";
+
 import { CockpitShell } from "@/components/shell/cockpit-shell";
 import { ErrorBoundary } from "@/shared/error-boundary";
 import { useButtons } from "@/hooks/use-buttons";
@@ -11,6 +13,7 @@ import { useGamepad } from "@/hooks/use-gamepad";
 import { useAppearance } from "@/hooks/use-appearance";
 import { ControllerTour } from "@/components/controls/controller-tour";
 import { ToastHost } from "@/components/ui/toast";
+import { watchFullscreenExit } from "@/lib/fullscreen";
 import { useInputSourceTracking } from "@/stores/input-store";
 import { useWakeLock } from "@/shared/wake-lock";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
@@ -26,6 +29,7 @@ import { activeScreenId, useNavStore } from "@/stores/nav-store";
  *  screen — on a panel with no console and no way to read the stack. */
 function CockpitRoot() {
   useAppearance();
+  useEffect(() => watchFullscreenExit(), []);
   useInputSourceTracking();
   const { connected: buttonsConnected } = useButtons();
   const { connected: gamepadConnected } = useGamepad();

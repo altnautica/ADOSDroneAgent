@@ -2,59 +2,105 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn perception_fields_maps_board_caps_to_a_tier() {
-    // An NPU board (npu_tops > 0) with a confirmed live backend runs
-    // detection locally.
-    let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 6.0 }), true);
+fn perception_fields_maps_the_live_detector_to_a_tier() {
+    // An NPU board whose accelerator backend answers runs detection locally.
+    let (npu, accel, tier, _target) =
+        perception_fields(&json!({ "npu_tops": 6.0 }), LiveDetector::Accelerator);
     assert_eq!(npu, 6.0);
     assert!(accel);
     assert_eq!(tier, "local");
-    // A CPU board with no NPU + no paired node has no perception tier (no
+    // No detector running and no paired node: no perception tier (no
     // offload-link sidecar in the test env ⇒ compute_node_paired false).
-    let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 0.0 }), true);
+    let (npu, accel, tier, _target) =
+        perception_fields(&json!({ "npu_tops": 0.0 }), LiveDetector::Off);
     assert_eq!(npu, 0.0);
     assert!(!accel);
     assert_eq!(tier, "none");
-    // A board block with no npu_tops key degrades to no-accelerator/none.
-    let (_npu, accel, tier, _target) = perception_fields(&json!({}), true);
+    // A board block with no npu_tops key degrades to no-accelerator.
+    let (_npu, accel, tier, _target) = perception_fields(&json!({}), LiveDetector::Off);
     assert!(!accel);
     assert_eq!(tier, "none");
-    // A CPU-strong board with no NPU but the profile-declared ONNX local
-    // inference reads `local` (runs the detector on-board) when the live
-    // backend confirms it, with the accelerator flag still false (it has
-    // no NPU).
-    let (npu, accel, tier, _target) = perception_fields(
-        &json!({ "npu_tops": 0.0, "has_local_inference": true }),
-        true,
-    );
-    assert_eq!(npu, 0.0);
-    assert!(!accel);
-    assert_eq!(tier, "local");
 }
 
 #[test]
-fn perception_fields_never_claims_local_without_a_live_backend() {
-    // A declared NPU (npu_tops > 0) with no in-tree
-    // backend for it (e.g. the A733's VIP9000) resolves `select_backend`
-    // to MockBackend, which loads every model and returns zero
-    // detections. The declared capability must not outrun the live
-    // signal — `has_accelerator` (the raw hardware fact) stays true, but
-    // the tier degrades to `none` rather than lying `local`.
-    let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 3.0 }), false);
+fn a_board_running_its_detector_on_the_cpu_reads_cpu() {
+    // Whatever the board declares, a live ONNX backend runs the detector on
+    // the CPU, so the tier is `cpu`, never `none`: a generic board with no
+    // declared vision path, a CPU-ONNX profile, and an NPU board configured
+    // for the ONNX backend all read the same.
+    for board in [
+        json!({ "npu_tops": 0.0 }),
+        json!({}),
+        json!({ "npu_tops": 0.0, "has_local_inference": true }),
+        json!({ "npu_tops": 6.0 }),
+    ] {
+        let (_npu, _accel, tier, _target) = perception_fields(&board, LiveDetector::Cpu);
+        assert_eq!(tier, "cpu", "{board}");
+    }
+}
+
+#[test]
+fn perception_fields_never_claims_a_detector_without_a_live_backend() {
+    // A declared NPU (npu_tops > 0) with no in-tree backend for it (e.g. the
+    // A733's VIP9000) resolves `select_backend` to MockBackend, which loads
+    // every model and returns zero detections. The declaration must not
+    // outrun the live signal: `has_accelerator` (the raw hardware fact) stays
+    // true, but the tier is `none` rather than a false `local`.
+    let (npu, accel, tier, _target) =
+        perception_fields(&json!({ "npu_tops": 3.0 }), LiveDetector::Off);
     assert_eq!(npu, 3.0);
     assert!(accel, "hasAccelerator is the raw hardware declaration");
     assert_eq!(tier, "none");
-    // Same dishonesty for the CPU-ONNX declaration: a board profile can
-    // declare `has_local_inference` while the deployed binary was not
-    // built with the `onnx` feature, so no real backend loaded.
+    // Same for a CPU-ONNX declaration on a binary built without the `onnx`
+    // feature: no real backend loaded, so no `cpu` either.
     let (_npu, _accel, tier, _target) = perception_fields(
         &json!({ "npu_tops": 0.0, "has_local_inference": true }),
-        false,
+        LiveDetector::Off,
     );
     assert_eq!(tier, "none");
-    // An unreachable engine (vision disabled / not up) resolves the same
-    // live signal to `false` upstream in `live_backend_inference_capable`,
-    // so this case also covers "vision is off".
+}
+
+#[test]
+fn the_list_models_reply_names_where_the_detector_runs() {
+    let reply = |backend: Option<&str>, capable: Option<bool>| {
+        let mut map = Vec::new();
+        if let Some(b) = backend {
+            map.push((rmpv::Value::from("backend"), rmpv::Value::from(b)));
+        }
+        if let Some(c) = capable {
+            map.push((
+                rmpv::Value::from("backend_inference_capable"),
+                rmpv::Value::Boolean(c),
+            ));
+        }
+        rmpv::Value::Map(map)
+    };
+    assert_eq!(
+        detector_from_reply(&reply(Some("onnx"), Some(true))),
+        LiveDetector::Cpu
+    );
+    assert_eq!(
+        detector_from_reply(&reply(Some("rknn"), Some(true))),
+        LiveDetector::Accelerator
+    );
+    assert_eq!(
+        detector_from_reply(&reply(Some("hailo"), Some(true))),
+        LiveDetector::Accelerator
+    );
+    // The mock and an unavailable backend run no real inference.
+    assert_eq!(
+        detector_from_reply(&reply(Some("mock"), Some(false))),
+        LiveDetector::Off
+    );
+    assert_eq!(
+        detector_from_reply(&reply(Some("onnx"), Some(false))),
+        LiveDetector::Off
+    );
+    assert_eq!(
+        detector_from_reply(&reply(Some("onnx"), None)),
+        LiveDetector::Off
+    );
+    assert_eq!(detector_from_reply(&rmpv::Value::Nil), LiveDetector::Off);
 }
 
 #[test]

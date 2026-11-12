@@ -105,9 +105,15 @@ const STREAM_SILENT_MS = 5000;
  * Hold the setup stream open: dial with a fresh `fc.setup` ticket, hand every
  * parsed frame to `onFrame`, and redial with backoff after a close or a silent
  * socket. `onOpen` fires on each (re)connect, so the caller can re-read the
- * full status it may have missed. Returns the stop function.
+ * full status it may have missed. `onUp` reports the stream up on each open
+ * and down on each close, or when no socket opened within the silence window
+ * (the watchdog closes a socket silent that long). Returns the stop function.
  */
-export function openSetupStream(onFrame: (frame: SetupFrame) => void, onOpen?: () => void): () => void {
+export function openSetupStream(
+  onFrame: (frame: SetupFrame) => void,
+  onOpen?: () => void,
+  onUp?: (up: boolean) => void,
+): () => void {
   let stopped = false;
   let socket: WebSocket | null = null;
   let retry: number | undefined;
@@ -136,6 +142,8 @@ export function openSetupStream(onFrame: (frame: SetupFrame) => void, onOpen?: (
     socket = ws;
     ws.onopen = () => {
       armWatchdog();
+      window.clearTimeout(upTimer);
+      onUp?.(true);
       onOpen?.();
     };
     ws.onmessage = (ev) => {
@@ -147,13 +155,16 @@ export function openSetupStream(onFrame: (frame: SetupFrame) => void, onOpen?: (
     ws.onclose = () => {
       window.clearTimeout(watchdog);
       if (socket === ws) socket = null;
+      if (!stopped) onUp?.(false);
       scheduleRedial();
     };
   }
 
+  const upTimer = window.setTimeout(() => onUp?.(false), STREAM_SILENT_MS);
   void dial();
   return () => {
     stopped = true;
+    window.clearTimeout(upTimer);
     abort.abort();
     window.clearTimeout(retry);
     window.clearTimeout(watchdog);

@@ -31,18 +31,15 @@ export function RadioCardGroup<T extends string>({
   const buttonsRef = useRef<Array<HTMLButtonElement | null>>([]);
 
   // Roving-tabindex pattern. The selected option gets tabIndex=0; the
-  // rest get -1. Arrow keys move focus + selection through the
-  // enabled options (matching ARIA radiogroup spec).
+  // rest get -1. Arrow keys move focus only; Space or Enter selects. Several
+  // groups write on selection, so a key walk must never write each option.
   const enabledIndices = options
     .map((o, i) => ({ o, i }))
     .filter(({ o }) => !o.disabled)
     .map(({ i }) => i);
 
   function focusIndex(i: number) {
-    const btn = buttonsRef.current[i];
-    btn?.focus();
-    const opt = options[i];
-    if (opt && !opt.disabled) onChange(opt.value);
+    buttonsRef.current[i]?.focus();
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLButtonElement>, index: number) {

@@ -122,7 +122,9 @@ export function ModeSheet() {
 
   const family = fcFamily(autopilot, last?.vehicleClass ?? null);
   const cm = MODE_SHEET.control_mode;
-  const controlValues = cm.values.filter((v) => v !== "elrs" || groundLink);
+  // ELRS is offered on a ground station, and kept wherever it is the current
+  // mode (set from the ground station) so the row shows what is in force.
+  const controlValues = cm.values.filter((v) => v !== "elrs" || groundLink || pilot?.controlMode === "elrs");
 
   /** Run one change: the control turns pending at once, its row waits for the
    *  answer (or the timeout), then the result line shows it. */

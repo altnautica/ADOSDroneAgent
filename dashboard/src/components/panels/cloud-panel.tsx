@@ -45,7 +45,7 @@ function LinkRows({ link, error }: { link: CloudLink | undefined; error: boolean
     <>
       <div className="flex items-baseline justify-between text-sm">
         <span className="text-xs text-muted-foreground">{t("panels.cloud.broker")}</span>
-        <Badge variant={link.broker_connected ? "ok" : "default"}>{broker}</Badge>
+        <Badge variant={link.broker_connected ? "success" : "neutral"}>{broker}</Badge>
       </div>
       <div className="flex items-baseline justify-between text-sm">
         <span className="text-xs text-muted-foreground">{t("panels.cloud.statusPost")}</span>
@@ -93,7 +93,7 @@ export function CloudPanel() {
                 {t("panels.cloud.pairing")}
               </div>
               {finalized && !code ? (
-                <Badge variant="ok">{t("panels.cloud.paired")}</Badge>
+                <Badge variant="success">{t("panels.cloud.paired")}</Badge>
               ) : code ? (
                 <div className="font-mono text-2xl tracking-[0.3em] py-1">
                   {code}

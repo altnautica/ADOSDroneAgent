@@ -181,10 +181,6 @@ fn the_ar_kind_carries_the_next_waypoints_eta_while_fresh() {
 }
 
 #[test]
-fn tones_cover_the_phase_and_health_words() {
-    assert_eq!(phase_tone("following"), Tone::Good);
-    assert_eq!(phase_tone("searching"), Tone::Caution);
-    assert_eq!(phase_tone("lost"), Tone::Fault);
-    assert_eq!(phase_tone("idle"), Tone::Neutral);
+fn tones_cover_the_health_words() {
     assert_eq!(health_tone("degraded"), Tone::Caution);
 }

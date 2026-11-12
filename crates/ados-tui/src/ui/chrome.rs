@@ -190,9 +190,34 @@ pub fn context_line(f: &mut Frame, area: Rect, core: &Core, text: Option<String>
     }
 }
 
+/// The hints that fit `width` columns whole, in order. When some must go,
+/// the last ones go first, but `? help` and `q quit` stay (help first), so
+/// the way to every other key is never cut.
+pub fn fit_hints<'a>(hints: &[(&'a str, &'a str)], width: usize) -> Vec<(&'a str, &'a str)> {
+    let cost = |h: &[(&str, &str)]| -> usize {
+        h.iter()
+            .map(|(k, w)| k.chars().count() + 1 + w.chars().count())
+            .sum::<usize>()
+            + 3 * h.len().saturating_sub(1)
+            + 1
+    };
+    let mut kept: Vec<(&str, &str)> = hints.to_vec();
+    for protect in [&["?", "q"][..], &["?"][..], &[][..]] {
+        while cost(&kept) > width {
+            match kept.iter().rposition(|(k, _)| !protect.contains(k)) {
+                Some(i) => {
+                    kept.remove(i);
+                }
+                None => break,
+            }
+        }
+    }
+    kept
+}
+
 /// The bottom row: key hints on the left; the screen's status (e.g. `PAUSED
 /// +12`), the version and the update badge on the right, so the status is
-/// never clipped by a long hint list.
+/// never clipped by a long hint list. Hints that do not fit are dropped whole.
 pub fn hint_bar(
     f: &mut Frame,
     area: Rect,
@@ -201,14 +226,6 @@ pub fn hint_bar(
     extra: Option<String>,
 ) {
     let t = &core.theme;
-    let mut left: Vec<Span> = vec![Span::raw(" ")];
-    for (i, (key, word)) in hints.iter().enumerate() {
-        if i > 0 {
-            left.push(Span::styled(" · ", t.dim()));
-        }
-        left.push(Span::styled(key.to_string(), t.accented()));
-        left.push(Span::styled(format!(" {word}"), t.dim()));
-    }
     let mut right: Vec<Span> = Vec::new();
     if let Some(extra) = extra {
         right.push(Span::styled(extra, t.accent_bold()));
@@ -224,6 +241,15 @@ pub fn hint_bar(
         }
     }
     let rw = width(&right) + 1;
+    let fitted = fit_hints(hints, usize::from(area.width.saturating_sub(rw)));
+    let mut left: Vec<Span> = vec![Span::raw(" ")];
+    for (i, (key, word)) in fitted.iter().enumerate() {
+        if i > 0 {
+            left.push(Span::styled(" · ", t.dim()));
+        }
+        left.push(Span::styled(key.to_string(), t.accented()));
+        left.push(Span::styled(format!(" {word}"), t.dim()));
+    }
     let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(rw)]).split(area);
     f.render_widget(Paragraph::new(Line::from(left)), cols[0]);
     f.render_widget(
@@ -270,13 +296,17 @@ pub fn toasts(f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
 
 /// Below 80×24 the whole screen is this notice.
 pub fn too_small(f: &mut Frame, area: Rect, core: &Core) {
-    let msg = format!(
-        "Terminal too small: need {}×{}, have {}×{}",
-        super::MIN_W,
-        super::MIN_H,
-        area.width,
-        area.height
-    );
+    let (need_w, need_h) = (super::MIN_W, super::MIN_H);
+    let (w, h) = (area.width, area.height);
+    let long = format!("Terminal too small: need {need_w}×{need_h}, have {w}×{h}");
+    let msg = if long.chars().count() <= usize::from(w) {
+        long
+    } else {
+        super::widgets::truncate(
+            &format!("Too small: {w}×{h}, need {need_w}×{need_h}"),
+            usize::from(w),
+        )
+    };
     let y = area.y + area.height / 2;
     let rect = Rect::new(
         area.x,

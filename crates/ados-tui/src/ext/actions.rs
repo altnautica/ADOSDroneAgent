@@ -1,7 +1,8 @@
 //! Lifecycle actions on an installed extension: enable, disable, remove,
 //! grant and revoke a permission. Each opens its dialog, and the dialog's
-//! answer sends the request. Enable, disable, remove and grant are refused
-//! unless a fresh snapshot reports disarmed (the agent answers 409 otherwise).
+//! answer sends the request. Every one confirms first and is refused unless a
+//! fresh snapshot reports disarmed (a revoke takes effect at once, so a
+//! flying skill would lose the permission mid-flight).
 
 use serde_json::{json, Value};
 
@@ -19,6 +20,8 @@ pub const TAG_DISABLE: &str = "ext.disable";
 pub const TAG_REMOVE: &str = "ext.remove";
 pub const TAG_GRANT: &str = "ext.grant";
 pub const TAG_REVOKE: &str = "ext.revoke";
+/// The picked permission's revoke, awaiting its confirm.
+pub const TAG_REVOKE_CONFIRM: &str = "ext.revoke.confirm";
 
 /// The permissions the detail manifest declares.
 fn declared(core: &Core, id: &str) -> Vec<Perm> {
@@ -105,7 +108,7 @@ pub fn grant(core: &mut Core, route: Route, inst: &Install, name: &str) {
     }
 }
 
-/// `G`: revoke a granted permission.
+/// `G`: revoke a granted permission, confirmed.
 pub fn revoke(core: &mut Core, route: Route, inst: &Install, name: &str) {
     let granted: Vec<String> = inst
         .grants
@@ -120,14 +123,32 @@ pub fn revoke(core: &mut Core, route: Route, inst: &Install, name: &str) {
         );
         return;
     }
+    if !core.guard_disarmed() {
+        return;
+    }
+    match granted.as_slice() {
+        [perm] => confirm_revoke(core, route, &inst.id, name, perm),
+        _ => {
+            let ret = Ret::new(route, TAG_REVOKE)
+                .with(json!({"id": inst.id, "name": name, "perms": granted}));
+            core.open(Overlay::picker(
+                ret,
+                format!("Revoke from {name}"),
+                granted,
+                0,
+            ));
+        }
+    }
+}
+
+fn confirm_revoke(core: &mut Core, route: Route, id: &str, name: &str, perm: &str) {
     let ret =
-        Ret::new(route, TAG_REVOKE).with(json!({"id": inst.id, "name": name, "perms": granted}));
-    core.open(Overlay::picker(
-        ret,
-        format!("Revoke from {name}"),
-        granted,
-        0,
-    ));
+        Ret::new(route, TAG_REVOKE_CONFIRM).with(json!({"id": id, "name": name, "perm": perm}));
+    let body = vec![
+        perm.to_string(),
+        "The extension loses it at once, in flight too.".to_string(),
+    ];
+    core.open(Overlay::confirm(ret, format!("Revoke from {name}?"), body));
 }
 
 fn str_at(v: &Value, k: &str) -> String {
@@ -215,6 +236,13 @@ pub fn on_overlay(core: &mut Core, route: Route, ret: &Ret, result: &OverlayResu
         }
         (TAG_REVOKE, OverlayResult::Picked(i)) => {
             let Some(perm) = perm_at(*i) else { return true };
+            confirm_revoke(core, route, &id, &name, &perm);
+        }
+        (TAG_REVOKE_CONFIRM, OverlayResult::Confirmed) => {
+            if !core.guard_disarmed() {
+                return true;
+            }
+            let perm = str_at(&ret.data, "perm");
             core.submit(Request::new(
                 "DELETE",
                 format!("/api/plugins/{}/perms/{}", seg(&id), seg(&perm)),
@@ -225,7 +253,10 @@ pub fn on_overlay(core: &mut Core, route: Route, ret: &Ret, result: &OverlayResu
                 },
             ));
         }
-        (TAG_ENABLE | TAG_DISABLE | TAG_REMOVE | TAG_GRANT | TAG_REVOKE, _) => {}
+        (
+            TAG_ENABLE | TAG_DISABLE | TAG_REMOVE | TAG_GRANT | TAG_REVOKE | TAG_REVOKE_CONFIRM,
+            _,
+        ) => {}
         _ => return false,
     }
     true
@@ -254,4 +285,89 @@ pub fn on_reply(core: &mut Core, reply: &Reply) {
         }
     }
     core.fetch_now(ResourceId::Plugins);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::app::TabId;
+    use crate::model::ProfileRoutes;
+    use crate::ui::tests::{feed, test_app};
+
+    const ROUTE: Route = Route::tab(TabId::Extensions);
+
+    fn inst(grants: &[&str]) -> Install {
+        Install {
+            id: "com.example.follow".into(),
+            version: "1.0.0".into(),
+            status: "running".into(),
+            signer: None,
+            failure_reason: None,
+            revocation_pending: false,
+            grants: grants.iter().map(|g| (g.to_string(), true)).collect(),
+        }
+    }
+
+    fn setup(armed: bool) -> Value {
+        json!({
+            "version": "0.99.108", "device_name": "ados-x", "profile": "drone", "paired": true,
+            "mavlink": {"connected": true},
+            "telemetry": {"mode": "LOITER", "armed": armed}
+        })
+    }
+
+    #[test]
+    fn a_revoke_is_refused_while_armed() {
+        let mut app = test_app();
+        feed(
+            &mut app,
+            setup(true),
+            ProfileRoutes::default(),
+            Duration::ZERO,
+        );
+        revoke(
+            &mut app.core,
+            ROUTE,
+            &inst(&["mavlink.command", "video"]),
+            "Follow",
+        );
+        assert!(app.core.overlays.is_empty(), "no picker opens while armed");
+    }
+
+    #[test]
+    fn a_picked_permission_is_confirmed_before_it_is_revoked() {
+        let mut app = test_app();
+        feed(
+            &mut app,
+            setup(false),
+            ProfileRoutes::default(),
+            Duration::ZERO,
+        );
+        revoke(
+            &mut app.core,
+            ROUTE,
+            &inst(&["mavlink.command", "video"]),
+            "Follow",
+        );
+        let Some(Overlay::Picker(_)) = app.core.overlays.pop() else {
+            panic!("two grants open a picker");
+        };
+        let ret = Ret::new(ROUTE, TAG_REVOKE)
+            .with(json!({"id": "com.example.follow", "name": "Follow", "perms": ["mavlink.command", "video"]}));
+        assert!(on_overlay(
+            &mut app.core,
+            ROUTE,
+            &ret,
+            &OverlayResult::Picked(0)
+        ));
+        let Some(Overlay::Confirm(c)) = app.core.overlays.pop() else {
+            panic!("the pick asks to confirm");
+        };
+        assert_eq!(c.ret.tag, TAG_REVOKE_CONFIRM);
+        assert_eq!(c.ret.data["perm"], "mavlink.command");
+    }
 }

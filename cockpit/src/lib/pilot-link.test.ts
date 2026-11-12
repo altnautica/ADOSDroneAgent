@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   connectPilotLink,
+  pilotLinkSource,
   releasePilotInput,
   sendPilotAction,
   sendPilotInput,
@@ -105,5 +106,19 @@ describe("cockpit pilot frames match the agent fixture", () => {
     }
     const hb = sent.find((f) => f.op === "hb");
     expect(hb).toEqual(expected("hb", hb!));
+  });
+});
+
+describe("which surface the Feed opens the pilot link as", () => {
+  it("demo mode opens none, so live frames never mix with the demo's", () => {
+    expect(pilotLinkSource({ flies: true, groundStation: false, kiosk: false, demo: true })).toBeNull();
+    expect(pilotLinkSource({ flies: true, groundStation: true, kiosk: true, demo: true })).toBeNull();
+  });
+
+  it("a node that flies opens it, a kiosk ground station as the kiosk", () => {
+    expect(pilotLinkSource({ flies: true, groundStation: false, kiosk: false, demo: false })).toBe("cockpit");
+    expect(pilotLinkSource({ flies: true, groundStation: true, kiosk: true, demo: false })).toBe("kiosk");
+    expect(pilotLinkSource({ flies: true, groundStation: false, kiosk: true, demo: false })).toBe("cockpit");
+    expect(pilotLinkSource({ flies: false, groundStation: false, kiosk: false, demo: false })).toBeNull();
   });
 });

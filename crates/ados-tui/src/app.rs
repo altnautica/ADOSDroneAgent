@@ -276,6 +276,19 @@ impl Core {
         crate::update::is_newer(&latest, installed).then_some(latest)
     }
 
+    /// Why `u` cannot update right now, in words; `None` when it can.
+    pub fn update_refusal(&self) -> Option<&'static str> {
+        if self.target.remote {
+            Some("Update runs on the companion computer; not available remotely")
+        } else if self.update_available().is_some() {
+            None
+        } else if self.latest_version().is_some() {
+            Some("Already up to date")
+        } else {
+            Some("Update check unavailable")
+        }
+    }
+
     /// The latest version the update check reported, whether newer or not.
     pub fn latest_version(&self) -> Option<String> {
         self.latest.lock().ok().and_then(|g| g.clone())
@@ -396,6 +409,9 @@ pub fn error_text(err: &RestError) -> String {
     {
         return ARMED_REFUSAL.to_string();
     }
+    if matches!(err, RestError::Transport(_)) {
+        return crate::poll::NO_AGENT.to_string();
+    }
     let detail = err.detail();
     if detail.is_empty() {
         err.to_string()
@@ -455,6 +471,10 @@ pub trait Tab {
     }
     /// Whether `/` searches on this screen (shows the hint).
     fn searchable(&self, _core: &Core) -> bool {
+        false
+    }
+    /// Whether Tab moves between panes here (shows the hint).
+    fn has_panes(&self) -> bool {
         false
     }
 }

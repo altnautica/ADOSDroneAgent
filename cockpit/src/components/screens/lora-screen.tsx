@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import { EmptyNote, ProgressBar, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
+import { EmptyNote, ErrorNote, ProgressBar, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
 import { SelectSettingRow } from "@/components/ui/setting-row";
 import { SlideToConfirm } from "@/components/ui/slide-to-confirm";
 import { FOLLOW_COUNTRY, regionApplyBlock, regionBody } from "@/lib/lora-model";
@@ -183,7 +183,7 @@ export function LoraScreen() {
   if (!lora.ready) {
     body = <EmptyNote>{t("common.loading")}</EmptyNote>;
   } else if (!status) {
-    body = <EmptyNote>{t("lora.loadFailed")}</EmptyNote>;
+    body = <ErrorNote onRetry={lora.refresh}>{t("lora.loadFailed")}</ErrorNote>;
   } else if (!status.present) {
     body = <EmptyNote>{t("lora.absent")}</EmptyNote>;
   } else {
@@ -261,7 +261,7 @@ export function LoraScreen() {
   }
 
   return (
-    <ConsoleScaffold title={t("lora.title")} actions={<StaleBadge stale={lora.stale} />}>
+    <ConsoleScaffold stale={lora.stale} title={t("lora.title")} actions={<StaleBadge stale={lora.stale} />}>
       {body}
     </ConsoleScaffold>
   );

@@ -4,6 +4,7 @@
 // active uplink the operator may be riding. Each write renders the agent's
 // read-back, never the optimistic value.
 
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import type { TOptions } from "i18next";
 import { useReducer, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -41,6 +42,7 @@ export function UplinkSection() {
   const [ui, dispatch] = useReducer(uplinkReducer, UPLINK_UI_IDLE);
   const [confirmPriority, setConfirmPriority] = useState(false);
   const [busy, setBusy] = useState(false);
+  useDirtyGuard(ui.draft !== null, "settings-uplink-priority");
 
   const net: GsNetworkView | null = res.data
     ? { ...res.data, ...(readBack.of === res.data ? readBack.patch : {}) }

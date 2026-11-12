@@ -97,6 +97,10 @@ pub enum ResourceId {
     NavStatus,
     /// `GET /api/vision/status` (the Vehicle tab's detector row).
     VisionStatus,
+    /// `GET /api/vision/detections/latest` (the detector row's count).
+    DetectionsLatest,
+    /// `GET /api/v1/gimbal/rate` (whether the gimbal takes rate commands).
+    GimbalRate,
 }
 
 /// A subscription: read `path` into `id` every `period`; `Duration::ZERO`
@@ -313,6 +317,10 @@ fn spawn_resources(client: RestClient, tx: Sender<PollMsg>, ctl: Receiver<ResCtl
 /// The status text while the agent refuses this session's credentials.
 pub const LOCKED: &str = "Locked: API key or dashboard PIN required";
 
+/// The status text when no answer came back at all (connection refused,
+/// timeout, DNS). The view adds the host and the retry key.
+pub const NO_AGENT: &str = "Cannot reach the agent";
+
 /// What the render loop knows about the agent's global status.
 #[derive(Default)]
 pub struct AgentView {
@@ -358,7 +366,7 @@ impl AgentView {
                 self.error = Some(if matches!(e.code(), Some(401) | Some(403)) {
                     LOCKED.to_string()
                 } else {
-                    format!("Agent unreachable: {e}")
+                    crate::app::error_text(&e)
                 });
             }
         }
@@ -414,10 +422,7 @@ mod tests {
             Some("12:00:00"),
             "the refreshed clock only moves when data actually refreshed"
         );
-        assert_eq!(
-            view.error.as_deref(),
-            Some("Agent unreachable: transport error: connection refused")
-        );
+        assert_eq!(view.error.as_deref(), Some(NO_AGENT));
         assert_eq!(view.dash.as_ref().and_then(|d| d.battery), Some(82.0));
         assert!(!view.is_stale(t0 + Duration::from_secs(2), Duration::from_secs(6)));
         assert!(view.is_stale(t0 + Duration::from_secs(7), Duration::from_secs(6)));

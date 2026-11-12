@@ -50,8 +50,8 @@ export function Sheet({
         "flex flex-col border bg-surface text-surface-foreground duration-quick animate-in motion-reduce:animate-none",
         danger ? "border-err" : "border-border",
         portrait
-          ? "max-h-[90%] w-full max-w-[720px] rounded-t-xl slide-in-from-bottom"
-          : "h-full w-[clamp(320px,42%,480px)] rounded-l-xl slide-in-from-right",
+          ? "max-h-[90%] w-full max-w-[720px] rounded-t-md slide-in-from-bottom"
+          : "h-full w-[clamp(320px,42%,480px)] rounded-l-md slide-in-from-right",
       )}
     >
       <div className="flex min-h-[max(2.75rem,48px)] shrink-0 items-center gap-[0.5rem] px-[0.9rem] pt-[0.4rem]">
@@ -69,7 +69,7 @@ export function Sheet({
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-[0.9rem] py-[0.4rem]">{children}</div>
       {footer ? <div className="shrink-0 px-[0.9rem] pb-[0.8rem] pt-[0.2rem]">{footer}</div> : null}
-      <HintBar hints={hints} className={portrait ? undefined : "rounded-bl-xl"} />
+      <HintBar hints={hints} className={portrait ? undefined : "rounded-bl-md"} />
     </Overlay>
   );
 }

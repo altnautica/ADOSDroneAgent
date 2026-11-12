@@ -8,15 +8,36 @@ use ratatui::Frame;
 
 use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
+use crate::model::autonomy::NAV_STATUS_PATH;
 use crate::model::Health;
+use crate::poll::{ResourceId, Sub};
+use crate::ui::vehicle::VehicleTab;
 
-/// The Overview tab holds no state of its own: it renders the global poll.
+/// The Overview renders the global poll, and on a drone the flight-state
+/// chip and alert count from its own copy of the Vehicle tab's readings.
 #[derive(Default)]
-pub struct OverviewTab;
+pub struct OverviewTab {
+    flight: VehicleTab,
+}
 
 impl Tab for OverviewTab {
     fn ctx(&self, _core: &Core) -> Vec<Ctx> {
         Vec::new()
+    }
+
+    fn subs(&self, core: &Core) -> Vec<Sub> {
+        if core.profile() != "drone" {
+            return Vec::new();
+        }
+        vec![
+            Sub::every_ms(ResourceId::Telemetry, "/api/telemetry", 1000),
+            Sub::every_ms(ResourceId::Battery, "/api/v1/battery", 2000),
+            Sub::every_ms(ResourceId::NavStatus, NAV_STATUS_PATH, 1000),
+        ]
+    }
+
+    fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
+        self.flight.on_resource(core, id);
     }
 
     fn on_command(&mut self, _core: &mut Core, _cmd: Command) -> bool {
@@ -24,16 +45,27 @@ impl Tab for OverviewTab {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, _out: &mut FrameOut) {
-        let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
+        let flight = if core.profile() == "drone" && core.dash().is_some() {
+            self.flight.summary(core)
+        } else {
+            Vec::new()
+        };
+        let rows = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Length(flight.len() as u16),
+            Constraint::Min(0),
+        ])
+        .split(area);
         verdict(f, rows[0], core);
+        f.render_widget(Paragraph::new(flight), rows[1]);
+        let rows = [rows[0], rows[2]];
         match core.dash() {
             Some(d) => super::panels::body(f, rows[1], core, d),
             None => {
-                let msg = core
-                    .view
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Connecting to the agent…".into());
+                let msg = match core.view.error.as_deref() {
+                    Some(e) => why_text(core, e),
+                    None => "Connecting to the agent…".into(),
+                };
                 f.render_widget(
                     Paragraph::new(msg)
                         .style(Style::default().fg(core.theme.warning()))
@@ -54,14 +86,15 @@ impl Tab for OverviewTab {
 /// the last good snapshot cannot read as a live HEALTHY.
 fn verdict(f: &mut Frame, area: Rect, core: &Core) {
     let t = &core.theme;
+    let error = core.view.error.as_deref();
     let Some(d) = core.dash() else {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled("· · ·", t.dim()))),
-            area,
-        );
+        let line = match error {
+            Some(e) => Line::from(Span::styled(why_text(core, e), t.warning())),
+            None => Line::from(Span::styled("· · ·", t.dim())),
+        };
+        f.render_widget(Paragraph::new(line), area);
         return;
     };
-    let error = core.view.error.as_deref();
     let stale = core.stale();
     if error.is_some() || stale {
         let word = if core.view.locked() {
@@ -71,7 +104,10 @@ fn verdict(f: &mut Frame, area: Rect, core: &Core) {
         } else {
             "STALE"
         };
-        let why = error.unwrap_or("No answer from the agent.");
+        let why = error.map_or_else(
+            || "No answer from the agent.".to_string(),
+            |e| why_text(core, e),
+        );
         let line1 = Line::from(vec![
             Span::styled(
                 format!("{} ", core.sym.warn),
@@ -102,6 +138,19 @@ fn verdict(f: &mut Frame, area: Rect, core: &Core) {
         Span::styled(format!("{} ", health.dot()), Style::default().fg(color)),
         Span::styled(health.label(), word_style),
     ]);
-    let line2 = Line::from(Span::styled(d.status_summary(), t.dim()));
+    let summary = match d.health_cause() {
+        Some(cause) => format!("{cause} · {}", d.status_summary()),
+        None => d.status_summary(),
+    };
+    let line2 = Line::from(Span::styled(summary, t.dim()));
     f.render_widget(Paragraph::new(vec![line1, line2]), area);
+}
+
+/// The failed poll in words: a missing agent names the host and the retry key.
+fn why_text(core: &Core, error: &str) -> String {
+    if error == crate::poll::NO_AGENT {
+        format!("{error} at {}. r retry", core.target.host)
+    } else {
+        error.to_string()
+    }
 }

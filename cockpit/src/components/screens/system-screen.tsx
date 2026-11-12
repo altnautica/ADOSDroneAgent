@@ -22,17 +22,8 @@ import { NetworkCard } from "@/components/system/network-card";
 import { CloudCard } from "@/components/system/cloud-card";
 import { StatusTilesCard } from "@/components/system/status-tiles-card";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
-import {
-  ActionButton,
-  Dot,
-  EmptyNote,
-  MeterTile,
-  Row,
-  SectionHeader,
-  StaleBadge,
-  Tile,
-  TileGrid,
-} from "@/components/ui/data";
+import { ActionButton, Dot, EmptyNote, ErrorNote, MeterTile, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { ListItem } from "@/components/ui/list-item";
 import { startRecording, stopRecording } from "@/lib/api";
@@ -204,7 +195,7 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
   const mdnsHost = identity?.mdns_host?.trim() || null;
 
   return (
-    <ConsoleScaffold
+    <ConsoleScaffold stale={sys.stale || services.stale}
       title={t("cockpit.system.title")}
       actions={
         <div className="flex items-center gap-[0.5rem]">
@@ -332,6 +323,8 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
               />
             </div>
           ))
+        ) : readFailed(services) ? (
+          <ErrorNote onRetry={services.refresh}>{t("cockpit.readFailed.services")}</ErrorNote>
         ) : (
           <EmptyNote>{services.ready ? t("cockpit.system.noServices") : t("diagnostics.services.loading")}</EmptyNote>
         )}

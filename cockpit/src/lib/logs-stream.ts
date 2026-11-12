@@ -25,7 +25,8 @@ export interface LogsResponse {
   warning?: string;
 }
 
-export const LOG_LEVELS = ["", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] as const;
+/** The filter levels: the agent emits DEBUG/INFO/WARN/ERROR (no CRITICAL). */
+export const LOG_LEVELS = ["", "DEBUG", "INFO", "WARN", "ERROR"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** Entries the live tail keeps, to bound memory on a screen left open. */
@@ -118,8 +119,19 @@ export function parseLogsResponse(body: unknown): LogsResponse {
 /** Wall-clock text for an entry's time. */
 export function fmtLogTime(ts: LogEntry["timestamp"]): string {
   if (ts === null) return "—";
-  if (typeof ts === "number") return new Date(ts * 1000).toLocaleTimeString();
-  return ts;
+  const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
+  // An RFC 3339 string reads as local HH:MM:SS like a numeric stamp; text
+  // that is not a time is shown as it came.
+  return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleTimeString([], { hour12: false });
+}
+
+/** A level as the filter names it: WARNING folds to WARN and CRITICAL/FATAL
+ *  to ERROR, so every producer's spelling lands in one bucket. */
+export function foldLevel(level: string): string {
+  const l = level.toUpperCase();
+  if (l === "WARNING") return "WARN";
+  if (l === "CRITICAL" || l === "FATAL") return "ERROR";
+  return l;
 }
 
 /** The rows a fixed-row-height list renders for a scroll position, with

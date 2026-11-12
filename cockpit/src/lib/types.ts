@@ -226,6 +226,9 @@ export interface VehicleState {
    *  read as a flight-controller failsafe. Absent from an agent that does not
    *  report it. */
   system_status?: number | null;
+  /** MAVLink `EXTENDED_SYS_STATE` landed state while the flight controller
+   *  reports it; absent (or null) with the FC link down. */
+  landed_state?: "undefined" | "on_ground" | "in_air" | "takeoff" | "landing" | null;
   position?: VehiclePosition;
   velocity?: VehicleVelocity;
   attitude?: VehicleAttitude;

@@ -6,7 +6,10 @@ import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ReadErrorCard } from "@/components/read-error-card";
+import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { useResource } from "@/hooks/use-resource";
+import { useVehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
 import { apiFetch } from "@/shared/api-fetch";
 import { toast, toastFromError } from "@/shared/api/toast";
 
@@ -61,6 +64,8 @@ export function IoRoute() {
   const [discovered, setDiscovered] = useState<DiscoveredBluetoothDevice[] | null>(null);
   const [pairingMac, setPairingMac] = useState<string | null>(null);
   const [primaryBusy, setPrimaryBusy] = useState<string | null>(null);
+  const [primaryTarget, setPrimaryTarget] = useState<{ id: string; name: string } | null>(null);
+  const armed = useVehicleTelemetry().data?.armed === true;
 
   const gamepads = useResource<GamepadsResponse>(
     "io-gamepads",
@@ -116,7 +121,12 @@ export function IoRoute() {
     }
   };
 
+  // Moving the primary moves RC input: confirmed, and refused while armed.
   const makePrimary = async (deviceId: string) => {
+    if (armed) {
+      toast.err(t("io.gamepads.armedRefused"));
+      return;
+    }
     setPrimaryBusy(deviceId);
     try {
       await apiFetch("/api/v1/ground-station/gamepads/primary", {
@@ -218,13 +228,13 @@ export function IoRoute() {
                         </div>
                       </div>
                       {isPrimary ? (
-                        <Badge variant="ok">{t("io.gamepads.primary")}</Badge>
+                        <Badge variant="success">{t("io.gamepads.primary")}</Badge>
                       ) : (
                         <Button
                           variant="outline"
                           size="sm"
                           disabled={primaryBusy !== null}
-                          onClick={() => void makePrimary(pad.device_id)}
+                          onClick={() => setPrimaryTarget({ id: pad.device_id, name: pad.name || t("io.gamepads.unnamed") })}
                         >
                           {primaryBusy === pad.device_id ? t("io.gamepads.setting") : t("io.gamepads.makePrimary")}
                         </Button>
@@ -259,7 +269,9 @@ export function IoRoute() {
               <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1.5">
                 {t("io.bluetooth.pairedHeading")}
               </div>
-              {paired.length === 0 ? (
+              {bluetooth.isError ? (
+                <ReadErrorCard message={t("io.bluetooth.readFailed")} onRetry={() => void bluetooth.refetch()} />
+              ) : paired.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   {t("io.bluetooth.noPaired")}
                 </p>
@@ -277,7 +289,7 @@ export function IoRoute() {
                           {d.type ? ` · ${d.type}` : ""}
                         </div>
                       </div>
-                      <Badge variant={d.connected ? "ok" : "outline"}>
+                      <Badge variant={d.connected ? "success" : "neutral"}>
                         {d.connected ? t("io.bluetooth.connected") : t("io.bluetooth.paired")}
                       </Badge>
                     </li>
@@ -327,6 +339,16 @@ export function IoRoute() {
           </CardContent>
         </Card>
       </div>
+      <ConfirmDialog
+        open={primaryTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setPrimaryTarget(null);
+        }}
+        title={t("io.gamepads.primaryTitle", { name: primaryTarget?.name ?? "" })}
+        description={armed ? t("io.gamepads.armedRefused") : t("io.gamepads.primaryBody")}
+        confirmLabel={t("io.gamepads.makePrimary")}
+        onConfirm={() => (primaryTarget ? makePrimary(primaryTarget.id) : undefined)}
+      />
     </PageShell>
   );
 }

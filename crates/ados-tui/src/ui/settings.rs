@@ -268,6 +268,10 @@ impl Tab for SettingsTab {
         out
     }
 
+    fn has_panes(&self) -> bool {
+        true
+    }
+
     fn subs(&self, core: &Core) -> Vec<Sub> {
         let entry = self.current(core);
         let mut subs = match entry.body {

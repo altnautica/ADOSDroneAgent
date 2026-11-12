@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useTourStage } from "@/components/controls/tour-stage";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
+import { tipsArmState } from "@/lib/controller-tour";
 import { skillVisibleFor } from "@/lib/skills";
 import { gotoAdvertised } from "@/shared/hud/fly-here-offer";
 import { specText } from "@/shared/hud/spec-text";
@@ -83,8 +84,7 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
         if (r) rects[a] = r;
       }
       const screen: TipsScreen = {
-        armed: pilot ? pilot.armed === true : telemetryArmed === true,
-        airborne: pilot ? pilot.armed === true && pilot.landed === false : telemetryArmed !== false,
+        ...tipsArmState(pilot, telemetryArmed),
         flightScreen: activeScreenId(nav) === "feed" && nav.detailStack.length === 0,
         sheetOrMenuOpen:
           useCockpitUiStore.getState().sheet !== null ||

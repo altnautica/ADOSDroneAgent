@@ -1,5 +1,6 @@
 import { Pause, Play, ScrollText } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
@@ -8,164 +9,65 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useResource } from "@/hooks/use-resource";
+import {
+  EMPTY_TAIL,
+  LEVEL_KEYS,
+  LOG_LEVELS,
+  appendToTail,
+  fmtLogTime,
+  foldLevel,
+  logsPollPath,
+  openLogStream,
+  type LiveTail,
+  type LogLevel,
+  type LogsResponse,
+} from "@/lib/logs-stream";
 import { logsEmptyState } from "@/shared/api/logs-empty";
 
-interface LogEntry {
-  seq?: number;
-  /** Null when the store row carried no time. */
-  timestamp: number | string | null;
-  level: string;
-  logger: string;
-  message: string;
-}
-
-interface LogsResponse {
-  entries: LogEntry[];
-  total: number;
-  limit: number;
-  offset: number;
-  /** Set when the logging store could not answer (off by default). */
-  warning?: string;
-}
-
-const LEVELS = ["", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] as const;
-type Level = (typeof LEVELS)[number];
-
-// Max entries the live tail keeps in memory on the dashboard, to bound DOM
-// cost as the page stays open.
-const LIVE_TAIL_CAP = 2500;
-
 const TONE: Record<string, string> = {
-  DEBUG: "text-muted-foreground/70",
+  DEBUG: "text-muted-foreground",
   INFO: "text-foreground",
-  WARNING: "text-warn",
+  WARN: "text-warn",
   ERROR: "text-destructive",
-  CRITICAL: "text-destructive font-semibold",
 };
-
-function fmtTs(ts: LogEntry["timestamp"]): string {
-  if (ts === null) return "—";
-  if (typeof ts === "number") {
-    return new Date(ts * 1000).toLocaleTimeString();
-  }
-  return ts;
-}
 
 export function LogsRoute() {
   const { t } = useTranslation();
-  const [level, setLevel] = useState<Level>("");
+  const [level, setLevel] = useState<LogLevel>("");
   const [service, setService] = useState("");
   const [paused, setPaused] = useState(false);
 
-  // Polling fallback used when SSE returns 503 (subscriber cap hit) or
-  // any other error. Also polled while SSE is active so the page always
-  // knows whether the logging store is answering at all (its `warning`).
-  const path = `/api/logs?limit=200${level ? `&level=${level}` : ""}${
-    service ? `&service=${encodeURIComponent(service)}` : ""
-  }`;
+  // Polling fallback used when the stream answers 503 (subscriber cap hit) or
+  // drops. Also polled while the stream is up so the page always knows
+  // whether the logging store is answering at all (its `warning`).
   const [pollFallback, setPollFallback] = useState(false);
   const logs = useResource<LogsResponse>(
     `logs:${level}:${service}:${pollFallback ? "poll" : "sse"}`,
-    path,
+    logsPollPath(level, service),
     paused ? false : pollFallback ? 2000 : 30000,
   );
 
-  // Live tail accumulated from the SSE connection. Bounded to
-  // LIVE_TAIL_CAP entries so the DOM doesn't grow without bound on a
-  // long-open page.
-  const [liveEntries, setLiveEntries] = useState<LogEntry[]>([]);
-  const seenSeq = useRef<number>(0);
-
+  // Live tail from the stream, bounded and de-duplicated by `seq` (the agent
+  // replays a snapshot on every open). Reset when the filters change.
+  const [tail, setTail] = useState<LiveTail>(EMPTY_TAIL);
   useEffect(() => {
-    if (paused) return undefined;
-
-    let cancelled = false;
-    const params = new URLSearchParams();
-    if (level) params.set("level", level);
-    if (service) params.set("service", service);
-    const url = `/api/logs/stream${params.toString() ? `?${params}` : ""}`;
-    const source = new EventSource(url, { withCredentials: false });
-
-    // Browser behavior on HTTP errors (notably 503 with Retry-After)
-    // varies: Chrome closes promptly, Firefox stays in CONNECTING and
-    // retries silently. The dashboard treats EITHER as a fallback
-    // trigger after a short grace window so the user sees polled
-    // entries while the SSE retry loop churns in the background.
-    let errorGraceTimer: ReturnType<typeof setTimeout> | null = null;
-
-    source.onopen = () => {
-      if (cancelled) return;
-      setPollFallback(false);
-      if (errorGraceTimer !== null) {
-        clearTimeout(errorGraceTimer);
-        errorGraceTimer = null;
-      }
-    };
-
-    source.onmessage = (ev: MessageEvent<string>) => {
-      if (cancelled) return;
-      try {
-        const entry = JSON.parse(ev.data) as LogEntry;
-        // Sequence-number de-dup across reconnects: the agent's SSE
-        // sends a 100-entry snapshot on every open, and EventSource
-        // auto-reconnects on disconnect. Track the last-seen seq so
-        // we don't render the same entry twice.
-        if (typeof entry.seq === "number") {
-          if (entry.seq <= seenSeq.current) return;
-          seenSeq.current = entry.seq;
-        }
-        setLiveEntries((prev) => {
-          const next = [...prev, entry];
-          return next.length > LIVE_TAIL_CAP
-            ? next.slice(next.length - LIVE_TAIL_CAP)
-            : next;
-        });
-      } catch {
-        // Malformed frame; ignore.
-      }
-    };
-
-    source.onerror = () => {
-      if (cancelled) return;
-      if (source.readyState === EventSource.CLOSED) {
-        // EventSource gave up. Switch to polling immediately.
-        setPollFallback(true);
-        return;
-      }
-      // CONNECTING — could be a transient blip or a silent retry
-      // loop against a 503. Arm a one-shot fallback timer so the
-      // dashboard does not stay blank for more than a few seconds.
-      if (errorGraceTimer === null) {
-        errorGraceTimer = setTimeout(() => {
-          if (!cancelled) setPollFallback(true);
-        }, 3000);
-      }
-    };
-
-    return () => {
-      cancelled = true;
-      if (errorGraceTimer !== null) {
-        clearTimeout(errorGraceTimer);
-        errorGraceTimer = null;
-      }
-      source.close();
-    };
-  }, [level, service, paused, pollFallback]);
-
-  // Reset live tail when filters change so the operator sees a clean
-  // restart of the stream rather than a mix of pre- and post-filter
-  // entries.
-  useEffect(() => {
-    setLiveEntries([]);
-    seenSeq.current = 0;
+    setTail(EMPTY_TAIL);
   }, [level, service]);
 
-  // Tab returns to visible → if we're on the polling fallback, try
-  // SSE again. Toggling pollFallback to false re-runs the open
-  // useEffect (it's in the deps) which opens a fresh EventSource.
-  // Browsers suspend EventSource activity while hidden so we never
-  // pause the open stream explicitly; resume is the only signal we
-  // act on.
+  // The stream is read with fetch, which carries the credential headers a
+  // paired node needs off-box (an EventSource cannot).
+  useEffect(() => {
+    if (paused || pollFallback) return undefined;
+    const ctrl = new AbortController();
+    void openLogStream(level, service, ctrl.signal, {
+      onOpen: () => setPollFallback(false),
+      onPayloads: (payloads) => setTail((prev) => appendToTail(prev, payloads)),
+      onClosed: () => setPollFallback(true),
+    });
+    return () => ctrl.abort();
+  }, [level, service, paused, pollFallback]);
+
+  // Tab returns to visible on the polling fallback: try the stream again.
   useEffect(() => {
     function onVisibility() {
       if (!document.hidden) {
@@ -177,11 +79,10 @@ export function LogsRoute() {
       document.removeEventListener("visibilitychange", onVisibility);
   }, []);
 
-  // Source of truth for the rendered list:
-  // - SSE healthy → liveEntries (real-time tail).
-  // - SSE failed and fell back to polling → /api/logs entries.
+  // Source of truth for the rendered list: the live tail while the stream is
+  // up, the polled entries on the fallback.
   const fallbackEntries = logs.data?.entries ?? [];
-  const entries = pollFallback ? fallbackEntries : liveEntries;
+  const entries = pollFallback ? fallbackEntries : tail.entries;
   const empty = logsEmptyState({
     loading: logs.isLoading && pollFallback,
     filtered: Boolean(service || level),
@@ -217,12 +118,12 @@ export function LogsRoute() {
             <Label className="text-xs">{t("logs.filter.level")}</Label>
             <select
               value={level}
-              onChange={(e) => setLevel(e.target.value as Level)}
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm font-mono"
+              onChange={(e) => setLevel(e.target.value as LogLevel)}
+              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
             >
-              {LEVELS.map((l) => (
+              {LOG_LEVELS.map((l) => (
                 <option key={l} value={l}>
-                  {l || t("logs.filter.anyLevel")}
+                  {l ? t(LEVEL_KEYS[l]) : t("logs.filter.anyLevel")}
                 </option>
               ))}
             </select>
@@ -264,7 +165,11 @@ export function LogsRoute() {
                           : t("logs.empty.noEntries")}
                 </div>
                 {empty.kind === "storeOff" ? (
-                  <div className="text-xs opacity-70">{t("logs.empty.storeOffHint")}</div>
+                  <div className="text-xs opacity-70">
+                    <Link to="/settings/advanced#log-store" className="underline">
+                      {t("settingsMore.advanced.logStoreLabel")}
+                    </Link>
+                  </div>
                 ) : empty.kind === "noMatch" || empty.kind === "noEntries" ? (
                   <div className="text-xs opacity-70">{t("logs.empty.hint")}</div>
                 ) : null}
@@ -272,27 +177,28 @@ export function LogsRoute() {
             </div>
           ) : (
             <ul className="font-mono text-xs divide-y divide-border/50 max-h-[70vh] overflow-y-auto">
-              {entries.map((e, i) => (
-                <li
-                  key={`${e.seq ?? i}-${e.timestamp}`}
-                  className="px-3 py-1.5 flex gap-3"
-                >
-                  <span className="text-muted-foreground/60 shrink-0 tabular-nums">
-                    {fmtTs(e.timestamp)}
-                  </span>
-                  <span
-                    className={`shrink-0 w-14 ${TONE[e.level] ?? ""}`}
+              {entries.map((e, i) => {
+                const lvl = foldLevel(e.level);
+                return (
+                  <li
+                    key={`${e.seq ?? i}-${e.timestamp}`}
+                    className="px-3 py-1.5 flex flex-wrap gap-x-3 gap-y-0.5"
                   >
-                    {e.level}
-                  </span>
-                  <span className="shrink-0 text-muted-foreground/70 truncate max-w-[220px]">
-                    {e.logger}
-                  </span>
-                  <span className="flex-1 truncate" title={e.message}>
-                    {e.message}
-                  </span>
-                </li>
-              ))}
+                    <span className="text-muted-foreground shrink-0 tabular-nums">
+                      {fmtLogTime(e.timestamp)}
+                    </span>
+                    <span className={`shrink-0 w-14 ${TONE[lvl] ?? ""}`}>
+                      {lvl}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground truncate max-w-[220px]">
+                      {e.logger}
+                    </span>
+                    <span className="min-w-0 flex-[1_1_16rem] whitespace-pre-wrap break-words">
+                      {e.message}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </CardContent>

@@ -271,6 +271,10 @@ impl Tab for ParamsTab {
         }
     }
 
+    fn has_panes(&self) -> bool {
+        true
+    }
+
     fn subs(&self, core: &Core) -> Vec<Sub> {
         let mut subs = vec![
             Sub::every_ms(ResourceId::Telemetry, "/api/telemetry", 2000),

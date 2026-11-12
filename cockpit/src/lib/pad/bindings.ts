@@ -95,7 +95,8 @@ export interface BindingConflict {
 /** Conflicts: the same control (and combo) and gesture bound twice under
  *  conditions that can hold together, or one action bound to two single
  *  controls with the same gesture. Combos may repeat an action (Options +
- *  Circle is PS's documented fallback). */
+ *  Circle is PS's documented fallback), and the emergency stop may sit on
+ *  several controls: more ways to stop is never a hazard. */
 export function findConflicts(rows: readonly PadBinding[]): BindingConflict[] {
   const out: BindingConflict[] = [];
   for (let i = 0; i < rows.length; i++) {
@@ -108,6 +109,7 @@ export function findConflicts(rows: readonly PadBinding[]): BindingConflict[] {
         out.push({ rows: [i, j], reason: "same_slot" });
       } else if (
         a.action === b.action &&
+        a.action !== STOP_ACTION &&
         a.gesture === b.gesture &&
         a.with.length === 0 &&
         b.with.length === 0 &&

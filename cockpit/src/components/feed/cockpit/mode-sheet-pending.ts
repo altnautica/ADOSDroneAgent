@@ -6,7 +6,7 @@
 
 import { sendCommand } from "@/lib/api";
 import { mavResultText } from "@/lib/cockpit-flow";
-import { FC_FAILSAFE_MODES, FC_RECOVERY_MODES, noteCommandedModes } from "@/lib/fc-failsafe";
+import { claimCommandedModes, currentFcMode, FC_FAILSAFE_MODES, FC_RECOVERY_MODES } from "@/lib/fc-failsafe";
 import { stopMotionSkills } from "@/lib/skill-runner";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -32,14 +32,19 @@ export function modeChange(run: () => Promise<Outcome>, stop: () => Promise<void
 }
 
 /** Set a flight-controller mode (`POST /api/command` `mode`). A return or
- *  landing sent from here is recorded as this cockpit's, not a failsafe. */
+ *  landing sent from here is recorded as this cockpit's, not a failsafe,
+ *  once the answer is in (`claimCommandedModes`). */
 export async function sendFcMode(name: string): Promise<Outcome> {
-  if (FC_FAILSAFE_MODES[name]) noteCommandedModes([name]);
+  const claimed = FC_FAILSAFE_MODES[name] ? [name] : null;
+  const modeAtCommand = currentFcMode();
+  const sentAt = Date.now();
   try {
     const r = await sendCommand("mode", [name]);
+    if (claimed) claimCommandedModes(claimed, modeAtCommand, r.ack, sentAt);
     if (!r.ack?.observed || r.ack.accepted) return { ok: true };
     return { ok: false, reason: r.ack.result_name ? mavResultText(r.ack.result_name) : specText("flow.mode.fc.rejected") };
   } catch {
+    if (claimed) claimCommandedModes(claimed, modeAtCommand, null, sentAt);
     return { ok: false, reason: specText("flow.mode.fc.failed") };
   }
 }

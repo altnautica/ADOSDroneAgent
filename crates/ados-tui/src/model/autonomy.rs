@@ -90,6 +90,8 @@ pub struct NavSource {
     pub obstacle_rate_hz: Option<f64>,
     pub min_obstacle_m: Option<f64>,
     pub gps_fix: Option<i64>,
+    /// How old vision-nav's pose was when it reported (ms).
+    pub pose_age_ms: Option<f64>,
     pub stale: bool,
 }
 
@@ -168,6 +170,12 @@ pub struct Pilot {
     pub failsafe_cause: Option<String>,
     /// The pilot operations a surface may offer now (`goto`, ...).
     pub surface_ops: Vec<String>,
+    /// The arm and landed state; `None` while unknown (the FC is unheard),
+    /// which may be airborne, never disarmed.
+    pub armed: Option<bool>,
+    pub landed: Option<bool>,
+    /// Who holds the sticks: the input session's label, else its source.
+    pub input_label: Option<String>,
     /// The kind's age when read; `None` when the route did not say.
     pub age_ms: Option<u64>,
     pub stale: bool,
@@ -208,6 +216,7 @@ impl Autonomy {
             obstacle_rate_hz: f(d, "obstacle_rate_hz"),
             min_obstacle_m: f(d, "min_obstacle_m"),
             gps_fix: i(d, "gps_fix"),
+            pose_age_ms: f(d, "pose_age_ms"),
             stale,
         });
         let lidar = kind(v, "scan").map(|(d, _, stale)| Lidar {
@@ -388,6 +397,19 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                     .collect()
             })
             .unwrap_or_default(),
+        armed: d.get("armed").and_then(Value::as_bool),
+        landed: d.get("landed").and_then(Value::as_bool),
+        input_label: d
+            .get("input_session")
+            .filter(|s| s.get("src").and_then(Value::as_str).is_some())
+            .and_then(|s| {
+                s.get("label")
+                    .and_then(Value::as_str)
+                    .or(s.get("src")?.as_str())
+            })
+            .or_else(|| d.get("input_src").and_then(Value::as_str))
+            .filter(|l| !l.is_empty())
+            .map(str::to_string),
         age_ms,
         stale,
     }
@@ -421,16 +443,6 @@ pub enum Tone {
     Caution,
     Fault,
     Neutral,
-}
-
-/// The tone of a follow phase.
-pub fn phase_tone(phase: &str) -> Tone {
-    match phase {
-        "following" => Tone::Good,
-        "acquiring" | "coasting" | "searching" | "holding" => Tone::Caution,
-        "lost" => Tone::Fault,
-        _ => Tone::Neutral,
-    }
 }
 
 /// The tone of an external-nav health word.

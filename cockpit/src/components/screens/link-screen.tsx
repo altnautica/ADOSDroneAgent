@@ -7,16 +7,9 @@
 
 import { useCallback } from "react";
 
-import { Panel, PanelHeader } from "@/components/ui/panel";
-import {
-  Dot,
-  EmptyNote,
-  Row,
-  SectionHeader,
-  StaleBadge,
-  Tile,
-  TileGrid,
-} from "@/components/ui/data";
+import { ConsoleScaffold } from "@/components/ui/console-scaffold";
+import { Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { readFailed } from "@/lib/read-failed";
 import type { Tone } from "@/lib/tone";
 import { useResource } from "@/shared/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
@@ -110,14 +103,31 @@ function linkTone(state: string | undefined, active: boolean | undefined): Tone 
   }
 }
 
+/** The link state's label key; an unlisted state reads as unknown. */
+const LINK_STATE_KEYS = {
+  connected: "cockpit.link.state.connected",
+  degraded: "cockpit.link.state.degraded",
+  rf_unverified: "cockpit.link.state.rf_unverified",
+  connecting: "cockpit.link.state.connecting",
+  searching: "cockpit.link.state.searching",
+  disconnected: "cockpit.link.state.disconnected",
+  stopped: "cockpit.link.state.stopped",
+  stale: "cockpit.link.state.stale",
+} as const;
+
+function linkStateKey(state: string): (typeof LINK_STATE_KEYS)[keyof typeof LINK_STATE_KEYS] | "cockpit.link.state.unknown" {
+  return state in LINK_STATE_KEYS ? LINK_STATE_KEYS[state as keyof typeof LINK_STATE_KEYS] : "cockpit.link.state.unknown";
+}
+
 /** A tiny inline RSSI sparkline over the recent history samples (best-effort:
  *  reads `rssi_dbm`/`rssi` from whatever the history producer emits). */
 function RssiSparkline({ samples }: { samples: HistorySample[] }) {
+  const { t } = useTranslation();
   const vals = samples
     .map((s) => (typeof s.rssi_dbm === "number" ? s.rssi_dbm : typeof s.rssi === "number" ? s.rssi : null))
     .filter((v): v is number => v != null && Number.isFinite(v));
   if (vals.length < 2) {
-    return <EmptyNote>No link-quality history yet.</EmptyNote>;
+    return <EmptyNote>{t("cockpit.link.noHistory")}</EmptyNote>;
   }
   const min = Math.min(...vals, -90);
   const max = Math.max(...vals, -30);
@@ -168,127 +178,130 @@ export function LinkScreen() {
   const samples = history.data?.samples ?? [];
 
   return (
-    <Panel>
-      <PanelHeader
-        title="Link"
-        right={
+    <ConsoleScaffold stale={wfb.stale}
+      title={t("cockpit.link.title")}
+      actions={
           <div className="flex items-center gap-[0.5rem]">
             <Dot tone={tone} />
             <span className={cn("text-[0.8rem]", tone === "ok" ? "text-ok" : tone === "err" ? "text-err" : "text-warn")}>
-              {w?.state ?? DASH}
+              {w?.state ? t(linkStateKey(w.state)) : DASH}
             </span>
             <StaleBadge stale={wfb.stale} />
           </div>
         }
-      />
-
-      {!wfb.ready && wfb.data == null ? (
-        <EmptyNote>Reading the radio link…</EmptyNote>
-      ) : wfb.status === 404 ? (
-        <EmptyNote>The WFB radio link is not available on this profile.</EmptyNote>
+    >
+      {wfb.status === 404 ? (
+        <EmptyNote>{t("cockpit.link.notAvailable")}</EmptyNote>
+      ) : readFailed(wfb) ? (
+        <ErrorNote onRetry={wfb.refresh}>{t("cockpit.readFailed.wfb")}</ErrorNote>
+      ) : wfb.data == null ? (
+        <EmptyNote>{t("common.loading")}</EmptyNote>
       ) : (
         <div className="flex flex-col gap-[0.15rem]">
-          <SectionHeader>Diagnosis</SectionHeader>
+          <SectionHeader>{t("cockpit.link.diagnosis")}</SectionHeader>
           {diag ? (
             <Row
-              label="Verdict"
+              label={t("cockpit.link.verdict")}
               left={<Dot tone={diag.tone} />}
               value={diag.label}
               tone={diag.tone}
               hint={diag.hint}
             />
           ) : (
-            <Row label="Verdict" value={DASH} hint="Not yet classified" />
+            <Row label={t("cockpit.link.verdict")} value={DASH} hint={t("cockpit.link.notClassified")} />
           )}
           <Row
-            label="RF frames seen"
+            label={t("cockpit.link.framesSeen")}
             value={fmtInt(w?.packets_all)}
-            hint="Captured off-air before decrypt (0 = a deaf radio)"
+            hint={t("cockpit.link.framesSeenHint")}
             tone={w?.link_diag === "deaf" ? "warn" : undefined}
           />
           <Row
-            label="Decrypt errors"
+            label={t("cockpit.link.decryptErrors")}
             value={fmtInt(w?.decrypt_errors)}
-            hint="Wrong key or wrong link id"
+            hint={t("cockpit.link.decryptErrorsHint")}
             tone={(w?.decrypt_errors ?? 0) > 0 ? "warn" : undefined}
           />
           {w?.fanout_forwarded != null ? (
             <Row
-              label="Forwarded"
+              label={t("cockpit.link.forwarded")}
               value={fmtInt(w.fanout_forwarded)}
-              hint="Decoded packets relayed to the video pipeline"
+              hint={t("cockpit.link.forwardedHint")}
             />
           ) : null}
-          <Row label="FEC recovered" value={fmtInt(w?.fec_recovered)} />
 
-          <SectionHeader>Signal</SectionHeader>
+          <SectionHeader>{t("cockpit.link.signal")}</SectionHeader>
           <TileGrid>
-            <Tile label="RSSI" value={fmtDbm(w?.rssi_dbm)} tone={tone} />
-            <Tile label="SNR" value={fmtDb(w?.snr_db)} />
-            <Tile label="Noise" value={fmtDbm(w?.noise_dbm)} />
-            <Tile label="Loss" value={fmtLossPct(w?.loss_percent)} tone={(w?.loss_percent ?? 0) > 5 ? "warn" : undefined} />
-            <Tile label="Bitrate" value={bitrate} />
-            <Tile label="MCS" value={fmtInt(w?.mcs_index)} />
+            <Tile label={t("cockpit.link.rssi")} value={fmtDbm(w?.rssi_dbm)} tone={tone} />
+            <Tile label={t("cockpit.link.snr")} value={fmtDb(w?.snr_db)} />
+            <Tile label={t("cockpit.link.noise")} value={fmtDbm(w?.noise_dbm)} />
+            <Tile label={t("cockpit.link.loss")} value={fmtLossPct(w?.loss_percent)} tone={(w?.loss_percent ?? 0) > 5 ? "warn" : undefined} />
+            <Tile label={t("cockpit.link.bitrate")} value={bitrate} />
+            <Tile label={t("cockpit.link.mcs")} value={fmtInt(w?.mcs_index)} />
           </TileGrid>
 
-          <SectionHeader>Channel</SectionHeader>
-          <Row label="Channel" value={fmtChannel(w?.channel)} hint={fmtMhz(w?.frequency_mhz)} />
-          <Row label="Bandwidth" value={w?.bandwidth_mhz != null ? `${w.bandwidth_mhz} MHz` : DASH} />
-          <Row label="TX power" value={fmtDbm(w?.tx_power_dbm)} hint={w?.tx_power_max_dbm != null ? `max ${fmtDbm(w.tx_power_max_dbm)}` : undefined} />
-          <Row label="Regulatory domain" value={w?.regulatory_domain ?? w?.reg_domain ?? DASH} />
-
-          <SectionHeader>Packets &amp; FEC</SectionHeader>
-          <Row label="Received" value={fmtInt(w?.packets_received)} />
-          <Row label="Lost" value={fmtInt(w?.packets_lost)} tone={(w?.packets_lost ?? 0) > 0 ? "warn" : undefined} />
-          <Row label="FEC recovered" value={fmtInt(w?.fec_recovered)} />
-          <Row label="FEC failed" value={fmtInt(w?.fec_failed)} tone={(w?.fec_failed ?? 0) > 0 ? "err" : undefined} />
+          <SectionHeader>{t("cockpit.link.channelSection")}</SectionHeader>
+          <Row label={t("cockpit.link.channel")} value={fmtChannel(w?.channel)} hint={fmtMhz(w?.frequency_mhz)} />
+          <Row label={t("cockpit.link.bandwidth")} value={fmtMhz(w?.bandwidth_mhz)} />
           <Row
-            label="RX silent"
-            value={w?.rx_silent_seconds != null ? `${Math.round(w.rx_silent_seconds)}s` : DASH}
+            label={t("cockpit.link.txPower")}
+            value={fmtDbm(w?.tx_power_dbm)}
+            hint={w?.tx_power_max_dbm != null ? t("cockpit.link.txPowerMax", { dbm: fmtDbm(w.tx_power_max_dbm) }) : undefined}
+          />
+          <Row label={t("cockpit.link.regDomain")} value={w?.regulatory_domain ?? w?.reg_domain ?? DASH} />
+
+          <SectionHeader>{t("cockpit.link.packets")}</SectionHeader>
+          <Row label={t("cockpit.link.received")} value={fmtInt(w?.packets_received)} />
+          <Row label={t("cockpit.link.lost")} value={fmtInt(w?.packets_lost)} tone={(w?.packets_lost ?? 0) > 0 ? "warn" : undefined} />
+          <Row label={t("cockpit.link.fecRecovered")} value={fmtInt(w?.fec_recovered)} />
+          <Row label={t("cockpit.link.fecFailed")} value={fmtInt(w?.fec_failed)} tone={(w?.fec_failed ?? 0) > 0 ? "err" : undefined} />
+          <Row
+            label={t("cockpit.link.rxSilent")}
+            value={w?.rx_silent_seconds != null ? t("cockpit.link.seconds", { s: Math.round(w.rx_silent_seconds) }) : DASH}
             tone={(w?.rx_silent_seconds ?? 0) > 3 ? "warn" : undefined}
           />
 
-          <SectionHeader>RSSI history (60s)</SectionHeader>
+          <SectionHeader>{t("cockpit.link.history")}</SectionHeader>
           <div className="rounded-md bg-input/30 px-[0.6rem] py-[0.4rem]">
             <RssiSparkline samples={samples} />
           </div>
 
-          <SectionHeader>Adapter</SectionHeader>
-          <Row label="Interface" value={w?.interface ?? DASH} />
-          <Row label="Chipset" value={chipset ?? DASH} hint={adapterHint} />
+          <SectionHeader>{t("cockpit.link.adapter")}</SectionHeader>
+          <Row label={t("cockpit.link.iface")} value={w?.interface ?? DASH} />
+          <Row label={t("cockpit.link.chipset")} value={chipset ?? DASH} hint={adapterHint} />
           <Row
-            label="Injection"
+            label={t("cockpit.link.injection")}
             left={<Dot tone={w?.adapter_injection_ok ? "ok" : w?.adapter_injection_ok === false ? "err" : "muted"} />}
-            value={w?.adapter_injection_ok == null ? DASH : w.adapter_injection_ok ? "ok" : "no"}
+            value={w?.adapter_injection_ok == null ? DASH : w.adapter_injection_ok ? t("cockpit.link.injectionOk") : t("cockpit.link.injectionFailed")}
           />
-          <Row label="Restarts" value={fmtInt(w?.restart_count)} tone={(w?.restart_count ?? 0) > 0 ? "warn" : undefined} />
+          <Row label={t("cockpit.link.restarts")} value={fmtInt(w?.restart_count)} tone={(w?.restart_count ?? 0) > 0 ? "warn" : undefined} />
 
-          <SectionHeader>Pair</SectionHeader>
+          <SectionHeader>{t("cockpit.link.pair")}</SectionHeader>
           <Row
-            label="Paired"
-            left={<Dot tone={pair.data?.paired ? "ok" : "muted"} />}
-            value={pair.data?.paired ? "linked" : "none"}
+            label={t("cockpit.link.paired")}
+            left={<Dot tone={pair.data == null ? "warn" : pair.data.paired ? "ok" : "muted"} />}
+            value={pair.data == null ? DASH : pair.data.paired ? t("cockpit.pair.linked") : t("cockpit.link.notPaired")}
             tone={pair.data?.paired ? "ok" : "muted"}
           />
           {pair.data?.paired_with_device_id ? (
-            <Row label="Peer" value={pair.data.paired_with_device_id} />
+            <Row label={t("cockpit.link.peer")} value={pair.data.paired_with_device_id} />
           ) : null}
           {pair.data?.fingerprint ? (
-            <Row label="Key" value={pair.data.fingerprint} />
+            <Row label={t("cockpit.link.fingerprint")} value={pair.data.fingerprint} />
           ) : null}
           {keyStatus ? (
             <Row
-              label="Link key"
+              label={t("cockpit.link.linkKey")}
               value={t(keyStatus.labelKey)}
               tone={keyStatus.variant === "warn" ? "warn" : undefined}
             />
           ) : null}
           <Row
-            label="Auto-pair"
-            value={pair.data?.auto_pair_enabled == null ? DASH : pair.data.auto_pair_enabled ? "on" : "off"}
+            label={t("cockpit.link.autoPair")}
+            value={pair.data?.auto_pair_enabled == null ? DASH : pair.data.auto_pair_enabled ? t("video.fields.on") : t("video.fields.off")}
           />
         </div>
       )}
-    </Panel>
+    </ConsoleScaffold>
   );
 }

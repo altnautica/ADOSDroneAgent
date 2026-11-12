@@ -2,21 +2,29 @@
 // reads only at startup, that path is recorded in the config store and this
 // amber bar appears across the top of every screen — the honest surface:
 // the panel never shows a reboot-gated change as already live. It offers a
-// guarded "Reboot now" (tap arms, hold fires; POST /api/v1/setup/reboot) and stays until the box has
-// actually rebooted, which it detects from the agent's uptime and auto-clears.
+// guarded reboot (tap arms, hold fires), or a video-service restart when every
+// pending change is a video setting, and says when the request fails. It stays
+// until the box has actually rebooted, detected from the agent's uptime.
 
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { RotateCw } from "lucide-react";
 
 import { GuardedButton } from "@/components/ui/guarded-button";
 import { useConfigStore } from "@/stores/config-store";
 import { useStatusStore } from "@/stores/status-store";
 import { apiFetch } from "@/shared/api-fetch";
+import { rebootAgent } from "@/shared/api/setup-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
+import "@/shared/i18n";
 import { prettify } from "@/lib/settings-schema";
+import { videoRestartApplies } from "@/lib/reboot-scope";
 import { cn } from "@/lib/utils";
 
 export function RebootBanner({ floating = false }: { floating?: boolean }) {
+  const { t } = useTranslation();
   const paths = useConfigStore((s) => s.pendingRebootPaths);
+  const clearReboot = useConfigStore((s) => s.clearReboot);
   const maybeAutoClear = useConfigStore((s) => s.maybeAutoClearReboot);
   const status = useStatusStore((s) => s.status);
   const uptime = status?.system?.uptime_seconds ?? null;
@@ -28,19 +36,35 @@ export function RebootBanner({ floating = false }: { floating?: boolean }) {
   }, [uptime, maybeAutoClear]);
 
   if (paths.length === 0) return null;
+  const videoOnly = videoRestartApplies(paths);
 
   const reboot = async () => {
     if (rebooting) return;
     setRebooting(true);
-    // If the box does actually go down the socket drops and this page reloads
-    // when the agent returns (the banner then auto-clears on the fresh uptime).
-    // If the reboot never happens, drop back to the armed state so the operator
-    // can retry rather than being stuck on "Rebooting…".
+    // If the board never goes down, return to the armed state so the operator
+    // can retry rather than sit on "Rebooting…".
     window.setTimeout(() => setRebooting(false), 25_000);
     try {
-      await apiFetch("/api/v1/setup/reboot", { method: "POST", body: {} });
-    } catch {
-      // The box drops the socket as it goes down; nothing reliable to surface.
+      await rebootAgent();
+      toast.ok(t("diagnostics.reboot.queued"), t("cockpit.system.rebootDetail"));
+    } catch (err) {
+      setRebooting(false);
+      toastFromError(err, t("diagnostics.reboot.failed"));
+    }
+  };
+
+  const restartVideo = async () => {
+    if (rebooting) return;
+    setRebooting(true);
+    try {
+      await apiFetch("/api/services/ados-video/restart", { method: "POST", body: {} });
+      // The video service read the new values on start: nothing is pending.
+      clearReboot();
+      toast.ok(t("cockpit.shell.videoRestarted"));
+    } catch (err) {
+      toastFromError(err, t("cockpit.shell.videoRestartFailed"));
+    } finally {
+      setRebooting(false);
     }
   };
 
@@ -59,13 +83,27 @@ export function RebootBanner({ floating = false }: { floating?: boolean }) {
       />
       <div className="min-w-0 flex-1">
         <div className="truncate text-[0.8rem] font-medium">
-          {rebooting ? "Rebooting…" : "Changes pending — reboot to apply"}
+          {rebooting
+            ? t(videoOnly ? "cockpit.shell.videoRestarting" : "diagnostics.reboot.rebooting")
+            : t(videoOnly ? "cockpit.shell.videoRestartPending" : "cockpit.shell.rebootPending")}
         </div>
         <div className="truncate text-[0.75rem] opacity-80">{summary}</div>
       </div>
-      {!rebooting ? (
-        <GuardedButton label="Reboot now" guardLabel="Hold to reboot" icon={RotateCw} onFired={() => void reboot()} />
-      ) : null}
+      {rebooting ? null : videoOnly ? (
+        <GuardedButton
+          label={t("cockpit.shell.restartVideo")}
+          guardLabel={t("cockpit.system.restartGuard")}
+          icon={RotateCw}
+          onFired={() => void restartVideo()}
+        />
+      ) : (
+        <GuardedButton
+          label={t("diagnostics.reboot.button")}
+          guardLabel={t("cockpit.shell.rebootGuard")}
+          icon={RotateCw}
+          onFired={() => void reboot()}
+        />
+      )}
     </div>
   );
 }

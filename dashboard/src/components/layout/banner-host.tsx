@@ -16,7 +16,7 @@ export function BannerHost() {
   const { profile } = useNodeIdentity();
   const heartbeat = useHeartbeat();
   const { pathname } = useLocation();
-  const onDroneHome = profile === "drone" && pathname === "/home";
+  const onDroneHome = profile === "drone" && pathname === "/";
   const snapshot = useSnapshot({ intervalMs: BANNER_SNAPSHOT_MS, enabled: onDroneHome });
 
   const banners = buildBanners({

@@ -8,8 +8,8 @@
 // truncate with an ellipsis. Every control's hit area is at least
 // `touch_target.min` (`HIT_AREA`), whatever its drawn size.
 
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, Gamepad2, Layers, Menu, OctagonX, Radio } from "lucide-react";
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Check, ChevronDown, Gamepad2, Layers, Maximize2, Menu, Minimize2, OctagonX, Radio } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { FlightStateChip } from "@/components/feed/cockpit/flight-state-chip";
@@ -17,30 +17,38 @@ import { StatusPill } from "@/components/feed/cockpit/status-pill";
 import { NavSourceChip } from "@/components/feed/nav-source-chip";
 import { Overlay } from "@/components/ui/overlay";
 import { padStatusText, usePadStatus } from "@/hooks/use-gamepad";
+import { useNow } from "@/hooks/use-now";
 import { useSkillContext } from "@/hooks/use-skill-context";
-import { chromeStyle, severityColor } from "@/lib/chrome-tokens";
+import { useWidthClass } from "@/hooks/use-width-class";
+import { CHROME_TOKENS, chromeStyle, severityColor } from "@/lib/chrome-tokens";
 import { BUILTIN_LAYERS, layerFlag } from "@/lib/cockpit-view";
+import type { WidthClass } from "@/lib/cockpit-layout";
 import {
   barFull,
   HIT_AREA,
   linkCell,
   linkDetail,
+  menuTextPx,
   movedItems,
   reserveText,
-  severityTextColor,
   TOP_BAR_OVERFLOW,
   type TopBarOverflowItem,
+  vehicleFrameAgeMs,
 } from "@/lib/flight-layout";
+import { enterFlightFullscreen, exitFlightFullscreen } from "@/lib/fullscreen";
+import { isKiosk } from "@/lib/kiosk";
 import { fmtClock } from "@/lib/safety-band";
 import { requestSkill } from "@/lib/skill-runner";
 import { BUILTIN_SKILL_BY_ID } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { BATTERY_LOW_PCT, batteryReading } from "@/shared/hud/battery";
 import { specText } from "@/shared/hud/spec-text";
-import type { PillSeverity } from "@/shared/hud/status-pill";
+import { severityTextColor, type PillSeverity } from "@/shared/hud/status-pill";
+import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStore } from "@/stores/nav-store";
+import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useStatusStore } from "@/stores/status-store";
 import { useTopBarStore } from "@/stores/top-bar-store";
 
@@ -121,8 +129,18 @@ function ControllerItem() {
 function LinkItem({ text }: { text: boolean }) {
   const ageS = useStatusStore((s) => s.status?.heartbeat_age_s);
   const rssi = useStatusStore((s) => s.status?.link?.rssi_dbm);
+  const pilotAt = useNavStreamStore((s) => s.pilot?.at ?? null);
+  const lastLiveAt = useFlightStore((s) => s.lastLiveAt);
+  const now = useNow(500);
   const [rect, setRect] = useState<DOMRect | null>(null);
-  const cell = linkCell(typeof ageS === "number" ? ageS * 1000 : null);
+  const cell = linkCell(
+    vehicleFrameAgeMs({
+      pilotAgeMs: pilotAt === null ? null : now - pilotAt,
+      // `lastLiveAt` is on the `performance.now()` clock.
+      telemetryAgeMs: lastLiveAt === null ? null : now - (performance.timeOrigin + lastLiveAt),
+      heartbeatAgeS: ageS,
+    }),
+  );
   const detail = linkDetail(rssi);
   return (
     <span className="flex shrink-0 items-center" data-zone="link" data-severity={cell.severity}>
@@ -131,7 +149,7 @@ function LinkItem({ text }: { text: boolean }) {
         onClick={(e) => setRect(rect ? null : e.currentTarget.getBoundingClientRect())}
         aria-label={specText("cockpit.link.named", { label: cell.text })}
         aria-expanded={rect !== null}
-        className={cn(HIT_AREA, "flex h-[40px] items-center gap-[6px] whitespace-nowrap rounded-[var(--fs-radius-sm)] px-[4px] hover:bg-white/10")}
+        className={cn(HIT_AREA, "flex h-[var(--fs-control)] items-center gap-[6px] whitespace-nowrap rounded-[var(--fs-radius-sm)] px-[4px] hover:bg-white/10")}
       >
         <Radio className="chrome-icon" style={{ color: severityColor(cell.severity) }} aria-hidden data-testid="link-icon" />
         {text ? <span style={cell.severity === "critical" ? { color: severityTextColor("critical") } : undefined}>{cell.text}</span> : null}
@@ -153,24 +171,36 @@ function LinkItem({ text }: { text: boolean }) {
   );
 }
 
-/** The layer menu: one checkbox per layer flag (`layers.json` layers). */
+/** The layer menu: one switch per layer flag (`layers.json` layers). The
+ *  whole row is the control, so a controller's focus ring frames the row. */
 function LayerFlagsList({ className }: { className?: string }) {
   const layers = useCockpitViewStore((s) => s.layers);
   const toggleLayer = useCockpitViewStore((s) => s.toggleLayer);
   return (
     <div role="group" aria-label={specText("cockpit.layers.flags")} className={cn("flex flex-col", className)} data-testid="layer-flags">
-      {BUILTIN_LAYERS.map((l) => (
-        <label key={l.id} className="flex min-h-[48px] cursor-pointer items-center justify-between gap-[12px] px-[6px]">
-          <span>{l.label}</span>
-          <input
-            type="checkbox"
-            className="h-[18px] w-[18px] accent-[var(--fs-ok)]"
-            checked={layerFlag(layers, l.id)}
-            onChange={(e) => toggleLayer(l.id, e.target.checked)}
+      {BUILTIN_LAYERS.map((l) => {
+        const on = layerFlag(layers, l.id);
+        return (
+          <button
+            key={l.id}
+            type="button"
+            role="switch"
+            aria-checked={on}
+            onClick={() => toggleLayer(l.id, !on)}
             data-layer={l.id}
-          />
-        </label>
-      ))}
+            className="flex min-h-[48px] w-full items-center justify-between gap-[12px] rounded-[var(--fs-radius-sm)] px-[6px] text-left hover:bg-white/10"
+          >
+            <span>{l.label}</span>
+            <span
+              aria-hidden
+              className="flex h-[1.1em] w-[1.1em] shrink-0 items-center justify-center rounded-[3px] border border-[var(--fs-text-dim)]"
+              style={on ? { background: "var(--fs-ok)", borderColor: "var(--fs-ok)" } : undefined}
+            >
+              {on ? <Check className="h-[0.9em] w-[0.9em] text-black" /> : null}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -199,7 +229,7 @@ function LayerButton({ withLabel = true }: { withLabel?: boolean }) {
         type="button"
         onClick={cycleLevel}
         aria-label={specText("cockpit.layers.next", { level: levelLabel(level) })}
-        className={cn(HIT_AREA, "flex h-[40px] min-w-[34px] items-center gap-[6px] rounded-[var(--fs-radius-sm)] px-[8px] hover:bg-white/10")}
+        className={cn(HIT_AREA, "flex h-[var(--fs-control)] min-w-[34px] items-center gap-[6px] rounded-[var(--fs-radius-sm)] px-[8px] hover:bg-white/10")}
       >
         <Layers className="chrome-icon" aria-hidden />
         {withLabel ? levelLabel(level) : null}
@@ -211,7 +241,7 @@ function LayerButton({ withLabel = true }: { withLabel?: boolean }) {
         aria-expanded={rect !== null}
         aria-haspopup="dialog"
         data-testid="layer-flags-button"
-        className={cn(HIT_AREA, "flex h-[40px] w-[48px] items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10")}
+        className={cn(HIT_AREA, "flex h-[var(--fs-control)] w-[48px] items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10")}
       >
         <ChevronDown className="chrome-icon" aria-hidden />
       </button>
@@ -269,6 +299,40 @@ function useOverflowCount(row: React.RefObject<HTMLDivElement>): number {
   return hidden;
 }
 
+/** Full screen, outside the kiosk: the Feed leaves the shell's frame and
+ *  fills the screen, and back. */
+function FullscreenButton() {
+  const on = useCockpitUiStore((s) => s.flightFullscreen);
+  const Icon = on ? Minimize2 : Maximize2;
+  const label = specText(on ? "cockpit.menu.leave_immersive" : "cockpit.menu.immersive");
+  return (
+    <button
+      type="button"
+      onClick={() => void (on ? exitFlightFullscreen() : enterFlightFullscreen())}
+      title={label}
+      aria-label={label}
+      aria-pressed={on}
+      data-testid="top-bar-fullscreen"
+      className={cn(HIT_AREA, "flex h-[var(--fs-control)] w-[44px] shrink-0 items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10")}
+    >
+      <Icon className="chrome-icon" aria-hidden />
+    </button>
+  );
+}
+
+/** The Menu's top-bar sections at the Menu row type size (`menuTextPx`),
+ *  so they scale with the width class as the Menu's rows do. */
+function menuSectionStyle(widthClass: WidthClass): CSSProperties {
+  const px = menuTextPx(widthClass);
+  const k = px / CHROME_TOKENS.type.top_bar_px;
+  return {
+    ...chromeStyle(),
+    "--fs-type-bar": `${px}px`,
+    "--fs-type-bar-line": `${Math.round(CHROME_TOKENS.type.top_bar_line_px * k)}px`,
+    "--fs-icon": `${Math.round(CHROME_TOKENS.icon_px * k)}px`,
+  } as CSSProperties;
+}
+
 export function TopBar({ compact = false }: { compact?: boolean }) {
   const command = useNavStore((s) => s.command);
   const ctx = useSkillContext();
@@ -301,12 +365,13 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
         {!moved.has("controller") ? <ControllerItem /> : null}
       </div>
       {!moved.has("layer_button") ? <LayerButton withLabel={!compact} /> : null}
+      {isKiosk() ? null : <FullscreenButton />}
       <button
         type="button"
         onClick={() => command("quick-menu")}
         aria-label={specText("cockpit.menu")}
         data-zone="menu"
-        className={cn(HIT_AREA, "flex h-[40px] w-[44px] shrink-0 items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10")}
+        className={cn(HIT_AREA, "flex h-[var(--fs-control)] w-[44px] shrink-0 items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10")}
       >
         <Menu className="chrome-icon" aria-hidden />
       </button>
@@ -319,7 +384,7 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
         aria-label={specText("stop.hold_label")}
         data-zone="stop"
         data-testid="top-bar-stop"
-        className={cn(HIT_AREA, "chrome-stop flex h-[40px] w-[84px] shrink-0 items-center justify-center gap-[6px] font-bold tracking-wide")}
+        className={cn(HIT_AREA, "chrome-stop flex h-[var(--fs-control)] w-[76px] shrink-0 items-center justify-center gap-[6px] font-bold tracking-wide")}
       >
         <OctagonX className="chrome-icon" aria-hidden />
         {specText("cockpit.stop")}
@@ -331,10 +396,11 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
 /** The top-bar items the bar has moved into the Menu, shown there in full,
  *  in the order they moved. */
 export function FlightMenuSection({ moved }: { moved: ReadonlySet<TopBarOverflowItem> }) {
+  const { widthClass } = useWidthClass();
   return (
     <div
-      className="chrome-bar-text flex flex-wrap items-center gap-x-[16px] gap-y-[8px] rounded-md border border-border p-[8px]"
-      style={chromeStyle()}
+      className="chrome-bar-text flex flex-wrap items-center gap-x-[16px] gap-y-[8px] rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] p-[8px]"
+      style={menuSectionStyle(widthClass)}
       aria-label={specText("cockpit.flight_status")}
       data-testid="menu-overflow"
     >
@@ -352,10 +418,11 @@ export function FlightMenuSection({ moved }: { moved: ReadonlySet<TopBarOverflow
 
 /** The Menu's Layers entry: the level button and every layer flag. */
 export function LayersMenuSection() {
+  const { widthClass } = useWidthClass();
   const level = useCockpitViewStore((s) => s.level);
   const cycleLevel = useCockpitViewStore((s) => s.cycleLevel);
   return (
-    <div className="chrome-bar-text flex flex-col gap-[4px] rounded-md border border-border p-[8px]" style={chromeStyle()} data-testid="menu-layers">
+    <div className="chrome-bar-text flex flex-col gap-[4px] rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] p-[8px]" style={menuSectionStyle(widthClass)} data-testid="menu-layers">
       <button
         type="button"
         onClick={cycleLevel}

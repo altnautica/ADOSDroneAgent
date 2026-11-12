@@ -14,13 +14,14 @@ import {
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { fmtUptime } from "@/shared/format";
+import { profileLabel, roleLabel } from "@/lib/enum-labels";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 
 function profileVariant(profile?: string) {
   if (profile === "drone" || profile === "visor") return "info" as const;
-  if (profile === "ground_station") return "ok" as const;
-  return "default" as const;
+  if (profile === "ground_station") return "success" as const;
+  return "neutral" as const;
 }
 
 /** The node's mDNS reach name — only the name the agent reports avahi as
@@ -116,8 +117,8 @@ export function Header() {
           {deviceName && <span className="text-sm tracking-tight truncate">{deviceName}</span>}
           {mdnsHost && <CopyHost host={mdnsHost} />}
           <Badge variant={profileVariant(profile)} className="shrink-0">
-            {profile}
-            {role && profile === "ground_station" ? ` · ${role}` : ""}
+            {profileLabel(profile)}
+            {role && profile === "ground_station" ? ` · ${roleLabel(role)}` : ""}
           </Badge>
         </div>
 

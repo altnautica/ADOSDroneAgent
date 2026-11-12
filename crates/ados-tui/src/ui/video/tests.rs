@@ -90,3 +90,19 @@ fn video_renders_encoder_radio_cameras_latency_and_urls() {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
 }
+
+#[test]
+fn a_running_pipeline_without_a_url_reads_as_one_sentence() {
+    assert_eq!(
+        no_viewer_text("running"),
+        "The pipeline is running but has not reported a viewer URL"
+    );
+    assert_eq!(
+        no_viewer_text(""),
+        "No viewer URL: the pipeline state is not reported"
+    );
+    assert_eq!(
+        no_viewer_text("failed"),
+        "No viewer URL: the pipeline failed"
+    );
+}

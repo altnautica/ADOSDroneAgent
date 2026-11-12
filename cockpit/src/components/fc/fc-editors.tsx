@@ -8,10 +8,12 @@ import { Check } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ActionButton, SectionHeader } from "@/components/ui/data";
+import { KeyboardPanel } from "@/components/ui/keyboard-panel";
 import { ListItem } from "@/components/ui/list-item";
 import { SwitchSettingRow } from "@/components/ui/setting-row";
 import { Sheet } from "@/components/ui/sheet";
 import { setDocumented, toggleBit, undocumentedBits } from "@/lib/fc-config";
+import { useWantsKeyboard } from "@/hooks/use-wants-keyboard";
 import { cn } from "@/lib/utils";
 import "@/shared/i18n";
 
@@ -39,30 +41,53 @@ export function ValueEntry({
     setShown(value);
     setText(value);
   }
+  const wantsKeyboard = useWantsKeyboard();
+  const [keyboard, setKeyboard] = useState(false);
+  const commit = () => {
+    if (text !== value) onCommit(text);
+  };
   return (
-    <input
-      type="text"
-      inputMode={numeric ? "decimal" : "text"}
-      aria-label={label}
-      value={text}
-      disabled={disabled}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        if (text !== value) onCommit(text);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          if (text !== value) onCommit(text);
-        } else if (e.key === "Escape") {
-          setText(value);
-        }
-      }}
-      className={cn(
-        "touch-target w-[7.5rem] rounded-md border bg-input px-[0.5rem] text-right font-mono text-[0.9rem] text-surface-foreground disabled:opacity-50",
-        dirty ? "border-warn" : "border-border",
-      )}
-    />
+    <div className="flex flex-col items-end gap-[0.3rem]">
+      <input
+        type="text"
+        inputMode={numeric ? "decimal" : "text"}
+        aria-label={label}
+        value={text}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onFocus={() => {
+          if (wantsKeyboard) setKeyboard(true);
+        }}
+        onBlur={() => {
+          // With the on-screen keyboard open, its own keys take focus; the
+          // entry commits when that keyboard closes instead.
+          if (!keyboard) commit();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            setText(value);
+          }
+        }}
+        className={cn(
+          "touch-target w-[7.5rem] rounded-md border bg-input px-[0.5rem] text-right font-mono text-[0.9rem] text-surface-foreground disabled:opacity-50",
+          dirty ? "border-warn" : "border-border",
+        )}
+      />
+      {keyboard && !disabled ? (
+        <KeyboardPanel
+          value={text}
+          onChange={setText}
+          numeric={numeric}
+          onClose={() => {
+            setKeyboard(false);
+            commit();
+          }}
+        />
+      ) : null}
+    </div>
   );
 }
 

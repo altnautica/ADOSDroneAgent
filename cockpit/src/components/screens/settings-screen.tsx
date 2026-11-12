@@ -18,7 +18,7 @@
 
 import { Suspense, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronLeft, ChevronRight, Gamepad2, Layers, Lightbulb, Palette, Settings as SettingsIcon, Wrench } from "lucide-react";
+import { ChevronRight, Gamepad2, Layers, Lightbulb, Palette, Wrench } from "lucide-react";
 
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { ControlsSettings } from "@/components/settings/controls/controls-settings";
@@ -34,8 +34,8 @@ import { specText } from "@/shared/hud/spec-text";
 import { useNodeIdentity, type NodeIdentityLite } from "@/shared/use-profile";
 import "@/shared/i18n";
 
-import { Panel } from "@/components/ui/panel";
-import { EmptyNote, StaleBadge } from "@/components/ui/data";
+import { ConsoleScaffold } from "@/components/ui/console-scaffold";
+import { EmptyNote, ErrorNote, StaleBadge } from "@/components/ui/data";
 import { PathRow } from "@/components/settings/settings-rows";
 import { LeafEditor } from "@/components/settings/leaf-editor";
 import { useConfigStore, useConfigSubscription, type WriteResult } from "@/stores/config-store";
@@ -62,7 +62,7 @@ export function SettingsScreen({
   const config = useConfigStore((s) => s.config);
   const ready = useConfigStore((s) => s.ready);
   const stale = useConfigStore((s) => s.stale);
-  const error = useConfigStore((s) => s.error);
+  const refresh = useConfigStore((s) => s.refresh);
   const write = useConfigStore((s) => s.write);
 
   const mode = path[0] ?? "~";
@@ -85,15 +85,13 @@ export function SettingsScreen({
     body = <SectionBody id={rest} identity={identity} />;
   } else if (mode === "!") {
     body = rest === "appearance" ? <AppearanceSettings /> : <ControlsSettings />;
-  } else if (config == null) {
-    body = <EmptyNote>{ready ? error ?? "Configuration is unavailable." : "Reading configuration…"}</EmptyNote>;
-  } else if (mode === "@") {
-    body = <LeafEditor path={rest} config={config} write={write} onDone={back} />;
-  } else if (mode === "~" && rest === "") {
+  } else if (mode === "~" && rest === "" && (config != null || ready)) {
+    // The root lists the agent's own sections, which read their own routes, so
+    // a failed config read hides only what needs it (never the raw error).
     body = (
       <CuratedRoot
         config={config}
-        onGroup={(id) => dispatch({ kind: "open-detail", id: `settings:~${id}` })}
+        onRetry={() => void refresh()}
         onAll={() => drill("")}
         onControls={() => dispatch({ kind: "open-detail", id: "settings:!controls" })}
         onAircraftSetup={
@@ -111,69 +109,47 @@ export function SettingsScreen({
         sectionsHeading={t("cockpit.settingsSections.heading")}
       />
     );
+  } else if (config == null) {
+    body = ready ? (
+      <ErrorNote onRetry={() => void refresh()}>{t("cockpit.readFailed.config")}</ErrorNote>
+    ) : (
+      <EmptyNote>{t("common.loading")}</EmptyNote>
+    );
+  } else if (mode === "@") {
+    body = <LeafEditor path={rest} config={config} write={write} onDone={back} />;
   } else if (mode === "~") {
     body = <CuratedGroupView groupId={rest} config={config} onDrill={drill} onEdit={edit} write={write} />;
   } else {
-    // raw: "#" (root) or "#<dotpath>"
-    body = <RawView dotpath={rest} config={config} onDrill={drill} onEdit={edit} write={write} />;
+    // raw: "#" (root) or "#<dotpath>". The root leads with the curated groups,
+    // so the Settings root itself lists each setting group once.
+    const onGroup = (id: string) => dispatch({ kind: "open-detail", id: `settings:~${id}` });
+    body = (
+      <>
+        {rest === "" ? <CuratedGroups config={config} onGroup={onGroup} /> : null}
+        <RawView dotpath={rest} config={config} onDrill={drill} onEdit={edit} write={write} />
+      </>
+    );
   }
 
   return (
-    <Panel>
-      <div className="mb-[0.4rem] flex items-center gap-[0.4rem]">
-        {isRoot ? (
-          <SettingsIcon className="h-[1.3rem] w-[1.3rem] shrink-0 text-hud-primary" aria-hidden />
-        ) : (
-          <button
-            type="button"
-            onClick={back}
-            aria-label="Back"
-            className="touch-target -ml-[0.3rem] flex items-center justify-center rounded-md px-[0.3rem] text-muted-foreground hover:bg-muted hover:text-surface-foreground"
-          >
-            <ChevronLeft className="h-[1.5rem] w-[1.5rem]" />
-          </button>
-        )}
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-[1.1rem] font-semibold tracking-tight text-surface-foreground">
-            {title}
-          </h1>
-          {hint ? <div className="truncate text-[0.75rem] text-muted-foreground">{hint}</div> : null}
-        </div>
-        <StaleBadge stale={stale} />
-      </div>
-
+    <ConsoleScaffold stale={stale}
+      title={title}
+      // Every drill level steps back one level; the root has no back.
+      onBack={isRoot ? undefined : back}
+      actions={<StaleBadge stale={stale} />}
+    >
+      {hint ? <div className="mb-[0.4rem] truncate px-[0.2rem] text-[0.75rem] text-muted-foreground">{hint}</div> : null}
       {body}
-    </Panel>
+    </ConsoleScaffold>
   );
 }
 
 // ── the curated root menu ────────────────────────────────────────────────────
 
-function CuratedRoot({
-  config,
-  onGroup,
-  onAll,
-  onControls,
-  onAircraftSetup,
-  onAppearance,
-  sections,
-  onSection,
-  sectionLabel,
-  sectionsHeading,
-}: {
-  config: AgentConfig;
-  onGroup: (id: string) => void;
-  onAll: () => void;
-  onControls: () => void;
-  onAircraftSetup: (() => void) | null;
-  onAppearance: () => void;
-  sections: SettingsSectionId[];
-  onSection: (id: SettingsSectionId) => void;
-  sectionLabel: (id: SettingsSectionId) => { title: string; summary: string };
-  sectionsHeading: string;
-}) {
+/** The curated setting groups present in this node's config. */
+function CuratedGroups({ config, onGroup }: { config: AgentConfig; onGroup: (id: string) => void }) {
   return (
-    <div className="flex flex-col gap-[0.3rem]">
+    <div className="mb-[0.4rem] flex flex-col gap-[0.3rem]">
       {CURATED_GROUPS.map((g) => {
         // Skip a curated group whose every field is absent on this profile.
         const present = g.paths.some((p) => getAtPath(config, p) !== undefined);
@@ -195,7 +171,41 @@ function CuratedRoot({
           </button>
         );
       })}
+    </div>
+  );
+}
 
+function CuratedRoot({
+  config,
+  onRetry,
+  onAll,
+  onControls,
+  onAircraftSetup,
+  onAppearance,
+  sections,
+  onSection,
+  sectionLabel,
+  sectionsHeading,
+}: {
+  config: AgentConfig | null;
+  onRetry: () => void;
+  onAll: () => void;
+  onControls: () => void;
+  onAircraftSetup: (() => void) | null;
+  onAppearance: () => void;
+  sections: SettingsSectionId[];
+  onSection: (id: SettingsSectionId) => void;
+  sectionLabel: (id: SettingsSectionId) => { title: string; summary: string };
+  sectionsHeading: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-col gap-[0.3rem]">
+      {config == null ? (
+        <ErrorNote onRetry={onRetry}>{t("cockpit.readFailed.config")}</ErrorNote>
+      ) : null}
+
+      {config != null ? (
       <button
         type="button"
         onClick={onAll}
@@ -203,13 +213,12 @@ function CuratedRoot({
       >
         <Layers className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[0.95rem] text-surface-foreground">All settings</div>
-          <div className="truncate text-[0.75rem] text-muted-foreground">
-            Every field in the raw config tree
-          </div>
+          <div className="truncate text-[0.95rem] text-surface-foreground">{t("cockpit.settingsSections.root.allSettings")}</div>
+          <div className="truncate text-[0.75rem] text-muted-foreground">{t("cockpit.settingsSections.root.allSettingsSummary")}</div>
         </div>
         <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
       </button>
+      ) : null}
       <button
         type="button"
         onClick={onAppearance}
@@ -217,8 +226,8 @@ function CuratedRoot({
       >
         <Palette className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[0.95rem] text-surface-foreground">Appearance</div>
-          <div className="truncate text-[0.75rem] text-muted-foreground">Theme and glove mode on this panel</div>
+          <div className="truncate text-[0.95rem] text-surface-foreground">{t("cockpit.settingsSections.root.appearance")}</div>
+          <div className="truncate text-[0.75rem] text-muted-foreground">{t("cockpit.settingsSections.root.appearanceSummary")}</div>
         </div>
         <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
       </button>
@@ -229,10 +238,8 @@ function CuratedRoot({
       >
         <Gamepad2 className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[0.95rem] text-surface-foreground">Controls</div>
-          <div className="truncate text-[0.75rem] text-muted-foreground">
-            Controller map, sticks, calibration, on-screen sticks and voice prompts
-          </div>
+          <div className="truncate text-[0.95rem] text-surface-foreground">{specText("controls.title")}</div>
+          <div className="truncate text-[0.75rem] text-muted-foreground">{t("cockpit.settingsSections.root.controlsSummary")}</div>
         </div>
         <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
       </button>
@@ -253,8 +260,8 @@ function CuratedRoot({
         >
           <Wrench className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-[0.95rem] text-surface-foreground">Aircraft setup</div>
-            <div className="truncate text-[0.75rem] text-muted-foreground">Calibrate, configure and tune the flight controller</div>
+            <div className="truncate text-[0.95rem] text-surface-foreground">{t("nav.aircraftSetup")}</div>
+            <div className="truncate text-[0.75rem] text-muted-foreground">{t("cockpit.settingsSections.root.aircraftSetupSummary")}</div>
           </div>
           <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
         </button>
@@ -330,8 +337,9 @@ function CuratedGroupView({
   onEdit: (p: string) => void;
   write: (p: string, v: string) => Promise<WriteResult>;
 }) {
+  const { t } = useTranslation();
   const group = curatedGroupById(groupId);
-  if (!group) return <EmptyNote>Unknown settings group.</EmptyNote>;
+  if (!group) return <EmptyNote>{t("cockpit.settingsSections.tree.unknownGroup")}</EmptyNote>;
   // Presence is decided from the CONFIG, not from the rendered row.
   //
   // `PathRow` returns null for a path this profile does not carry, and the
@@ -343,7 +351,7 @@ function CuratedGroupView({
   // ground-station settings, which reads as a screen that failed to load.
   const present = group.paths.filter((p) => getAtPath(config, p) !== undefined);
   if (present.length === 0) {
-    return <EmptyNote>None of these fields are present on this node.</EmptyNote>;
+    return <EmptyNote>{t("cockpit.settingsSections.tree.noneOnNode")}</EmptyNote>;
   }
   return (
     <div className="flex flex-col gap-[0.3rem]">
@@ -369,10 +377,11 @@ function RawView({
   onEdit: (p: string) => void;
   write: (p: string, v: string) => Promise<WriteResult>;
 }) {
+  const { t } = useTranslation();
   const node: ConfigValue | undefined = dotpath === "" ? config : getAtPath(config, dotpath);
-  if (!isGroup(node)) return <EmptyNote>This is not a settings group.</EmptyNote>;
+  if (!isGroup(node)) return <EmptyNote>{t("cockpit.settingsSections.tree.notGroup")}</EmptyNote>;
   const keys = Object.keys(node).sort();
-  if (keys.length === 0) return <EmptyNote>No fields here.</EmptyNote>;
+  if (keys.length === 0) return <EmptyNote>{t("cockpit.settingsSections.tree.noFields")}</EmptyNote>;
   return (
     <div className="flex flex-col gap-[0.3rem]">
       {keys.map((k) => {

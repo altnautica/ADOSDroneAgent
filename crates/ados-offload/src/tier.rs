@@ -2,9 +2,10 @@
 //!
 //! NPU-less boards are first-class: a board with no accelerator runs an
 //! autonomous mission by offloading the heavy perception to a paired compute
-//! node, not as a degraded mode. The agent picks the tier from three inputs ,
-//! the HAL accelerator capability, whether a compute node is paired on an
-//! acceptable bearer, and whether the board can carry a light local path.
+//! node, not as a degraded mode. The agent picks the tier from three inputs:
+//! the HAL accelerator capability (or a CPU that runs the detector itself),
+//! whether a compute node is paired on an acceptable bearer, and whether the
+//! board can carry a light local path.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,9 @@ use serde::{Deserialize, Serialize};
 pub enum PerceptionTier {
     /// On the drone's own NPU / GPU (lowest latency).
     Local,
+    /// On the drone's own CPU: no accelerator, the detector runs in-process
+    /// on the companion's cores.
+    Cpu,
     /// Entirely on the paired compute node (NPU-less board, near-real-time).
     Offload,
     /// Light/fast work local (a small detector + fast VIO for the control loop),
@@ -21,17 +25,30 @@ pub enum PerceptionTier {
     Hybrid,
 }
 
+impl PerceptionTier {
+    /// The wire name (`local`, `cpu`, `offload`, `hybrid`), the same string the
+    /// serde form carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PerceptionTier::Local => "local",
+            PerceptionTier::Cpu => "cpu",
+            PerceptionTier::Offload => "offload",
+            PerceptionTier::Hybrid => "hybrid",
+        }
+    }
+}
+
 /// The inputs the agent reads to pick a perception tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TierInputs {
     /// The board has an NPU / GPU.
     pub has_accelerator: bool,
-    /// The board has no NPU but a CPU strong enough to run the detector locally
-    /// (for example a Cortex-A76-class SoC). A distinct signal from
-    /// `has_accelerator`: it is a full local compute path, so it resolves to
-    /// `Local` the same way an accelerator does, and the board runs detection
-    /// on-board rather than offloading. Set it only when the board really has
-    /// that path, so the picker never invents one.
+    /// The board has no NPU but runs the detector on its CPU (for example a
+    /// Cortex-A76-class SoC with the in-process ONNX backend). A distinct
+    /// signal from `has_accelerator`: it is a full on-board path, so it wins
+    /// over an offload node the same way an accelerator does, and resolves to
+    /// `Cpu`. Set it only when the board really has that path, so the picker
+    /// never invents one.
     pub local_inference_capable: bool,
     /// The required models fit + run on the local accelerator.
     pub models_fit_locally: bool,
@@ -73,18 +90,22 @@ impl TierInputs {
 /// (an NPU-less board with no usable compute node, it flies on bare odometry,
 /// with no detection / tracking / map-based autonomy).
 ///
-/// - A local compute path that fits the models ⇒ **Local** (the default): an
-///   accelerator (NPU / GPU), or a CPU strong enough to run the detector via the
-///   in-process ONNX backend (`local_inference_capable`). Either is a full
-///   on-board path, so it wins over an available node (lowest latency).
+/// - An accelerator (NPU / GPU) that fits the models ⇒ **Local** (the default,
+///   lowest latency).
+/// - Otherwise, a CPU that runs the detector (`local_inference_capable`) ⇒
+///   **Cpu**. Like an accelerator it is a full on-board path, so it wins over
+///   an available node.
 /// - Otherwise, a paired node on an acceptable bearer ⇒ **Hybrid** when the
 ///   board can carry the light local path, else **Offload**.
 /// - Otherwise, a board that can run a light local detector (no usable node) ⇒
 ///   **Local** (degraded: the small on-board detector only, no heavy remote).
 /// - Otherwise ⇒ `None` (bare odometry, no detection / tracking / map autonomy).
 pub fn pick_tier(inputs: &TierInputs) -> Option<PerceptionTier> {
-    if (inputs.has_accelerator && inputs.models_fit_locally) || inputs.local_inference_capable {
+    if inputs.has_accelerator && inputs.models_fit_locally {
         return Some(PerceptionTier::Local);
+    }
+    if inputs.local_inference_capable {
+        return Some(PerceptionTier::Cpu);
     }
     if inputs.compute_node_paired && inputs.bearer_acceptable {
         return Some(if inputs.can_run_light_local {
@@ -138,17 +159,36 @@ mod tests {
     }
 
     #[test]
-    fn a_cpu_onnx_capable_board_runs_local_without_an_accelerator() {
-        // A board with no NPU but a CPU strong enough for the in-process ONNX
-        // detector is a full local path: it runs detection on-board.
+    fn a_cpu_detector_board_reports_cpu_without_an_accelerator() {
+        // A board with no NPU whose CPU runs the in-process ONNX detector is a
+        // full on-board path, reported as the CPU tier, never `none`.
         let mut i = inputs();
         i.has_accelerator = false;
         i.local_inference_capable = true;
-        assert_eq!(pick_tier(&i), Some(PerceptionTier::Local));
-        // Local wins even when a node is paired (lowest latency on-board).
+        assert_eq!(pick_tier(&i), Some(PerceptionTier::Cpu));
+        // The CPU path wins even when a node is paired (it runs on-board).
         i.compute_node_paired = true;
         i.bearer_acceptable = true;
+        assert_eq!(pick_tier(&i), Some(PerceptionTier::Cpu));
+        // An accelerator that fits the models outranks the CPU.
+        i.has_accelerator = true;
+        i.models_fit_locally = true;
         assert_eq!(pick_tier(&i), Some(PerceptionTier::Local));
+    }
+
+    #[test]
+    fn the_wire_name_is_the_serde_form() {
+        use serde::de::IntoDeserializer;
+        for tier in [
+            PerceptionTier::Local,
+            PerceptionTier::Cpu,
+            PerceptionTier::Offload,
+            PerceptionTier::Hybrid,
+        ] {
+            let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                tier.as_str().into_deserializer();
+            assert_eq!(PerceptionTier::deserialize(de).unwrap(), tier, "{tier:?}");
+        }
     }
 
     #[test]
@@ -206,14 +246,14 @@ mod tests {
             pick_tier(&TierInputs::for_drone(true, false, true, true)),
             Some(PerceptionTier::Local)
         );
-        // A CPU-ONNX-capable board runs local regardless of a link (no offload).
+        // A CPU-detector board runs on its CPU regardless of a link (no offload).
         assert_eq!(
             pick_tier(&TierInputs::for_drone(false, true, true, true)),
-            Some(PerceptionTier::Local)
+            Some(PerceptionTier::Cpu)
         );
         assert_eq!(
             pick_tier(&TierInputs::for_drone(false, true, false, false)),
-            Some(PerceptionTier::Local)
+            Some(PerceptionTier::Cpu)
         );
         // A paired node on an unacceptable bearer is not an offload path.
         assert_eq!(

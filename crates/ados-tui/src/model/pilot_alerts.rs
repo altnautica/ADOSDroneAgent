@@ -1,12 +1,15 @@
-//! The alerts the cockpit's status pill draws from the pilot kind and the
-//! flight controller: a pilot state too old to trust, the FC's own failsafe,
-//! failing readiness items, the FC's PreArm/Arm texts and its status texts at
-//! WARNING or worse. The same rules, ids, texts and order as the shared
-//! `status-pill.ts` `pillAlerts` for these sources, held to the golden
-//! `pill-cases.json`.
+//! The status pill's alert list, as the shared `status-pill.ts` `pillAlerts`
+//! builds it: the shared base alerts (link, battery, packs, GPS), the agent
+//! not answering, a pilot state too old to trust or the FC's own failsafe,
+//! failing readiness items, a lost controller, failing pre-flight items, a
+//! degraded navigation source, the FC's PreArm/Arm text, its status texts at
+//! WARNING or worse, and the on-board storage. The same rules, ids, texts and
+//! order, held to the golden `pill-cases.json`.
 
 use super::autonomy::Pilot;
+use super::base_alerts::{storage_crit_pct, storage_warn_pct, BaseAlert, Level};
 use super::flight_state::stale_after_ms;
+use super::nav_source::{NavPill, NavTone};
 use super::spec_text::{has_spec_text, spec_text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,56 +53,133 @@ pub fn failsafe_text(cause: Option<&str>) -> String {
     spec_text("alert.failsafe", &[("cause", &worded)])
 }
 
-/// Every active alert, critical first, then in source order: the pilot not
-/// answering or the FC failsafe, readiness, the newest PreArm/Arm text, the
-/// status texts (one per text, at the worst severity it was sent with). A
-/// stale pilot state contributes only the not-answering item. `age_ms` is the
-/// pilot state's age now (the read's age plus the time since the read), so a
-/// hung poll ages the alerts as it ages the rows.
-pub fn pilot_alerts(p: &Pilot, age_ms: Option<u64>, prearm: Option<&[String]>) -> Vec<PillAlert> {
+/// The pilot holds for a lost controller while armed and airborne. An
+/// unknown arm or landed state is possibly airborne.
+pub fn controller_lost(p: &Pilot) -> bool {
+    p.hold_reason.as_deref() == Some("controller-lost")
+        && p.armed != Some(false)
+        && p.landed != Some(true)
+}
+
+/// What the pill reads.
+#[derive(Default)]
+pub struct PillInputs<'a> {
+    /// The shared base alerts; advisories stay out of the pill.
+    pub alerts: &'a [BaseAlert],
+    /// The pilot kind; `None` when nothing publishes it (the pilot rules
+    /// are off).
+    pub pilot: Option<&'a Pilot>,
+    /// The pilot state's age now (the read's age plus the time since the
+    /// read, so a hung poll ages it); `None` is unknown, so stale.
+    pub pilot_age_ms: Option<u64>,
+    /// The FC's PreArm/Arm texts; `None` while unknown.
+    pub prearm: Option<&'a [String]>,
+    pub storage_pct: Option<f64>,
+    /// The agent itself does not answer.
+    pub agent_unreachable: bool,
+    /// The arm state is unknown (the drone may be airborne): pre-flight
+    /// items hide.
+    pub arm_unknown: bool,
+    /// The failing pre-flight checklist items (id, label).
+    pub preflight_failing: &'a [(String, String)],
+    pub nav_source: Option<NavPill>,
+}
+
+fn push(out: &mut Vec<PillAlert>, id: impl Into<String>, severity: Severity, text: String) {
+    out.push(PillAlert {
+        id: id.into(),
+        severity,
+        text,
+    });
+}
+
+/// Every active alert, critical first, then in source order. A stale pilot
+/// state contributes only the not-answering item, never its readiness,
+/// controller or status-text items.
+pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
     let mut out = Vec::new();
-    let stale = pilot_stale(p, age_ms);
-    if stale {
-        out.push(PillAlert {
-            id: "pilot_not_answering".into(),
-            severity: Severity::Warning,
-            text: spec_text("alert.pilot_not_answering", &[]),
-        });
-    } else if p.fc_failsafe {
-        out.push(PillAlert {
-            id: "failsafe".into(),
-            severity: Severity::Critical,
-            text: failsafe_text(p.failsafe_cause.as_deref()),
-        });
+    for a in i.alerts {
+        let severity = match a.level {
+            Level::Critical => Severity::Critical,
+            Level::Warning => Severity::Warning,
+            Level::Advisory => continue,
+        };
+        push(
+            &mut out,
+            format!("alert:{}", a.id),
+            severity,
+            a.title.clone(),
+        );
     }
-    let readiness = if stale { &[][..] } else { &p.readiness[..] };
-    for r in readiness.iter().filter(|r| !r.ok) {
+    if i.agent_unreachable {
+        let text = spec_text("alert.agent_unreachable", &[]);
+        push(&mut out, "agent_unreachable", Severity::Critical, text);
+    }
+    let fresh = i.pilot.filter(|p| !pilot_stale(p, i.pilot_age_ms));
+    match (i.pilot, fresh) {
+        (Some(_), None) => {
+            let text = spec_text("alert.pilot_not_answering", &[]);
+            push(&mut out, "pilot_not_answering", Severity::Warning, text);
+        }
+        (_, Some(p)) if p.fc_failsafe => {
+            let text = failsafe_text(p.failsafe_cause.as_deref());
+            push(&mut out, "failsafe", Severity::Critical, text);
+        }
+        _ => {}
+    }
+    for r in fresh
+        .into_iter()
+        .flat_map(|p| &p.readiness)
+        .filter(|r| !r.ok)
+    {
         // A blocking item refuses take-off: critical, as the pre-flight sheet fails it.
-        out.push(PillAlert {
-            id: format!("pilot:{}", r.id),
-            severity: if r.block {
-                Severity::Critical
-            } else {
-                Severity::Warning
-            },
-            text: if r.msg.is_empty() {
-                r.id.clone()
-            } else {
-                r.msg.clone()
-            },
-        });
+        let severity = if r.block {
+            Severity::Critical
+        } else {
+            Severity::Warning
+        };
+        let text = if r.msg.is_empty() {
+            r.id.clone()
+        } else {
+            r.msg.clone()
+        };
+        push(&mut out, format!("pilot:{}", r.id), severity, text);
     }
-    if let Some(last) = prearm.and_then(<[String]>::last) {
-        let text = prearm_body(last).unwrap_or(last);
-        out.push(PillAlert {
-            id: format!("fc:{text}"),
-            severity: Severity::Warning,
-            text: spec_text("flow.preflight.fc_prearm.failing", &[("text", text)]),
-        });
+    if fresh.is_some_and(controller_lost) {
+        let text = spec_text("alert.controller_lost", &[]);
+        push(&mut out, "controller_lost", Severity::Warning, text);
+    }
+    let preflight = if i.arm_unknown {
+        &[][..]
+    } else {
+        i.preflight_failing
+    };
+    for (id, label) in preflight {
+        let text = spec_text("alert.preflight_failing", &[("item", label)]);
+        push(&mut out, format!("preflight:{id}"), Severity::Warning, text);
+    }
+    if let Some(nav) = i.nav_source {
+        if let Some(key) = nav.kind.key() {
+            let severity = match nav.tone {
+                NavTone::Crit => Some(Severity::Critical),
+                NavTone::Warn => Some(Severity::Warning),
+                _ => None,
+            };
+            if let Some(severity) = severity {
+                let text = spec_text(
+                    "alert.nav_source_degraded",
+                    &[("source", &spec_text(key, &[]))],
+                );
+                push(&mut out, "nav_source_degraded", severity, text);
+            }
+        }
+    }
+    if let Some(last) = i.prearm.and_then(<[String]>::last) {
+        let text = prearm_body(last).unwrap_or(last).to_string();
+        push(&mut out, format!("fc:{text}"), Severity::Warning, text);
     }
     let fc_start = out.len();
-    let fc_status = if stale { &[][..] } else { &p.statustext[..] };
-    for s in fc_status {
+    for s in fresh.into_iter().flat_map(|p| &p.statustext) {
         // PreArm/Arm lines already arrive through `prearm`.
         if prearm_body(&s.text).is_some() {
             continue;
@@ -112,12 +192,23 @@ pub fn pilot_alerts(p: &Pilot, age_ms: Option<u64>, prearm: Option<&[String]>) -
         match out[fc_start..].iter_mut().find(|a| a.text == s.text) {
             Some(seen) if severity == Severity::Critical => seen.severity = severity,
             Some(_) => {}
-            None => out.push(PillAlert {
-                id: format!("fcst:{}", s.text),
+            None => push(
+                &mut out,
+                format!("fcst:{}", s.text),
                 severity,
-                text: s.text.clone(),
-            }),
+                s.text.clone(),
+            ),
         }
+    }
+    if let Some(pct) = i.storage_pct.filter(|p| *p >= storage_warn_pct()) {
+        let severity = if pct >= storage_crit_pct() {
+            Severity::Critical
+        } else {
+            Severity::Warning
+        };
+        let n = (pct.round() as i64).to_string();
+        let text = spec_text("cockpit.status.storage_used", &[("pct", &n)]);
+        push(&mut out, "storage", severity, text);
     }
     // A stable sort: equal severities keep their source order.
     out.sort_by_key(|a| a.severity != Severity::Critical);
@@ -137,6 +228,7 @@ pub fn alerts_count_text(n: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::autonomy::{FcStatusText, ReadinessItem};
+    use super::super::nav_source::NavKind;
     use super::*;
     use serde_json::Value;
 
@@ -163,6 +255,16 @@ mod tests {
             age_ms: Some(100),
             ..Pilot::default()
         }
+    }
+
+    /// The pill from the pilot kind and PreArm texts alone.
+    fn pilot_alerts(p: &Pilot, age_ms: Option<u64>, prearm: Option<&[String]>) -> Vec<PillAlert> {
+        pill_alerts(&PillInputs {
+            pilot: Some(p),
+            pilot_age_ms: age_ms,
+            prearm,
+            ..PillInputs::default()
+        })
     }
 
     #[test]
@@ -195,7 +297,7 @@ mod tests {
                 (Severity::Critical, "fc_profile"),
                 (Severity::Critical, "EKF variance"),
                 (Severity::Warning, "No rangefinder"),
-                (Severity::Warning, "Flight controller: Throttle too high"),
+                (Severity::Warning, "Throttle too high"),
                 (Severity::Warning, "Low disk"),
             ]
         );
@@ -255,19 +357,38 @@ mod tests {
         assert_eq!(alerts_count_text(3).as_deref(), Some("3 warnings"));
     }
 
-    /// Whether a golden case uses only the sources this port models (the
-    /// pilot kind and the FC's PreArm texts): the terminal has no surface
-    /// alerts, storage, agent-reachability, controller, checklist or
-    /// navigation-source rules. An `armed` input only hides checklist items,
-    /// so a case without them reads the same whatever it says.
-    fn pilot_sources_only(i: &Value) -> bool {
-        let empty = |k: &str| i[k].as_array().is_none_or(Vec::is_empty);
-        empty("alerts")
-            && empty("preflight_failing")
-            && i["agent_reachable"] != Value::Bool(false)
-            && i["controller_lost"] != Value::Bool(true)
-            && i["storage_pct"].as_f64().is_none_or(|s| s < 90.0)
-            && i["nav_source"].is_null()
+    /// A golden case's inputs as this port reads them. The case's
+    /// `controller_lost` is the shared rule's answer, so the pilot is built
+    /// holding for a lost controller at an unknown arm state.
+    fn case_inputs(i: &Value) -> (Vec<BaseAlert>, Option<NavPill>, Vec<(String, String)>) {
+        let alerts = i["alerts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|a| BaseAlert {
+                id: a["id"].as_str().unwrap_or_default().into(),
+                level: Level::from_name(a["level"].as_str().unwrap_or_default())
+                    .expect("a known level"),
+                title: a["title"].as_str().unwrap_or_default().into(),
+            })
+            .collect();
+        let nav = i
+            .get("nav_source")
+            .filter(|n| !n.is_null())
+            .map(|n| NavPill {
+                kind: NavKind::from_name(n["kind"].as_str().unwrap_or_default()).expect("a kind"),
+                tone: NavTone::from_name(n["tone"].as_str().unwrap_or_default()).expect("a tone"),
+            });
+        let preflight = i["preflight_failing"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let s = |k: &str| p[k].as_str().unwrap_or_default().to_string();
+                (s("id"), s("label"))
+            })
+            .collect();
+        (alerts, nav, preflight)
     }
 
     #[test]
@@ -279,10 +400,9 @@ mod tests {
         let mut ran = 0;
         for c in &cases {
             let i = &c["input"];
-            if !pilot_sources_only(i) {
-                continue;
-            }
             let p = Pilot {
+                hold_reason: (i["controller_lost"] == Value::Bool(true))
+                    .then(|| "controller-lost".to_string()),
                 readiness: i["readiness"]
                     .as_array()
                     .into_iter()
@@ -316,7 +436,18 @@ mod tests {
                     .map(String::from)
                     .collect()
             });
-            let alerts = pilot_alerts(&p, p.age_ms, prearm.as_deref());
+            let (base, nav_source, preflight) = case_inputs(i);
+            let alerts = pill_alerts(&PillInputs {
+                alerts: &base,
+                pilot: Some(&p),
+                pilot_age_ms: p.age_ms,
+                prearm: prearm.as_deref(),
+                storage_pct: i["storage_pct"].as_f64(),
+                agent_unreachable: i["agent_reachable"] == Value::Bool(false),
+                arm_unknown: i.get("armed").is_some_and(Value::is_null),
+                preflight_failing: &preflight,
+                nav_source,
+            });
             let severity = if alerts.is_empty() {
                 "ok"
             } else if alerts.iter().any(|a| a.severity == Severity::Critical) {
@@ -354,6 +485,25 @@ mod tests {
                 .any(|c| c["name"] == "fc_failsafe_fresh_is_critical"),
             "the failsafe case is in the file"
         );
-        assert!(ran >= 10, "only {ran} pill cases use the pilot sources");
+        assert_eq!(ran, cases.len(), "every shared case runs");
+    }
+
+    #[test]
+    fn an_unknown_arm_state_with_a_lost_controller_alerts() {
+        let p = Pilot {
+            hold_reason: Some("controller-lost".into()),
+            ..fresh(vec![], vec![])
+        };
+        assert!(controller_lost(&p), "unknown arm may be airborne");
+        let landed = Pilot {
+            landed: Some(true),
+            ..p.clone()
+        };
+        assert!(!controller_lost(&landed));
+        let disarmed = Pilot {
+            armed: Some(false),
+            ..p
+        };
+        assert!(!controller_lost(&disarmed));
     }
 }

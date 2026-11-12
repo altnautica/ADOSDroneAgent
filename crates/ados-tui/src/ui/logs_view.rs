@@ -9,12 +9,49 @@ use ratatui::Frame;
 
 use super::{LogsTab, Mode, LEVELS};
 use crate::app::{Core, FrameOut, Hit};
-use crate::stream::LogEntry;
+use crate::stream::{LogEntry, STORE_UNAVAILABLE};
 use crate::ui::widgets::{scroll_offset, truncate};
 
 const TIME_W: usize = 12;
 const LEVEL_W: usize = 8;
 const LOGGER_W: usize = 22;
+
+/// The dashboard's words for the logging store being off (the default).
+pub const STORE_OFF: &str =
+    "The logging store is off or not answering, so this node has no log history to show.";
+pub const STORE_OFF_HINT: &str = "It is off by default. While it is off the system journal is the log of record (journalctl -u ados-supervisor -f). To keep logs here, set logging.store.enabled: true in /etc/ados/config.yaml, then re-run the installer or `ados update`.";
+
+/// Whether the agent said its logging store cannot serve.
+fn store_off(tab: &LogsTab) -> bool {
+    let says = |s: &Option<String>| s.as_deref().is_some_and(|w| w.contains(STORE_UNAVAILABLE));
+    says(&tab.warning) || says(&tab.down_reason)
+}
+
+/// Split `text` at spaces into lines at most `width` characters wide; a word
+/// longer than `width` gets a line of its own, split.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        let need = cur.chars().count() + usize::from(!cur.is_empty()) + word.chars().count();
+        if !cur.is_empty() && need > width {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+        while cur.chars().count() > width {
+            let head: String = cur.chars().take(width).collect();
+            cur = cur.chars().skip(width).collect();
+            out.push(head);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
 
 /// One line as copied text: `time LEVEL logger message`.
 pub fn plain_line(e: &LogEntry) -> String {
@@ -76,7 +113,7 @@ fn status_line(core: &Core, tab: &LogsTab, shown: usize) -> Line<'static> {
                 format!("{} polling (stream unavailable)", sym.warn),
                 Style::default().fg(t.warning()),
             ));
-            if let Some(why) = &tab.down_reason {
+            if let Some(why) = tab.down_reason.as_ref().filter(|_| !store_off(tab)) {
                 spans.push(Span::styled(format!(" · {}", truncate(why, 48)), t.dim()));
             }
         }
@@ -111,13 +148,19 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &LogsTab, out: &mut F
     let mut y = area.y;
     put(f, area, y, status_line(core, tab, visible.len()));
     y += 1;
-    if let Some(w) = &tab.warning {
+    let store_off = store_off(tab);
+    let warning = if store_off {
+        Some(STORE_OFF)
+    } else {
+        tab.warning.as_deref()
+    };
+    if let Some(w) = warning {
         put(
             f,
             area,
             y,
             Line::from(Span::styled(
-                format!("{} {w}", core.sym.warn),
+                truncate(&format!("{} {w}", core.sym.warn), usize::from(area.width)),
                 Style::default().fg(t.warning()),
             )),
         );
@@ -139,17 +182,24 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &LogsTab, out: &mut F
     y += 1;
     let list = Rect::new(area.x, y, area.width, area.bottom().saturating_sub(y));
     if visible.is_empty() {
-        let text = if tab.ring.is_empty() {
-            "No log lines yet."
-        } else {
-            "No lines match the level or filter."
+        let text = match (tab.ring.is_empty(), store_off) {
+            (true, true) => STORE_OFF_HINT,
+            (true, false) => "No log lines yet.",
+            (false, _) => "No lines match the level or filter.",
         };
-        put(
-            f,
-            area,
-            y,
-            Line::from(Span::styled(format!("  {text}"), t.dim())),
-        );
+        let width = usize::from(area.width).saturating_sub(2).max(1);
+        for chunk in wrap_words(text, width) {
+            if y >= area.bottom() {
+                break;
+            }
+            put(
+                f,
+                area,
+                y,
+                Line::from(Span::styled(format!("  {chunk}"), t.dim())),
+            );
+            y += 1;
+        }
         return 0;
     }
     let height = list.height as usize;

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import specStrings from "../cockpit-spec/setup-strings.json";
 import en from "./en.json";
 
 // The locale is shared by every agent web app, so the key check reads every
@@ -44,9 +45,11 @@ function hasKey(key: string): boolean {
 
 // Config paths such as "video.camera.rotation" share the dotted shape, so a
 // bare literal counts as a key only when its parent group exists in en.json.
+// Flight-spec keys (`cockpit-spec/setup-strings.json`, read through
+// `specText`) share the shape too and are not locale keys.
 function isKeyShaped(literal: string): boolean {
   const parts = literal.split(".");
-  if (parts.length < 3 || !namespaces.has(parts[0])) return false;
+  if (parts.length < 3 || !namespaces.has(parts[0]) || literal in specStrings.strings) return false;
   const parent = lookup(parts.slice(0, -1).join("."));
   return typeof parent === "object" && parent !== null;
 }

@@ -11,6 +11,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { ActionButton, EmptyNote, Row } from "@/components/ui/data";
 import { ListItem } from "@/components/ui/list-item";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
+import { profileWordKey, roleWordKey } from "@/lib/profile-words";
 import { isKiosk } from "@/lib/kiosk";
 import { CLOSED_GATE, openGate, sectionVerdict, settleGate, type ConfirmGate } from "@/lib/settings/apply-form";
 import { PROFILE_OPTIONS, ROLE_OPTIONS, profileDirty, profilePayload, type ProfileDraft } from "@/lib/settings/profile";
@@ -98,11 +99,10 @@ export function ProfileSection() {
           label={t("settings.profile.profileHeading")}
           value={
             initialProfile === "ground_station"
-              ? `${initialProfile}${t("settings.profile.roleSeparator")}${initialRole}`
-              : initialProfile
+              ? `${t(profileWordKey(initialProfile))}${t("access.profileGate.roleSuffix", { role: t(roleWordKey(initialRole)) })}`
+              : t(profileWordKey(initialProfile))
           }
           hint={`${t("settings.profile.sourceSeparator")}${source}`}
-          mono
         />
         {setup.status === 501 ? <ResidualMissingNote /> : null}
         <div className="px-[0.75rem]">
