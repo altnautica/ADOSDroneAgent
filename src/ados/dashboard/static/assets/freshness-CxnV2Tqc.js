@@ -1,0 +1,1 @@
+import{i as e,n as t}from"./jsx-runtime-CU3EbJiN.js";var n=e(t(),1);function r(e){let[t,r]=(0,n.useState)(()=>Date.now());return(0,n.useEffect)(()=>{let t=setInterval(()=>r(Date.now()),e);return()=>clearInterval(t)},[e]),t}function i(e,t,n){return!e.isError&&e.dataUpdatedAt>0&&n-e.dataUpdatedAt<=2*t}function a(e,t,n){return i(e,t,n)?e.data:void 0}export{a as n,r,i as t};

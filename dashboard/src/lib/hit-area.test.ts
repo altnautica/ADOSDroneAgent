@@ -27,7 +27,7 @@ describe("touch hit targets", () => {
     ["components/panels/video-layers.tsx", "layer checkboxes"],
     ["components/telemetry/mavlink-params.tsx", "modified-only checkbox"],
     ["routes/telemetry-route.tsx", "telemetry tabs"],
-    ["components/layout/sidebar.tsx", "nav links"],
+    ["components/layout/sidebar-nav.tsx", "nav links"],
     ["components/fc/bitmask-modal.tsx", "bit rows"],
   ])("%s: %s are 44 px tall below md", (file) => {
     expect(read(file)).toMatch(/max-md:min-h-11/);

@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.110] - 2026-11-12
+
+### Fixed
+
+- The dashboard's mobile navigation drawer loads on its first open, so the dialog code stays out of the main chunk and the main bundle is back under its budget.
+- The cockpit browser checks long-press the open part of the small map card for Fly Here; its centre is inside the frame toggle's touch target, so the press used to toggle the frame instead.
+
 ## [0.109.109] - 2026-11-12
 
 ### Fixed

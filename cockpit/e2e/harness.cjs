@@ -263,7 +263,23 @@ const AIR_SHEETS = [
     async (p) => {
       const map = p.locator('[aria-label="Long-press the map to fly there"]').first();
       await map.waitFor({ state: "attached", timeout: 5000 });
-      await holdOn(p, map, 1200);
+      // On the small card the header buttons' 48 px hit areas cover the top
+      // half of the map; a pilot presses the open map below them. Pick the
+      // first point down the vertical centre line that hit-tests to the map.
+      const at = await map.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        for (let f = 0.5; f <= 0.9; f += 0.05) {
+          const x = r.left + r.width / 2;
+          const y = r.top + r.height * f;
+          if (el.contains(document.elementFromPoint(x, y))) return { x, y };
+        }
+        return null;
+      });
+      if (!at) throw new Error("no point in the lower half of the map takes a press");
+      await p.mouse.move(at.x, at.y);
+      await p.mouse.down();
+      await p.waitForTimeout(1200);
+      await p.mouse.up();
     },
   ],
 ];
