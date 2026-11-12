@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.114] - 2026-11-13
+
+### Fixed
+
+- The TUI's flight-state chip words live in their own module, so every Rust file stays within the size ratchet; a camera-match check reads as one expression for the current clippy.
+
 ## [0.109.113] - 2026-11-13
 
 ### Fixed

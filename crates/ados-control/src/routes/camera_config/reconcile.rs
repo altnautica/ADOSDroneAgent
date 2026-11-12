@@ -21,15 +21,8 @@ pub(super) fn fingerprint_matches(
     let (Some(d), Some(x)) = (declared, discovered) else {
         return false;
     };
-    if let (Some(a), Some(b)) = (&d.usb, &x.usb) {
-        if a == b {
-            return true;
-        }
-    }
-    if d.csi_sensor.is_some() && d.csi_sensor == x.csi_sensor && d.csi_port == x.csi_port {
-        return true;
-    }
-    false
+    matches!((&d.usb, &x.usb), (Some(a), Some(b)) if a == b)
+        || (d.csi_sensor.is_some() && d.csi_sensor == x.csi_sensor && d.csi_port == x.csi_port)
 }
 
 /// True when a leg source is a network capture URL (a leg mediamtx pulls, not a

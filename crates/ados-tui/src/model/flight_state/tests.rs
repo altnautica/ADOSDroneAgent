@@ -1,5 +1,7 @@
+use super::words::fmt_eta;
 use super::*;
 use crate::model::autonomy::Autonomy;
+use crate::model::spec_text::spec_text;
 
 /// The shared golden chip cases, read in place.
 const CHIP_CASES: &str = include_str!("../../../../../web-shared/src/hud/fixtures/chip-cases.json");

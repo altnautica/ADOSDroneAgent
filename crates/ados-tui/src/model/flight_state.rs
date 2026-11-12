@@ -16,9 +16,11 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::autonomy::Pilot;
-use super::spec_text::{fill_placeholders, spec_text};
 
 pub mod readouts;
+mod words;
+
+use words::fill;
 
 /// The spec file, byte for byte.
 pub const FLIGHT_STATE_JSON: &str =
@@ -252,84 +254,6 @@ fn matches(when: &Map<String, Value>, f: &ChipFacts) -> bool {
         // A condition this cockpit does not know never matches.
         _ => false,
     })
-}
-
-fn fmt_eta(s: Option<f64>) -> String {
-    let Some(s) = s.filter(|s| s.is_finite()) else {
-        return String::new();
-    };
-    // Round the total first, so 119.6 s reads 2:00, never 1:60.
-    let total = js_round(s) as i64;
-    let m = total.div_euclid(60);
-    if m > 0 {
-        format!("ETA {m}:{:02}", total % 60)
-    } else {
-        format!("ETA {total} s")
-    }
-}
-
-/// A launch step's name as the spec words it (`flow.launch.step.*`, `after`
-/// read as its label). The take-off step reads as its action
-/// (`chip.launch_step.takeoff`), so the chip never repeats "take off".
-fn launch_step_name(step: Option<&str>) -> String {
-    let key = match step {
-        None => return String::new(),
-        Some("after") => "flow.launch.step.after_label".to_string(),
-        Some("takeoff") => "chip.launch_step.takeoff".to_string(),
-        Some(s) => format!("flow.launch.step.{s}"),
-    };
-    spec_text(&key, &[])
-}
-
-/// A word that starts a chip part, with a capital first letter.
-fn capital_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
-}
-
-/// A profile as the mode sheet labels it (`mode_sheet.profile`), "Normal"
-/// when none is reported; an unknown value reads with a capital first letter.
-fn profile_label(profile: Option<&str>) -> String {
-    let value = profile.unwrap_or("normal");
-    let sheet = &SPEC.mode_sheet.profile;
-    match sheet.values.iter().position(|v| v == value) {
-        Some(i) => sheet.labels[i].clone(),
-        None => capital_first(value),
-    }
-}
-
-fn num(v: Option<f64>) -> String {
-    match v.filter(|v| v.is_finite()) {
-        Some(v) => (js_round(v) as i64).to_string(),
-        None => "—".to_string(),
-    }
-}
-
-fn fill(template: &str, f: &ChipFacts) -> String {
-    let filled = fill_placeholders(template, |key| {
-        Some(match key {
-            "first_block_msg" => f.first_block_msg.clone().unwrap_or_default(),
-            "profile" => profile_label(f.profile.as_deref()),
-            "skill_label" => capital_first(f.skill_label.as_deref().unwrap_or("Skill")),
-            "mode_detail" => f.mode_detail.clone().unwrap_or_else(|| "Active".into()),
-            "dist_m" => num(f.dist_m),
-            "home_dist_m" => num(f.home_dist_m),
-            "setup_step" => f.setup_step.as_deref().unwrap_or("").to_uppercase(),
-            "seq" => num(f.seq),
-            "total" => num(f.total),
-            "eta" => fmt_eta(f.eta_s),
-            "fc_mode_name_upper" => f.fc_mode_name.as_deref().unwrap_or("—").to_uppercase(),
-            "step" => launch_step_name(f.launch_step.as_deref()),
-            _ => return None,
-        })
-    });
-    match filled.strip_suffix(" · ") {
-        Some(trimmed) => trimmed.to_string(),
-        None => filled,
-    }
 }
 
 /// A hold reason as the spec labels it; an unlabelled one reads with its
