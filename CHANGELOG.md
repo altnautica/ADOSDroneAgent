@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.109] - 2026-11-12
+
+### Fixed
+
+- The dashboard contrast check lists its source files with `readdirSync`, which the CI's Node 20 has (it used `fs.globSync`, Node 22 only).
+
 ## [0.109.108] - 2026-11-12
 
 ### Changed

@@ -1,11 +1,13 @@
-import { globSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 // Text colours that fail 4.5:1 in one of the two themes.
 const SRC = path.resolve(__dirname);
-const files = globSync("**/*.{ts,tsx}", { cwd: SRC }).filter((f) => !f.startsWith("shared/") && !f.endsWith(".test.ts"));
+const files = (readdirSync(SRC, { recursive: true }) as string[])
+  .map((f) => f.split(path.sep).join("/"))
+  .filter((f) => /\.tsx?$/.test(f) && !f.startsWith("shared/") && !f.endsWith(".test.ts"));
 const read = (f: string) => readFileSync(path.join(SRC, f), "utf8");
 
 describe("dashboard text contrast in both themes", () => {
