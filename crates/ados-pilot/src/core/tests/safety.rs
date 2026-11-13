@@ -173,7 +173,7 @@ fn replayed_column_approach_never_allows_more_than_it_can_stop_from() {
 }
 
 /// A planar scan of a wall `d` ahead (vehicle yaw 0), as world-engine sends it.
-fn wall_scan(d: f32) -> Value {
+pub(super) fn wall_scan(d: f32) -> Value {
     let ranges: Vec<f32> = (0..360)
         .map(|i| {
             let th = if i > 180 { i as f32 - 360.0 } else { i as f32 }.to_radians();

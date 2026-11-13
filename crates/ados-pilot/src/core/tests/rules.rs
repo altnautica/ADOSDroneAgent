@@ -857,9 +857,10 @@ fn goto_stops_at_the_geofence() {
     w.airborne(copter::GUIDED);
     w.action("take_control");
     w.pos = [20.0, 0.0, -5.0];
+    // Past the fence and off to the side: the fence point is 9 m away.
     w.req(Request::Goto {
         n: 60.0,
-        e: 0.0,
+        e: 30.0,
         d: -5.0,
         yaw: None,
     });
@@ -872,6 +873,51 @@ fn goto_stops_at_the_geofence() {
         "position setpoint {} past the fence",
         sp.x
     );
+}
+
+#[test]
+fn a_goto_past_the_fence_arrives_at_the_fence() {
+    let mut w = World::new();
+    w.p.settings.pilot.max_dist_m = 20.0;
+    w.airborne(copter::GUIDED);
+    w.action("take_control");
+    w.pos = [20.0, 0.0, -5.0];
+    w.req(Request::Goto {
+        n: 60.0,
+        e: 0.0,
+        d: -5.0,
+        yaw: None,
+    });
+    w.run(400);
+    assert_eq!(w.p.owner(), Owner::Pilot, "arrived and holds");
+}
+
+#[test]
+fn a_goto_above_the_ceiling_arrives_at_the_ceiling() {
+    let mut w = World::new();
+    w.p.settings.pilot.max_alt_agl_m = 5.0;
+    w.airborne(copter::GUIDED); // d = -5, 5 m above the ground: at the ceiling
+    w.action("take_control");
+    w.req(Request::Goto {
+        n: 0.0,
+        e: 0.0,
+        d: -30.0,
+        yaw: None,
+    });
+    w.run(400);
+    assert_eq!(w.p.owner(), Owner::Pilot, "arrived and holds");
+}
+
+#[test]
+fn a_rangefinder_stuck_low_holds_the_height_rather_than_climbing() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.agl = Some(0.3); // a stuck reading under the 0.5 m floor, at d = -5
+    let id = w.lease();
+    w.goal_d(id, 0.0, 0.0, -5.0);
+    w.run(400);
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.z >= -5.0 - 1e-3, "climbs to d {}", sp.z);
 }
 
 #[test]

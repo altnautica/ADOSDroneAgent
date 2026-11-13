@@ -86,11 +86,15 @@ impl Pilot {
                 self.on_mission(m, now_ms);
             }
             "nav.state" => {
+                // The FC keeps a source set until told otherwise: a report
+                // naming none leaves the last one.
                 let set = payload
                     .get("active_set")
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|v| u8::try_from(v).ok());
-                self.nav_state = Some((set, now_ms));
+                if let Some(set) = set {
+                    self.nav_set = set;
+                }
             }
             CLIENT_MODE_TOPIC => {
                 if let Some(c) = ClientMode::parse(payload) {

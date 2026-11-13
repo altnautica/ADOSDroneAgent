@@ -311,8 +311,11 @@ impl Pilot {
             Owner::Skill | Owner::Goto => self.fly_plan(pos, yaw, now_ms),
             Owner::Swarm => match self.swarm {
                 Some(g) if now_ms.saturating_sub(g.at_ms) <= SWARM_STALE_MS => {
-                    let v = self.brake_limit(pos, [g.vel[0], g.vel[1]], now_ms);
-                    let v = self.cap_velocity(v, now_ms);
+                    // The ramp first, then the brake: the brake's cut flies
+                    // at once.
+                    let want = self.cap_ramp([g.vel[0], g.vel[1]], now_ms);
+                    let v = self.brake_limit(pos, want, now_ms);
+                    self.cap_flown(v, now_ms);
                     let m = self.tx().setpoint(
                         MASK_VELOCITY,
                         [0.0; 3],
@@ -330,6 +333,12 @@ impl Pilot {
 
     fn fly_sticks(&mut self, axes: [f32; 4], pos: [f32; 3], yaw: f32, dt: f32, now_ms: u64) {
         let lim = self.limits_now(now_ms);
+        if self.nav_capped(now_ms) {
+            // A cap switching on mid-flight: the stick model starts from the
+            // capped speed, so only speeding up is ramped and the FC slows the
+            // vehicle at its own limit.
+            self.mr.shaper.v = geo::clamp_len(self.mr.shaper.v, lim.v_h);
+        }
         let agl = self.agl(now_ms);
         let mut axes = axes;
         if self.landing {

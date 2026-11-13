@@ -30,11 +30,17 @@ impl Pilot {
                 None => (None, 0.0, pos[2], None, None),
             },
         };
+        let home = self.fc.home_ne();
+        let max_dist = self.settings.pilot.max_dist_m;
+        let max_alt = self.settings.pilot.max_alt_agl_m;
+        let agl = self.agl(now_ms);
         if self.owner() == Owner::Goto {
             if let Some(t) = self.goto {
-                if geo::dist(pos_ne, [t[0], t[1]]) < GOTO_ARRIVE_M
-                    && (pos[2] - t[2]).abs() < GOTO_ARRIVE_M
-                {
+                // Arrival at the point the limits let it fly to: a target past
+                // the fence or the ceiling is reached at the limit.
+                let t_ne = inside_fence([t[0], t[1]], home, max_dist);
+                let (t_d, _) = clamp_d(t[2], 0.0, pos[2], agl, FLOOR_AGL_M, max_alt);
+                if geo::dist(pos_ne, t_ne) < GOTO_ARRIVE_M && (pos[2] - t_d).abs() < GOTO_ARRIVE_M {
                     self.brake_hold(now_ms, None);
                     return;
                 }
@@ -73,18 +79,19 @@ impl Pilot {
             None => yaw,
         });
         let ask = geo::add(vel, geo::scale(to, FC_POS_GAIN));
-        let braked = self.goal_brake(pos_ne, ask, v_cap, now_ms);
-        let home = self.fc.home_ne();
-        let max_dist = self.settings.pilot.max_dist_m;
         let fence = |v: V2| geofence(pos_ne, home, max_dist, v);
-        let (sp_ne, vel) = if self.nav_cap(now_ms).is_some() {
+        let (sp_ne, vel) = if self.nav_capped(now_ms) {
             // Capped, a distant position setpoint would let the FC's position
-            // loop pull past the cap, so the capped velocity is flown from the
-            // vehicle's own position.
-            let v = fence(braked.unwrap_or_else(|| geo::clamp_len(ask, v_cap)));
-            (pos_ne, self.cap_velocity(v, now_ms))
+            // loop pull past the cap, so the velocity is flown from the
+            // vehicle's own position. The ramp runs first and the brake and
+            // the fence after it, so their cut flies at once.
+            let want = self.cap_ramp(geo::clamp_len(ask, v_cap), now_ms);
+            let v = fence(self.goal_brake(pos_ne, want, v_cap, now_ms).unwrap_or(want));
+            self.cap_flown(v, now_ms);
+            (pos_ne, v)
         } else {
-            match braked {
+            self.cap_vel = None;
+            match self.goal_brake(pos_ne, ask, v_cap, now_ms) {
                 // At the vehicle's own position the FC's position loop adds
                 // nothing: it flies the braked velocity.
                 Some(v) => (pos_ne, fence(v)),
@@ -95,9 +102,9 @@ impl Pilot {
             goal_d,
             goal.as_ref().map_or(0.0, |g| g.vd),
             pos[2],
-            self.agl(now_ms),
+            agl,
             FLOOR_AGL_M,
-            self.settings.pilot.max_alt_agl_m,
+            max_alt,
         );
         let sp = [sp_ne[0], sp_ne[1], goal_d];
         self.setpoint = Some(sp);
@@ -120,8 +127,10 @@ fn inside_fence(p: V2, home: V2, max_dist: f32) -> V2 {
 
 /// The setpoint down position and down velocity held to an AGL within
 /// `[floor, ceil]`, from the vehicle's `d_now` and its height above ground.
-/// A down velocity pushing past a bound it is held at is dropped. Without a
-/// height above ground both pass through.
+/// A bound is held, never pushed: a vehicle already past one keeps its
+/// height (it may still move back inside), so a rangefinder stuck low or
+/// high never drives a climb or a descent. A down velocity the clamp cut
+/// is dropped. Without a height above ground both pass through.
 fn clamp_d(
     goal_d: f32,
     vd: f32,
@@ -135,8 +144,8 @@ fn clamp_d(
     };
     let ground_d = d_now + a; // NED: the ground is below
     let (top, bottom) = (ground_d - ceil, ground_d - floor);
-    let d = goal_d.clamp(top.min(bottom), bottom);
-    let vd = if (d <= top && vd < 0.0) || (d >= bottom && vd > 0.0) {
+    let d = goal_d.min(bottom.max(d_now)).max(top.min(d_now));
+    let vd = if (d > goal_d && vd < 0.0) || (d < goal_d && vd > 0.0) {
         0.0
     } else {
         vd

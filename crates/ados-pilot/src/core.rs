@@ -132,11 +132,10 @@ pub struct Pilot {
     params_ms: u64,
     setpoint: Option<[f32; 3]>,
     plan_hold: Option<[f32; 3]>,
-    /// vision-nav's last `nav.state`: the EKF source set it reports active
-    /// (`None`: it named none) and when it came.
-    nav_state: Option<(Option<u8>, u64)>,
-    /// The last capped horizontal velocity setpoint and its time
-    /// ([`nav_cap`]).
+    /// The EKF source set the FC flies: the last one vision-nav's `nav.state`
+    /// named, the boot set before any ([`nav_cap`]).
+    nav_set: u8,
+    /// The last capped horizontal velocity flown and its time ([`nav_cap`]).
     cap_vel: Option<(V2, u64)>,
     last_tick_ms: Option<u64>,
     controller_lost_shown: bool,
@@ -193,7 +192,7 @@ impl Pilot {
             params_ms: 0,
             setpoint: None,
             plan_hold: None,
-            nav_state: None,
+            nav_set: nav_cap::BOOT_SOURCE_SET,
             cap_vel: None,
             last_tick_ms: None,
             controller_lost_shown: false,

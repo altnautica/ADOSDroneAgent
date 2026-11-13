@@ -113,12 +113,40 @@ fn gps_source_is_not_capped() {
 }
 
 #[test]
-fn a_stale_nav_state_falls_back_to_the_gps_fix() {
+fn a_stale_nav_state_keeps_the_last_reported_set() {
     let mut w = ext_nav_world();
     ext_nav(&mut w);
     w.run(5000);
-    // The harness keeps feeding a 3-D fix.
-    assert!(w.p.nav_cap(w.now).is_none());
+    // The FC keeps the set until told otherwise: the 3-D fix the harness
+    // feeds does not lift the cap.
+    assert!(w.p.nav_cap(w.now).is_some());
+    w.p.on_feed(
+        "nav.state",
+        &json!({"active_set": null, "gps_fix": 3}),
+        w.now,
+    );
+    assert!(
+        w.p.nav_cap(w.now).is_some(),
+        "no set named: the last one holds"
+    );
+    w.p.on_feed("nav.state", &json!({"active_set": 1, "gps_fix": 3}), w.now);
+    assert!(w.p.nav_cap(w.now).is_none(), "set 1 is GPS");
+}
+
+#[test]
+fn a_non_gps_boot_set_is_capped_despite_a_3d_fix() {
+    // No nav.state yet: the FC flies source set 1, here external nav.
+    let mut w = World::new();
+    w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 6.0);
+    w.airborne(copter::GUIDED);
+    assert!(w.p.nav_cap(w.now).is_some());
+}
+
+#[test]
+fn an_unknown_source_set_is_capped() {
+    let mut w = ext_nav_world();
+    w.p.on_feed("nav.state", &json!({"active_set": 7, "gps_fix": 3}), w.now);
+    assert!(w.p.nav_cap(w.now).is_some());
 }
 
 #[test]
@@ -168,6 +196,86 @@ fn stick_flight_is_capped_too() {
     }
     let v = speeds(&w, from);
     assert!(v.iter().any(|s| *s > 1.0), "sticks fly: {v:?}");
+    for s in v {
+        assert!(s <= CAP + 1e-3, "{s} m/s");
+    }
+}
+
+/// Lease and fly the capped goal 40 m north until its setpoint is at the cap.
+fn capped_goal_at_speed(w: &mut World) -> u64 {
+    ext_nav(w);
+    let id = w.lease();
+    fly_goal_ext_nav(w, id, 2000);
+    let sp = w.last_setpoint().unwrap();
+    assert!((sp.vx - CAP).abs() < 1e-3, "at the cap: {}", sp.vx);
+    w.vel = [sp.vx, sp.vy, 0.0];
+    id
+}
+
+#[test]
+fn a_capped_goal_obeys_the_obstacle_brake_at_once() {
+    let mut w = ext_nav_world();
+    let id = capped_goal_at_speed(&mut w);
+    // A wall 3 m ahead and a goal 1.4 m ahead: the plan stays clear, and the
+    // brake allows about 1.1 m/s at 2 m/s inside the 1.5 m margin.
+    w.p.on_feed(
+        "plugin.world-engine.scan",
+        &super::safety::wall_scan(3.0),
+        w.now,
+    );
+    w.goal(id, 1.4, 0.0);
+    w.run(20);
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.vx <= 1.5, "toward the wall at {} m/s", sp.vx);
+}
+
+#[test]
+fn a_capped_goal_stops_at_once_at_the_geofence() {
+    let mut w = ext_nav_world();
+    w.p.settings.pilot.max_dist_m = 20.0;
+    let id = capped_goal_at_speed(&mut w);
+    w.pos[0] = 20.0;
+    w.goal(id, 40.0, 0.0);
+    w.run(20);
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.vx <= 1e-3, "outward at {} m/s", sp.vx);
+}
+
+#[test]
+fn a_cap_starting_at_speed_commands_no_more_than_the_cap() {
+    let mut w = ext_nav_world();
+    w.vel = [8.0, 0.0, 0.0];
+    ext_nav(&mut w);
+    let id = w.lease();
+    let from = w.sent.len();
+    fly_goal_ext_nav(&mut w, id, 1000);
+    let v = speeds(&w, from);
+    assert!(!v.is_empty());
+    for s in v {
+        assert!(s <= CAP + 1e-3, "{s} m/s");
+    }
+}
+
+#[test]
+fn stick_flight_at_speed_drops_to_the_cap_when_it_switches_on() {
+    let mut w = World::new();
+    w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
+    w.p.fc.params.insert("EK3_SRC2_POSXY".into(), 6.0);
+    // The brake off, so only the cap can hold the sticks to 2 m/s.
+    w.p.settings.pilot.avoid = ados_protocol::pilot::AvoidMode::Off;
+    w.airborne(copter::GUIDED);
+    w.action("take_control");
+    w.stick([0.0; 4], 600); // pass the gate
+                            // Full forward on GPS (source set 1): the stick model reaches 8 m/s.
+    w.stick([0.0, 1.0, 0.0, 0.0], 5000);
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.vx > 7.5, "uncapped stick flight at {} m/s", sp.vx);
+    // The EKF moves to external nav mid-flight.
+    ext_nav(&mut w);
+    let from = w.sent.len();
+    w.stick([0.0, 1.0, 0.0, 0.0], 500);
+    let v = speeds(&w, from);
+    assert!(!v.is_empty());
     for s in v {
         assert!(s <= CAP + 1e-3, "{s} m/s");
     }
