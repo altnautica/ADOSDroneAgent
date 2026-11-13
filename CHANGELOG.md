@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.125] - 2026-11-13
+
+### Fixed
+
+- Vehicle camera zoom: a stop the camera refuses (`DENIED`, `TEMPORARILY_REJECTED` and the like) shows the zoom failure at once and is still sent again up to three times, like an unanswered stop. Before, a refused stop was dropped silently.
+
 ## [0.109.124] - 2026-11-13
 
 ### Changed

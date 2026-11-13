@@ -249,6 +249,23 @@ describe("the vehicle camera's zoom (ArduPilot takes a continuous or a range zoo
       expect(writes.map((w) => w.body.value)).toEqual([1, 0, 0]);
     }));
 
+  it("a refused stop shows its failure at once and is still sent again", () =>
+    within(async () => {
+      const seen: ToastMessage[] = [];
+      const off = onToast((t) => seen.push(t));
+      try {
+        const writes = stubZoom((b) => (b.value === 0 ? { result: "DENIED" } : { result: "ACCEPTED" }));
+        holdMavZoom(100, 1)();
+        await vi.advanceTimersByTimeAsync(ZOOM_TAP_MS + 10);
+        expect(seen.map((t) => t.message)).toEqual([specText("camera.zoom_failed", { reason: specText("mav_result.DENIED") })]);
+        await vi.advanceTimersByTimeAsync(ZOOM_STOP_TRIES * ZOOM_STOP_RETRY_MS * 4);
+        expect(writes.map((w) => w.body.value)).toEqual([1, ...Array<number>(ZOOM_STOP_TRIES).fill(0)]);
+        expect(seen).toHaveLength(1);
+      } finally {
+        off();
+      }
+    }));
+
   it("a held zoom keeps the agent's deadman fed until the release, and no longer", () =>
     within(async () => {
       stubZoom();

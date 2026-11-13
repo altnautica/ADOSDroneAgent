@@ -222,28 +222,28 @@ export async function captureMavPhoto(componentId: number): Promise<MavCameraRep
 export const ZOOM_TAP_MS = 300;
 /** A held zoom whose release never comes (a lost pointer-up) stops here. */
 export const ZOOM_HOLD_MAX_MS = 10_000;
-/** A held zoom tells the agent it is still held this often; the agent stops
- *  a zoom that hears nothing for about a second. */
+/** A held zoom tells the agent it is still held this often (its deadman stops a quiet zoom after ~1 s). */
 export const ZOOM_KEEPALIVE_MS = 300;
-/** An unanswered stop is sent again this long after, `ZOOM_STOP_TRIES` sends in all. */
+/** A failed stop is sent again this long after, `ZOOM_STOP_TRIES` sends in all. */
 export const ZOOM_STOP_RETRY_MS = 250;
 export const ZOOM_STOP_TRIES = 3;
 
-/** Set the vehicle camera's continuous zoom rate (`MAV_CMD_SET_CAMERA_ZOOM`
- *  type continuous): -1 wide … 1 tele, 0 stops. ArduPilot's camera library
- *  takes only a continuous or a range zoom and refuses a step. */
+/** Set the vehicle camera's continuous zoom rate: -1 wide … 1 tele, 0 stops (ArduPilot refuses a step zoom). */
 export function setMavZoomRate(componentId: number, rate: number, failKey: string | null = "camera.zoom_failed"): Promise<MavCameraReply | null> {
   return mavCameraWrite("zoom", { component_id: componentId, type: "continuous", value: rate }, failKey);
 }
 
-/** Stop the vehicle camera's zoom, sending the stop again while the camera
- *  gives no answer (a `TIMEOUT`, or no reply from the agent), up to
- *  `ZOOM_STOP_TRIES` sends. Only the last failure shows. */
+/** Stop the vehicle camera's zoom, resent until the camera takes it, up to `ZOOM_STOP_TRIES`
+ *  sends. A refusal shows at once, no answer on the last send; one failure shows at most. */
 export async function stopMavZoom(componentId: number): Promise<MavCameraReply | null> {
-  for (let i = 1; ; i++) {
-    const last = i >= ZOOM_STOP_TRIES;
-    const r = await setMavZoomRate(componentId, 0, last ? "camera.zoom_failed" : null);
-    if (last || (r !== null && r.result !== "TIMEOUT")) return r;
+  for (let i = 1, shown = false; ; i++) {
+    const r = await setMavZoomRate(componentId, 0, null);
+    if (r !== null && (r.ok || r.result === "IN_PROGRESS")) return r;
+    if (!shown && (i >= ZOOM_STOP_TRIES || refused(r))) {
+      shown = true;
+      toast.err(specText("camera.zoom_failed", { reason: r ? r.statustext || mavResultText(r.result) : refusalText("no response") }));
+    }
+    if (i >= ZOOM_STOP_TRIES) return r;
     await new Promise((done) => setTimeout(done, ZOOM_STOP_RETRY_MS));
   }
 }
