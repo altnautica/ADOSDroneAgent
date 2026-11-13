@@ -112,7 +112,7 @@ impl Pilot {
             fc_mode: self.fc.custom_mode,
             fc_mode_name,
             armed: fc_linked.then_some(self.fc.armed),
-            landed: fc_linked.then(|| self.landed()),
+            landed: fc_linked.then(|| self.fc.landed()),
             vtol_transitioning: fc_linked && self.fc.vtol_transitioning(),
             input_src: self.sessions.owner.as_ref().map(|o| o.src.clone()),
             input_age_ms: self

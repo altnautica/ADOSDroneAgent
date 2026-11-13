@@ -112,7 +112,7 @@ impl Pilot {
         }
         self.failsafe.reset_link();
         self.landing = false;
-        self.touchdown = None;
+        self.touchdown = Default::default();
         self.goto = None;
         self.swarm = None;
         self.mission_paused = false;

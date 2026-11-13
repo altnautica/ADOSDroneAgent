@@ -103,9 +103,9 @@ pub struct Pilot {
     /// reported it.
     client_mode: Option<(events::ClientMode, u64)>,
     landing: bool,
-    /// On the ground after a landing, until a take-off, climb or disarm: the
-    /// NED down of the floor ([`touchdown`]).
-    touchdown: Option<f32>,
+    /// A landing reaching the ground, from the pilot's own evidence
+    /// ([`touchdown`]).
+    touchdown: touchdown::Touchdown,
     /// Outside `ados`: the hold position already given to the FC. Its
     /// GUIDED keeps it, so it is not streamed again, and a ground station's
     /// reposition replaces it instead of being overwritten on the next tick.
@@ -166,7 +166,7 @@ impl Pilot {
             own_mode: None,
             client_mode: None,
             landing: false,
-            touchdown: None,
+            touchdown: touchdown::Touchdown::default(),
             fc_hold: None,
             fc_failsafe: false,
             failsafe_cause: None,
@@ -214,9 +214,6 @@ impl Pilot {
     }
 
     fn set_mode(&mut self, mode: u32, now_ms: u64) {
-        if self.holds_land(mode) {
-            return;
-        }
         self.own_mode = Some((mode, now_ms));
         let m = self.tx().set_mode(mode);
         self.mav(m);
@@ -420,7 +417,7 @@ impl Pilot {
         if self.fc_failsafe {
             return refuse("failsafe", None);
         }
-        if self.touchdown.is_some() {
+        if self.touchdown.floor_d.is_some() {
             return refuse("landed", None);
         }
         if self.owner() == Owner::Tuning {

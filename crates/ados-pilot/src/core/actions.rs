@@ -273,6 +273,7 @@ impl Pilot {
                 let m = fam.land(class == VehicleClass::Vtol);
                 self.set_mode(m, now_ms);
                 self.set_owner(Owner::FcMode, "land");
+                self.land_handed_over();
             }
             _ => {
                 self.brake_hold(now_ms, None);

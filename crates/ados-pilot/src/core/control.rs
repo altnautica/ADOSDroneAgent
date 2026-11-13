@@ -350,7 +350,7 @@ impl Pilot {
                 self.set_mode(m, now_ms);
                 self.set_owner(Owner::FcMode, "land");
                 self.landing = false;
-                self.touch_down(pos[2]);
+                self.land_handed_over();
                 return;
             }
         }

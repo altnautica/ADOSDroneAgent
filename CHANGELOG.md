@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.121] - 2026-11-13
+
+### Fixed
+
+- Pilot: the touchdown hold from 0.109.120 could start in the air. It judged the floor by the height used for flying, which falls back to height above home without a fresh in-range rangefinder reading (no rangefinder, past its range, a dropout, or ground below the take-off point), and it started at the hand-over to LAND itself. RTH, Pause, Take control and goto were then refused, and `landed: true` was published, for the whole LAND descent. The hold now starts only on ground evidence: the FC's own ON_GROUND, or, after the pilot put the FC in its land mode, a fresh in-range downward rangefinder reading at or below 0.3 m with the vertical speed under 0.2 m/s for 200 ms; height above home never counts. It refuses only what would command a climb or a hold off the ground (Pause, goto, a ground station's reposition, Resume, a VTOL transition, a skill's motion lease, and a take-off until the FC reports ON_GROUND). RTH, Land, Take control, hand-to-FC and kill are never refused for it, the pilot no longer holds back FC mode changes, and the published `landed` is the FC's own.
+
 ## [0.109.120] - 2026-11-13
 
 ### Fixed

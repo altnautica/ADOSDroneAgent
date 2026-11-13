@@ -80,7 +80,7 @@ impl Pilot {
             ..l
         };
         // A deliberate take-off ends a touchdown.
-        self.touchdown = None;
+        self.touchdown = Default::default();
         self.arm_for_launch(&mut l, now_ms);
         self.launch = Some(l);
         Ok(())
