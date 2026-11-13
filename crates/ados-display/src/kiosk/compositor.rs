@@ -1,7 +1,7 @@
 //! Probes and actions around the cage compositor: the browser liveness check,
 //! the output-mode set, the orphan sweep and the GPU-failure heuristic.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,7 @@ use ados_proc::run::{run, RunOutcome};
 use super::drm::{connected_outputs, DrmPaths};
 use super::launcher::BROWSER_CANDIDATES;
 use super::session::wayland_sockets;
+use super::settings::{AUTO_MODE, TV_MODE};
 
 /// How long the output-mode set keeps retrying while cage brings its Wayland
 /// socket up, and how often.
@@ -91,22 +92,48 @@ async fn pkill(sig: &str, name: &str) {
     }
 }
 
-/// Set `mode` on every connected output that advertises it, through
-/// `wlr-randr` over cage's Wayland socket in `runtime_dir`. Retried every
-/// [`OUTPUT_MODE_POLL`] until the socket answers or [`OUTPUT_MODE_WAIT`]
-/// passes; an output without the mode keeps the one cage picked.
+/// The mode to set on one output that advertises `modes`, or `None` to keep
+/// the one cage picked. A preset applies when the output offers it. Under
+/// [`AUTO_MODE`] a panel wider than [`TV_MODE`] that offers it steps down to
+/// it; any other panel keeps its preferred mode.
+pub fn mode_for_output(requested: &str, modes: &BTreeSet<String>) -> Option<String> {
+    if requested != AUTO_MODE {
+        return modes.contains(requested).then(|| requested.to_string());
+    }
+    let tv_width = mode_width(TV_MODE).unwrap_or(0);
+    let widest = modes
+        .iter()
+        .filter_map(|m| mode_width(m))
+        .max()
+        .unwrap_or(0);
+    (widest > tv_width && modes.contains(TV_MODE)).then(|| TV_MODE.to_string())
+}
+
+fn mode_width(mode: &str) -> Option<u32> {
+    mode.split_once('x')?.0.parse().ok()
+}
+
+/// Set `mode` (a preset or [`AUTO_MODE`], resolved per output by
+/// [`mode_for_output`]) through `wlr-randr` over cage's Wayland socket in
+/// `runtime_dir`. Retried every [`OUTPUT_MODE_POLL`] until the socket answers
+/// or [`OUTPUT_MODE_WAIT`] passes; an output without a mode to set keeps the
+/// one cage picked.
 pub async fn apply_output_mode(
     mode: &str,
     runtime_dir: &Path,
     env: &[(String, String)],
     drm: &DrmPaths,
 ) {
-    let mut pending: BTreeSet<String> = BTreeSet::new();
+    let mut pending: BTreeMap<String, String> = BTreeMap::new();
     for (name, modes) in connected_outputs(drm) {
-        if modes.contains(mode) {
-            pending.insert(name);
-        } else {
-            tracing::warn!(output = %name, mode, "kiosk_output_mode_unsupported");
+        match mode_for_output(mode, &modes) {
+            Some(set) => {
+                pending.insert(name, set);
+            }
+            None if mode != AUTO_MODE => {
+                tracing::warn!(output = %name, mode, "kiosk_output_mode_unsupported");
+            }
+            None => {}
         }
     }
     let deadline = Instant::now() + OUTPUT_MODE_WAIT;
@@ -119,15 +146,15 @@ pub async fn apply_output_mode(
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             child_env.push(("WAYLAND_DISPLAY", socket.as_str()));
-            for name in pending.clone() {
-                let args = ["--output", name.as_str(), "--mode", mode];
+            for (name, set) in pending.clone() {
+                let args = ["--output", name.as_str(), "--mode", set.as_str()];
                 match run("wlr-randr", &args, &child_env, WLR_RANDR_TIMEOUT).await {
                     RunOutcome::SpawnFailed(error) => {
                         tracing::warn!(mode, %error, "kiosk_output_mode_unavailable");
                         return;
                     }
                     RunOutcome::Exited { code: Some(0), .. } => {
-                        tracing::info!(output = %name, mode, "kiosk_output_mode_applied");
+                        tracing::info!(output = %name, mode = %set, "kiosk_output_mode_applied");
                         pending.remove(&name);
                     }
                     RunOutcome::Exited { stderr, .. } => last_error = stderr.trim().to_string(),
@@ -140,8 +167,8 @@ pub async fn apply_output_mode(
             tokio::time::sleep(OUTPUT_MODE_POLL).await;
         }
     }
-    for name in pending {
-        tracing::warn!(output = %name, mode, error = %last_error, "kiosk_output_mode_failed");
+    for (name, set) in pending {
+        tracing::warn!(output = %name, mode = %set, error = %last_error, "kiosk_output_mode_failed");
     }
 }
 

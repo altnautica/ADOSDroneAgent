@@ -27,29 +27,29 @@ describe("followPanelModel", () => {
       stale: false,
       range: "10.2 m",
       plusMinus: "±0.6",
-      phase: "FOLLOWING",
+      phase: "Following",
       phaseTone: "track",
       interval: "9.6 – 10.8 m",
       geometry: "DEP 22° · BRG 064° · 1.4 m/s",
       latency: "LAT 85 ms",
       latencyWarn: false,
-      mode: "SMART",
+      mode: "Smart",
     });
     expect(m.cues).toEqual([
       { label: "GND", lit: true },
-      { label: "BOX", lit: false },
+      { label: "Box", lit: false },
       { label: "LIDAR", lit: true },
     ]);
     expect(m.bar?.maxM).toBe(20);
   });
 
-  it("reads every value as a dash and the phase as STALE past 2 s", () => {
+  it("reads every value as a dash and the phase as Stale past 2 s", () => {
     const m = followPanelModel(f, 2001);
     expect(m).toMatchObject({
       stale: true,
       range: "— m",
       plusMinus: null,
-      phase: "STALE",
+      phase: "Stale",
       phaseTone: "warn",
       bar: null,
       geometry: "DEP — · BRG — · — m/s",
@@ -63,7 +63,7 @@ describe("followPanelModel", () => {
   it("warns on latency above 250 ms", () => {
     const g = parseFollowState({ phase: "coasting", pipeline_latency_ms: 300, agl_source: "baro", reacquire_mode: "strict" })!;
     const m = followPanelModel(g, 0);
-    expect(m).toMatchObject({ latencyWarn: true, mode: "STRICT", phase: "COASTING", phaseTone: "coast" });
+    expect(m).toMatchObject({ latencyWarn: true, mode: "Strict", phase: "Coasting", phaseTone: "coast" });
   });
 
   it("carries no second AGL: the bottom row's is the only one on screen", () => {

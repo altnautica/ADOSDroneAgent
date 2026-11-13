@@ -37,13 +37,22 @@ pub fn load_config(path: &Path) -> Result<Value, String> {
     ados_config::schema::effective(path)
 }
 
-/// `ground_station.kiosk.resolution` → the `WIDTHxHEIGHT` mode set on the
-/// connected outputs under cage. Anything else (`auto`, unknown) leaves the
-/// compositor's choice alone.
+/// The `auto` resolution: each output keeps the compositor's choice unless
+/// it is wider than [`TV_MODE`] and offers it (see
+/// `compositor::mode_for_output`).
+pub const AUTO_MODE: &str = "auto";
+/// The mode `auto` steps a wider panel (a 4K TV) down to, so the cockpit's
+/// TV scale reads at the size it was laid out for instead of a quarter of it.
+pub const TV_MODE: &str = "1920x1080";
+
+/// `ground_station.kiosk.resolution` → the mode set on the connected outputs
+/// under cage: a `WIDTHxHEIGHT` preset or [`AUTO_MODE`]. An unknown value
+/// leaves the compositor's choice alone.
 pub fn resolution_mode(resolution: &str) -> Option<&'static str> {
     match resolution.trim().to_lowercase().as_str() {
         "720p" => Some("1280x720"),
-        "1080p" => Some("1920x1080"),
+        "1080p" => Some(TV_MODE),
+        "auto" | "" => Some(AUTO_MODE),
         _ => None,
     }
 }

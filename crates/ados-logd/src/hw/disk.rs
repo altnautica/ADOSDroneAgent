@@ -182,10 +182,7 @@ fn is_backing_device(name: &str) -> bool {
     // device stem is alphabetic (`sd`, `vd`, `hd`).
     let stem_is_alpha_disk =
         name.starts_with("sd") || name.starts_with("vd") || name.starts_with("hd");
-    if stem_is_alpha_disk && name.bytes().last().is_some_and(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    true
+    !(stem_is_alpha_disk && name.bytes().last().is_some_and(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]

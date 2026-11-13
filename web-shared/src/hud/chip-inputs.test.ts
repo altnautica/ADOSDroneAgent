@@ -72,7 +72,7 @@ describe("chip inputs", () => {
   });
 
   it("names the setup step of a tuning flight, and reads Tuning without one", () => {
-    expect(flightStateChip(chipInputs(wire({ owner: "tuning", setup_step: "autotune_roll" }), 0, 0, ctx)).text).toBe("Tuning · AUTOTUNE_ROLL");
+    expect(flightStateChip(chipInputs(wire({ owner: "tuning", setup_step: "autotune_roll" }), 0, 0, ctx)).text).toBe("Tuning · Autotune roll");
     expect(flightStateChip(chipInputs(wire({ owner: "tuning" }), 0, 0, ctx)).text).toBe("Tuning");
   });
 });

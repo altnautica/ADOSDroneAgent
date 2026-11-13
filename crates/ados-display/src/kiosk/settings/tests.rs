@@ -85,7 +85,7 @@ fn only_an_explicit_false_selects_the_full_layer() {
 }
 
 #[test]
-fn kiosk_settings_map_resolution_presets_and_leave_auto_alone() {
+fn kiosk_settings_map_resolution_presets_and_auto() {
     assert_eq!(
         kiosk_settings(&with_settings(true, "1080p")),
         KioskSettings {
@@ -97,12 +97,13 @@ fn kiosk_settings_map_resolution_presets_and_leave_auto_alone() {
         kiosk_settings(&with_settings(true, "720p")).output_mode,
         Some("1280x720")
     );
-    for value in ["auto", "4k", ""] {
+    for value in ["auto", ""] {
         assert_eq!(
             kiosk_settings(&with_settings(true, value)).output_mode,
-            None
+            Some(AUTO_MODE)
         );
     }
+    assert_eq!(kiosk_settings(&with_settings(true, "4k")).output_mode, None);
     // A config without the section reads as disabled.
     assert!(!kiosk_settings(&json!({})).enabled);
 }
@@ -139,7 +140,7 @@ fn the_effective_config_enables_the_kiosk_by_default() {
     let cfg = load_config(&dir.path().join("absent.yaml")).unwrap();
     let settings = kiosk_settings(&cfg);
     assert!(settings.enabled);
-    assert_eq!(settings.output_mode, None);
+    assert_eq!(settings.output_mode, Some(AUTO_MODE));
     assert_eq!(display_selection(&cfg), "auto");
 }
 
@@ -151,7 +152,7 @@ fn watch_reports_only_a_change_of_kiosk_settings() {
         path.clone(),
         KioskSettings {
             enabled: true,
-            output_mode: None,
+            output_mode: Some(AUTO_MODE),
         },
         None,
     );

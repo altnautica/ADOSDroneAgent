@@ -56,7 +56,7 @@ export function FollowRangePanel({
         <span className="font-semibold leading-none" style={{ fontSize: bigPx }}>
           {m.range}
         </span>
-        <span className={cn("text-[11px] font-semibold uppercase tracking-hud-tag", PHASE_CLASS[m.phaseTone])}>{m.phase}</span>
+        <span className={cn("text-[11px] font-semibold tracking-hud-tag", PHASE_CLASS[m.phaseTone])}>{m.phase}</span>
       </div>
       <div className="flex items-center gap-[8px]">
         <svg width={160} height={10} className="shrink-0" aria-hidden>

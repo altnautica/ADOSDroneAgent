@@ -20,6 +20,12 @@ describe("skill picker text", () => {
     }
   });
 
+  it("draws the chip with the control radius, not a pill", () => {
+    const chip = read("skill-picker.tsx").split('data-testid="skill-picker-chip"')[1].split(">")[0];
+    expect(chip).toContain("!rounded-[var(--fs-radius-sm)]");
+    expect(chip).not.toContain("rounded-full");
+  });
+
   it("labels the tabs from the spec", () => {
     expect(PICKER_TABS.map((t) => t.label)).toEqual(["Behaviors", "Camera", "Navigation", "Utility"]);
   });

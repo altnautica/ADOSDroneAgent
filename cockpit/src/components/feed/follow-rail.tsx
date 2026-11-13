@@ -54,7 +54,7 @@ function RailSlot({
       aria-pressed={active}
       style={{ width: size, height: size }}
       className={cn(
-        "flex shrink-0 flex-col items-center justify-center gap-[2px] rounded-md border font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.06em] disabled:opacity-45",
+        "flex shrink-0 flex-col items-center justify-center gap-[2px] rounded-md border font-mono text-[9px] font-semibold leading-none tracking-[0.06em] disabled:opacity-45",
         danger
           ? "border-hud-crit/60 text-hud-crit"
           : active

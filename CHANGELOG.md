@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.115] - 2026-11-13
+
+### Fixed
+
+- Follow strip words read in sentence case ("Follow", "Tracking ×", "Searching", "Smart"); abbreviations such as GND, LIDAR, BRG and LAT stay upper case.
+- The flight-state chip names a tuning step in sentence case ("Tuning · Autotune roll"), and so does its fallback for an unknown owner or control mode.
+- The Skills chip uses the 4 px control radius instead of a pill.
+- An HDMI kiosk on a panel wider than 1920 px (a 4K TV) under `resolution: auto` steps the output down to 1920x1080 when the panel offers it, so the cockpit's TV scale reads at its intended size.
+- Log store disk probe reads as one expression for the current clippy.
+
 ## [0.109.114] - 2026-11-13
 
 ### Fixed

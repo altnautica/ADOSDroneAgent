@@ -69,3 +69,33 @@ async fn output_mode_with_no_connected_output_returns_at_once() {
     .await
     .expect("nothing pending, nothing to wait for");
 }
+
+fn modes(list: &[&str]) -> BTreeSet<String> {
+    list.iter().map(|m| m.to_string()).collect()
+}
+
+#[test]
+fn auto_steps_a_4k_panel_down_to_1080p_and_leaves_smaller_panels_alone() {
+    let tv = modes(&["3840x2160", "2560x1440", "1920x1080", "1280x720"]);
+    assert_eq!(
+        mode_for_output(AUTO_MODE, &tv).as_deref(),
+        Some("1920x1080")
+    );
+    assert_eq!(
+        mode_for_output(AUTO_MODE, &modes(&["1920x1080", "1280x720"])),
+        None
+    );
+    assert_eq!(mode_for_output(AUTO_MODE, &modes(&["1280x800"])), None);
+    // A wide panel without a 1080p mode keeps its own.
+    assert_eq!(mode_for_output(AUTO_MODE, &modes(&["3840x2160"])), None);
+}
+
+#[test]
+fn a_preset_applies_only_where_the_output_offers_it() {
+    let tv = modes(&["3840x2160", "1920x1080"]);
+    assert_eq!(
+        mode_for_output("1920x1080", &tv).as_deref(),
+        Some("1920x1080")
+    );
+    assert_eq!(mode_for_output("1280x720", &tv), None);
+}

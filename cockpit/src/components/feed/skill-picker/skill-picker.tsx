@@ -299,7 +299,7 @@ export function SkillPicker() {
         data-testid="skill-picker-chip"
         aria-haspopup="dialog"
         className={cn(
-          "chrome-panel chrome-bar-text pointer-events-auto flex h-[48px] max-w-full items-center gap-[8px] !rounded-full px-[14px] transition-transform duration-150 ease-out active:scale-[0.97]",
+          "chrome-panel chrome-bar-text pointer-events-auto flex h-[48px] max-w-full items-center gap-[8px] !rounded-[var(--fs-radius-sm)] px-[14px] transition-transform duration-150 ease-out active:scale-[0.97]",
           activeState?.stale && "opacity-60",
           activeState?.pending && "outline-dashed outline-2 outline-primary",
         )}

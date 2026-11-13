@@ -429,7 +429,7 @@ export function TargetLayer({
         <span
           role="status"
           className={cn(
-            "pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-[4px] bg-hud-glass font-mono font-semibold uppercase tracking-hud-tag text-hud-muted backdrop-blur-hud",
+            "pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-[4px] bg-hud-glass font-mono font-semibold tracking-hud-tag text-hud-muted backdrop-blur-hud",
             pip ? "bottom-[4px] px-[5px] text-[9px]" : "bottom-[12px] px-[8px]",
           )}
           style={pip ? undefined : { fontSize: CHROME_TOKENS.type.label_px * gridMeasures(widthClass, false).scale }}
