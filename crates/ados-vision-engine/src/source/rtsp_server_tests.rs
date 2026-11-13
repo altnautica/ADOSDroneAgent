@@ -164,22 +164,46 @@ async fn request(conn: &mut TcpStream, buf: &mut Vec<u8>) -> Option<(String, Str
     }
 }
 
-/// Serve `stream` to one client: OPTIONS, DESCRIBE with the parameter sets in
-/// the SDP only, SETUP over TCP, PLAY, then every access unit one
-/// [`SEND_INTERVAL`] apart; then hang up.
-async fn serve(listener: TcpListener, stream: Stream) {
-    let (mut conn, _) = listener.accept().await.expect("the demuxer connects");
+/// Where the served stream carries its parameter sets.
+#[derive(Clone, Copy, PartialEq)]
+enum ParameterSets {
+    /// In the SDP only (`sprop-parameter-sets`).
+    SdpOnly,
+    /// In-band only, before every IDR picture; the SDP names none.
+    InBandOnly,
+}
+
+/// Serve `stream` until one client has received all of it, taking clients one
+/// after another (a demuxer that gives up and reconnects gets a new session).
+async fn serve(listener: TcpListener, stream: Stream, sets: ParameterSets) {
+    loop {
+        let (conn, _) = listener.accept().await.expect("the demuxer connects");
+        if serve_one(conn, &stream, sets).await {
+            return;
+        }
+    }
+}
+
+/// Serve one client: OPTIONS, DESCRIBE, SETUP over TCP, PLAY, then every
+/// access unit one [`SEND_INTERVAL`] apart. `true` once all of it was sent.
+async fn serve_one(mut conn: TcpStream, stream: &Stream, sets: ParameterSets) -> bool {
     let mut buf = Vec::new();
+    let sprop = match sets {
+        ParameterSets::SdpOnly => format!(
+            ";sprop-parameter-sets={},{}",
+            base64(&stream.sps),
+            base64(&stream.pps)
+        ),
+        ParameterSets::InBandOnly => String::new(),
+    };
     while let Some((method, cseq)) = request(&mut conn, &mut buf).await {
         let reply = match method.as_str() {
             "DESCRIBE" => {
                 let sdp = format!(
                     "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=cam\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n\
                      m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n\
-                     a=fmtp:96 packetization-mode=1;sprop-parameter-sets={},{}\r\n\
-                     a=control:trackID=0\r\n",
-                    base64(&stream.sps),
-                    base64(&stream.pps)
+                     a=fmtp:96 packetization-mode=1{sprop}\r\n\
+                     a=control:trackID=0\r\n"
                 );
                 format!(
                     "RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Type: application/sdp\r\n\
@@ -197,7 +221,7 @@ async fn serve(listener: TcpListener, stream: Stream) {
             ),
         };
         if conn.write_all(reply.as_bytes()).await.is_err() {
-            return;
+            return false;
         }
         if method == "PLAY" {
             break;
@@ -208,28 +232,33 @@ async fn serve(listener: TcpListener, stream: Stream) {
     for (i, au) in stream.access_units.iter().enumerate() {
         pace.tick().await;
         let ts = u32::try_from(i).expect("few pictures") * (90_000 / FPS);
-        let packets: Vec<Vec<u8>> = au.iter().flat_map(|nal| payloads(nal)).collect();
+        let idr = au.iter().any(|nal| nal_type(nal) == NAL_IDR);
+        let in_band = (sets == ParameterSets::InBandOnly && idr)
+            .then_some([&stream.sps, &stream.pps])
+            .into_iter()
+            .flatten();
+        let packets: Vec<Vec<u8>> = in_band
+            .chain(au.iter())
+            .flat_map(|nal| payloads(nal))
+            .collect();
         for (j, payload) in packets.iter().enumerate() {
             let packet = interleaved(seq, ts, j + 1 == packets.len(), payload);
             if conn.write_all(&packet).await.is_err() {
-                return;
+                return false;
             }
             seq = seq.wrapping_add(1);
         }
     }
+    true
 }
 
-/// A stream whose parameter sets travel only in the SDP decodes: an encoder
-/// that writes global headers publishes them there alone, and a server that
-/// forwards its RTP packets as sent keeps it so. The decoder on the pipe gets
-/// the parameter sets in-band from the demuxer, so frames come out and pair
-/// with their pictures to the end of the stream.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stream_with_its_parameter_sets_only_in_the_sdp_decodes() {
+/// Pull the stream served with `sets` through an [`RtspSource`]: the frames
+/// decoded, and the error that ended the stream.
+async fn decode_served(sets: ParameterSets) -> (usize, String) {
     let stream = encode();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("local addr").port();
-    let server = tokio::spawn(serve(listener, stream));
+    let server = tokio::spawn(serve(listener, stream, sets));
     let mut source = RtspSource::new(
         "cam",
         RtspSettings {
@@ -254,8 +283,31 @@ async fn a_stream_with_its_parameter_sets_only_in_the_sdp_decodes() {
         }
     };
     server.await.expect("server task");
-    // The demuxer drops what it reads while probing the stream; the pictures
-    // from the next IDR on reach the decoder.
+    (frames, end)
+}
+
+/// A stream whose parameter sets travel only in the SDP decodes: an encoder
+/// that writes global headers publishes them there alone, and a server that
+/// forwards its RTP packets as sent keeps it so. The decoder on the pipe gets
+/// the parameter sets in-band from the demuxer, so frames come out and pair
+/// with their pictures to the end of the stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_with_its_parameter_sets_only_in_the_sdp_decodes() {
+    let (frames, end) = decode_served(ParameterSets::SdpOnly).await;
+    // The pictures from the first IDR on reach the decoder.
+    assert!(
+        frames >= PICTURES / 4,
+        "{frames} frames decoded of {PICTURES} sent, then: {end}"
+    );
+    assert!(!end.contains("pairing lost"), "{end}");
+}
+
+/// A stream whose parameter sets travel only in-band fails the quick open (its
+/// size is unknown until the first SPS arrives), and the source reopens it with
+/// the stream probe rather than reporting the source failed: frames come out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_with_its_parameter_sets_only_in_band_decodes() {
+    let (frames, end) = decode_served(ParameterSets::InBandOnly).await;
     assert!(
         frames >= PICTURES / 4,
         "{frames} frames decoded of {PICTURES} sent, then: {end}"

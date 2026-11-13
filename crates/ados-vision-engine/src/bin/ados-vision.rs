@@ -23,7 +23,7 @@ use ados_vision_engine::backend::{select_backend, BackendPrefs};
 use ados_vision_engine::cameras::{camera_specs, needs_triggers, CameraSpec, SourceFactory};
 use ados_vision_engine::config::{DepthPlan, VisionConfig};
 use ados_vision_engine::daemon_support::{
-    backoff, board_soc, init_tracing, sd_ready, wait_for_shutdown,
+    backoff, board_soc, init_tracing, reopen_pause, sd_ready, wait_for_shutdown,
 };
 use ados_vision_engine::depth::feed;
 use ados_vision_engine::depth_bus;

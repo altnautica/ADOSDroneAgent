@@ -193,8 +193,28 @@ pub fn frame_timing(
     t
 }
 
-/// The demuxer's arguments: the stream at `url` over RTSP-over-TCP, its H.264
-/// copied to stdout as Annex-B.
+/// How the demuxer probes the stream before it starts copying.
+///
+/// ffmpeg's default probe reads the stream for seconds to estimate a frame
+/// rate the copy never uses: a demuxer took 2.2-3.1 s to its first decoded
+/// frame, measured against a live 15 fps stream with a 1 s GOP, of which at
+/// most one GOP is the wait for a keyframe. The open that follows a source
+/// outage pays all of it before the first frame returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemuxProbe {
+    /// Start on the first packet (0.3-1.1 s to the first frame on the same
+    /// stream). Needs the parameter sets in the SDP (`sprop-parameter-sets`),
+    /// which give the stream's size up front; without them the demuxer fails
+    /// at once with "dimensions not set".
+    Quick,
+    /// Read until the stream's own parameter sets arrive, skipping only the
+    /// frame-rate estimate (1.2-2.1 s), for a stream that carries them in-band
+    /// only.
+    Full,
+}
+
+/// The demuxer's arguments: the stream at `url` over RTSP-over-TCP, probed as
+/// `probe` says, its H.264 copied to stdout as Annex-B.
 ///
 /// `dump_extra=freq=keyframe` writes the stream's parameter sets (SPS and PPS)
 /// in-band before every keyframe. An RTSP stream may carry them only in its
@@ -204,8 +224,12 @@ pub fn frame_timing(
 /// (`h264_mp4toannexb` passes Annex-B input through), so the decoder on the
 /// pipe would see only slices that name a PPS it never got, and decode
 /// nothing.
-pub fn demuxer_args(url: &str) -> Vec<String> {
-    [
+pub fn demuxer_args(url: &str, probe: DemuxProbe) -> Vec<String> {
+    let probe_args: &[&str] = match probe {
+        DemuxProbe::Quick => &["-probesize", "32", "-analyzeduration", "0"],
+        DemuxProbe::Full => &["-fpsprobesize", "0"],
+    };
+    let input = [
         "-hide_banner",
         "-loglevel",
         "error",
@@ -215,6 +239,8 @@ pub fn demuxer_args(url: &str) -> Vec<String> {
         "nobuffer",
         "-flags",
         "low_delay",
+    ];
+    let output = [
         "-i",
         url,
         "-map",
@@ -226,10 +252,13 @@ pub fn demuxer_args(url: &str) -> Vec<String> {
         "-f",
         "h264",
         "-",
-    ]
-    .iter()
-    .map(|a| a.to_string())
-    .collect()
+    ];
+    input
+        .iter()
+        .chain(probe_args)
+        .chain(output.iter())
+        .map(|a| a.to_string())
+        .collect()
 }
 
 /// The decoder's arguments: Annex-B H.264 on stdin, raw `settings.format`
@@ -309,6 +338,11 @@ pub struct RtspSource {
     sim: SimClock,
     pool: BufferPool,
     running: Option<Running>,
+    /// How the next demuxer probes the stream: quick until a quick open has
+    /// failed before delivering a frame.
+    probe: DemuxProbe,
+    /// Whether this source has delivered a frame.
+    delivered: bool,
 }
 
 impl RtspSource {
@@ -325,6 +359,8 @@ impl RtspSource {
             sim,
             pool: BufferPool::new(),
             running: None,
+            probe: DemuxProbe::Quick,
+            delivered: false,
         }
     }
 
@@ -332,7 +368,7 @@ impl RtspSource {
         let s = &self.settings;
         check_format(s.format)?;
         let mut demux = Command::new("ffmpeg")
-            .args(demuxer_args(&s.url))
+            .args(demuxer_args(&s.url, self.probe))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -396,19 +432,30 @@ impl RtspSource {
 
 impl FrameSource for RtspSource {
     async fn next_frame(&mut self) -> Result<RawFrame> {
-        if self.running.is_none() {
-            self.running = Some(self.spawn()?);
-        }
-        let running = self.running.as_mut().expect("spawned above");
         let bytes = self
             .settings
             .format
             .frame_bytes(self.settings.width, self.settings.height);
         let mut data = self.pool.take(bytes);
-        if let Err(e) = running.frames.read_exact(&mut data).await {
+        loop {
+            if self.running.is_none() {
+                self.running = Some(self.spawn()?);
+            }
+            let running = self.running.as_mut().expect("spawned above");
+            let Err(e) = running.frames.read_exact(&mut data).await else {
+                break;
+            };
             self.running = None;
-            return Err(e.into());
+            if self.delivered || self.probe == DemuxProbe::Full {
+                return Err(e.into());
+            }
+            // The quick open needs the parameter sets in the SDP; a stream
+            // that carries them only in-band fails it at once. Probe it.
+            tracing::info!(camera = %self.camera_id, "rtsp_quick_open_failed; reopening with a stream probe");
+            self.probe = DemuxProbe::Full;
         }
+        self.delivered = true;
+        let running = self.running.as_mut().expect("read from above");
         let now = mono_ns();
         let popped = running.pending.lock().expect("pending lock").pop();
         let Ok(pending) = popped else {

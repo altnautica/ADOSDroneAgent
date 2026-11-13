@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.126] - 2026-11-13
+
+### Fixed
+
+- Video: when a network camera stops sending, only the encoder is restarted; mediamtx and the WebRTC path stay up. The camera is probed and the encoder respawned the moment it answers again, instead of after a fixed back-off. Stopping the pipeline terminates every stage at once under one short grace, so an encoder blocked on a silent source no longer delays the teardown by several seconds per stage.
+
 ## [0.109.125] - 2026-11-13
 
 ### Fixed

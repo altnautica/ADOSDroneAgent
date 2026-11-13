@@ -60,6 +60,7 @@ pub mod retry;
 pub mod secret_gen;
 pub mod shutdown;
 pub mod sidecar;
+pub mod source_probe;
 pub mod state;
 pub mod tap;
 pub mod units;

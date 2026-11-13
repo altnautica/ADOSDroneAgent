@@ -65,16 +65,27 @@ pub fn board_soc() -> String {
     "generic".to_string()
 }
 
-/// The fixed pause before a failed frame source is reopened: a dead stream is
-/// redialled every 2 s, forever, never faster and never given up on.
+/// The reopen pace of a frame source: attempts start at most once per
+/// `SOURCE_RETRY`, forever, never given up on.
 pub const SOURCE_RETRY: Duration = Duration::from_secs(2);
 
-/// The reopen pause ([`SOURCE_RETRY`]), waking early on shutdown. Returns
-/// `true` when shutdown fired during the wait (the caller should stop),
-/// `false` when the full pause elapsed (the caller should reopen its source).
-pub async fn backoff(cancel: &ados_protocol::shutdown::Shutdown) -> bool {
+/// The pause before reopening a source whose last attempt ran for `ran`.
+///
+/// Attempts are paced start to start, so an attempt that fails at once waits
+/// out the rest of [`SOURCE_RETRY`] (a source that keeps failing is redialled
+/// every 2 s, never faster), while one that ran longer than that (it streamed,
+/// then dropped or went silent) is reopened at once: the first reopen after an
+/// outage costs nothing, and only a source failing again and again is paced.
+pub fn reopen_pause(ran: Duration) -> Duration {
+    SOURCE_RETRY.saturating_sub(ran)
+}
+
+/// Wait out `pause` before a reopen, waking early on shutdown. Returns `true`
+/// when shutdown fired during the wait (the caller should stop), `false` when
+/// the pause elapsed (the caller should reopen its source).
+pub async fn backoff(cancel: &ados_protocol::shutdown::Shutdown, pause: Duration) -> bool {
     tokio::select! {
-        _ = tokio::time::sleep(SOURCE_RETRY) => false,
+        _ = tokio::time::sleep(pause) => false,
         _ = cancel.wait() => true,
     }
 }
@@ -102,14 +113,47 @@ mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn a_failed_source_is_reopened_after_two_seconds() {
+    async fn a_source_that_fails_at_once_is_reopened_after_two_seconds() {
         let cancel = ados_protocol::shutdown::Shutdown::new();
         let start = tokio::time::Instant::now();
-        assert!(!backoff(&cancel).await);
-        let waited = start.elapsed();
-        assert!(
-            waited >= Duration::from_secs(2) && waited <= Duration::from_secs(5),
-            "reopen pause {waited:?}"
+        assert!(!backoff(&cancel, reopen_pause(Duration::ZERO)).await);
+        assert_eq!(start.elapsed(), SOURCE_RETRY);
+    }
+
+    /// The schedule: a first reopen after a source that streamed is immediate,
+    /// and attempts that keep failing start one `SOURCE_RETRY` apart, never
+    /// faster, however many there are.
+    #[tokio::test(start_paused = true)]
+    async fn reopens_are_immediate_after_an_outage_and_paced_while_failing() {
+        assert_eq!(reopen_pause(Duration::from_secs(10)), Duration::ZERO);
+        assert_eq!(reopen_pause(SOURCE_RETRY), Duration::ZERO);
+        assert_eq!(
+            reopen_pause(Duration::from_millis(500)),
+            Duration::from_millis(1500)
         );
+
+        let cancel = ados_protocol::shutdown::Shutdown::new();
+        // One attempt that streamed for 10 s and went silent, then fifty that
+        // each fail 100 ms in.
+        let mut ran = Duration::from_secs(10);
+        let silent = tokio::time::Instant::now();
+        let mut starts = Vec::new();
+        for _ in 0..51 {
+            assert!(!backoff(&cancel, reopen_pause(ran)).await);
+            starts.push(tokio::time::Instant::now());
+            tokio::time::advance(Duration::from_millis(100)).await;
+            ran = Duration::from_millis(100);
+        }
+        assert_eq!(starts[0], silent, "the first reopen is at once");
+        for pair in starts.windows(2) {
+            assert_eq!(pair[1] - pair[0], SOURCE_RETRY, "a failing source is paced");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_ends_the_pause() {
+        let cancel = ados_protocol::shutdown::Shutdown::new();
+        cancel.trigger();
+        assert!(backoff(&cancel, SOURCE_RETRY).await);
     }
 }

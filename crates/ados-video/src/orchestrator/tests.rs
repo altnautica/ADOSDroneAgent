@@ -5,6 +5,7 @@ use ados_protocol::shutdown::Shutdown;
 use super::*;
 use crate::wfb_tee::WFB_TEE_PROGRESS_TIMEOUT;
 
+mod input_stage;
 mod telemetry;
 
 fn test_orch() -> VideoOrchestrator {
@@ -496,12 +497,12 @@ async fn vision_tap_bind_failure_spawns_nothing() {
 }
 
 #[test]
-fn only_encoder_side_failures_take_the_encoder_only_respawn() {
+fn only_input_stage_failures_take_the_encoder_only_respawn() {
     assert!(HealthFailure::EncoderExited.is_encoder_side());
     assert!(HealthFailure::GraceExpired.is_encoder_side());
     assert!(HealthFailure::InboundStalled.is_encoder_side());
+    assert!(HealthFailure::PathLost.is_encoder_side());
     assert!(!HealthFailure::MediamtxDied.is_encoder_side());
-    assert!(!HealthFailure::PathLost.is_encoder_side());
 }
 
 #[test]

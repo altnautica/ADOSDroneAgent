@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
 mod health_checks;
+mod input_stage;
 mod ladders;
 mod settings;
 
@@ -54,19 +55,26 @@ pub enum HealthFailure {
     MediamtxDied,
     /// The encoder never published within the startup grace.
     GraceExpired,
-    /// The publisher left the path after streaming.
+    /// The publisher left the path after streaming: mediamtx dropped an
+    /// encoder whose input went silent past its read timeout.
     PathLost,
     /// The publisher is present but the inbound byte counter is flat.
     InboundStalled,
 }
 
 impl HealthFailure {
-    /// A failure of the encoder alone, recoverable by respawning the encoder
-    /// while mediamtx (and every reader on it) keeps running.
+    /// A failure of the input stage (the encoder and the source it reads)
+    /// alone, recoverable by respawning the encoder while mediamtx (and every
+    /// reader on it, the WHEP path included) keeps running.
+    ///
+    /// A lost publisher is one of them. mediamtx is up and drops the encoder
+    /// only because the encoder's own source stopped feeding it; restarting
+    /// mediamtx along with it threw away the WHEP path and the recording
+    /// session and cost a full cold start for a fault mediamtx did not have.
     pub fn is_encoder_side(self) -> bool {
         matches!(
             self,
-            Self::EncoderExited | Self::GraceExpired | Self::InboundStalled
+            Self::EncoderExited | Self::GraceExpired | Self::PathLost | Self::InboundStalled
         )
     }
 }
@@ -170,6 +178,15 @@ pub struct VideoOrchestrator {
     pub(crate) inbound_bytes_value: i64,
     pub(crate) inbound_bytes_changed_at: Instant,
     pub(crate) video_inbound_bytes_per_s: f64,
+    /// The last inbound sample found the counter flat: the input may be
+    /// failing, so the run loop re-checks it every
+    /// [`crate::recovery::INPUT_WATCH_INTERVAL`] until it moves again.
+    pub(crate) inbound_flat: bool,
+    /// Set while the primary's network source does not accept a connection:
+    /// the encoder is held rather than spawned against it (its connect would
+    /// sit out the kernel's SYN retransmit schedule), and the run loop probes
+    /// the source and respawns the encoder the moment it answers.
+    pub(crate) source_wait: Option<ados_protocol::source_probe::SourceAddr>,
 
     /// Consecutive failed recovery attempts of each ladder, for the log lines
     /// only: every ladder retries on the next health tick however high these
@@ -327,6 +344,8 @@ impl VideoOrchestrator {
             inbound_bytes_value: -1,
             inbound_bytes_changed_at: now,
             video_inbound_bytes_per_s: 0.0,
+            inbound_flat: false,
+            source_wait: None,
             restart_count: 0,
             cloud_restart_count: 0,
             wfb_tee_restart_count: 0,

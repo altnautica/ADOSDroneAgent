@@ -1,11 +1,12 @@
 //! The service loop, the health tick and the recovery ladders.
 
-use super::{counts_toward_software_fallback, software_rearm_due};
+use super::input_stage::wait_for_source;
+use super::{counts_toward_software_fallback, software_rearm_due, HealthFailure};
 use crate::health::{
     sei_tap_session_wedged, should_fallback_to_software, PipelineState, SEI_TAP_SESSION_MAX,
 };
 use crate::mediamtx::MAIN_PATH;
-use crate::recovery::{retry_ticker, tap_recovery, TapRecovery};
+use crate::recovery::{retry_ticker, tap_recovery, TapRecovery, INPUT_WATCH_INTERVAL};
 use ados_protocol::shutdown::Shutdown;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -42,8 +43,15 @@ impl VideoOrchestrator {
         // rather than on the next tick. A local handle so the select arm borrows it,
         // not `self`.
         let camera_plugged = Arc::clone(&self.camera_plugged);
+        let mut input_watch = tokio::time::interval(INPUT_WATCH_INTERVAL);
+        input_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            // Both input arms run only while the primary's input is down: the
+            // fast re-check while the inbound counter is flat, the source probe
+            // while a network source is unreachable and the encoder held.
+            let watching_input = self.input_watch_due();
+            let source_wait = self.source_wait.clone();
             tokio::select! {
                 _ = shutdown.wait() => {
                     tracing::info!("video_pipeline_shutdown");
@@ -62,6 +70,12 @@ impl VideoOrchestrator {
                         self.tick_retry_from_error().await;
                     }
                 }
+                _ = input_watch.tick(), if watching_input => {
+                    self.watch_input().await;
+                }
+                _ = wait_for_source(source_wait) => {
+                    self.on_source_answered().await;
+                }
                 _ = telemetry_tick.tick() => {
                     self.emit_telemetry(&telemetry);
                 }
@@ -78,19 +92,9 @@ impl VideoOrchestrator {
             }
         }
 
-        // Final teardown: wfb tee → vision tap → secondary legs → cloud push →
-        // encoder → mediamtx. The ManagedProcess Drop killpg is the backstop;
-        // this is the graceful ordered path.
-        self.stop_wfb_tee().await;
-        self.stop_vision_tap().await;
-        self.stop_secondary_encoders().await;
-        self.stop_cloud_push().await;
-        if let Some(mut tap) = self.sei_tap.take() {
-            tap.terminate(Duration::from_secs(2)).await;
-        }
-        if let Some(mut enc) = self.encoder.take() {
-            enc.terminate(Duration::from_secs(5)).await;
-        }
+        // Final teardown: every stage at once, then mediamtx. The
+        // ManagedProcess Drop killpg is the backstop.
+        self.stop_stages().await;
         self.mediamtx.stop().await;
         tracing::info!("video_pipeline_service_stopped");
     }
@@ -166,32 +170,14 @@ impl VideoOrchestrator {
         self.supervise_secondary_encoders().await;
 
         if let Err(failure) = health {
-            self.software_healthy_since = None;
-            self.note_failed_run();
-            self.restart_count += 1;
-            tracing::warn!(
-                attempt = self.restart_count,
-                cause = ?failure,
-                "pipeline_health_check_failed: restarting"
-            );
-            // The encoder alone failed and mediamtx is up: re-discover (the
-            // camera may have renegotiated) and respawn only the encoder, so
-            // WHEP viewers, network-pull legs, recording segments and the cloud
-            // push keep their mediamtx session. Anything else, or a respawn
-            // that fails, takes the full restart.
-            if failure.is_encoder_side() && self.mediamtx.is_running() {
-                self.refresh_discovery(true).await;
-                if self.restart_encoder_only().await {
-                    self.restart_count = 0;
-                    return;
-                }
-            }
-            let _guard = self.restart_lock.clone().lock_owned().await;
-            self.stop_stream().await;
-            let ok = self.start_stream().await;
-            drop(_guard);
-            if ok {
-                self.restart_count = 0;
+            // A held encoder (its network source unreachable) is the source
+            // probe's to bring back; the tick only steps in when mediamtx
+            // itself is gone.
+            let held = self.source_wait.is_some()
+                && failure == HealthFailure::EncoderExited
+                && self.mediamtx.is_running();
+            if !held {
+                self.recover_primary(failure).await;
             }
             return;
         }

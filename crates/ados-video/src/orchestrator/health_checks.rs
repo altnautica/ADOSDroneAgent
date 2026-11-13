@@ -9,27 +9,16 @@ use crate::recovery::RETRY_INTERVAL;
 use crate::wfb_tee::{
     wfb_tee_output_is_stalled, wfb_tee_progress_is_stale, WFB_TEE_PROGRESS_TIMEOUT,
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::VideoOrchestrator;
 
 impl VideoOrchestrator {
-    /// Stop the encoding pipeline and mediamtx. Teardown order: wfb_tee →
-    /// sei_tap → cloud_push → encoder → mediamtx.
+    /// Stop the encoding pipeline and mediamtx: every stage at once (see
+    /// [`Self::stop_stages`]), then mediamtx.
     pub async fn stop_stream(&mut self) {
         tracing::info!("stop_stream_begin");
-        self.stop_wfb_tee().await;
-        self.stop_vision_tap().await;
-        self.stop_secondary_encoders().await;
-        if let Some(mut tap) = self.sei_tap.take() {
-            tap.terminate(Duration::from_secs(5)).await;
-        }
-        self.stop_cloud_push().await;
-        if let Some(mut enc) = self.encoder.take() {
-            if enc.is_running() {
-                enc.terminate(Duration::from_secs(5)).await;
-            }
-        }
+        self.stop_stages().await;
         self.mediamtx.stop().await;
         self.state = PipelineState::Stopped;
         // The encoder is gone with the pipeline; keeping its identity would
@@ -41,6 +30,44 @@ impl VideoOrchestrator {
         self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Stopped)
             .await;
         tracing::info!("pipeline_stopped");
+    }
+
+    /// Stop every stage but mediamtx: the vision tap, then the radio tap, the
+    /// secondary encoders, the SEI tap, the cloud push and the primary encoder
+    /// all at once, each bounded by [`crate::recovery::STAGE_STOP_GRACE`].
+    ///
+    /// Stopped one after another with a 5 s grace each, a source outage held
+    /// the restart for seconds: every encoder reading a frame-bus pipe was
+    /// blocked on an empty pipe that SIGTERM cannot interrupt, so each stop
+    /// waited on the very camera that had gone silent. The pipes are cut
+    /// first (the encoders get end-of-file and exit), and what is left is
+    /// stopped in parallel under one short grace.
+    pub(crate) async fn stop_stages(&mut self) {
+        self.source_wait = None;
+        self.stop_vision_tap().await;
+        self.framebus_feeds.renew_all();
+        let mut stages = Vec::new();
+        stages.extend(self.wfb_tee.take());
+        stages.extend(
+            std::mem::take(&mut self.secondary_encoders)
+                .into_iter()
+                .map(|(_, p)| p),
+        );
+        stages.extend(self.sei_tap.take());
+        self.sei_tap_started_at = None;
+        let cloud = self.cloud_push.take();
+        let cloud_stopped = cloud.is_some();
+        stages.extend(cloud);
+        stages.extend(self.encoder.take());
+        crate::recovery::stop_stages(stages).await;
+        if cloud_stopped {
+            tracing::info!("cloud_push_stopped");
+        }
+        // The radio tap's straggler sweep, as `stop_wfb_tee` does it: skipped
+        // when the encoder carried the radio RTP, whose pattern it shares.
+        if !self.encoder_emits_wfb_rtp {
+            crate::process::kill_orphans(&crate::wfb_tee::orphan_pattern()).await;
+        }
     }
 
     /// One health probe: encoder PID alive + mediamtx alive + the startup-grace /
@@ -117,12 +144,17 @@ impl VideoOrchestrator {
         let current = current as i64;
         let now = Instant::now();
         let since_change = now.saturating_duration_since(self.inbound_bytes_changed_at);
-        match inbound_decision(
+        let decision = inbound_decision(
             self.inbound_bytes_value,
             current,
             since_change,
             RETRY_INTERVAL,
-        ) {
+        );
+        self.inbound_flat = matches!(
+            decision,
+            InboundDecision::WithinStall | InboundDecision::Stalled
+        );
+        match decision {
             InboundDecision::Seed => {
                 self.inbound_bytes_value = current;
                 self.inbound_bytes_changed_at = now;

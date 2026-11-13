@@ -165,3 +165,37 @@ async fn renew_replaces_the_pipe_so_a_new_reader_starts_clean() {
         "a renewed feed must hand out a new pipe"
     );
 }
+
+/// An encoder blocked reading a pipe whose camera has gone silent cannot act
+/// on SIGTERM; renewing the feed lets go of its pipe, so the reader gets
+/// end-of-file and exits at once.
+#[tokio::test]
+async fn renew_releases_a_reader_blocked_on_a_silent_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = FeedSpec {
+        camera_id: "cam_fr".to_string(),
+        format: FrameFormat::Gray8,
+        width: W,
+        height: H,
+        fifo: dir.path().join("framebus-cam_fr.fifo"),
+        frames_socket: dir.path().join("vision-frames.sock"),
+        shm_dir: dir.path().to_path_buf(),
+    };
+    let feed = FramebusFeed::spawn(spec.clone()).unwrap();
+    // A reader that ignores SIGTERM, blocked on the pipe with no frame coming.
+    let script = format!("trap '' TERM; cat '{}' > /dev/null", spec.fifo.display());
+    let mut reader = tokio::process::Command::new("sh")
+        .args(["-c", &script])
+        .spawn()
+        .unwrap();
+    // Let the feed attach to it as the pipe's writer.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(reader.try_wait().unwrap().is_none(), "blocked on the pipe");
+
+    feed.renew().unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(2), reader.wait())
+        .await
+        .expect("the blocked reader exits once the feed lets go of its pipe")
+        .unwrap();
+    assert!(status.success());
+}

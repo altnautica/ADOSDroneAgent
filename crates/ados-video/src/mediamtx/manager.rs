@@ -229,6 +229,19 @@ impl MediamtxManager {
         }
     }
 
+    /// Adopt a stand-in process as the running mediamtx (tests only), so a
+    /// test can tell whether a recovery restarted mediamtx.
+    #[cfg(test)]
+    pub(crate) fn adopt_process(&mut self, process: ManagedProcess) {
+        self.process = Some(process);
+    }
+
+    /// The running mediamtx's PID (tests only).
+    #[cfg(test)]
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.process.as_ref().and_then(ManagedProcess::pid)
+    }
+
     /// Graceful teardown of the process group and config-file cleanup.
     pub async fn stop(&mut self) {
         if let Some(mut p) = self.process.take() {

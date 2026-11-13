@@ -10,6 +10,16 @@
 //! spawn and connect time, and every consumer of `main` is respawned on the
 //! first tick that sees the publisher, inside that same tick.
 //!
+//! The primary's input stage has one faster path on top of the tick. While
+//! the inbound byte counter is flat the run loop re-checks the input every
+//! [`INPUT_WATCH_INTERVAL`], so the publisher leaving `main` or the encoder
+//! exiting is acted on within that interval rather than on the next tick; and
+//! while a network source is unreachable the encoder is held and the source is
+//! probed every [`ados_protocol::source_probe::PROBE_INTERVAL`], so the encoder
+//! is respawned the moment the source answers instead of after its connect
+//! has sat out the kernel's SYN retransmit schedule. Neither path runs while
+//! the input is healthy.
+//!
 //! Stall detection is a separate concern with its own wall-clock thresholds
 //! (`health::INBOUND_FLOW_STALL`, `health::STARTUP_GRACE_MAX`,
 //! `wfb_tee::WFB_TEE_PROGRESS_TIMEOUT`); sampling them more often does not
@@ -30,6 +40,33 @@ pub fn retry_ticker() -> tokio::time::Interval {
     let mut tick = tokio::time::interval(RETRY_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tick
+}
+
+/// The input watch's period: how often the primary's input is re-checked while
+/// its inbound byte counter is flat.
+pub const INPUT_WATCH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The SIGTERM grace each pipeline stage gets on a teardown before it is
+/// killed.
+///
+/// An ffmpeg blocked reading an empty frame-bus pipe, or a socket whose peer
+/// went silent, does not act on SIGTERM until that read returns, so a long
+/// grace waits on the very source that failed: a 5 s grace per stage, stage
+/// after stage, held the restart until the camera came back. A stage that is
+/// working exits on SIGTERM in well under this; every stage of a teardown is
+/// stopped at once, so the whole teardown is bounded by it.
+pub const STAGE_STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// Terminate every stage at once, each with [`STAGE_STOP_GRACE`]: the
+/// teardown takes as long as the slowest stage, never the sum.
+pub async fn stop_stages(stages: Vec<crate::process::ManagedProcess>) {
+    let stops: Vec<_> = stages
+        .into_iter()
+        .map(|mut stage| tokio::spawn(async move { stage.terminate(STAGE_STOP_GRACE).await }))
+        .collect();
+    for stop in stops {
+        let _ = stop.await;
+    }
 }
 
 /// What a consumer ladder does with an unhealthy tap on this tick.

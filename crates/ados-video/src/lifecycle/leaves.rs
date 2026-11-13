@@ -45,10 +45,14 @@ impl VideoOrchestrator {
         self.encoder_label = Some(crate::encoder::encoder_label(kind, &tokens));
         self.encoder_emits_wfb_rtp = crate::wfb_tee::cmd_emits_wfb_rtp(&tokens);
 
-        if let Some(mut enc) = self.encoder.take() {
-            if enc.is_running() {
-                enc.terminate(Duration::from_secs(5)).await;
-            }
+        // A frame-bus encoder reads a pipe: move the feed onto a fresh one
+        // first, so the outgoing encoder gets end-of-file and exits even when
+        // its camera has gone silent (blocked on an empty pipe it cannot act
+        // on SIGTERM), and the incoming one starts on a frame boundary.
+        let source = self.camera_cfg.source.clone();
+        self.renew_framebus_for(&source);
+        if let Some(enc) = self.encoder.take() {
+            crate::recovery::stop_stages(vec![enc]).await;
         }
         // The outgoing encoder held the mediamtx publisher slot; sweep any
         // straggler so the incoming one is not refused the path.
@@ -68,8 +72,6 @@ impl VideoOrchestrator {
             kill_orphans(&orphan_pattern()).await;
         }
 
-        let source = self.camera_cfg.source.clone();
-        self.renew_framebus_for(&source);
         let mut enc = match cmd.spawn() {
             Ok(p) => p,
             Err(e) => {
@@ -102,6 +104,7 @@ impl VideoOrchestrator {
         self.inbound_bytes_value = -1;
         self.inbound_bytes_changed_at = now;
         self.video_inbound_bytes_per_s = 0.0;
+        self.inbound_flat = false;
         tracing::info!(
             encoder = ?kind,
             encoder_respawns = self.encoder_respawns,

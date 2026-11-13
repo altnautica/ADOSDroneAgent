@@ -59,7 +59,8 @@ impl DepthPacer {
 
 /// Run one camera's capture loop: open its source, pull frames (each in the
 /// source's native format), and publish each into the engine ring. A source
-/// error backs off and re-opens.
+/// error, a silent source or a closed stream reopens it: at once after an
+/// attempt that ran, paced at `SOURCE_RETRY` while attempts keep failing.
 ///
 /// Every frame taken off the source is counted on `input`, and the input is
 /// live from its first frame until the source fails, ends or delivers nothing
@@ -96,8 +97,29 @@ pub(super) async fn run_camera(
     // The last source failure, surfaced in the status sidecar and logged at
     // warn once per distinct reason, cleared by the next delivered frame.
     let mut last_error: Option<String> = None;
+    // A network camera that does not answer is probed, not opened: an open
+    // would sit in the kernel's connect retry and see the camera back only at
+    // its next SYN retransmit, seconds late.
+    let probe = match &cam {
+        CameraSpec::Owned(c) => ados_protocol::source_probe::SourceAddr::from_url(&c.source),
+        CameraSpec::Tap { .. } => None,
+    };
     loop {
+        if let Some(addr) = &probe {
+            if !addr.reachable().await {
+                let camera_id = cam.id().to_string();
+                let reason = "source not answering".to_string();
+                if work_status::note_source_failure(&work, &mut last_error, &camera_id, reason) {
+                    tracing::warn!(camera = %camera_id, "frame source not answering; probing until it does");
+                }
+                tokio::select! {
+                    _ = addr.wait_reachable() => {}
+                    _ = cancel.wait() => return,
+                }
+            }
+        }
         // Build the source for this attempt.
+        let opened = tokio::time::Instant::now();
         let mut source: AnySource = factory.open(&cam);
         let camera_id = cam.id().to_string();
         // Consumed frame buffers go back to this source's pool, so a steady
@@ -200,7 +222,7 @@ pub(super) async fn run_camera(
             }
         }
         input.lost();
-        if backoff(&cancel).await {
+        if backoff(&cancel, reopen_pause(opened.elapsed())).await {
             return;
         }
     }

@@ -99,6 +99,17 @@ impl Feeds {
         #[cfg(not(target_os = "linux"))]
         let _ = camera_id;
     }
+
+    /// Move every feed onto a fresh pipe before the encoders reading them are
+    /// stopped. The writer lets go of the old pipe, so an encoder blocked
+    /// reading it (its camera silent, no frame to read) gets end-of-file and
+    /// exits at once; SIGTERM alone cannot reach it until a frame arrives.
+    pub fn renew_all(&self) {
+        #[cfg(target_os = "linux")]
+        for id in self.running.keys() {
+            self.renew(id);
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
