@@ -22,7 +22,13 @@
 //!   1 tele, 0 stops) or `range` (0..100 percent of the camera's range). These
 //!   are the two zoom types ArduPilot's camera library accepts; it answers
 //!   `DENIED` to a step zoom, so the route takes no `step` (a zoom button
-//!   sends a rate on press and 0 on release).
+//!   sends a rate on press and 0 on release). A non-zero continuous rate is
+//!   held only while its caller keeps it alive: unless another zoom or a
+//!   keepalive (the same body with `"keepalive": true`; nothing goes to the
+//!   camera, and it is a 409 when no zoom of that component is moving)
+//!   arrives within about a second, the agent sends the camera rate 0
+//!   itself, so a caller that vanishes mid-hold never drives the lens to its
+//!   limit.
 //!
 //! Both writes answer 200 `{"ok", "result", "component_id"}` once the command
 //! was written: `result` is the camera's `MAV_RESULT` name (`ACCEPTED`,
@@ -79,6 +85,9 @@ pub(crate) struct CameraTiming {
     pub(crate) probe_window: Duration,
     /// The `COMMAND_ACK` wait and retry policy of a capture or zoom.
     pub(crate) ack: AckConfig,
+    /// A moving continuous zoom with no newer zoom or keepalive this long is
+    /// stopped by the agent.
+    pub(crate) zoom_deadman: Duration,
 }
 
 impl Default for CameraTiming {
@@ -86,6 +95,7 @@ impl Default for CameraTiming {
         Self {
             probe_window: Duration::from_millis(1000),
             ack: AckConfig::default(),
+            zoom_deadman: Duration::from_millis(1000),
         }
     }
 }
@@ -155,11 +165,21 @@ fn text(bytes: &[u8]) -> String {
 /// Each answering camera and when it last answered, by `(system, component)`.
 type Seen = BTreeMap<(u8, u8), (MavlinkCamera, Instant)>;
 
+/// A moving continuous zoom: its vehicle system, and the generation of the
+/// last zoom or keepalive that armed its deadman.
+#[derive(Debug, Clone, Copy)]
+struct ZoomHold {
+    system: u8,
+    generation: u64,
+}
+
 /// The cameras that answered, keyed by `(system, component)` so a vehicle
-/// that changes its system id never inherits another's cameras.
+/// that changes its system id never inherits another's cameras, and the
+/// moving zooms by component.
 #[derive(Clone, Default)]
 pub struct MavlinkCameras {
     seen: Arc<parking_lot::Mutex<Seen>>,
+    zooms: Arc<parking_lot::Mutex<(u64, BTreeMap<u8, ZoomHold>)>>,
     timing: CameraTiming,
 }
 
@@ -169,8 +189,46 @@ impl MavlinkCameras {
     pub(crate) fn with_timing(timing: CameraTiming) -> Self {
         Self {
             seen: Arc::default(),
+            zooms: Arc::default(),
             timing,
         }
+    }
+
+    /// Record a zoom of `component`: a moving one gets a fresh deadman
+    /// generation (returned), any other clears the hold.
+    fn arm_zoom(&self, system: u8, component: u8, moving: bool) -> Option<u64> {
+        let mut zooms = self.zooms.lock();
+        if !moving {
+            zooms.1.remove(&component);
+            return None;
+        }
+        zooms.0 += 1;
+        let generation = zooms.0;
+        zooms.1.insert(component, ZoomHold { system, generation });
+        Some(generation)
+    }
+
+    /// A keepalive of `component`'s moving zoom: its new generation, or None
+    /// when nothing of it is moving.
+    fn keep_zoom(&self, component: u8) -> Option<u64> {
+        let mut zooms = self.zooms.lock();
+        zooms.0 += 1;
+        let generation = zooms.0;
+        let hold = zooms.1.get_mut(&component)?;
+        hold.generation = generation;
+        Some(generation)
+    }
+
+    /// Take `component`'s hold when `generation` is still its latest: the
+    /// deadman expired with nothing newer.
+    fn expire_zoom(&self, component: u8, generation: u64) -> Option<u8> {
+        let mut zooms = self.zooms.lock();
+        let hold = *zooms.1.get(&component)?;
+        if hold.generation != generation {
+            return None;
+        }
+        zooms.1.remove(&component);
+        Some(hold.system)
     }
 
     fn record(&self, system: u8, found: Vec<MavlinkCamera>) {
@@ -443,6 +501,9 @@ pub struct ZoomRequest {
     #[serde(rename = "type")]
     pub kind: ZoomType,
     pub value: f32,
+    /// Keep the moving zoom of `component_id` alive; nothing is sent.
+    #[serde(default)]
+    pub keepalive: bool,
 }
 
 /// The `(type, value)` params of a zoom, or why the value is refused.
@@ -467,16 +528,53 @@ fn zoom_command(target: (u8, u8), zoom_type: f32, value: f32) -> COMMAND_LONG_DA
     )
 }
 
-/// `POST /api/v1/camera/mavlink/zoom`: zoom the camera.
+/// Stop `component`'s zoom with rate 0 once `generation` has gone the
+/// deadman's span with no newer zoom or keepalive.
+fn arm_zoom_deadman(state: &AppState, component: u8, generation: u64) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let registry = &state.mavlink_cameras;
+        tokio::time::sleep(registry.timing.zoom_deadman).await;
+        let Some(system) = registry.expire_zoom(component, generation) else {
+            return;
+        };
+        tracing::warn!(component, "camera zoom kept no keepalive; stopping it");
+        let stop = zoom_command((system, component), ZOOM_TYPE_CONTINUOUS, 0.0);
+        let _ = send(&state, stop, true).await;
+    });
+}
+
+/// `POST /api/v1/camera/mavlink/zoom`: zoom the camera, or keep its moving
+/// zoom alive.
 pub async fn post_zoom(State(state): State<AppState>, Json(req): Json<ZoomRequest>) -> Response {
     let (zoom_type, value) = match zoom_params(req.kind, req.value) {
         Ok(p) => p,
         Err(why) => return detail(StatusCode::BAD_REQUEST, why),
     };
+    if req.keepalive {
+        return match state.mavlink_cameras.keep_zoom(req.component_id) {
+            Some(generation) => {
+                arm_zoom_deadman(&state, req.component_id, generation);
+                Json(json!({ "ok": true, "result": "KEEPALIVE", "component_id": req.component_id }))
+                    .into_response()
+            }
+            None => detail(
+                StatusCode::CONFLICT,
+                format!("no zoom is moving at component {}", req.component_id),
+            ),
+        };
+    }
     let system = match resolve(&state, req.component_id, Needs::Zoom).await {
         Ok(system) => system,
         Err((status, why)) => return detail(status, why),
     };
+    let moving = req.kind == ZoomType::Continuous && value != 0.0;
+    if let Some(generation) = state
+        .mavlink_cameras
+        .arm_zoom(system, req.component_id, moving)
+    {
+        arm_zoom_deadman(&state, req.component_id, generation);
+    }
     send(
         &state,
         zoom_command((system, req.component_id), zoom_type, value),

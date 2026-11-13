@@ -90,6 +90,8 @@ async fn a_capture_is_never_resent_so_a_lost_ack_cannot_shoot_twice() {
     let mut state = state_with_socket(dir.path(), sock);
     let mut resending = timing();
     resending.ack.retries = 2;
+    // No keepalives here: the deadman must not stop the zoom mid-count.
+    resending.zoom_deadman = Duration::from_secs(60);
     state.mavlink_cameras = MavlinkCameras::with_timing(resending);
     let resp = capture(&state, CAM).await;
     assert_eq!(

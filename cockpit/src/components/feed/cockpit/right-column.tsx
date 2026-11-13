@@ -4,7 +4,7 @@
 import { useEffect, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { Camera, Circle, ImageIcon, Minus, Plus, SlidersHorizontal, Square, Video } from "lucide-react";
 
-import { cameraRoute, recordRoute, runCameraAction, useMavCameraStore, type CameraAction } from "@/lib/camera-actions";
+import { cameraRoute, endZoomPresses, recordRoute, runCameraAction, useMavCameraStore, type CameraAction } from "@/lib/camera-actions";
 import { runCockpitAction } from "@/lib/cockpit-actions";
 import { FLIGHT_PX, type RightItem } from "@/lib/flight-layout";
 import type { RosterCamera } from "@/lib/types";
@@ -38,6 +38,8 @@ function ZoomPill() {
   const zoom = useCockpitViewStore((s) => s.digitalZoom);
   const level = digital ? specText("camera.digital_zoom", { n: zoom }) : null;
   const btn = "flex h-1/2 w-full items-center justify-center active:bg-white/10 aria-disabled:opacity-45";
+  // A pill that goes away mid-hold ends the zoom it started.
+  useEffect(() => endZoomPresses, []);
   const hold = (action: CameraAction, reason: string | null) => {
     const release = () => void runCameraAction(action, "release");
     return {
@@ -48,6 +50,7 @@ function ZoomPill() {
       },
       onPointerUp: release,
       onPointerCancel: release,
+      onLostPointerCapture: release,
       onClick: (e: MouseEvent<HTMLButtonElement>) => {
         if (e.detail !== 0) return;
         pressOrExplain(reason, () => {

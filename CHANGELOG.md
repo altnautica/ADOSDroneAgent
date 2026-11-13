@@ -6,12 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.123] - 2026-11-13
+
+### Fixed
+
+- Vehicle camera zoom: the cockpit's stop no longer waits for the zoom rate's own answer, which takes up to about 4.6 s when its ACK is lost and longer after an `IN_PROGRESS`, so a tap could drive the lens to its limit. The rate-0 stop goes at the release (a tap still zooms for 0.3 s), and once more if the rate's answer comes after it. A stop the camera did not answer (a `TIMEOUT`, or no reply from the agent) is sent again, up to three sends 250 ms apart. A held zoom also stops when the page hides, the Feed unmounts, the zoom pill goes away or its pointer capture is lost.
+- Camera zoom route: a moving continuous zoom (`POST /api/v1/camera/mavlink/zoom`, non-zero rate) is stopped by the agent itself, with rate 0, when no other zoom or keepalive (the same body with `"keepalive": true`, which sends nothing to the camera; 409 when nothing of that component is moving) arrives within 1 s. The cockpit sends a keepalive every 300 ms while a zoom button is held, so a cockpit that vanishes mid-hold no longer leaves the lens zooming.
+
 ## [0.109.122] - 2026-11-13
 
 ### Fixed
 
 - Pilot: after a Land touchdown, Take control followed by a lift of under 1 m kept the touchdown hold, so Pause was refused and the link-loss and low-battery failsafes did not fire. Any sign of flight now ends the hold: the operator's Take control, an arm or disarm, a take-off, the FC's landed state leaving ON_GROUND, or a climb of 0.3 m seen by the rangefinder or the local position. The failsafes (link loss, low battery, controller loss) and the link-loss countdown follow the FC's own landed state and never wait on the hold, which only refuses Pause, goto, resume and a VTOL transition.
-
 ## [0.109.121] - 2026-11-13
 
 ### Fixed

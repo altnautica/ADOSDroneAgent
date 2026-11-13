@@ -188,8 +188,8 @@ export function mavResultText(result: string): string {
 /** Send one MAVLink camera write, once: the agent resends where that is safe
  *  (a resent capture would shoot twice). A refusal or error shows `failKey`
  *  (`camera.capture_failed` / `camera.zoom_failed`) with the vehicle's text,
- *  else the result's name. Never rejects. */
-async function mavCameraWrite(route: "capture" | "zoom", body: object, failKey: string): Promise<MavCameraReply | null> {
+ *  else the result's name; a null `failKey` shows nothing. Never rejects. */
+async function mavCameraWrite(route: "capture" | "zoom", body: object, failKey: string | null): Promise<MavCameraReply | null> {
   try {
     const r = await cameraFetch<MavCameraReply>(`/api/v1/camera/mavlink/${route}`, CAMERA_WRITE_TIMEOUT_MS, {
       method: "POST",
@@ -197,11 +197,11 @@ async function mavCameraWrite(route: "capture" | "zoom", body: object, failKey: 
     });
     // IN_PROGRESS is the camera still working on an accepted command, never
     // a failure, whatever `ok` says.
-    if (!r.ok && r.result !== "IN_PROGRESS") toast.err(specText(failKey, { reason: r.statustext || mavResultText(r.result) }));
+    if (failKey && !r.ok && r.result !== "IN_PROGRESS") toast.err(specText(failKey, { reason: r.statustext || mavResultText(r.result) }));
     return r;
   } catch (e) {
     const reason = e instanceof ApiError ? errorDetail(e.body, e.message) : refusalText("no response");
-    toast.err(specText(failKey, { reason }));
+    if (failKey) toast.err(specText(failKey, { reason }));
     return null;
   }
 }
@@ -222,37 +222,84 @@ export async function captureMavPhoto(componentId: number): Promise<MavCameraRep
 export const ZOOM_TAP_MS = 300;
 /** A held zoom whose release never comes (a lost pointer-up) stops here. */
 export const ZOOM_HOLD_MAX_MS = 10_000;
-
-let zoomWrites: Promise<unknown> = Promise.resolve();
+/** A held zoom tells the agent it is still held this often; the agent stops
+ *  a zoom that hears nothing for about a second. */
+export const ZOOM_KEEPALIVE_MS = 300;
+/** A stop the camera did not answer is sent again after this long, up to
+ *  `ZOOM_STOP_TRIES` sends in all. */
+export const ZOOM_STOP_RETRY_MS = 250;
+export const ZOOM_STOP_TRIES = 3;
 
 /** Set the vehicle camera's continuous zoom rate (`MAV_CMD_SET_CAMERA_ZOOM`
  *  type continuous): -1 wide … 1 tele, 0 stops. ArduPilot's camera library
- *  takes only a continuous or a range zoom and refuses a step. Writes go one
- *  at a time, in order, so a stop never overtakes the rate it ends. */
-export function setMavZoomRate(componentId: number, rate: number): Promise<MavCameraReply | null> {
-  const write = zoomWrites.then(() => mavCameraWrite("zoom", { component_id: componentId, type: "continuous", value: rate }, "camera.zoom_failed"));
-  zoomWrites = write;
-  return write;
+ *  takes only a continuous or a range zoom and refuses a step. */
+export function setMavZoomRate(componentId: number, rate: number, failKey: string | null = "camera.zoom_failed"): Promise<MavCameraReply | null> {
+  return mavCameraWrite("zoom", { component_id: componentId, type: "continuous", value: rate }, failKey);
+}
+
+/** Stop the vehicle camera's zoom, sending the stop again while the camera
+ *  gives no answer (a `TIMEOUT`, or no reply from the agent), up to
+ *  `ZOOM_STOP_TRIES` sends. Only the last failure shows. */
+export async function stopMavZoom(componentId: number): Promise<MavCameraReply | null> {
+  for (let i = 1; ; i++) {
+    const last = i >= ZOOM_STOP_TRIES;
+    const r = await setMavZoomRate(componentId, 0, last ? "camera.zoom_failed" : null);
+    if (last || (r !== null && r.result !== "TIMEOUT")) return r;
+    await new Promise((done) => setTimeout(done, ZOOM_STOP_RETRY_MS));
+  }
+}
+
+/** The releases of the vehicle camera zooms being held. */
+const heldZooms = new Set<() => void>();
+
+/** Release every held vehicle camera zoom (the page hides or the camera
+ *  controls go away). */
+export function releaseMavZooms(): void {
+  for (const release of [...heldZooms]) release();
 }
 
 /** Zoom the vehicle camera at full rate (`dir` 1 tele, -1 wide) until the
  *  returned release runs, at least `ZOOM_TAP_MS` and at most
- *  `ZOOM_HOLD_MAX_MS` after the press, then stop it with a rate of 0 once the
- *  rate's own answer is in. A camera that refused the rate gets no stop. */
+ *  `ZOOM_HOLD_MAX_MS` after the press. The stop goes then, whether or not
+ *  the rate has its answer yet, and once more if the rate's answer comes
+ *  after it (the camera may act on a late rate). While held, a keepalive
+ *  goes every `ZOOM_KEEPALIVE_MS` so the agent's own deadman stops the zoom
+ *  if this page vanishes. A camera that refused the rate gets no stop. */
 export function holdMavZoom(componentId: number, dir: 1 | -1): () => void {
   const pressedAt = Date.now();
-  const started = setMavZoomRate(componentId, dir);
   let released = false;
+  let refusedStart = false;
+  let stopSent = false;
+  void setMavZoomRate(componentId, dir).then((reply) => {
+    if (refused(reply)) {
+      refusedStart = true;
+      clearInterval(keepalive);
+    } else if (stopSent) {
+      void stopMavZoom(componentId);
+    }
+  });
+  const keepalive = setInterval(() => {
+    // A 409 (the zoom already stopped) or a lost keepalive needs nothing:
+    // the release's stop and the agent's deadman cover both.
+    void cameraFetch(`/api/v1/camera/mavlink/zoom`, CAMERA_WRITE_TIMEOUT_MS, {
+      method: "POST",
+      body: { component_id: componentId, type: "continuous", value: dir, keepalive: true },
+    }).catch(() => undefined);
+  }, ZOOM_KEEPALIVE_MS);
   const release = () => {
     if (released) return;
     released = true;
+    heldZooms.delete(release);
     clearTimeout(cap);
-    void started.then((reply) => {
-      if (refused(reply)) return;
-      setTimeout(() => void setMavZoomRate(componentId, 0), Math.max(0, ZOOM_TAP_MS - (Date.now() - pressedAt)));
-    });
+    clearInterval(keepalive);
+    setTimeout(() => {
+      if (refusedStart) return;
+      stopSent = true;
+      void stopMavZoom(componentId);
+    }, Math.max(0, ZOOM_TAP_MS - (Date.now() - pressedAt)));
   };
   const cap = setTimeout(release, ZOOM_HOLD_MAX_MS);
+  heldZooms.add(release);
   return release;
 }
 
@@ -417,9 +464,21 @@ export async function toggleRecording(groundStation: boolean): Promise<void> {
   }
 }
 
-/** Register the camera actions while the Feed is mounted. */
+/** End every vehicle camera zoom in progress: its stop goes now. */
+export function endZoomPresses(): void {
+  zoomPress = null;
+  releaseMavZooms();
+}
+
+/** Register the camera actions while the Feed is mounted. A held zoom ends
+ *  when the page hides or the Feed goes away. */
 export function registerCameraActions(groundStation: boolean): () => void {
-  return registerCockpitActions([
+  const onHidden = () => {
+    if (document.visibilityState === "hidden") endZoomPresses();
+  };
+  document.addEventListener("visibilitychange", onHidden);
+  window.addEventListener("pagehide", endZoomPresses);
+  const unregister = registerCockpitActions([
     { id: "camera.photo", label: "Photo", group: "camera", run: (p) => void (p === "press" && runCameraAction("photo")) },
     {
       id: "camera.record",
@@ -433,4 +492,10 @@ export function registerCameraActions(groundStation: boolean): () => void {
     { id: "camera.zoom_out", label: "Zoom out", group: "camera", run: (p) => void (p !== "hold" && runCameraAction("zoom_out", p)) },
     { id: "gimbal.recenter", label: "Recentre gimbal", group: "camera", run: (p) => void (p === "press" && runCameraAction("recenter")) },
   ]);
+  return () => {
+    unregister();
+    document.removeEventListener("visibilitychange", onHidden);
+    window.removeEventListener("pagehide", endZoomPresses);
+    endZoomPresses();
+  };
 }

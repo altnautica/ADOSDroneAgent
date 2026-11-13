@@ -18,6 +18,7 @@ fn timing() -> CameraTiming {
             retries: 0,
             inprogress_timeout: Duration::from_millis(300),
         },
+        zoom_deadman: Duration::from_millis(400),
     }
 }
 
@@ -193,15 +194,103 @@ async fn capture(state: &AppState, component_id: u8) -> Response {
 }
 
 async fn zoom(state: &AppState, component_id: u8, kind: ZoomType, value: f32) -> Response {
+    zoom_req(state, component_id, kind, value, false).await
+}
+
+async fn zoom_req(
+    state: &AppState,
+    component_id: u8,
+    kind: ZoomType,
+    value: f32,
+    keepalive: bool,
+) -> Response {
     post_zoom(
         State(state.clone()),
         Json(ZoomRequest {
             component_id,
             kind,
             value,
+            keepalive,
         }),
     )
     .await
+}
+
+/// The zoom values the vehicle was sent, in order.
+fn zoom_rates(vehicle: &FakeVehicle) -> Vec<f32> {
+    vehicle
+        .commands()
+        .iter()
+        .filter(|c| c.command == MavCmd::MAV_CMD_SET_CAMERA_ZOOM)
+        .map(|c| c.param2)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_moving_zoom_with_no_keepalive_is_stopped_by_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("mavlink.sock");
+    let vehicle = FakeVehicle::start(
+        &sock,
+        vec![(CAM, photo_and_zoom())],
+        Some(MavResult::MAV_RESULT_ACCEPTED),
+    );
+    let state = state_with_socket(dir.path(), sock);
+    zoom(&state, CAM, ZoomType::Continuous, 1.0).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(zoom_rates(&vehicle), vec![1.0]);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(zoom_rates(&vehicle), vec![1.0, 0.0]);
+    // The hold is gone: a keepalive now has nothing to keep.
+    assert_eq!(
+        zoom_req(&state, CAM, ZoomType::Continuous, 1.0, true)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn keepalives_hold_the_zoom_and_send_nothing_until_they_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("mavlink.sock");
+    let vehicle = FakeVehicle::start(
+        &sock,
+        vec![(CAM, photo_and_zoom())],
+        Some(MavResult::MAV_RESULT_ACCEPTED),
+    );
+    let state = state_with_socket(dir.path(), sock);
+    zoom(&state, CAM, ZoomType::Continuous, -1.0).await;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let resp = zoom_req(&state, CAM, ZoomType::Continuous, -1.0, true).await;
+        assert_eq!(
+            body_json(resp).await,
+            json!({ "ok": true, "result": "KEEPALIVE", "component_id": CAM })
+        );
+    }
+    // A second past the press, kept alive: still moving, nothing more sent.
+    assert_eq!(zoom_rates(&vehicle), vec![-1.0]);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(zoom_rates(&vehicle), vec![-1.0, 0.0]);
+}
+
+#[tokio::test]
+async fn a_stop_or_a_range_zoom_disarms_the_deadman() {
+    for (kind, value) in [(ZoomType::Continuous, 0.0), (ZoomType::Range, 40.0)] {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let vehicle = FakeVehicle::start(
+            &sock,
+            vec![(CAM, photo_and_zoom())],
+            Some(MavResult::MAV_RESULT_ACCEPTED),
+        );
+        let state = state_with_socket(dir.path(), sock);
+        zoom(&state, CAM, ZoomType::Continuous, 1.0).await;
+        zoom(&state, CAM, kind, value).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(zoom_rates(&vehicle), vec![1.0, value], "{kind:?}");
+    }
 }
 
 #[tokio::test]
