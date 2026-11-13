@@ -105,6 +105,23 @@ describe("layoutAr on the golden frame", () => {
     expect(blocked.some((o) => o.kind === "cross")).toBe(true);
   });
 
+  it("keeps a blocked goal drawn, in the blocked colour", () => {
+    const at = (avoid: ArLayoutOptions["avoid"], c: ArCamera = cam) => {
+      const b = new DrawOpBuffer();
+      layoutAr(c, rect, opts({ avoid }), b);
+      return b.ops.slice(0, b.n).find((o) => o.k === "fgoal")!;
+    };
+    expect(at("clear").color).toBe("#22D3EE");
+    expect(at("blocked").color).toBe("#EF4444");
+    // Without a pilot state the goal takes the path's state from the agent.
+    const blockedPath: ArCamera = {
+      ...cam,
+      items: cam.items.map((i) => (i.t === "fpath" ? { ...i, state: "blocked" as const } : i)),
+    };
+    expect(at(null).color).toBe("#22D3EE"); // the golden path is a detour
+    expect(at(null, blockedPath).color).toBe("#EF4444");
+  });
+
   it("keeps edge arrows inside the rect inset", () => {
     for (const ang of [0, 1, 2.6, Math.PI, -1.2]) {
       const c: ArCamera = { ...cam, items: [{ t: "edge", k: "edge:home", of: "home", seq: null, ang, distM: 35 }] };

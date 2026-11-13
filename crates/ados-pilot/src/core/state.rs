@@ -76,18 +76,42 @@ impl Pilot {
             .or(self.plan.min_clearance)
             .map(wire);
         let planning = matches!(owner, Owner::Skill | Owner::Goto);
+        // The commanded goal: a skill's lease goal, else the goto target.
+        let commanded = self
+            .auth
+            .lease()
+            .and_then(|l| l.goal.as_ref())
+            .map(|g| [g.n, g.e, g.d])
+            .or(self.goto);
+        // A blocked plan holds with no goal or path of its own; the frame keeps
+        // the commanded goal and the straight way to it, so the surfaces draw
+        // them in the blocked colour rather than dropping them.
+        let blocked_goal =
+            if planning && self.plan.goal.is_none() && self.plan.state == AvoidState::Blocked {
+                commanded.map(|c| [c[0], c[1]])
+            } else {
+                None
+            };
         let goal_ned = if planning {
-            self.plan.goal.map(|g| {
-                let d = self
-                    .auth
-                    .lease()
-                    .and_then(|l| l.goal.as_ref())
-                    .map(|g| g.d)
-                    .or(self.goto.map(|t| t[2]));
-                [wire(g[0]), wire(g[1]), wire(d.unwrap_or(0.0))]
+            self.plan.goal.or(blocked_goal).map(|g| {
+                let d = commanded.map_or(0.0, |c| c[2]);
+                [wire(g[0]), wire(g[1]), wire(d)]
             })
         } else {
             None
+        };
+        let plan_ned = match blocked_goal {
+            Some(t) => self
+                .pos_ne(now_ms)
+                .map(|p| vec![[wire(p[0]), wire(p[1])], [wire(t[0]), wire(t[1])]])
+                .unwrap_or_default(),
+            None if planning => self
+                .plan
+                .path
+                .iter()
+                .map(|p| [wire(p[0]), wire(p[1])])
+                .collect(),
+            None => Vec::new(),
         };
         let window = u64::from(self.settings.pilot.link_loss_s) * 1000;
         let link_loss_in_s = if self.fc.armed && !self.fc.landed() {
@@ -124,15 +148,7 @@ impl Pilot {
             avoid_state,
             min_clearance_m,
             goal_ned,
-            plan_ned: if planning {
-                self.plan
-                    .path
-                    .iter()
-                    .map(|p| [wire(p[0]), wire(p[1])])
-                    .collect()
-            } else {
-                Vec::new()
-            },
+            plan_ned,
             setpoint_ned: self.setpoint.map(|p| p.map(wire)),
             readiness,
             link_loss_in_s,

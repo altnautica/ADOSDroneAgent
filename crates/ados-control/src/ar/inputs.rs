@@ -127,7 +127,8 @@ pub fn scene_from(
 
 /// The planned motion while a follow skill or a pilot go-to flies: the path
 /// and goal from the pilot (or, without a pilot, from follow-me's own state),
-/// the orbit from follow-me's mode, radius and target.
+/// the orbit from follow-me's mode, radius and target. A go-to never draws an
+/// orbit: follow-me may hold an orbit subject without flying it.
 pub(super) fn motion_from(
     owner: Option<&str>,
     pilot: Option<&Value>,
@@ -162,7 +163,7 @@ pub(super) fn motion_from(
         .get("setpoint_ned")
         .and_then(arr)
         .and_then(|s| s.get(2).copied());
-    let orbit = follow.and_then(|fs| {
+    let orbit = follow.filter(|_| owner != Some("goto")).and_then(|fs| {
         if fs.get("follow_mode").and_then(Value::as_str) != Some("orbit") {
             return None;
         }

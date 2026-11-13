@@ -221,6 +221,37 @@ fn stick_brake_reports_avoid_state_and_hard_stop() {
     );
 }
 
+/// A wall across a goto holds the vehicle, and the frame still carries the
+/// commanded goal and the straight way to it, so every surface draws them in
+/// the blocked colour instead of dropping them.
+#[test]
+fn a_blocked_goto_keeps_its_goal_and_way_on_the_frame() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.req(Request::Goto {
+        n: 20.0,
+        e: 0.0,
+        d: -5.0,
+        yaw: None,
+    });
+    let end = w.now + 1500;
+    while w.now < end {
+        w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+        w.run(20);
+    }
+    let s = w.p.state(w.now);
+    assert_eq!(s.avoid_state, AvoidState::Blocked);
+    assert_eq!(s.hold_reason.as_deref(), Some("blocked"));
+    let g = s.goal_ned.expect("the commanded goal stays on the frame");
+    assert!(
+        (g[0] - 20.0).abs() < 0.01 && g[1].abs() < 0.01 && (g[2] + 5.0).abs() < 0.01,
+        "{g:?}"
+    );
+    assert_eq!(s.plan_ned.len(), 2, "{:?}", s.plan_ned);
+    assert!(s.plan_ned[0][0].abs() < 1.0, "{:?}", s.plan_ned);
+    assert_eq!(s.plan_ned[1], [g[0], g[1]]);
+}
+
 #[test]
 fn centred_sticks_hold_only_once_the_vehicle_slows() {
     let mut w = World::new();

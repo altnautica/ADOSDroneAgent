@@ -127,6 +127,21 @@ fn a_goto_draws_its_planned_path_and_goal() {
     assert!(fi.orbit.is_none());
 }
 
+/// Follow-me tracking a subject with orbit configured, but not flying: a
+/// goto shows its own path and goal and no orbit ring around the subject.
+#[test]
+fn a_goto_beside_an_idle_orbit_follow_draws_no_orbit() {
+    let pilot = json!({"owner": "goto", "plan_ned": [[5.0, 1.0]], "goal_ned": [12.0, 3.0, -10.0],
+                       "avoid_state": "clear"});
+    let follow = json!({"active": false, "follow_mode": "orbit", "target_ned": [20.0, 0.0, 0.0],
+                        "orbit_radius_m": 8.0, "orbit_direction": "cw"});
+    let fi = scene_from(&snapshot(), 7, Some(&pilot), Some(&follow))
+        .motion
+        .expect("goto geometry");
+    assert_eq!(fi.goal, Some([12.0, 3.0, -10.0]));
+    assert!(fi.orbit.is_none(), "{:?}", fi.orbit);
+}
+
 #[test]
 fn empty_demand_builds_nothing() {
     let mut b = Builder::new(10.0);

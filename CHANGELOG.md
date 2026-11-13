@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.134] - 2026-11-14
+
+### Fixed
+
+- A go-to the planner finds blocked keeps its goal and path on the pilot frame. The planner holds without a goal or path of its own when no way around is clear, so the frame sent no `goal_ned` and an empty `plan_ned`, and the minimaps and the AR motion layer dropped the go-to's path and goal exactly while it was blocked. The frame now carries the commanded goal and the straight way from the vehicle to it, with `avoid_state` `blocked`, and the minimaps and the AR layer draw both in the blocked colour. The vehicle still holds.
+- The AR goal ring takes the blocked colour while the way is blocked, as the path already did.
+- The AR motion layer no longer draws a follow-me orbit ring during a go-to. Follow-me publishes its orbit mode and subject while it tracks without flying, so a go-to beside an idle orbit follow drew a ring around the subject the vehicle was not orbiting.
+
 ## [0.109.133] - 2026-11-14
 
 ### Fixed
@@ -19,7 +27,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - Obstacle cells on the camera view now end half a metre above the scan plane. The per-camera obstacle grid treated each planar-scan return as a wall reaching 3 m above the vehicle, so cells were drawn well above anything the scan could see.
 - The AR motion layer draws a pilot go-to's planned path (`fpath`) and goal (`fgoal`), as it already did for a follow skill.
-- Cockpit: the local minimap draws the pilot's planned path (dashed) and a ring on its goal while a go-to or a skill flies, in the go-to state colour, or red while the pilot reports the way blocked. The plan hides once the pilot frame is stale. The TUI has no minimap, so there is nothing to pair there.
+- Cockpit: the local minimap draws the pilot's planned path (dashed) and a ring on its goal while a go-to or a skill flies, in the go-to state colour, or red while the pilot reports the way blocked and still sends a goal (the goal brake holding on a clear plan). A go-to the planner found blocked sent no path or goal in this release, so the plan disappeared instead of turning red. The plan hides once the pilot frame is stale. The TUI has no minimap, so there is nothing to pair there.
+
 ## [0.109.131] - 2026-11-13
 
 ### Fixed
