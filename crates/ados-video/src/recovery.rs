@@ -15,7 +15,8 @@
 //! [`INPUT_WATCH_INTERVAL`], so the publisher leaving `main` or the encoder
 //! exiting is acted on within that interval rather than on the next tick; and
 //! while a network source is unreachable the encoder is held and the source is
-//! probed every [`ados_protocol::source_probe::PROBE_INTERVAL`], so the encoder
+//! probed (fast for the first seconds, then at a steady back-off, see
+//! [`ados_protocol::source_probe::probe_delay`]), so the encoder
 //! is respawned the moment the source answers instead of after its connect
 //! has sat out the kernel's SYN retransmit schedule. Neither path runs while
 //! the input is healthy.

@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.128] - 2026-11-13
+
+### Fixed
+
+- Video: a network camera that stays down is probed every 250 ms only for its first 5 s down, then every 3 s for as long as it stays down, instead of every 250 ms forever. A camera named by hostname is resolved outside the 250 ms connect bound, so a slow resolver no longer fails every probe. A mediamtx that is running but frozen (its API not answering, or an encoder respawn that never gets a packet through) is restarted again instead of only the encoder being respawned.
+
 ## [0.109.127] - 2026-11-13
 
 ### Fixed

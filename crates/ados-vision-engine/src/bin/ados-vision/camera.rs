@@ -113,7 +113,7 @@ pub(super) async fn run_camera(
                     tracing::warn!(camera = %camera_id, "frame source not answering; probing until it does");
                 }
                 tokio::select! {
-                    _ = addr.wait_reachable() => {}
+                    _ = addr.wait_reachable(tokio::time::Instant::now()) => {}
                     _ = cancel.wait() => return,
                 }
             }

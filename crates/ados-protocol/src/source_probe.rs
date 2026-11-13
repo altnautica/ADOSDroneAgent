@@ -5,17 +5,45 @@
 //! after 1 s, 3 s, 7 s, 15 s and so on, so a camera that comes back in the
 //! middle of that schedule is only seen at the next retransmit, seconds late.
 //! A daemon that has to reopen such a source probes it instead: one short TCP
-//! connect every [`PROBE_INTERVAL`], each bounded by the same interval, and it
-//! opens the source only once a probe is accepted. A camera that comes back is
-//! then seen within one interval of answering, and the cost while it is down is
-//! one SYN per interval.
+//! connect at a time, and it opens the source only once a probe is accepted.
+//!
+//! The cadence follows [`probe_delay`]: every [`PROBE_INTERVAL`] for the first
+//! [`FAST_PROBE_WINDOW`] after the source went down (a brief drop is seen
+//! within one interval of the camera answering), then every
+//! [`STEADY_PROBE_INTERVAL`] for as long as it stays down. A dead camera costs
+//! one SYN per steady interval, and the probe never gives up.
+//!
+//! Name resolution is not part of the connect bound: a hostname is resolved
+//! first under its own, longer bound ([`RESOLVE_TIMEOUT`]), so a slow resolver
+//! delays a probe rather than failing every one.
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
-/// The probe cadence, and the bound on each probe's connect.
+/// The fast probe cadence, and the bound on each probe's connect.
 pub const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long after the source went down the probe keeps the fast cadence.
+pub const FAST_PROBE_WINDOW: Duration = Duration::from_secs(5);
+
+/// The probe cadence once the source has been down past the fast window.
+pub const STEADY_PROBE_INTERVAL: Duration = Duration::from_secs(3);
+
+/// The bound on resolving a source's hostname, separate from the connect's.
+pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The pause before the next probe of a source that has been down for
+/// `down_for`.
+pub fn probe_delay(down_for: Duration) -> Duration {
+    if down_for < FAST_PROBE_WINDOW {
+        PROBE_INTERVAL
+    } else {
+        STEADY_PROBE_INTERVAL
+    }
+}
 
 /// Where a network source's connection goes: its host and TCP port.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,27 +88,45 @@ impl SourceAddr {
         })
     }
 
-    /// One probe: does the source accept a TCP connection within
-    /// [`PROBE_INTERVAL`]? The connection is closed at once.
-    pub async fn reachable(&self) -> bool {
-        matches!(
-            tokio::time::timeout(
-                PROBE_INTERVAL,
-                TcpStream::connect((self.host.as_str(), self.port))
-            )
-            .await,
-            Ok(Ok(_))
+    /// The socket addresses to probe: an IP literal as is, a hostname resolved
+    /// under [`RESOLVE_TIMEOUT`] (empty when it does not resolve in time).
+    async fn resolve(&self) -> Vec<SocketAddr> {
+        if let Ok(ip) = self.host.parse::<IpAddr>() {
+            return vec![SocketAddr::new(ip, self.port)];
+        }
+        match tokio::time::timeout(
+            RESOLVE_TIMEOUT,
+            tokio::net::lookup_host((self.host.as_str(), self.port)),
         )
+        .await
+        {
+            Ok(Ok(addrs)) => addrs.collect(),
+            _ => Vec::new(),
+        }
     }
 
-    /// Resolve once the source accepts a connection, probing every
-    /// [`PROBE_INTERVAL`] (the first probe at once). Never gives up; drop the
-    /// future to stop probing.
-    pub async fn wait_reachable(&self) {
-        let mut tick = tokio::time::interval(PROBE_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    /// One probe: does the source accept a TCP connection, each connect
+    /// bounded by [`PROBE_INTERVAL`]? Resolving a hostname comes first and is
+    /// bounded on its own. The connection is closed at once.
+    pub async fn reachable(&self) -> bool {
+        for addr in self.resolve().await {
+            if matches!(
+                tokio::time::timeout(PROBE_INTERVAL, TcpStream::connect(addr)).await,
+                Ok(Ok(_))
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Resolve once the source accepts a connection. The caller has just seen
+    /// a probe fail, so the first probe here waits one [`probe_delay`]; the
+    /// cadence is measured from `down_since`, when the source was first seen
+    /// down. Never gives up; drop the future to stop probing.
+    pub async fn wait_reachable(&self, down_since: Instant) {
         loop {
-            tick.tick().await;
+            tokio::time::sleep(probe_delay(down_since.elapsed())).await;
             if self.reachable().await {
                 return;
             }
@@ -102,8 +148,8 @@ mod tests {
     #[test]
     fn a_source_url_resolves_to_its_host_and_port() {
         assert_eq!(
-            SourceAddr::from_url("rtsp://192.168.150.1:9754/cam"),
-            addr("192.168.150.1", 9754)
+            SourceAddr::from_url("rtsp://192.0.2.10:8554/cam"),
+            addr("192.0.2.10", 8554)
         );
         assert_eq!(
             SourceAddr::from_url("rtsp://cam.local/stream"),
@@ -155,7 +201,7 @@ mod tests {
 
         let waiter = tokio::spawn({
             let source = source.clone();
-            async move { source.wait_reachable().await }
+            async move { source.wait_reachable(tokio::time::Instant::now()).await }
         });
         tokio::time::sleep(PROBE_INTERVAL * 3).await;
         assert!(!waiter.is_finished(), "nothing is listening yet");
@@ -169,6 +215,73 @@ mod tests {
             .expect("the waiter sees the source within an interval")
             .unwrap();
         assert!(back.elapsed() <= PROBE_INTERVAL * 2, "{:?}", back.elapsed());
+        assert!(source.reachable().await);
+    }
+
+    /// Fast for the first seconds after the source went down, then a fixed
+    /// steady cadence inside 2-5 s for as long as it stays down.
+    #[test]
+    fn the_probe_backs_off_to_a_steady_cadence() {
+        assert_eq!(probe_delay(Duration::ZERO), PROBE_INTERVAL);
+        assert_eq!(
+            probe_delay(FAST_PROBE_WINDOW - Duration::from_millis(1)),
+            PROBE_INTERVAL
+        );
+        for down_for in [5, 60, 3600, 86_400 * 30] {
+            let delay = probe_delay(Duration::from_secs(down_for));
+            assert_eq!(delay, STEADY_PROBE_INTERVAL, "{down_for} s");
+        }
+        assert!(STEADY_PROBE_INTERVAL >= Duration::from_secs(2));
+        assert!(STEADY_PROBE_INTERVAL <= Duration::from_secs(5));
+        assert!(FAST_PROBE_WINDOW <= Duration::from_secs(10));
+    }
+
+    /// A source down for longer than the fast window is probed at the steady
+    /// cadence: one that answers right after a failed probe is seen at the
+    /// next steady probe, not within a fast interval, and still seen.
+    #[tokio::test]
+    async fn a_source_down_past_the_fast_window_is_probed_at_the_steady_cadence() {
+        let parked = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = parked.local_addr().unwrap().port();
+        drop(parked);
+        let source = SourceAddr {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let down_since = tokio::time::Instant::now()
+            .checked_sub(FAST_PROBE_WINDOW * 2)
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let waiter = tokio::spawn({
+            let source = source.clone();
+            async move { source.wait_reachable(down_since).await }
+        });
+        let _listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio::time::sleep(PROBE_INTERVAL * 4).await;
+        assert!(!waiter.is_finished(), "no fast probe in steady failure");
+        tokio::time::timeout(STEADY_PROBE_INTERVAL * 2, waiter)
+            .await
+            .expect("the steady probe still sees the source")
+            .unwrap();
+        let seen = start.elapsed();
+        assert!(seen >= STEADY_PROBE_INTERVAL, "{seen:?}");
+        assert!(
+            seen < STEADY_PROBE_INTERVAL + PROBE_INTERVAL * 4,
+            "{seen:?}"
+        );
+    }
+
+    /// A hostname is resolved outside the connect bound and probed on every
+    /// address it resolves to.
+    #[tokio::test]
+    async fn a_hostname_source_is_resolved_then_probed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = SourceAddr {
+            host: "localhost".into(),
+            port: listener.local_addr().unwrap().port(),
+        };
         assert!(source.reachable().await);
     }
 }

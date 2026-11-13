@@ -268,6 +268,7 @@ impl VideoOrchestrator {
         self.inbound_bytes_changed_at = now;
         self.video_inbound_bytes_per_s = 0.0;
         self.inbound_flat = false;
+        self.input_respawn_unproven = false;
         self.last_start_error = StartError::None;
         tracing::info!(encoder = ?kind, "pipeline_started");
         // The encoder is spawned, but nothing is published on `main` yet: the

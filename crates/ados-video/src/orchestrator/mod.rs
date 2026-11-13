@@ -186,7 +186,10 @@ pub struct VideoOrchestrator {
     /// the encoder is held rather than spawned against it (its connect would
     /// sit out the kernel's SYN retransmit schedule), and the run loop probes
     /// the source and respawns the encoder the moment it answers.
-    pub(crate) source_wait: Option<ados_protocol::source_probe::SourceAddr>,
+    pub(crate) source_wait: Option<input_stage::SourceWait>,
+    /// The last recovery respawned only the encoder and no packet has reached
+    /// mediamtx since: a further failure on mediamtx's side restarts mediamtx.
+    pub(crate) input_respawn_unproven: bool,
 
     /// Consecutive failed recovery attempts of each ladder, for the log lines
     /// only: every ladder retries on the next health tick however high these
@@ -346,6 +349,7 @@ impl VideoOrchestrator {
             video_inbound_bytes_per_s: 0.0,
             inbound_flat: false,
             source_wait: None,
+            input_respawn_unproven: false,
             restart_count: 0,
             cloud_restart_count: 0,
             wfb_tee_restart_count: 0,

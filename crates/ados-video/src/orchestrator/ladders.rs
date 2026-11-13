@@ -45,13 +45,22 @@ impl VideoOrchestrator {
         let camera_plugged = Arc::clone(&self.camera_plugged);
         let mut input_watch = tokio::time::interval(INPUT_WATCH_INTERVAL);
         input_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The source probe lives across loop iterations for as long as the same
+        // source is held, so its back-off is not reset by every other wakeup.
+        let mut probing = self.source_wait.clone();
+        let mut source_probe = Box::pin(wait_for_source(probing.clone()));
+        let mut probe_done = false;
 
         loop {
             // Both input arms run only while the primary's input is down: the
             // fast re-check while the inbound counter is flat, the source probe
             // while a network source is unreachable and the encoder held.
             let watching_input = self.input_watch_due();
-            let source_wait = self.source_wait.clone();
+            if probe_done || self.source_wait != probing {
+                probing = self.source_wait.clone();
+                source_probe = Box::pin(wait_for_source(probing.clone()));
+                probe_done = false;
+            }
             tokio::select! {
                 _ = shutdown.wait() => {
                     tracing::info!("video_pipeline_shutdown");
@@ -73,7 +82,8 @@ impl VideoOrchestrator {
                 _ = input_watch.tick(), if watching_input => {
                     self.watch_input().await;
                 }
-                _ = wait_for_source(source_wait) => {
+                _ = &mut source_probe => {
+                    probe_done = true;
                     self.on_source_answered().await;
                 }
                 _ = telemetry_tick.tick() => {

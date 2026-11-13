@@ -104,6 +104,7 @@ impl VideoOrchestrator {
             match grace_decision(path_ready, elapsed) {
                 GraceDecision::FirstPacket => {
                     self.first_packet_seen = true;
+                    self.input_respawn_unproven = false;
                     self.no_first_packet_failures = 0;
                     tracing::info!(elapsed_s = elapsed.as_secs_f64(), "pipeline_first_packet");
                     return Ok(());

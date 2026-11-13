@@ -9,6 +9,7 @@ use tokio::net::TcpListener;
 use super::*;
 use crate::encoder::EncoderKind;
 use crate::mediamtx::MediamtxManager;
+use crate::orchestrator::input_stage::InputRespawn;
 use crate::process::ManagedProcess;
 use crate::recovery::{INPUT_WATCH_INTERVAL, STAGE_STOP_GRACE};
 
@@ -202,4 +203,88 @@ async fn a_teardown_of_deaf_stages_is_bounded_by_one_grace() {
     assert!(o.encoder.is_none() && o.sei_tap.is_none());
     assert!(o.secondary_encoders.is_empty());
     assert_eq!(o.state, PipelineState::Stopped);
+}
+
+/// mediamtx alive but frozen: its process runs and its API does not answer, so
+/// the lost path is mediamtx's fault and it is not kept.
+#[tokio::test]
+async fn a_frozen_mediamtx_is_not_kept_through_a_lost_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let camera = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source = format!("rtsp://{}/cam", camera.local_addr().unwrap());
+    let ready = Arc::new(AtomicBool::new(false));
+    let mut o = streaming_orch(dir.path(), &source, ready).await;
+    assert!(o.mediamtx_trusted(HealthFailure::PathLost).await);
+
+    // The same live process, its API gone silent.
+    let mut frozen =
+        MediamtxManager::new(dir.path()).with_ports(closed_port(), closed_port(), 0, 0);
+    let args = vec!["30".to_string()];
+    frozen.adopt_process(ManagedProcess::spawn("mediamtx", "sleep", &args).unwrap());
+    o.mediamtx = frozen;
+    assert!(o.mediamtx.is_running());
+    assert!(!o.mediamtx_trusted(HealthFailure::PathLost).await);
+    assert!(!o.mediamtx_trusted(HealthFailure::EncoderExited).await);
+    o.stop_stream().await;
+    o.mediamtx.stop().await;
+}
+
+/// An encoder-only respawn that never gets a packet through: the next failure
+/// seen on mediamtx's side restarts mediamtx rather than respawning the
+/// encoder again forever. A first packet restores the encoder-only path.
+#[tokio::test]
+async fn a_respawn_that_never_publishes_escalates_to_a_mediamtx_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let camera = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source = format!("rtsp://{}/cam", camera.local_addr().unwrap());
+    let ready = Arc::new(AtomicBool::new(false));
+    let mut o = streaming_orch(dir.path(), &source, Arc::clone(&ready)).await;
+    let mediamtx_pid = o.mediamtx.pid();
+
+    // The publisher leaves: only the encoder is respawned.
+    o.tick_running().await;
+    assert_eq!(
+        o.mediamtx.pid(),
+        mediamtx_pid,
+        "mediamtx kept the first time"
+    );
+    assert!(o.input_respawn_unproven);
+
+    // The fresh encoder never publishes: mediamtx is no longer trusted for a
+    // failure on its side, while an exiting encoder is still the encoder's.
+    for failure in [
+        HealthFailure::PathLost,
+        HealthFailure::GraceExpired,
+        HealthFailure::InboundStalled,
+    ] {
+        assert!(!o.mediamtx_trusted(failure).await, "{failure:?}");
+    }
+    assert!(o.mediamtx_trusted(HealthFailure::EncoderExited).await);
+
+    // The path comes up: the respawn is proven.
+    ready.store(true, Ordering::Release);
+    o.encoder = Some(deaf_stage("encoder"));
+    assert!(o.check_health_detail().await.is_ok());
+    assert!(o.first_packet_seen);
+    assert!(!o.input_respawn_unproven);
+    assert!(o.mediamtx_trusted(HealthFailure::PathLost).await);
+    o.stop_stream().await;
+}
+
+/// A source that stays down keeps the time it first went down across held
+/// respawns, so the probe settles at its steady cadence instead of starting
+/// over fast at each one.
+#[tokio::test]
+async fn a_source_that_stays_down_keeps_its_down_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = format!("rtsp://127.0.0.1:{}/cam", closed_port());
+    let ready = Arc::new(AtomicBool::new(false));
+    let mut o = streaming_orch(dir.path(), &source, ready).await;
+    assert_eq!(o.respawn_input_stage().await, InputRespawn::AwaitingSource);
+    let first = o.source_wait.clone().unwrap().down_since;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(o.respawn_input_stage().await, InputRespawn::AwaitingSource);
+    assert_eq!(o.source_wait.clone().unwrap().down_since, first);
+    o.stop_stream().await;
+    o.mediamtx.stop().await;
 }

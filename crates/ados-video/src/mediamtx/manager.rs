@@ -264,6 +264,12 @@ impl MediamtxManager {
         data.get("ready").and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
+    /// Whether the control API answers at all. A mediamtx whose process is
+    /// alive but whose API does not answer is frozen and needs a restart.
+    pub async fn api_answers(&self) -> bool {
+        http_get(self.api_port, "/v3/paths/list").await.is_some()
+    }
+
     /// Read the cumulative `bytesReceived` counter for the named path — the
     /// authoritative "data is actually arriving from the encoder" signal for
     /// the orchestrator's inbound-stall watchdog + bytes/s telemetry. `None`

@@ -37,18 +37,30 @@ pub(crate) enum InputRespawn {
     Failed,
 }
 
+/// A held network source: where it is and when it was first seen down, which
+/// sets the probe's cadence (fast at first, then the steady back-off).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceWait {
+    pub(crate) addr: SourceAddr,
+    pub(crate) down_since: tokio::time::Instant,
+}
+
 /// Resolve once the held source answers; never while no source is held.
-pub(super) async fn wait_for_source(source: Option<SourceAddr>) {
+///
+/// The run loop keeps one of these alive for as long as the same source is
+/// held: rebuilding it on every wakeup would restart the probe's pause each
+/// time and either hammer the camera or never probe it.
+pub(super) async fn wait_for_source(source: Option<SourceWait>) {
     match source {
-        Some(source) => source.wait_reachable().await,
+        Some(wait) => wait.addr.wait_reachable(wait.down_since).await,
         None => std::future::pending().await,
     }
 }
 
 impl VideoOrchestrator {
     /// Recover the primary after `failure`: the input stage alone when only it
-    /// failed and mediamtx is up, otherwise (or when the encoder cannot be
-    /// rebuilt) the full pipeline restart.
+    /// failed and mediamtx is up and answering, otherwise (or when the encoder
+    /// cannot be rebuilt) the full pipeline restart.
     pub(super) async fn recover_primary(&mut self, failure: HealthFailure) {
         self.software_healthy_since = None;
         self.note_failed_run();
@@ -58,10 +70,11 @@ impl VideoOrchestrator {
             cause = ?failure,
             "pipeline_health_check_failed: restarting"
         );
-        if failure.is_encoder_side() && self.mediamtx.is_running() {
+        if failure.is_encoder_side() && self.mediamtx_trusted(failure).await {
             match self.respawn_input_stage().await {
                 InputRespawn::Respawned => {
                     self.restart_count = 0;
+                    self.input_respawn_unproven = true;
                     return;
                 }
                 InputRespawn::AwaitingSource => return,
@@ -75,6 +88,30 @@ impl VideoOrchestrator {
         if ok {
             self.restart_count = 0;
         }
+    }
+
+    /// Whether mediamtx can be kept through an input-stage `failure`.
+    ///
+    /// Its process must be alive and its API answering: a mediamtx that is
+    /// alive but frozen reads as a lost path too, and only a restart fixes it.
+    /// And when the last input-stage respawn never got a packet through, a
+    /// further failure seen on mediamtx's side (the path, the grace, the byte
+    /// counter) is no longer put down to the encoder: mediamtx is restarted.
+    /// An encoder that exits is the encoder's own fault and is always respawned
+    /// alone.
+    pub(super) async fn mediamtx_trusted(&mut self, failure: HealthFailure) -> bool {
+        if !self.mediamtx.is_running() {
+            return false;
+        }
+        if !self.mediamtx.api_answers().await {
+            tracing::warn!("mediamtx_api_not_answering: restarting mediamtx");
+            return false;
+        }
+        if self.input_respawn_unproven && failure != HealthFailure::EncoderExited {
+            tracing::warn!("input_respawn_never_published: restarting mediamtx");
+            return false;
+        }
+        true
     }
 
     /// Respawn only the encoder. Re-discovers first (a local camera may have
@@ -99,7 +136,14 @@ impl VideoOrchestrator {
                 if let Some(enc) = self.encoder.take() {
                     crate::recovery::stop_stages(vec![enc]).await;
                 }
-                self.source_wait = Some(source);
+                let down_since = match &self.source_wait {
+                    Some(wait) if wait.addr == source => wait.down_since,
+                    _ => tokio::time::Instant::now(),
+                };
+                self.source_wait = Some(SourceWait {
+                    addr: source,
+                    down_since,
+                });
                 return InputRespawn::AwaitingSource;
             }
         }
@@ -120,7 +164,10 @@ impl VideoOrchestrator {
         }
         tracing::info!("primary_source_answered: respawning the encoder");
         match self.respawn_input_stage().await {
-            InputRespawn::Respawned => self.restart_count = 0,
+            InputRespawn::Respawned => {
+                self.restart_count = 0;
+                self.input_respawn_unproven = true;
+            }
             InputRespawn::AwaitingSource => {}
             // The next tick finds no encoder and takes the full restart.
             InputRespawn::Failed => self.source_wait = None,
