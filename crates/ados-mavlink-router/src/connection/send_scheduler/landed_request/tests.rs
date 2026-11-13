@@ -141,3 +141,20 @@ async fn a_stream_table_that_carries_it_owns_the_rate() {
     conn.tick_landed_state_request().await;
     assert!(intervals(&rx).is_empty());
 }
+
+#[test]
+fn only_the_first_request_of_a_link_up_counts_as_first() {
+    let mut r = LandedStateRequest::default();
+    let t0 = Instant::now();
+    assert!(!r.due(true, false, t0));
+    assert!(r.due(true, false, t0 + LANDED_STATE_GRACE));
+    assert!(r.first_of_link_up());
+    let again = t0 + LANDED_STATE_GRACE + LANDED_STATE_REREQUEST;
+    assert!(r.due(true, false, again));
+    assert!(!r.first_of_link_up(), "a repeat logs at debug");
+    // A link drop starts a new link-up.
+    assert!(!r.due(false, false, again));
+    assert!(!r.due(true, false, again));
+    assert!(r.due(true, false, again + LANDED_STATE_GRACE));
+    assert!(r.first_of_link_up());
+}

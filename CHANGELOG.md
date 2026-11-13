@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.116] - 2026-11-13
+
+### Fixed
+
+- Cockpit: the flight-telemetry poll runs for the whole session (5 Hz with the Feed open, 1 Hz elsewhere), so every screen knows the arm state. The aircraft setup offer and the Menu's "Set up aircraft" show again on a known-disarmed vehicle, and leaving a screen with an unsaved draft for the Feed asks first. An unanswered poll still counts as possibly airborne.
+- Cockpit: the top bar's link age follows the shared spec format (one decimal below 10 s, whole seconds above).
+- Cockpit: declining a cloud unpair while armed names the unpair, not a radio change.
+- Dashboard: "Make primary" reads the arm state only from live telemetry; a second camera whose stream fails shows no snapshot rather than the primary camera's; the Logs page keeps the polled list until a stream retry actually opens.
+- Router: repeated EXTENDED_SYS_STATE requests on one link-up log at debug, not info.
+
 ## [0.109.115] - 2026-11-13
 
 ### Fixed

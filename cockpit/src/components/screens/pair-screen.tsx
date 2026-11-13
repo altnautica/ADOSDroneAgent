@@ -215,7 +215,7 @@ function CloudOwner({
     if (busy) return;
     setBusy("unpair");
     unpair("cloud", confirmArmed, readArmed)
-      .then((res) => (res === "done" ? toast.ok(t("cockpit.pair.unpaired")) : toast.err(t(`cockpit.radio.${res}`))))
+      .then((res) => (res === "done" ? toast.ok(t("cockpit.pair.unpaired")) : toast.err(t(res === "armed" ? "cockpit.pair.unpairArmed" : "cockpit.pair.unpairArmedUnknown"))))
       .catch((err: unknown) => toastFromError(err, t("pairing.page.unpairFailed")))
       .finally(() => {
         setBusy(null);

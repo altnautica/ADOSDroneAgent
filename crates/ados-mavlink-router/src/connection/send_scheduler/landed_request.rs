@@ -34,6 +34,8 @@ pub(crate) struct LandedStateRequest {
     absent_since: Option<Instant>,
     /// When it was last requested on this link-up.
     requested_at: Option<Instant>,
+    /// How many requests went out on this link-up.
+    requests: u32,
 }
 
 impl LandedStateRequest {
@@ -60,7 +62,15 @@ impl LandedStateRequest {
             return false;
         }
         self.requested_at = Some(now);
+        self.requests += 1;
         true
+    }
+
+    /// Whether the request [`Self::due`] just allowed is the first of this
+    /// link-up: that one is logged at `info`, the repeats at `debug`, so an
+    /// FC that never sends the message does not fill the journal.
+    pub(crate) fn first_of_link_up(&self) -> bool {
+        self.requests == 1
     }
 
     #[cfg(test)]
@@ -84,13 +94,22 @@ impl FcConnection {
         let linked = self.mavlink_alive().await;
         let now = Instant::now();
         let arriving = self.state.lock().await.landed_state_at(now).is_some();
-        let due = self
-            .landed_state_req
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .due(linked, arriving, now);
+        let (due, first) = {
+            let mut req = self
+                .landed_state_req
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let due = req.due(linked, arriving, now);
+            (due, req.first_of_link_up())
+        };
         if due {
-            tracing::info!("requesting EXTENDED_SYS_STATE at 1 Hz: not arriving on a live link");
+            if first {
+                tracing::info!(
+                    "requesting EXTENDED_SYS_STATE at 1 Hz: not arriving on a live link"
+                );
+            } else {
+                tracing::debug!("re-requesting EXTENDED_SYS_STATE at 1 Hz: still not arriving");
+            }
             self.send_message_interval(MSG_EXTENDED_SYS_STATE, LANDED_STATE_INTERVAL_US)
                 .await;
         }

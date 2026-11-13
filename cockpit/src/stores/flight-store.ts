@@ -1,6 +1,6 @@
 // The live vehicle state the Feed reads: attitude, position, battery, GPS and
-// the freshness/provenance verdicts. Written by the Feed's 5 Hz poll
-// (`useFlightTelemetryPoll`); every instrument subscribes with a field
+// the freshness/provenance verdicts. Written by the shell's poll
+// (`useFlightTelemetryPoll`, 5 Hz with the Feed open, 1 Hz elsewhere); every instrument subscribes with a field
 // selector so a poll re-renders only the instruments whose inputs changed.
 
 import { create } from "zustand";

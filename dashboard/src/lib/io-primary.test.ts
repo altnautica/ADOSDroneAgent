@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { primaryBlock, setPrimaryPad } from "@/lib/io-primary";
@@ -22,5 +25,12 @@ describe("primary controller change", () => {
     await setPrimaryPad("pad-1", async () => (asked++, true), put);
     expect(asked).toBe(1);
     expect(calls).toEqual([{ device_id: "pad-1" }, { device_id: "pad-1", force: true }]);
+  });
+});
+
+describe("make primary arm gate", () => {
+  it("reads the arm state only while the telemetry is live", () => {
+    const src = readFileSync(path.resolve(__dirname, "../routes/io-route.tsx"), "utf8");
+    expect(src).toMatch(/primaryBlock\(liveData\(tel, VEHICLE_TELEMETRY_POLL_MS, now\)\?\.armed\)/);
   });
 });

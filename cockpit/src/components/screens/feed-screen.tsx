@@ -48,7 +48,7 @@ import { ReachNotice } from "@/components/shell/reach-notice";
 import { RebootBanner } from "@/components/shell/reboot-banner";
 import { useExtensionStatePoll } from "@/hooks/use-extension-state-poll";
 import { useElementSize } from "@/hooks/use-element-size";
-import { useFlightTelemetryPoll } from "@/hooks/use-flight-telemetry";
+import { useFlightTelemetryFast } from "@/hooks/use-flight-telemetry";
 import { useGimbalAvailable, useGimbalDriver } from "@/hooks/use-gimbal-rate";
 import { useGroundDetectionPoll } from "@/hooks/use-ground-detection-poll";
 import { useNavStream } from "@/hooks/use-nav-stream";
@@ -122,7 +122,7 @@ export function FeedScreen() {
     bindVehicle(vehicleId, m.defaultLevel);
   }, [bindVehicle, vehicleId, m.defaultLevel]);
 
-  useFlightTelemetryPoll();
+  useFlightTelemetryFast();
   useExtensionStatePoll();
   useSkillKeys();
 

@@ -16,6 +16,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 vi.mock("@/lib/kiosk", () => ({ isKiosk: () => kiosk.on }));
 vi.mock("@/hooks/use-status-poll", () => ({ useStatusPoll: () => undefined }));
+vi.mock("@/hooks/use-flight-telemetry", () => ({ useFlightTelemetryPoll: () => undefined, useFlightTelemetryFast: () => undefined }));
 vi.mock("@/components/shell/menu-rail", () => ({ MenuRail: () => createElement("nav", { "data-testid": "menu-rail" }) }));
 vi.mock("@/shared/use-profile", () => ({ useNodeIdentity: () => ({ profile: "drone", role: null }) }));
 vi.mock("@/nav/registry", () => {

@@ -93,3 +93,12 @@ describe("log stream fallback", () => {
     }
   });
 });
+
+describe("stream retry on the polling fallback", () => {
+  it("keeps the polled list until the stream opens", () => {
+    expect(route).toMatch(/scheduleStreamRetry\(\(\) => setStreamAttempt/);
+    expect(route).not.toMatch(/setPollFallback\(false\)\)/);
+    expect(route).not.toMatch(/current \? false : current/);
+    expect(route.match(/setPollFallback\(false\)/g)).toHaveLength(1);
+  });
+});

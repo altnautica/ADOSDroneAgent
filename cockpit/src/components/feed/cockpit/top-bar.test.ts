@@ -9,7 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { TopBar } from "@/components/feed/cockpit/top-bar";
-import { linkCell } from "@/lib/flight-layout";
+import { linkCell, TOP_BAR_LINK } from "@/lib/flight-layout";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { INITIAL_FLIGHT_STATE, useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -56,5 +56,13 @@ describe("the top bar's link cell", () => {
     const link = await render();
     expect(link.dataset.severity).toBe("critical");
     expect(link.textContent).toContain(linkCell(null).text);
+  });
+});
+
+describe("link age format", () => {
+  it("reproduces the spec's golden rows", () => {
+    for (const [ms, text] of TOP_BAR_LINK.age_format.cases) {
+      expect(linkCell(ms).text).toBe(text);
+    }
   });
 });

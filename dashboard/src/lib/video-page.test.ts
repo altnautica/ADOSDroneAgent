@@ -62,3 +62,11 @@ describe("cameraVideoUrls", () => {
     expect(cameraVideoUrls({ whepUrl: "", hlsUrl: "" }, "down")).toEqual({ whepUrl: "", hlsUrl: "" });
   });
 });
+
+describe("video panel snapshot fallback", () => {
+  it("shows the primary camera's still only for the primary camera, refetched on a camera switch", () => {
+    const src = readFileSync(path.resolve(__dirname, "../components/panels/video-panel.tsx"), "utf8");
+    expect(src).toMatch(/showSnapshot = state === "failed" && cameraId === DEFAULT_CAMERA_ID/);
+    expect(src).toMatch(/\[showSnapshot, retryToken, cameraId\]/);
+  });
+});

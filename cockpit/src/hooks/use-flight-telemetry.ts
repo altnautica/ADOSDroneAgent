@@ -1,5 +1,7 @@
-// The Feed's flight-telemetry poll: `GET /api/telemetry` at 5 Hz while the Feed
-// is mounted and the page is visible, written into the flight store.
+// The flight-telemetry poll: `GET /api/telemetry` for the whole shell while the
+// page is visible, written into the flight store. It runs at 5 Hz while the Feed
+// is open and at 1 Hz on every other screen, so the arm state that gates the
+// setup offer, the controller tour and the draft guard is known everywhere.
 //
 // `live` is derived from attitude presence plus how long the vehicle stamp has
 // stood still (measured on the client's monotonic clock, so agent/browser clock
@@ -17,6 +19,27 @@ import { nextNoFixSince } from "@/shared/hud/minimap-mode";
 import { INITIAL_FLIGHT_STATE, useFlightStore, type HomePoint } from "@/stores/flight-store";
 
 export const FLIGHT_POLL_MS = 200;
+/** The poll's pace with the Feed closed: enough for the arm state and the
+ *  liveness verdict (well inside `LIVE_FRESH_MS`). */
+export const OFF_FEED_POLL_MS = 1000;
+
+/** How many mounted Feeds want the fast pace. */
+let fastHolders = 0;
+
+/** The poll's interval now: fast while a Feed is open, slow otherwise. */
+export function flightPollMs(): number {
+  return pollIntervalMs(fastHolders > 0 ? FLIGHT_POLL_MS : OFF_FEED_POLL_MS, renderProfile());
+}
+
+/** Held by the Feed while mounted: the shell's poll runs at the flight pace. */
+export function useFlightTelemetryFast(): void {
+  useEffect(() => {
+    fastHolders += 1;
+    return () => {
+      fastHolders -= 1;
+    };
+  }, []);
+}
 
 /** How long the vehicle stamp may stand still before the reading stops
  *  counting as live. */
@@ -83,63 +106,64 @@ export function nextArmedSince(
   return prevArmed === false ? nowMs : prevSince;
 }
 
-export function useFlightTelemetryPoll(): void {
-  useEffect(() => {
-    let lastStamp: string | null = null;
-    let lastStampMovedAt = 0;
-    let wasArmed = false;
-    const interval = pollIntervalMs(FLIGHT_POLL_MS, renderProfile());
+/** Start the poll; returns stop, which clears the live verdict (home and the
+ *  arm history stay: they belong to the flight, not to the poll). */
+export function startFlightTelemetryPoll(): () => void {
+  let lastStamp: string | null = null;
+  let lastStampMovedAt = 0;
+  let wasArmed = false;
 
-    const stop = pollLoop(
-      async (signal) => {
-        try {
-          const telemetry = await getTelemetry(signal);
-          const stamp = vehicleStamp(telemetry);
-          const nowMs = performance.now();
-          if (stamp !== lastStamp) {
-            lastStamp = stamp;
-            lastStampMovedAt = nowMs;
-          }
-          const msSinceStampMoved = stamp == null ? null : nowMs - lastStampMovedAt;
-          const prev = useFlightStore.getState();
-          const home = nextHome(prev.home, wasArmed, telemetry);
-          wasArmed = telemetry.armed === true;
-          const live = isLive(telemetry, msSinceStampMoved);
-          useFlightStore.setState({
-            telemetry,
-            stale: false,
-            live,
-            relayed: isRelayed(telemetry),
-            home,
-            lastLiveAt: live ? nowMs : prev.lastLiveAt,
-            armedAtLastLive: live ? telemetry.armed === true : prev.armedAtLastLive,
-            armedSince: nextArmedSince(
-              prev.armedAtLastLive,
-              prev.armedSince,
-              live,
-              telemetry.armed === true,
-              Date.now(),
-            ),
-            // Kept with the telemetry, not per map: a minimap mounted later
-            // (a view switch) keeps the frame it had.
-            noFixSince: nextNoFixSince(prev.noFixSince, live ? (telemetry.gps?.fix_type ?? null) : null, Date.now()),
-          });
-        } catch {
-          if (signal.aborted) return;
-          // Provenance survives a failed poll: the last snapshot is still on
-          // screen and its origin has not changed.
-          useFlightStore.setState({ stale: true, live: false, noFixSince: null });
+  const stop = pollLoop(
+    async (signal) => {
+      try {
+        const telemetry = await getTelemetry(signal);
+        const stamp = vehicleStamp(telemetry);
+        const nowMs = performance.now();
+        if (stamp !== lastStamp) {
+          lastStamp = stamp;
+          lastStampMovedAt = nowMs;
         }
-      },
-      () => interval,
-    );
+        const msSinceStampMoved = stamp == null ? null : nowMs - lastStampMovedAt;
+        const prev = useFlightStore.getState();
+        const home = nextHome(prev.home, wasArmed, telemetry);
+        wasArmed = telemetry.armed === true;
+        const live = isLive(telemetry, msSinceStampMoved);
+        useFlightStore.setState({
+          telemetry,
+          stale: false,
+          live,
+          relayed: isRelayed(telemetry),
+          home,
+          lastLiveAt: live ? nowMs : prev.lastLiveAt,
+          armedAtLastLive: live ? telemetry.armed === true : prev.armedAtLastLive,
+          armedSince: nextArmedSince(
+            prev.armedAtLastLive,
+            prev.armedSince,
+            live,
+            telemetry.armed === true,
+            Date.now(),
+          ),
+          // Kept with the telemetry, not per map: a minimap mounted later
+          // (a view switch) keeps the frame it had.
+          noFixSince: nextNoFixSince(prev.noFixSince, live ? (telemetry.gps?.fix_type ?? null) : null, Date.now()),
+        });
+      } catch {
+        if (signal.aborted) return;
+        // Provenance survives a failed poll: the last snapshot is still on
+        // screen and its origin has not changed.
+        useFlightStore.setState({ stale: true, live: false, noFixSince: null });
+      }
+    },
+    flightPollMs,
+  );
 
-    return () => {
-      stop();
-      // A stale "live" must never linger after the Feed unmounts. Home stays:
-      // it belongs to the flight, not to the screen. The live clock restarts,
-      // since nothing was being watched while the Feed was away.
-      useFlightStore.setState((s) => ({ ...INITIAL_FLIGHT_STATE, home: s.home, armedAtLastLive: s.armedAtLastLive, armedSince: s.armedSince }));
-    };
-  }, []);
+  return () => {
+    stop();
+    useFlightStore.setState((s) => ({ ...INITIAL_FLIGHT_STATE, home: s.home, armedAtLastLive: s.armedAtLastLive, armedSince: s.armedSince }));
+  };
+}
+
+/** The shell's one flight-telemetry poll, mounted for the whole session. */
+export function useFlightTelemetryPoll(): void {
+  useEffect(() => startFlightTelemetryPoll(), []);
 }

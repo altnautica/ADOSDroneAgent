@@ -1,6 +1,6 @@
 import { Pause, Play, ScrollText } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
@@ -59,8 +59,15 @@ export function LogsRoute() {
 
   // The stream is read with fetch, which carries the credential headers a
   // paired node needs off-box (an EventSource cannot).
+  // Each stream attempt is keyed by `streamAttempt`; the polled list stays
+  // on screen until the stream actually opens.
+  const [streamAttempt, setStreamAttempt] = useState(0);
+  const fallbackRef = useRef(pollFallback);
   useEffect(() => {
-    if (paused || pollFallback) return undefined;
+    fallbackRef.current = pollFallback;
+  }, [pollFallback]);
+  useEffect(() => {
+    if (paused) return undefined;
     const ctrl = new AbortController();
     void openLogStream(level, service, ctrl.signal, {
       onOpen: () => setPollFallback(false),
@@ -68,19 +75,19 @@ export function LogsRoute() {
       onClosed: () => setPollFallback(true),
     });
     return () => ctrl.abort();
-  }, [level, service, paused, pollFallback]);
+  }, [level, service, paused, streamAttempt]);
 
   // On the polling fallback, try the stream again on a timer.
   useEffect(() => {
     if (paused || !pollFallback) return undefined;
-    return scheduleStreamRetry(() => setPollFallback(false));
-  }, [paused, pollFallback]);
+    return scheduleStreamRetry(() => setStreamAttempt((n) => n + 1));
+  }, [paused, pollFallback, streamAttempt]);
 
   // Tab returns to visible on the polling fallback: try the stream again.
   useEffect(() => {
     function onVisibility() {
-      if (!document.hidden) {
-        setPollFallback((current) => (current ? false : current));
+      if (!document.hidden && fallbackRef.current) {
+        setStreamAttempt((n) => n + 1);
       }
     }
     document.addEventListener("visibilitychange", onVisibility);

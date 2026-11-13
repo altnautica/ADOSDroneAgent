@@ -130,7 +130,9 @@ export function VideoPanel() {
   const state: "idle" | "connecting" | "live" | "frozen" | "failed" = playing
     ? feed.state
     : "idle";
-  const showSnapshot = state === "failed";
+  // `/api/video/snapshot` is the primary camera's frame, so another camera
+  // shows no still rather than the wrong picture.
+  const showSnapshot = state === "failed" && cameraId === DEFAULT_CAMERA_ID;
 
   // The still-frame fallback. Fetched (not an <img src>) so it carries the
   // dashboard's credential.
@@ -155,7 +157,7 @@ export function VideoPanel() {
       setSnapshotUrl(null);
       setSnapshotAt(null);
     };
-  }, [showSnapshot, retryToken]);
+  }, [showSnapshot, retryToken, cameraId]);
 
   const isLive = state === "live";
   const transportLabel = feed.transport === "hls" ? "hls" : "webrtc";

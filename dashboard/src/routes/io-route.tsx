@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ReadErrorCard } from "@/components/read-error-card";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
+import { useNow } from "@/hooks/use-now";
 import { useResource } from "@/hooks/use-resource";
-import { useVehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
+import { useVehicleTelemetry, VEHICLE_TELEMETRY_POLL_MS } from "@/hooks/use-vehicle-telemetry";
+import { liveData } from "@/lib/freshness";
 import { primaryBlock, setPrimaryPad } from "@/lib/io-primary";
 import { apiFetch } from "@/shared/api-fetch";
 import { toast, toastFromError } from "@/shared/api/toast";
@@ -67,8 +69,11 @@ export function IoRoute() {
   const [primaryBusy, setPrimaryBusy] = useState<string | null>(null);
   const [primaryTarget, setPrimaryTarget] = useState<{ id: string; name: string } | null>(null);
   const [armedPrompt, setArmedPrompt] = useState<{ resolve: (ok: boolean) => void } | null>(null);
-  // Armed or unknown both block: an unknown arm state may be airborne.
-  const block = primaryBlock(useVehicleTelemetry().data?.armed);
+  // Armed or unknown both block: an unknown arm state may be airborne, and a
+  // reading kept past its poll is unknown.
+  const tel = useVehicleTelemetry();
+  const now = useNow(1_000);
+  const block = primaryBlock(liveData(tel, VEHICLE_TELEMETRY_POLL_MS, now)?.armed);
   const blockText = block === "armed" ? t("io.gamepads.armedRefused") : t("io.gamepads.armedUnknown");
 
   const gamepads = useResource<GamepadsResponse>(

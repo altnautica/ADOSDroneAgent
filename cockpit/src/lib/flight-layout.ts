@@ -41,11 +41,20 @@ export type TopBarOverflowItem = "controller" | "nav_source" | "link_text" | "li
 interface TopBarSpec {
   overflow: { to_menu_order: TopBarOverflowItem[]; never_move: string[] };
   chip: { max_frac: number };
-  link: { text: string; never: string; detail: string; icon_color: { ok_below_ms: number; warning_below_ms: number } };
+  link: {
+    text: string;
+    never: string;
+    detail: string;
+    age_format: { decimals_below_s: number; decimals: number; cases: [number, string][] };
+    icon_color: { ok_below_ms: number; warning_below_ms: number };
+  };
   battery: { time_to_reserve: { text: string; short: string } };
 }
 
 const TOP_BAR_SPEC = layoutJson.zones.find((z) => z.id === "top_bar") as unknown as TopBarSpec;
+
+/** The link cell spec (`top_bar.link`). */
+export const TOP_BAR_LINK = TOP_BAR_SPEC.link;
 
 export const TOP_BAR_OVERFLOW: readonly TopBarOverflowItem[] = TOP_BAR_SPEC.overflow.to_menu_order;
 
@@ -76,7 +85,8 @@ export function linkCell(ageMs: number | null): { text: string; severity: "ok" |
   if (ageMs === null || !Number.isFinite(ageMs)) return { text: specText(l.never), severity: "critical" };
   const s = ageMs / 1000;
   const severity = ageMs < l.icon_color.ok_below_ms ? "ok" : ageMs < l.icon_color.warning_below_ms ? "warning" : "critical";
-  return { text: specText(l.text, { s: s < 10 ? s.toFixed(1) : String(Math.round(s)) }), severity };
+  const f = l.age_format;
+  return { text: specText(l.text, { s: s < f.decimals_below_s ? s.toFixed(f.decimals) : String(Math.round(s)) }), severity };
 }
 
 /** The age of the newest vehicle frame the cockpit holds

@@ -2158,6 +2158,8 @@
       "unpairOwner": "Unpair from Mission Control",
       "holdToUnpair": "Hold to unbind",
       "unpaired": "Unpaired from Mission Control.",
+      "unpairArmed": "The vehicle is armed. Unpairing waits until it disarms.",
+      "unpairArmedUnknown": "The vehicle's arm state is not known yet. Unpairing waits until it reports disarmed.",
       "codeLabel": "Pairing code — enter in Mission Control",
       "linked": "linked",
       "unpairedState": "unpaired",

@@ -22,6 +22,7 @@ import { verifyAccess } from "@/shared/api/access";
 import { setAuthChallengeHandler } from "@/shared/api-fetch";
 import { useReachStore } from "@/stores/reach-store";
 import { useStatusStore } from "@/stores/status-store";
+import { useFlightTelemetryPoll } from "@/hooks/use-flight-telemetry";
 import { useStatusPoll } from "@/hooks/use-status-poll";
 import { BoxViewport, useBoxViewport } from "@/hooks/use-width-class";
 import { useExtensionsStore } from "@/stores/extensions-store";
@@ -43,9 +44,11 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   const setVisibleTabs = useNavStore((s) => s.setVisibleTabs);
   const loadExtensions = useExtensionsStore((s) => s.load);
 
-  // One status poll for the whole shell (strip, band, alerts, screens), and the
-  // running extensions read once so their skills and panels are ready.
+  // One status poll and one flight-telemetry poll for the whole shell (strip,
+  // band, alerts, screens; the arm state off the Feed), and the running
+  // extensions read once so their skills and panels are ready.
   useStatusPoll();
+  useFlightTelemetryPoll();
   useEffect(() => {
     void loadExtensions();
   }, [loadExtensions]);

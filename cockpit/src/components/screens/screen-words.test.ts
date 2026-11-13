@@ -2,6 +2,9 @@
 // node's real peer, and the System screen carries a pending reboot as a row
 // any input can reach.
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import i18n from "@/shared/i18n";
@@ -201,5 +204,16 @@ describe("System", () => {
     const html = text(renderScreen(SystemScreen, { dispatch: () => {} }));
     expect(html).toContain(en("cockpit.system.rebootToApply"));
     expect(html).toContain(en("cockpit.system.rebootPending", { paths: "Source" }));
+  });
+});
+
+describe("cloud unpair refusal words", () => {
+  it("names the unpair, not a radio change", () => {
+    expect(i18n.t("cockpit.pair.unpairArmed")).toContain("Unpairing waits");
+    expect(i18n.t("cockpit.pair.unpairArmedUnknown")).toContain("Unpairing waits");
+    const src = readFileSync(path.resolve(__dirname, "pair-screen.tsx"), "utf8");
+    const cloud = src.slice(src.indexOf("const unpairOwner"), src.indexOf("return (", src.indexOf("const unpairOwner")));
+    expect(cloud).toContain("cockpit.pair.unpairArmed");
+    expect(cloud).not.toContain("cockpit.radio.");
   });
 });
