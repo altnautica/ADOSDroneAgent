@@ -143,6 +143,16 @@ fn a_non_gps_boot_set_is_capped_despite_a_3d_fix() {
 }
 
 #[test]
+fn a_gps_source_set_without_a_fresh_3d_fix_is_capped() {
+    let mut w = World::new();
+    w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
+    w.gps_fix = None;
+    w.airborne(copter::GUIDED);
+    w.run(3100); // the fix World::new fed goes stale
+    assert!(w.p.nav_cap(w.now).is_some());
+}
+
+#[test]
 fn an_unknown_source_set_is_capped() {
     let mut w = ext_nav_world();
     w.p.on_feed("nav.state", &json!({"active_set": 7, "gps_fix": 3}), w.now);

@@ -40,18 +40,20 @@ impl Pilot {
     }
 
     /// Whether the cap is in force, without allocating (the control loop
-    /// asks several times a tick). The active set's `EK3_SRCn_POSXY` decides;
-    /// a set outside 1–3 is capped. Only while that parameter is unknown (not
-    /// read yet, or a firmware without it) does a fresh 3-D GPS fix stand in
-    /// for it.
+    /// asks several times a tick). Uncapped needs a fresh 3-D GPS fix, and
+    /// the active set's `EK3_SRCn_POSXY` naming GPS when it is known (it is
+    /// unknown until read, or on a firmware without it). A set outside 1–3,
+    /// a non-GPS source or no fresh 3-D fix is capped.
     pub fn nav_capped(&self, now_ms: u64) -> bool {
+        let fix_ok = self
+            .fc
+            .gps_fix
+            .is_some_and(|f| f.v >= FIX_3D && now_ms.saturating_sub(f.at_ms) <= GPS_FIX_STALE_MS);
         let gnss = match POSXY.get(usize::from(self.nav_set).wrapping_sub(1)) {
             None => false,
             Some(name) => match self.fc.params.get(*name) {
-                Some(v) => (*v - POSXY_GPS).abs() < 0.5,
-                None => self.fc.gps_fix.is_some_and(|f| {
-                    f.v >= FIX_3D && now_ms.saturating_sub(f.at_ms) <= GPS_FIX_STALE_MS
-                }),
+                Some(v) => (*v - POSXY_GPS).abs() < 0.5 && fix_ok,
+                None => fix_ok,
             },
         };
         !gnss
