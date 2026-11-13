@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.130] - 2026-11-13
+
+### Fixed
+
+- Video: an encoder reading a captured camera off the frame bus stamps each frame with the time it arrives instead of frame count at the nominal rate (`-fps_mode passthrough` on a 90 kHz time base; GStreamer `do-timestamp`). A burst, a gap or a source running under its nominal rate now reaches the viewer's RTP clock as it happened, and the stream no longer drifts against wall time. Device cameras keep their output rate cap.
+- Video: the frame-bus feed no longer keeps only the newest frame. Frames wait in a four-frame queue and are written at their capture cadence plus a small adaptive hold (at most three frame periods, decaying back to zero while the source is steady), so a burst from the source is spaced back out instead of collapsing to one frame. Frames that never reach the encoder are counted per camera (`frames_written`, `frames_skipped`, `seqlock_misses`, `queue_overflows`, `hold_ms`) in `camera-state.json` and shown as `framebus` in `GET /api/video` and the `video` block of `/api/status/full`.
+- Cockpit: the Feed screen holds the drone on the full-rate `hero` profile while it is shown, on every stream quality including Auto (30 s lease renewed every 10 s; a failed renewal is retried within 2 s with backoff; released 3 s after the Feed leaves or the page is hidden). High additionally pins a lease for the whole page, and reloading the page resumes its renewal. The HDMI kiosk runs the same Feed screen. Before, Auto took no lease, so a drone no ground station had promoted streamed its 1 fps thumbnail.
+- Dashboard: the video panel takes the same hero hold while it shows a drone's stream and the page is visible. Its fallback tooltips no longer say a freeze moves the feed to HLS.
+- Cockpit and dashboard video: a frozen picture redials WHEP only when no bytes arrive either (after 8 s when bytes keep arriving, for a stuck decoder); a freeze never moves the feed to HLS. HLS is used only when ICE fails, and WHEP is retried every 10 s while on HLS (was 60 s). A feed that was playing within the last minute keeps retrying WHEP through an encoder restart instead of stepping down to HLS.
+- Cockpit: the main `<video>` element lives once for the Feed screen and is moved between layout slots, so swapping pilot and map views or rotating the screen no longer tears down and redials the stream.
+- Cockpit: `?debug=video` shows decoded, shown and received fps, dropped frames, inter-frame time, jitter buffer, bitrate and decoder from `getStats` on the main video.
+
 ## [0.109.129] - 2026-11-13
 
 ### Fixed

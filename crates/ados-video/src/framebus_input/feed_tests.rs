@@ -57,6 +57,7 @@ async fn whole_frames_reach_the_pipe_and_foreign_frames_do_not() {
         format: FrameFormat::Gray8,
         width: W,
         height: H,
+        fps: 30,
         fifo: dir.path().join("framebus-cam_fl.fifo"),
         frames_socket: dir.path().join("vision-frames.sock"),
         shm_dir: dir.path().to_path_buf(),
@@ -143,6 +144,7 @@ async fn renew_replaces_the_pipe_so_a_new_reader_starts_clean() {
         format: FrameFormat::Gray8,
         width: W,
         height: H,
+        fps: 30,
         fifo: dir.path().join("framebus-cam_fl.fifo"),
         frames_socket: dir.path().join("vision-frames.sock"),
         shm_dir: dir.path().to_path_buf(),
@@ -177,6 +179,7 @@ async fn renew_releases_a_reader_blocked_on_a_silent_pipe() {
         format: FrameFormat::Gray8,
         width: W,
         height: H,
+        fps: 30,
         fifo: dir.path().join("framebus-cam_fr.fifo"),
         frames_socket: dir.path().join("vision-frames.sock"),
         shm_dir: dir.path().to_path_buf(),
@@ -198,4 +201,165 @@ async fn renew_releases_a_reader_blocked_on_a_silent_pipe() {
         .expect("the blocked reader exits once the feed lets go of its pipe")
         .unwrap();
     assert!(status.success());
+}
+
+/// A tempdir with a ring of `slots` frames for `cam_fl`, and a feed spec on it.
+fn ring_fixture(slots: u32) -> (tempfile::TempDir, memmap2::MmapMut, RingLayout, FeedSpec) {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RingLayout::for_frame(slots, W, H, FrameFormat::Gray8);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dir.path().join("ados-vision-cam_fl"))
+        .unwrap();
+    file.set_len(layout.total_len() as u64).unwrap();
+    // SAFETY: a private tempfile mapping for the test's writer.
+    let mut region = unsafe { memmap2::MmapMut::map_mut(&file) }.unwrap();
+    layout.write_header(&mut region).unwrap();
+    let spec = FeedSpec {
+        camera_id: "cam_fl".to_string(),
+        format: FrameFormat::Gray8,
+        width: W,
+        height: H,
+        fps: 30,
+        fifo: dir.path().join("framebus-cam_fl.fifo"),
+        frames_socket: dir.path().join("vision-frames.sock"),
+        shm_dir: dir.path().to_path_buf(),
+    };
+    (dir, region, layout, spec)
+}
+
+/// Frame `id` of `cam_fl` captured at `capture_ms` on the source clock, in
+/// ring slot `id % 8` under ring sequence `seq`.
+fn captured(id: u64, capture_ms: u64, seq: u64) -> FrameDescriptor {
+    let slot = (id % 8) as u32;
+    FrameDescriptor {
+        frame_id: id,
+        ts_ns: 0,
+        ts_sensor_ns: Some(capture_ms * 1_000_000),
+        ..descriptor("cam_fl", seq, W, slot)
+    }
+}
+
+/// Put frame `id` (every pixel `id`) in its slot under ring sequence `id`, and
+/// announce `d` for it.
+async fn publish(
+    conn: &mut tokio::net::UnixStream,
+    region: &mut memmap2::MmapMut,
+    layout: &RingLayout,
+    d: FrameDescriptor,
+) {
+    let id = d.frame_id;
+    write_slot(
+        region,
+        layout,
+        d.slot,
+        id,
+        &vec![id as u8; (W * H) as usize],
+    )
+    .unwrap();
+    conn.write_all(&encode_frame(&d.to_msgpack().unwrap(), 1 << 20).unwrap())
+        .await
+        .unwrap();
+}
+
+/// Read `n` frames off the pipe on a blocking thread, with when each arrived.
+fn read_frames(
+    fifo: std::path::PathBuf,
+    n: usize,
+) -> tokio::task::JoinHandle<Vec<(u8, std::time::Instant)>> {
+    tokio::task::spawn_blocking(move || {
+        let mut f = std::fs::File::open(fifo).unwrap();
+        (0..n)
+            .map(|_| {
+                let mut frame = vec![0u8; (W * H) as usize];
+                f.read_exact(&mut frame).unwrap();
+                (frame[0], std::time::Instant::now())
+            })
+            .collect()
+    })
+}
+
+/// A source that stalls and then delivers several frames at once: every frame
+/// of the burst reaches the pipe, spaced out at its capture cadence, instead of
+/// the burst collapsing to its newest frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_is_spaced_out_not_collapsed() {
+    let (_dir, mut region, layout, spec) = ring_fixture(8);
+    let listener = UnixListener::bind(&spec.frames_socket).unwrap();
+    let _feed = FramebusFeed::spawn(spec.clone()).unwrap();
+    let reader = read_frames(spec.fifo.clone(), 6);
+    let (mut conn, _) = listener.accept().await.unwrap();
+    // Let the writer find the reader before the first frame.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    publish(&mut conn, &mut region, &layout, captured(1, 0, 1)).await;
+    tokio::time::sleep(Duration::from_millis(33)).await;
+    publish(&mut conn, &mut region, &layout, captured(2, 33, 2)).await;
+    // A 140 ms stall, then four frames captured on cadence arrive together.
+    tokio::time::sleep(Duration::from_millis(140)).await;
+    for id in 3..=6u64 {
+        publish(
+            &mut conn,
+            &mut region,
+            &layout,
+            captured(id, id * 33 - 33, id),
+        )
+        .await;
+    }
+
+    let frames = tokio::time::timeout(Duration::from_secs(5), reader)
+        .await
+        .expect("every frame of the burst reaches the pipe")
+        .unwrap();
+    let ids: Vec<u8> = frames.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5, 6]);
+    let gaps_ms: Vec<u128> = frames[2..]
+        .windows(2)
+        .map(|w| w[1].1.duration_since(w[0].1).as_millis())
+        .collect();
+    for gap in &gaps_ms {
+        assert!(*gap >= 15, "the burst left bunched: {gaps_ms:?} ms");
+    }
+}
+
+/// Frames that never reach the pipe are counted: a gap in the frame ids, and a
+/// ring slot the engine reused before the feed read it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skipped_frames_and_seqlock_misses_are_counted() {
+    let (_dir, mut region, layout, spec) = ring_fixture(8);
+    let listener = UnixListener::bind(&spec.frames_socket).unwrap();
+    let feed = FramebusFeed::spawn(spec.clone()).unwrap();
+    let reader = read_frames(spec.fifo.clone(), 4);
+    let (mut conn, _) = listener.accept().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // Frames 3 and 4 never arrive; frame 6's descriptor names a ring sequence
+    // its slot no longer holds (the slot holds sequence 6).
+    for (n, (id, seq)) in [(1, 1), (2, 2), (5, 5), (6, 99), (7, 7)]
+        .into_iter()
+        .enumerate()
+    {
+        let d = captured(id, 33 * n as u64, seq);
+        publish(&mut conn, &mut region, &layout, d).await;
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    let frames = tokio::time::timeout(Duration::from_secs(5), reader)
+        .await
+        .expect("four frames")
+        .unwrap();
+    let ids: Vec<u8> = frames.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, vec![1, 2, 5, 7]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while feed.stats().frames_written < 4 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let stats = feed.stats();
+    assert_eq!(stats.camera_id, "cam_fl");
+    assert_eq!(stats.frames_written, 4, "{stats:?}");
+    assert_eq!(stats.seqlock_misses, 1, "{stats:?}");
+    assert_eq!(stats.frames_skipped, 3, "{stats:?}");
+    assert_eq!(stats.queue_overflows, 0, "{stats:?}");
 }

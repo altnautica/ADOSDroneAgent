@@ -487,9 +487,9 @@
       "badgeSnapshot": "snapshot",
       "badgeError": "error",
       "badgeIdle": "idle",
-      "titleFellBack": "WebRTC failed or froze, so playback fell back to HLS (several seconds of latency). WebRTC is retried in the background.",
+      "titleFellBack": "WebRTC failed, so playback fell back to HLS (several seconds of latency). WebRTC is retried every 10 s in the background.",
       "titleHls": "HLS playback. Several seconds of latency vs WebRTC's 100-300 ms; no decoder freeze.",
-      "titleFrozen": "No new frame decoded recently; reconnecting.",
+      "titleFrozen": "No new frame shown recently; reconnecting unless the picture resumes on its own.",
       "highLatencySuffix": " · high latency",
       "lastSnapshot": "Last snapshot",
       "waitingForWfb": "Waiting for WFB stream from drone.",
@@ -554,6 +554,11 @@
       "sessionLost": "Video session lost.",
       "transportFailed": "Video transport failed.",
       "hlsTimeout": "HLS manifest timeout ({{s}}s)."
+    },
+    "stats": {
+      "rates": "fps decoded {{decoded}} · shown {{shown}} · received {{received}}",
+      "timing": "dropped {{dropped}} · interframe {{mean}} ± {{sd}} ms · jitter buffer {{jitter}} ms",
+      "link": "{{kbps}} kbps · decoder {{decoder}}"
     }
   },
   "io": {

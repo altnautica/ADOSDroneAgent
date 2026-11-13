@@ -66,6 +66,11 @@ pub(crate) struct PipelineSidecar {
     /// start was pinned to the software encoder. Absent on a writer that
     /// predates the field.
     pub(crate) encoder_forced_software: Option<bool>,
+    /// `framebus`: per captured camera, the frame-bus feed counters (frames
+    /// written to the encoder, frames skipped, ring slots reused before they
+    /// were read, queue overflows, de-jitter hold). Absent when no encoder
+    /// reads the frame bus.
+    pub(crate) framebus: Option<Value>,
 }
 
 /// Read the pipeline sidecar the way every other sidecar block in this file
@@ -109,6 +114,7 @@ pub(crate) fn read_pipeline_outcome_in(run_dir: &Path, now: f64) -> PipelineSide
             .map(str::to_string),
         encoder_hw: doc.get("encoder_hw").and_then(Value::as_bool),
         encoder_forced_software: doc.get("encoder_forced_software").and_then(Value::as_bool),
+        framebus: doc.get("framebus").filter(|v| v.is_array()).cloned(),
     }
 }
 
@@ -186,6 +192,7 @@ pub(crate) fn build_video_block_with(
         encoder,
         encoder_hw,
         encoder_forced_software,
+        framebus,
     } = pipeline;
 
     // The encoder identity 0.99.359 dropped: without it the GCS cannot tell a
@@ -287,6 +294,10 @@ pub(crate) fn build_video_block_with(
     // say". A fresh sidecar with no key is a legacy writer: `unknown`.
     if fresh {
         block["pipeline_state"] = json!(pipeline_state.as_deref().unwrap_or("unknown"));
+    }
+    // The frame-bus feed counters ride along whenever the pipeline wrote them.
+    if let Some(feeds) = framebus {
+        block["framebus"] = feeds;
     }
     block
 }

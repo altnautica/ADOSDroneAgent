@@ -5,7 +5,11 @@
 //!   publisher on the primary `main` path, which media tools are installed, and
 //!   the WHEP/HLS URLs. The URLs address `main`, so they are advertised only when
 //!   `main` itself is live (`ready` with a `source`). A different path being
-//!   ready never stands in for it, and an absent `main` is not ready.
+//!   ready never stands in for it, and an absent `main` is not ready. A node
+//!   whose encoders read captured cameras off the frame bus adds `framebus`:
+//!   per camera, frames written to the encoder, frames skipped on the way,
+//!   ring slots reused before they were read, queue overflows and the
+//!   de-jitter hold (from the pipeline sidecar, while it is fresh).
 //! - **`GET /api/video/cameras`** lists the same discovered devices in the
 //!   compact enumeration shape.
 //!
@@ -27,19 +31,26 @@ const PRIMARY_WHEP_URL: &str = "/whep";
 /// The primary stream's HLS playlist on this front.
 const PRIMARY_HLS_URL: &str = "/hls/main/index.m3u8";
 
-/// `GET /api/video` → `{state, cameras, mediamtx, whep_url, hls_url, dependencies}`.
+/// `GET /api/video` → `{state, cameras, mediamtx, whep_url, hls_url, dependencies,
+/// framebus?}`.
 pub async fn get_video_status() -> Json<Value> {
     let list = read_paths_list().await;
     // An answering management API proves mediamtx is up. When it does not answer
     // (down, or the ground-station mediamtx credentialing it), a bound WHEP
     // endpoint is the credential-free liveness signal. Neither proves frames flow.
     let running = list.is_some() || mediamtx_whep_serving().await;
-    Json(build_video_status(
+    let mut body = build_video_status(
         list.as_ref(),
         running,
         discovered_camera_entries(),
         dependencies(),
-    ))
+    );
+    // The frame-bus feed counters (frames skipped on the way to the encoder),
+    // when a fresh pipeline sidecar carries them.
+    if let Some(feeds) = crate::routes::status_full::read_pipeline_outcome().framebus {
+        body["framebus"] = feeds;
+    }
+    Json(body)
 }
 
 /// The `GET /api/video` body from the probe results. Pure, so the readiness rule

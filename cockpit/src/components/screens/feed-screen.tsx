@@ -17,6 +17,7 @@
 // vision path adds POST /api/vision/demand 0.5/s per shown target overlay.
 
 import { useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 
 import { AlertStack } from "@/components/feed/alert-stack";
 import { BottomRow, LeftColumn } from "@/components/feed/cockpit/cockpit-zones";
@@ -41,6 +42,7 @@ import { SkillConfirmSheet } from "@/components/feed/skill-confirm-sheet";
 import { SkillAckLine, SkillPicker } from "@/components/feed/skill-picker/skill-picker";
 import { TargetLayer } from "@/components/feed/target-layer";
 import { TipLayer } from "@/components/feed/tip-layer";
+import { VideoSlot } from "@/components/feed/video-slot";
 import { ExtensionVideoOverlays } from "@/components/plugins/extension-feed-mounts";
 import { VideoLayer } from "@/components/shell/video-layer";
 import { BannerHost } from "@/components/shell/banner-host";
@@ -55,6 +57,7 @@ import { useNavStream } from "@/hooks/use-nav-stream";
 import { usePilotInput } from "@/hooks/use-pilot-input";
 import { useRoster } from "@/hooks/use-roster";
 import { useSkillKeys } from "@/hooks/use-skill-keys";
+import { useVideoHost } from "@/hooks/use-video-host";
 import { hasLocalVision, useVisionDetections } from "@/hooks/use-vision-detections";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { registerCameraActions } from "@/lib/camera-actions";
@@ -70,6 +73,7 @@ import { videoHasSource } from "@/lib/flight-layout";
 import { isKiosk } from "@/lib/kiosk";
 import { resolveActiveCameraId } from "@/lib/overlay-geometry";
 import { connectPilotLink, pilotLinkSource } from "@/lib/pilot-link";
+import { useFeedHeroHold } from "@/lib/stream-quality";
 import { isDemoMode } from "@/lib/utils";
 import { useProfile } from "@/shared/use-profile";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
@@ -154,6 +158,11 @@ export function FeedScreen() {
   useEffect(() => (rootRef.current ? trackFocusRing(rootRef.current) : undefined), []);
   const gimbal = useGimbalAvailable(flightNavCapable);
   useGimbalDriver(gimbal);
+  // The drone streams full rate while this Feed shows it, on every stream
+  // quality; the kiosk display runs this same screen.
+  useFeedHeroHold();
+  // The main video lives once for the Feed's life; the grid only places it.
+  const videoHost = useVideoHost();
 
   const { whepUrl, hlsUrl, reconnectKey, activeLabel, mainId, pipCamera } = useMemo(() => {
     const active = cameras.find((c) => c.id === activeCameraId) ?? cameras[0] ?? null;
@@ -180,7 +189,7 @@ export function FeedScreen() {
   const layers = effectiveLayers(level, layerFlags, view, pluginOverlayIds);
 
   const slots: FeedSlots = {
-    video: <VideoLayer whepUrl={whepUrl} hlsUrl={hlsUrl} reconnectKey={reconnectKey} hasSource={videoHasSource(statusVideo, roster.length)} />,
+    video: <VideoSlot attach={videoHost.attach} />,
     layers: (
       <>
         <ExtensionVideoOverlays
@@ -273,6 +282,16 @@ export function FeedScreen() {
       data-width-class={widthClass}
       data-layer-level={level}
     >
+      {createPortal(
+        <VideoLayer
+          whepUrl={whepUrl}
+          hlsUrl={hlsUrl}
+          reconnectKey={reconnectKey}
+          hasSource={videoHasSource(statusVideo, roster.length)}
+          enabled={videoHost.attached}
+        />,
+        videoHost.host,
+      )}
       {portrait ? (
         <PortraitGrid slots={slots} />
       ) : size.w > 0 ? (

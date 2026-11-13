@@ -78,13 +78,105 @@ fn an_attention_switch_rescales_instead_of_misreading_the_pipe() {
 }
 
 #[test]
+fn a_framebus_encoder_keeps_the_frames_real_timing() {
+    let p = framebus_params(EncoderKind::Ffmpeg, Some(FrameFormat::Rgb24));
+    let cmd = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rockchip()).unwrap();
+    // Stamped with the time each frame left the pipe, passed through as is:
+    // no synthetic constant rate re-gridding a burst or a gap into even steps.
+    assert!(has_pair(&cmd, "-fps_mode", "passthrough"), "{cmd:?}");
+    assert!(has_pair(&cmd, "-enc_time_base:v", "1/90000"), "{cmd:?}");
+    assert!(
+        !cmd.iter().any(|t| t == "-r"),
+        "no output rate cap at the captured rate: {cmd:?}"
+    );
+    let vf = cmd[cmd.iter().position(|t| t == "-vf").expect("-vf") + 1].clone();
+    assert!(
+        vf.starts_with("settb=1/90000,setpts=") && vf.contains("RTCTIME"),
+        "{vf}"
+    );
+    // Orientation still applies after the stamp, in the same filter chain.
+    let rotated = EncoderParams {
+        rotation: 180,
+        ..p.clone()
+    };
+    let cmd =
+        build_encoder_command(&rotated, SRC, RTSP_OUT, Some(&framebus_cam()), &rockchip()).unwrap();
+    let vf = &cmd[cmd.iter().position(|t| t == "-vf").unwrap() + 1];
+    assert!(vf.ends_with(",transpose=2,transpose=2"), "{vf}");
+    assert_eq!(cmd.iter().filter(|t| *t == "-vf").count(), 1, "{cmd:?}");
+}
+
+#[test]
+fn a_device_camera_keeps_its_output_rate_cap() {
+    let p = params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000);
+    let cam = CameraInfo {
+        camera_type: CameraType::Usb,
+        device_path: "/dev/video0".into(),
+        capabilities: vec![],
+    };
+    let cmd = build_encoder_command(&p, "/dev/video0", RTSP_OUT, Some(&cam), &rockchip()).unwrap();
+    assert!(has_pair(&cmd, "-r", "30"), "{cmd:?}");
+    assert!(!cmd.iter().any(|t| t == "-fps_mode"), "{cmd:?}");
+    assert!(!cmd.iter().any(|t| t.contains("RTCTIME")), "{cmd:?}");
+}
+
+/// The stamp filter itself, run through a real `ffmpeg` when one is
+/// installed: frames written after a long pause and then 120 ms apart come
+/// out stamped with those pauses, not with frame count over a 30 fps clock.
+#[test]
+fn the_wallclock_stamp_follows_when_frames_arrive() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("ffmpeg not installed: stamp filter run skipped");
+        return;
+    }
+    let mut child = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-f", "rawvideo"])
+        .args(["-pix_fmt", "gray", "-video_size", "4x2", "-framerate", "30"])
+        .args([
+            "-i",
+            "-",
+            "-vf",
+            crate::encoder::ffmpeg::FRAMEBUS_WALLCLOCK_PTS,
+        ])
+        .args(["-fps_mode", "passthrough", "-enc_time_base:v", "1/90000"])
+        .args(["-f", "framecrc", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for (i, pause_ms) in [0u64, 300, 120, 120].iter().enumerate() {
+        std::thread::sleep(std::time::Duration::from_millis(*pause_ms));
+        stdin.write_all(&[i as u8; 8]).unwrap();
+        stdin.flush().unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let pts: Vec<i64> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split(',').nth(2)?.trim().parse().ok())
+        .collect();
+    assert!(pts.len() >= 3, "{pts:?}");
+    let steps_ms: Vec<i64> = pts.windows(2).map(|w| (w[1] - w[0]) / 90).collect();
+    // The demuxer may hold back the first frame; the last two steps are the
+    // real 120 ms pauses, never the 33 ms a constant 30 fps clock would give.
+    for step in &steps_ms[steps_ms.len() - 2..] {
+        assert!((90..=250).contains(step), "{steps_ms:?}");
+    }
+}
+
+#[test]
 fn a_framebus_source_takes_the_rockchip_vpu_when_mpp_is_present() {
     let p = framebus_params(EncoderKind::Ffmpeg, Some(FrameFormat::Rgb24));
     let cmd = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rk_mpp()).unwrap();
     assert_eq!(cmd[0], "gst-launch-1.0", "{cmd:?}");
     let line = cmd.join(" ");
+    // Stamped on arrival from the feed, not by frame count.
     assert!(
-        line.contains(&format!("filesrc location={}", fifo())),
+        line.contains(&format!("filesrc location={} do-timestamp=true", fifo())),
         "{line}"
     );
     assert!(

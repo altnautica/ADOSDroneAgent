@@ -523,6 +523,7 @@ fn pipeline(state: &str, reason: Option<&str>, encoder: Option<&str>) -> Pipelin
         encoder: encoder.map(str::to_string),
         encoder_hw: None,
         encoder_forced_software: None,
+        framebus: None,
     }
 }
 
@@ -619,6 +620,40 @@ fn forced_software_is_read_from_the_camera_state_sidecar() {
     assert_eq!(p.encoder_forced_software, None);
     let v = build_video_block_with("drone", &None, true, vec![], p);
     assert!(v.get("encoder_forced_software").is_none());
+}
+
+#[test]
+fn framebus_feed_counters_are_read_from_the_camera_state_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = 1_000.0;
+    let feeds = json!([{
+        "camera_id": "cam_fl", "frames_written": 900, "frames_skipped": 12,
+        "seqlock_misses": 1, "queue_overflows": 3, "hold_ms": 21.5,
+    }]);
+    std::fs::write(
+        dir.path().join("camera-state.json"),
+        json!({"pipeline_state": "streaming", "framebus": feeds, "updated_at_unix": now})
+            .to_string(),
+    )
+    .unwrap();
+    let v = build_video_block_with(
+        "drone",
+        &None,
+        true,
+        vec![],
+        read_pipeline_outcome_in(dir.path(), now),
+    );
+    assert_eq!(v["framebus"], feeds);
+    // A pipeline with no frame-bus encoder writes no counters.
+    std::fs::write(
+        dir.path().join("camera-state.json"),
+        json!({"pipeline_state": "streaming", "updated_at_unix": now}).to_string(),
+    )
+    .unwrap();
+    let p = read_pipeline_outcome_in(dir.path(), now);
+    assert!(build_video_block_with("drone", &None, true, vec![], p)
+        .get("framebus")
+        .is_none());
 }
 
 /// The customer report, as a test. A camera is detected and mediamtx is

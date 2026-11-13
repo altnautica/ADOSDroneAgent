@@ -19,7 +19,7 @@ import {
   ZOOM_TAP_MS,
 } from "@/lib/camera-actions";
 import type { InstalledExtension } from "@/lib/extensions";
-import { QUALITY_LEASE_S, QUALITY_RENEW_MS, STREAM_QUALITIES, streamQualityOf, streamQualityRequest } from "@/lib/stream-quality";
+import { STREAM_QUALITIES, streamQualityOf } from "@/lib/stream-quality";
 import { onToast, type ToastMessage } from "@/shared/api/toast";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -344,16 +344,6 @@ describe("stream quality (the drone's video profile)", () => {
     expect(streamQualityOf({ leases: [{ holder: "cockpit:1" }] }, "cockpit:1")).toBe("high");
     expect(streamQualityOf({ leases: [{ holder: "gcs-1" }] }, "cockpit:1")).toBe("auto");
     expect(streamQualityOf({}, "cockpit:1")).toBe("auto");
-  });
-
-  it("High asks for a hero lease, Auto releases it", () => {
-    expect(streamQualityRequest("high", "cockpit:1")).toEqual({
-      path: "/api/video/profile",
-      method: "POST",
-      body: { profile: "hero", holder: "cockpit:1", lease_s: QUALITY_LEASE_S },
-    });
-    expect(streamQualityRequest("auto", "cockpit:1")).toEqual({ path: "/api/video/profile?holder=cockpit%3A1", method: "DELETE" });
-    expect(QUALITY_RENEW_MS).toBeLessThan(QUALITY_LEASE_S * 1000);
   });
 
   it("labels each choice from the spec", () => {

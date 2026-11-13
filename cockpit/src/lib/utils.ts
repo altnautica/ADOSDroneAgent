@@ -16,3 +16,10 @@ export function isDemoMode(): boolean {
   const v = new URLSearchParams(window.location.search).get("demo");
   return v === "1" || v === "true";
 }
+
+/** `?debug=video` on the URL shows the main video's receive rates over the
+ *  Feed (decoded and shown frame rates, drops, inter-frame spread, bitrate). */
+export function isVideoDebug(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("debug") === "video";
+}

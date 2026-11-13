@@ -1,1 +1,0 @@
-import{t as e}from"./i18n-DWsVmecu.js";var t={"self_hosted.url":`settingsMore.validation.url`,"self_hosted.mqtt_broker":`settingsMore.validation.broker`,"self_hosted.mqtt_port":`settingsMore.validation.port`,board_override:`settingsMore.validation.boardOverride`};function n(n){let r=t[n.path.map(String).join(`.`)];return e.t(r??`settingsMore.validation.invalid`)}export{n as t};

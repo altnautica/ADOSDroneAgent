@@ -121,8 +121,12 @@ pub(super) fn build_gstreamer_command(
     // the framerate flows from the `image/jpeg` source caps.
     let core = if let Some(fb) = framebus {
         // Parse at the captured geometry, scale to the leg's current profile.
+        // `do-timestamp` stamps each read with the pipeline clock and
+        // `rawvideoparse` keeps an upstream stamp, so a frame carries the time
+        // the feed wrote it (its capture cadence), not frame count over
+        // `framerate`. A framebus leg never takes the OMX arm, which refuses it.
         format!(
-            "filesrc location={} ! rawvideoparse width={} height={} format={} \
+            "filesrc location={} do-timestamp=true ! rawvideoparse width={} height={} format={} \
              framerate={}/1 ! videoconvert ! {flip}videoscale ! \
              video/x-raw,format=NV12,width={},height={} ! \
              queue max-size-buffers=4 leaky=downstream ! {encoder}",

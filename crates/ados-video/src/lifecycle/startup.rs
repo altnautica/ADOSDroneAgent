@@ -52,7 +52,8 @@ impl VideoOrchestrator {
             .last_cameras
             .camera_state_snapshot()
             .with_pipeline(outcome, reason, encoder, encoder_hw)
-            .with_forced_software(self.force_software);
+            .with_forced_software(self.force_software)
+            .with_framebus(self.framebus_feeds.stats());
         let path = self
             .camera_state_path
             .clone()

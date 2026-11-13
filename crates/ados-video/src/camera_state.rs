@@ -178,6 +178,12 @@ pub struct CameraStateSnapshot {
     /// after a sustained healthy stretch, which re-arms the hardware path for
     /// the next encoder start.
     pub encoder_forced_software: bool,
+    /// Per captured camera read off the frame bus: frames written to the
+    /// encoder, frames that never reached it, ring slots reused before they
+    /// were read, queue overflows and the de-jitter hold. Omitted when no
+    /// encoder reads the frame bus.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub framebus: Vec<crate::framebus_input::FeedStats>,
     pub updated_at_unix: f64,
 }
 
@@ -205,6 +211,7 @@ impl CameraStateSnapshot {
             encoder: None,
             encoder_hw: None,
             encoder_forced_software: false,
+            framebus: Vec::new(),
             updated_at_unix: now_unix(),
         }
     }
@@ -222,6 +229,7 @@ impl CameraStateSnapshot {
             encoder: None,
             encoder_hw: None,
             encoder_forced_software: false,
+            framebus: Vec::new(),
             updated_at_unix: now_unix(),
         }
     }
@@ -244,6 +252,12 @@ impl CameraStateSnapshot {
         self.encoder_hw = if encoder.is_some() { encoder_hw } else { None };
         self.encoder = encoder;
         self.updated_at_unix = now_unix();
+        self
+    }
+
+    /// Stamp the frame-bus feed counters.
+    pub fn with_framebus(mut self, feeds: Vec<crate::framebus_input::FeedStats>) -> Self {
+        self.framebus = feeds;
         self
     }
 

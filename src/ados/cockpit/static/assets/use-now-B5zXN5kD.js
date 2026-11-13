@@ -1,1 +1,0 @@
-import{x as e,y as t}from"./api-fetch-7GB0VyUK.js";var n=e(t(),1);function r(e,t=`wall`){let[r,i]=(0,n.useState)(()=>t===`monotonic`?performance.now():Date.now());return(0,n.useEffect)(()=>{if(e===null)return;let n=setInterval(()=>i(t===`monotonic`?performance.now():Date.now()),e);return()=>clearInterval(n)},[e,t]),r}export{r as t};

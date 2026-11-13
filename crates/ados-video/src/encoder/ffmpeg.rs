@@ -4,6 +4,11 @@ use super::rpicam::select_input_format;
 use super::tap_splice::ffmpeg_output_stage;
 use super::*;
 
+/// The filter that stamps a frame-bus frame with the wall-clock time it was
+/// read off the pipe, on a 90 kHz time base, strictly increasing.
+pub(super) const FRAMEBUS_WALLCLOCK_PTS: &str =
+    "settb=1/90000,setpts=max(PREV_OUTPTS+1\\,(RTCTIME-RTCSTART)/(TB*1000000))";
+
 /// `ffmpeg` command for USB / IP / frame-bus camera encoding.
 ///
 /// Network sources skip the v4l2 wrapper. V4L2 sources prepend the
@@ -139,17 +144,45 @@ pub(super) fn build_ffmpeg_command(
         return cmd;
     }
 
-    // Output framerate cap — drops frames to target fps BEFORE encoding so the
-    // libx264 software path keeps up (USB cameras ignore the input -framerate
-    // hint and deliver at native rate).
-    cmd.push("-r".into());
-    cmd.push(params.fps.to_string());
-    // A frame-bus input arrives at its captured size; the encoded size is the
-    // leg's current profile (an attention switch shrinks it).
-    if let Some(fb) = framebus {
-        if (fb.raw.width, fb.raw.height) != (params.width, params.height) {
-            cmd.push("-s".into());
-            cmd.push(format!("{}x{}", params.width, params.height));
+    // Frame timing. A raw pipe carries no timestamps, so the rawvideo demuxer
+    // would stamp a frame-bus input by frame count at `-framerate` (a synthetic
+    // constant rate): a burst, a gap or a source a few percent under its
+    // nominal rate would all reach the RTP clock as even steps, and the
+    // stream would drift against wall time. Instead each frame is stamped with
+    // the wall-clock time it came out of the pipe (`RTCTIME`, µs, on a 90 kHz
+    // time base; `PREV_OUTPTS+1` keeps the stamps strictly increasing). The
+    // feed writes every frame at its capture time plus a small de-jitter
+    // offset, so that is the capture cadence. At or above the captured rate
+    // the stamps pass through untouched; a profile below it (the thumbnail)
+    // still decimates with `-r`, now on real time.
+    //
+    // Other inputs keep the output rate cap: it drops frames to the target
+    // fps BEFORE encoding so the libx264 software path keeps up (USB cameras
+    // ignore the input -framerate hint and deliver at native rate).
+    let mut filters: Vec<String> = Vec::new();
+    match framebus {
+        Some(fb) => {
+            filters.push(FRAMEBUS_WALLCLOCK_PTS.to_string());
+            if params.fps < fb.raw.fps {
+                cmd.push("-r".into());
+                cmd.push(params.fps.to_string());
+            } else {
+                cmd.extend(
+                    ["-fps_mode", "passthrough", "-enc_time_base:v", "1/90000"]
+                        .iter()
+                        .map(|s| s.to_string()),
+                );
+            }
+            // A frame-bus input arrives at its captured size; the encoded size
+            // is the leg's current profile (an attention switch shrinks it).
+            if (fb.raw.width, fb.raw.height) != (params.width, params.height) {
+                cmd.push("-s".into());
+                cmd.push(format!("{}x{}", params.width, params.height));
+            }
+        }
+        None => {
+            cmd.push("-r".into());
+            cmd.push(params.fps.to_string());
         }
     }
 
@@ -157,9 +190,10 @@ pub(super) fn build_ffmpeg_command(
     // transform before encode. On the HW paths (h264_v4l2m2m) this is a CPU
     // filter between capture and encode — a small latency/CPU cost, acceptable
     // because the OMX/V4L2 HW encoders on these boards do not rotate natively.
-    if let Some(vf) = ffmpeg_vf(params.rotation, params.hflip, params.vflip) {
+    filters.extend(ffmpeg_vf(params.rotation, params.hflip, params.vflip));
+    if !filters.is_empty() {
         cmd.push("-vf".into());
-        cmd.push(vf);
+        cmd.push(filters.join(","));
     }
 
     cmd.push("-c:v".into());

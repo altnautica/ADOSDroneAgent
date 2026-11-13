@@ -35,6 +35,16 @@ export {
   type VideoTransportSnapshot,
 } from "./video-transport";
 export { useVideoTransport, type UseVideoTransportOptions } from "./use-video-transport";
+export { readInboundVideo, videoStatsBetween, type InboundVideoCounters, type VideoStats, type VideoStatsSample } from "./video-stats";
+export {
+  HERO_LEASE_S,
+  HERO_RELEASE_GRACE_MS,
+  HERO_RENEW_MS,
+  bindHeroHold,
+  createHeroHold,
+  useHeroHold,
+  type HeroHold,
+} from "./hero-hold";
 export {
   PROFILE_RETRY_MS,
   invalidateProfile,

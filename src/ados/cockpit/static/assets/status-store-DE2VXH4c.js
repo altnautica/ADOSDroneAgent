@@ -1,0 +1,1 @@
+import{v as e}from"./api-fetch-TwMoyHVt.js";var t=e(()=>({status:null,stale:!1,error:null,battery:null}));export{t};

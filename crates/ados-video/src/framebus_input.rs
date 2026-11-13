@@ -12,8 +12,12 @@
 //!
 //! The feed writes whole frames only and starts a fresh frame boundary on every
 //! open of the pipe, so an encoder that dies and respawns never reads a frame
-//! split across two runs. It is latest-frame-wins: while the encoder is slower
-//! than the camera, older descriptors are skipped rather than queued.
+//! split across two runs. Frames wait in a short queue (four frames, the
+//! oldest dropped when it is full) and are
+//! written at their capture cadence: the encoder stamps each frame with the
+//! time it reads it, so a burst from the source is spaced back out instead of
+//! reaching the viewer bunched. Frames that never reach the pipe are counted
+//! ([`FeedStats`]) and published in the pipeline sidecar.
 
 use std::path::PathBuf;
 
@@ -42,8 +46,30 @@ pub fn gst_raw_format(format: FrameFormat) -> &'static str {
     }
 }
 
+/// What one feed has done since it started, as the pipeline sidecar carries it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct FeedStats {
+    pub camera_id: String,
+    /// Frames written whole to the encoder's pipe.
+    pub frames_written: u64,
+    /// Frames of this camera that never reached the pipe, counted from the
+    /// gaps in the frame ids written (a full queue, a recycled ring slot, or a
+    /// frame the feed never saw). Counted while an encoder reads the pipe.
+    pub frames_skipped: u64,
+    /// Frames whose ring slot the vision engine had already reused by the
+    /// time the feed read it (the seqlock check failed). Part of
+    /// `frames_skipped`.
+    pub seqlock_misses: u64,
+    /// Frames dropped because the queue was full. Part of `frames_skipped`.
+    pub queue_overflows: u64,
+    /// The de-jitter hold now applied over the fastest recent transit, ms.
+    pub hold_ms: f64,
+}
+
 #[cfg(target_os = "linux")]
 mod feed;
+#[cfg(target_os = "linux")]
+mod pace;
 #[cfg(target_os = "linux")]
 pub use feed::{FeedSpec, FramebusFeed};
 
@@ -63,14 +89,17 @@ impl Feeds {
             self.running.retain(|id, feed| {
                 want.iter().any(|(w, raw)| {
                     let s = feed.spec();
-                    w == id && (s.format, s.width, s.height) == (raw.format, raw.width, raw.height)
+                    w == id
+                        && (s.format, s.width, s.height, s.fps)
+                            == (raw.format, raw.width, raw.height, raw.fps)
                 })
             });
             for (id, raw) in want {
                 if self.running.contains_key(id) {
                     continue;
                 }
-                match FramebusFeed::spawn(FeedSpec::new(id, raw.format, raw.width, raw.height)) {
+                let spec = FeedSpec::new(id, raw.format, raw.width, raw.height, raw.fps);
+                match FramebusFeed::spawn(spec) {
                     Ok(feed) => {
                         tracing::info!(camera = %id, "framebus_feed_started");
                         self.running.insert(id.clone(), feed);
@@ -109,6 +138,18 @@ impl Feeds {
         for id in self.running.keys() {
             self.renew(id);
         }
+    }
+
+    /// Every running feed's counters, ordered by camera id.
+    pub fn stats(&self) -> Vec<FeedStats> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut out: Vec<FeedStats> = self.running.values().map(FramebusFeed::stats).collect();
+            out.sort_by(|a, b| a.camera_id.cmp(&b.camera_id));
+            out
+        }
+        #[cfg(not(target_os = "linux"))]
+        Vec::new()
     }
 }
 

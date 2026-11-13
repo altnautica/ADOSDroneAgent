@@ -6,7 +6,21 @@ import {
   type TransportKind,
   type VideoTransportSnapshot,
   VIDEO_RECOVER_WINDOW_MS,
+  watchPeerFailure,
 } from "./video-transport";
+import type { InboundVideoCounters, VideoStats } from "./video-stats";
+
+const ZERO_COUNTERS: InboundVideoCounters = {
+  framesReceived: 0,
+  framesDecoded: 0,
+  framesDropped: 0,
+  totalInterFrameDelay: 0,
+  totalSquaredInterFrameDelay: 0,
+  jitterBufferDelay: 0,
+  jitterBufferEmittedCount: 0,
+  bytesReceived: 0,
+  decoderImplementation: null,
+};
 
 interface FakeVideo {
   videoWidth: number;
@@ -21,19 +35,22 @@ function fakeVideo(): HTMLVideoElement {
 
 /** A scripted harness: each dial pops the next scripted outcome for its kind
  *  (or asks `answers`, when given), and frames are delivered by hand to
- *  whichever element is being watched. */
+ *  whichever element is being watched. With `bytes`, a WHEP session reports
+ *  that byte count as its receiver's `bytesReceived`. */
 function harness(
   order: TransportKind[],
   script: Partial<Record<TransportKind, boolean[]>>,
   answers?: (kind: TransportKind) => boolean,
+  bytes?: () => number,
 ) {
   const video = fakeVideo();
   const probe = fakeVideo();
   const dials: { kind: TransportKind; el: HTMLVideoElement; at: number }[] = [];
   const lost: (() => void)[] = [];
   const closed: TransportKind[] = [];
-  const watchers = new Map<HTMLVideoElement, () => void>();
+  const watchers = new Map<HTMLVideoElement, (presented?: number) => void>();
   const snaps: VideoTransportSnapshot[] = [];
+  const stats: VideoStats[] = [];
 
   const transport = createVideoTransport({
     order,
@@ -42,6 +59,9 @@ function harness(
     video,
     createProbe: () => probe,
     onChange: (s) => snaps.push(s),
+    onStats: (s) => {
+      if (s) stats.push(s);
+    },
     watchFrames: (el, onFrame) => {
       watchers.set(el, onFrame);
       return () => {
@@ -53,6 +73,15 @@ function harness(
       lost.push(onLost);
       const ok = answers ? answers(kind) : (script[kind]?.shift() ?? true);
       if (!ok) return { ok: false, error: `${kind} refused` };
+      if (kind === "whep" && bytes) {
+        return {
+          ok: true,
+          session: {
+            close: () => void closed.push(kind),
+            inboundVideo: async () => ({ ...ZERO_COUNTERS, bytesReceived: bytes() }),
+          },
+        };
+      }
       return { ok: true, session: { close: () => void closed.push(kind) } };
     },
   });
@@ -64,8 +93,9 @@ function harness(
     dials,
     lost,
     closed,
+    stats,
     snap: () => transport.snapshot(),
-    frame: (el: HTMLVideoElement = video) => watchers.get(el)?.(),
+    frame: (el: HTMLVideoElement = video, presented?: number) => watchers.get(el)?.(presented),
   };
 }
 
@@ -105,37 +135,144 @@ describe("createVideoTransport", () => {
     expect(h.snap()).toMatchObject({ state: "live", transport: "hls", highLatency: true });
   });
 
-  it("re-dials once on a freeze, then falls back on a second freeze within the window", async () => {
+  it("re-dials a freeze while no bytes arrive either", async () => {
+    let bytes = 0;
+    const h = harness(["whep", "hls"], {}, undefined, () => bytes);
+    h.transport.start();
+    await flush();
+    for (let t = 0; t < 3000; t += 250) {
+      bytes += 10_000;
+      h.frame();
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    // Frames and bytes stop together.
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(h.snap().state).toBe("frozen");
+    expect(h.dials.map((d) => d.kind)).toEqual(["whep", "whep"]);
+    expect(h.closed).toEqual(["whep"]);
+  });
+
+  it("keeps the session through a freeze while bytes still arrive (a decoder waiting for a keyframe)", async () => {
+    let bytes = 0;
+    const h = harness(["whep", "hls"], {}, undefined, () => bytes);
+    h.transport.start();
+    await flush();
+    for (let t = 0; t < 3000; t += 250) {
+      bytes += 10_000;
+      h.frame();
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    // No frame is shown for 5 s, but the receiver keeps taking bytes.
+    for (let t = 0; t < 5000; t += 250) {
+      bytes += 10_000;
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    expect(h.snap().state).toBe("frozen");
+    expect(h.dials.map((d) => d.kind)).toEqual(["whep"]);
+    expect(h.closed).toEqual([]);
+    // The new keyframe decodes: the same session is live again.
+    h.frame();
+    expect(h.snap()).toMatchObject({ state: "live", transport: "whep" });
+    expect(h.dials).toHaveLength(1);
+  });
+
+  it("re-dials a picture that stays frozen too long even while bytes arrive", async () => {
+    let bytes = 0;
+    const h = harness(["whep", "hls"], {}, undefined, () => bytes);
+    h.transport.start();
+    await flush();
+    h.frame();
+    for (let t = 0; t < 9000; t += 250) {
+      bytes += 10_000;
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    expect(h.dials.map((d) => d.kind)).toEqual(["whep", "whep"]);
+    expect(h.dials[1].at - h.dials[0].at).toBeGreaterThanOrEqual(8000);
+  });
+
+  it("reports a peer connection lost only when ICE or the connection has failed", () => {
+    const listeners: (() => void)[] = [];
+    const pc = {
+      connectionState: "connected",
+      iceConnectionState: "connected",
+      addEventListener: (_t: string, cb: () => void) => void listeners.push(cb),
+    };
+    const onLost = vi.fn();
+    watchPeerFailure(pc, onLost);
+    const set = (patch: Partial<typeof pc>) => {
+      Object.assign(pc, patch);
+      for (const cb of listeners) cb();
+    };
+    set({ iceConnectionState: "disconnected" });
+    expect(onLost).not.toHaveBeenCalled();
+    set({ iceConnectionState: "failed" });
+    set({ connectionState: "failed" });
+    expect(onLost).toHaveBeenCalledTimes(1);
+  });
+
+  it("never moves to HLS on a second freeze: each freeze re-dials WHEP", async () => {
     const h = harness(["whep", "hls"], {});
     h.transport.start();
     await flush();
     h.frame();
     await vi.advanceTimersByTimeAsync(3000);
     expect(h.snap().state).toBe("frozen");
-    expect(h.dials.map((d) => d.kind)).toEqual(["whep", "whep"]);
-    expect(h.closed).toEqual(["whep"]);
-
     h.frame();
-    expect(h.snap().state).toBe("live");
     await vi.advanceTimersByTimeAsync(3000);
-    expect(h.dials.map((d) => d.kind)).toEqual(["whep", "whep", "hls"]);
     h.frame();
-    expect(h.snap()).toMatchObject({ state: "live", transport: "hls", highLatency: true });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.dials.map((d) => d.kind)).toEqual(["whep", "whep", "whep", "whep"]);
+    h.frame();
+    expect(h.snap()).toMatchObject({ state: "live", transport: "whep", highLatency: false });
   });
 
-  it("treats freezes further apart than the window as independent", async () => {
+  it("keeps to WHEP while its path comes back after an encoder restart, without a stop on HLS", async () => {
+    let restarting = false;
+    const h = harness(["whep", "hls"], {}, (kind) => kind === "hls" || !restarting);
+    h.transport.start();
+    await flush();
+    await playFor(h, 3000);
+    // The encoder respawns: the WHEP path is refused for 7 s, then serves again.
+    restarting = true;
+    await vi.advanceTimersByTimeAsync(7000);
+    restarting = false;
+    await vi.advanceTimersByTimeAsync(1500);
+    h.frame();
+    expect(h.dials.map((d) => d.kind)).not.toContain("hls");
+    expect(h.snap()).toMatchObject({ state: "live", transport: "whep", highLatency: false });
+  });
+
+  it("moves to HLS when ICE fails and tries WHEP again 10 s later", async () => {
     const h = harness(["whep", "hls"], {});
     h.transport.start();
     await flush();
     h.frame();
-    await vi.advanceTimersByTimeAsync(3000);
-    // Keep frames flowing for longer than the freeze window.
-    for (let t = 0; t < 65_000; t += 500) {
-      h.frame();
-      await vi.advanceTimersByTimeAsync(500);
+    h.lost[0]();
+    await flush();
+    h.frame();
+    expect(h.snap()).toMatchObject({ state: "live", transport: "hls", highLatency: true });
+    await playFor(h, 9750);
+    expect(h.dials.map((d) => d.kind)).toEqual(["whep", "hls"]);
+    await playFor(h, 500);
+    expect(h.dials[h.dials.length - 1]).toMatchObject({ kind: "whep", el: h.probe });
+  });
+
+  it("reports shown and decoded frame rates once a second", async () => {
+    let bytes = 0;
+    const h = harness(["whep"], {}, undefined, () => bytes);
+    h.transport.start();
+    await flush();
+    let presented = 0;
+    for (let t = 0; t < 3000; t += 50) {
+      bytes += 1000;
+      presented += 1;
+      h.frame(h.video, presented);
+      await vi.advanceTimersByTimeAsync(50);
     }
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(h.dials.map((d) => d.kind)).toEqual(["whep", "whep", "whep"]);
+    expect(h.stats.length).toBeGreaterThanOrEqual(2);
+    const last = h.stats[h.stats.length - 1];
+    expect(last.shownFps).toBeCloseTo(20, 0);
+    expect(last.kbps).toBeCloseTo(160, 0);
   });
 
   it("moves down the order when an established session is lost", async () => {
@@ -190,7 +327,7 @@ describe("createVideoTransport", () => {
     h.frame();
     expect(h.snap().transport).toBe("hls");
 
-    await playFor(h, 60_000);
+    await playFor(h, 10_000);
     const last = h.dials[h.dials.length - 1];
     expect(last).toMatchObject({ kind: "whep", el: h.probe });
     // Still on HLS until the probe shows a picture.

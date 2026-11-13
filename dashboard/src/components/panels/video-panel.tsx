@@ -16,6 +16,8 @@ import { VideoDetections } from "@/components/panels/video-detections";
 import { CameraSelect, GimbalBadge, LayerToggles, VideoLayers } from "@/components/panels/video-layers";
 import { useResource } from "@/hooks/use-resource";
 import { cameraOptions, DEFAULT_CAMERA_ID, defaultLeasedLayers } from "@/lib/video-layer-lease";
+import { PANEL_HERO_HOLD, panelWantsHero } from "@/lib/video-hero-hold";
+import { useHeroHold } from "@/shared/hero-hold";
 import { useProfile } from "@/shared/use-profile";
 import { useVideoTransport } from "@/shared/use-video-transport";
 import type { TransportKind } from "@/shared/video-transport";
@@ -126,6 +128,10 @@ export function VideoPanel() {
   });
   // The screen stays awake only while a feed is being shown.
   useWakeLock(playing);
+  // The drone streams full rate while this panel can show it and the page is
+  // visible; scrolling it out of view keeps the hold, so the encoder is not
+  // restarted on every scroll.
+  useHeroHold(PANEL_HERO_HOLD, panelWantsHero(canStream, profile));
 
   const state: "idle" | "connecting" | "live" | "frozen" | "failed" = playing
     ? feed.state
