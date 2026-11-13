@@ -9,16 +9,29 @@ use super::*;
 pub(super) const FRAMEBUS_WALLCLOCK_PTS: &str =
     "settb=1/90000,setpts=max(PREV_OUTPTS+1\\,(RTCTIME-RTCSTART)/(TB*1000000))";
 
-/// The filter that keeps a frame-bus frame only once `1/target` seconds of
-/// stamp time have passed since the last kept one, less half a captured frame
-/// period so jitter in the captured cadence does not skip a whole slot.
-pub(super) fn framebus_decimate(target_fps: u32, raw_fps: u32) -> String {
-    let (target, raw) = (target_fps.max(1), raw_fps.max(1));
+/// The filter that keeps one frame-bus frame per `1/target` second slot of
+/// stamp time, so any target below the captured rate holds on average, and a
+/// gap stays a gap (an empty slot is skipped, never filled). A kept frame is
+/// also at least half a slot after the last one, so capture jitter around a
+/// slot boundary cannot keep two frames back to back.
+pub(super) fn framebus_decimate(target_fps: u32) -> String {
+    let target = target_fps.max(1);
     format!(
-        "select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,{}/{})",
-        2 * raw - target,
-        2 * raw * target
+        "select=isnan(prev_selected_t)+gte(floor(t*{target})-floor(prev_selected_t*{target})\\,1)*gte(t-prev_selected_t\\,1/{})",
+        2 * target
     )
+}
+
+/// The rate a frame-bus input is declared at. The stamps come from the wall
+/// clock, so this only tells the encoder how many frames a second it gets: a
+/// leg that decimates declares its own rate, so the encoder's rate control
+/// spends the bitrate over the frames it really encodes.
+pub(super) fn framebus_input_rate(target_fps: u32, raw_fps: u32) -> u32 {
+    if target_fps < raw_fps {
+        target_fps.max(1)
+    } else {
+        raw_fps
+    }
 }
 
 /// `ffmpeg` command for USB / IP / frame-bus camera encoding.
@@ -81,7 +94,7 @@ pub(super) fn build_ffmpeg_command(
         cmd.push("-video_size".into());
         cmd.push(format!("{}x{}", fb.raw.width, fb.raw.height));
         cmd.push("-framerate".into());
-        cmd.push(fb.raw.fps.to_string());
+        cmd.push(framebus_input_rate(params.fps, fb.raw.fps).to_string());
         cmd.push("-i".into());
         cmd.push(fb.fifo.clone());
     } else if crate::config::is_network_url(source) {
@@ -180,7 +193,7 @@ pub(super) fn build_ffmpeg_command(
         Some(fb) => {
             filters.push(FRAMEBUS_WALLCLOCK_PTS.to_string());
             if params.fps < fb.raw.fps {
-                filters.push(framebus_decimate(params.fps, fb.raw.fps));
+                filters.push(framebus_decimate(params.fps));
             }
             cmd.extend(
                 ["-fps_mode", "passthrough", "-enc_time_base:v", "1/90000"]

@@ -61,7 +61,8 @@ fn an_attention_switch_rescales_instead_of_misreading_the_pipe() {
     };
     let cmd = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rockchip()).unwrap();
     assert!(has_pair(&cmd, "-video_size", "1280x800"), "{cmd:?}");
-    assert!(has_pair(&cmd, "-framerate", "20"), "{cmd:?}");
+    // The leg decimates, so the input is declared at the leg's rate.
+    assert!(has_pair(&cmd, "-framerate", "1"), "{cmd:?}");
     assert!(has_pair(&cmd, "-s", "320x180"), "{cmd:?}");
     assert!(!cmd.iter().any(|t| t == "-r"), "{cmd:?}");
     let line = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rk_mpp())
@@ -120,6 +121,27 @@ fn a_device_camera_keeps_its_output_rate_cap() {
     assert!(!cmd.iter().any(|t| t.contains("RTCTIME")), "{cmd:?}");
 }
 
+/// The argv of a frame-bus leg at `fps` over frames captured at `raw_fps`:
+/// the declared input rate and the filter chain.
+fn leg_rate_and_filters(fps: u32, raw_fps: u32) -> (String, String) {
+    let p = EncoderParams {
+        width: 320,
+        height: 180,
+        fps,
+        bitrate_kbps: 50,
+        framebus_input: Some(RawInput {
+            format: FrameFormat::Gray8,
+            width: 320,
+            height: 180,
+            fps: raw_fps,
+        }),
+        ..params(EncoderKind::Ffmpeg, 320, 180, fps, 50)
+    };
+    let cmd = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rockchip()).unwrap();
+    let after = |flag: &str| cmd[cmd.iter().position(|t| t == flag).expect(flag) + 1].clone();
+    (after("-framerate"), after("-vf"))
+}
+
 #[test]
 fn a_framebus_thumbnail_decimates_without_filling_gaps() {
     let p = EncoderParams {
@@ -133,67 +155,117 @@ fn a_framebus_thumbnail_decimates_without_filling_gaps() {
     assert!(!cmd.iter().any(|t| t == "-r"), "{cmd:?}");
     assert!(has_pair(&cmd, "-fps_mode", "passthrough"), "{cmd:?}");
     assert!(has_pair(&cmd, "-enc_time_base:v", "1/90000"), "{cmd:?}");
+    // The encoder is told the rate it really gets, so its rate control
+    // spends the bitrate over one frame a second, not over twenty.
+    assert!(has_pair(&cmd, "-framerate", "1"), "{cmd:?}");
+    assert!(!has_pair(&cmd, "-framerate", "20"), "{cmd:?}");
     let vf = &cmd[cmd.iter().position(|t| t == "-vf").expect("-vf") + 1];
     assert!(
         vf.starts_with(crate::encoder::ffmpeg::FRAMEBUS_WALLCLOCK_PTS),
         "{vf}"
     );
-    assert!(
-        vf.ends_with(",select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,39/40)"),
-        "{vf}"
-    );
+    assert!(vf.contains(",select="), "{vf}");
+    // A leg at the captured rate is declared at it and not decimated.
+    let (rate, vf) = leg_rate_and_filters(20, 20);
+    assert_eq!(rate, "20");
+    assert!(!vf.contains("select="), "{vf}");
 }
 
-/// The thumbnail decimation run through a real `ffmpeg` when one is
-/// installed: 20 fps frames, a 6 s pause, then frames again come out about
-/// once a second with the pause kept, never filled with duplicates.
-#[test]
-fn the_thumbnail_decimation_keeps_a_gap_a_gap() {
+/// The real `ffmpeg` runs stamp frames with the wall clock, so they run one
+/// at a time: a run beside another reads its pipe late under the load.
+static REAL_TIME_FFMPEG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs a frame-bus leg's input rate and filters through a real `ffmpeg`
+/// with libx264 at 50 kb/s, writing 320x180 frames at `raw_fps` in real time
+/// for each `(frames, pause_after_ms)` run. Returns each packet's
+/// `(pts in 90 kHz ticks, bytes)`, or `None` when ffmpeg is not installed.
+fn run_leg(fps: u32, raw_fps: u32, runs: &[(u32, u64)]) -> Option<Vec<(i64, i64)>> {
     use std::io::Write;
-    use std::process::{ChildStdin, Command, Stdio};
+    use std::process::{Command, Stdio};
+    let _one_at_a_time = REAL_TIME_FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
     if Command::new("ffmpeg").arg("-version").output().is_err() {
-        eprintln!("ffmpeg not installed: decimation run skipped");
-        return;
+        eprintln!("ffmpeg not installed: leg run skipped");
+        return None;
     }
-    let vf = format!(
-        "{},{}",
-        crate::encoder::ffmpeg::FRAMEBUS_WALLCLOCK_PTS,
-        crate::encoder::ffmpeg::framebus_decimate(1, 20)
-    );
+    let (rate, vf) = leg_rate_and_filters(fps, raw_fps);
     let mut child = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-f", "rawvideo"])
-        .args(["-pix_fmt", "gray", "-video_size", "4x2", "-framerate", "20"])
-        .args(["-i", "-", "-vf", &vf])
+        .args(["-pix_fmt", "gray", "-video_size", "320x180"])
+        .args(["-framerate", &rate, "-i", "-", "-vf", &vf])
         .args(["-fps_mode", "passthrough", "-enc_time_base:v", "1/90000"])
+        .args(["-c:v", "libx264", "-b:v", "50k", "-pix_fmt", "yuv420p"])
+        .args(["-preset", "ultrafast", "-tune", "zerolatency", "-g", "1"])
         .args(["-f", "framecrc", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    let burst = |stdin: &mut ChildStdin| {
-        for _ in 0..40 {
-            stdin.write_all(&[7u8; 8]).unwrap();
+    let period = std::time::Duration::from_micros(1_000_000 / u64::from(raw_fps));
+    // A moving textured picture, so the encoder has detail to spend bits on.
+    let mut n = 0u32;
+    let mut due = std::time::Instant::now();
+    for (frames, pause_ms) in runs {
+        for _ in 0..*frames {
+            let frame: Vec<u8> = (0..320 * 180u32)
+                .map(|i| (((i % 320) + n * 4) ^ ((i / 320) * 2)) as u8)
+                .collect();
+            std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+            stdin.write_all(&frame).unwrap();
             stdin.flush().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            n += 1;
+            due += period;
         }
-    };
-    burst(&mut stdin);
-    std::thread::sleep(std::time::Duration::from_secs(6));
-    burst(&mut stdin);
+        due += std::time::Duration::from_millis(*pause_ms);
+    }
     drop(stdin);
     let out = child.wait_with_output().unwrap();
-    let pts: Vec<i64> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.split(',').nth(2)?.trim().parse().ok())
-        .collect();
-    // 2 s of frames on each side of the pause: about two kept per side; a
-    // constant 1 fps output would add six duplicates for the pause.
-    assert!((3..=6).contains(&pts.len()), "{pts:?}");
-    let steps_ms: Vec<i64> = pts.windows(2).map(|w| (w[1] - w[0]) / 90).collect();
-    assert!(steps_ms.iter().all(|s| *s >= 900), "{steps_ms:?}");
-    assert!(steps_ms.iter().any(|s| *s >= 6000), "{steps_ms:?}");
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| {
+                let mut f = l.split(',').map(str::trim);
+                let pts = f.nth(2)?.parse().ok()?;
+                let size = f.nth(1)?.parse().ok()?;
+                Some((pts, size))
+            })
+            .collect(),
+    )
+}
+
+/// The 1 fps thumbnail over 20 fps frames through a real `ffmpeg`: frames
+/// come out about once a second with a 4 s pause kept, never filled with
+/// duplicates, and the stream holds its 50 kb/s budget per frame it sends.
+#[test]
+fn the_thumbnail_keeps_a_gap_a_gap_and_its_bitrate() {
+    let Some(packets) = run_leg(1, 20, &[(120, 4000), (80, 0)]) else {
+        return;
+    };
+    // 6 s of frames, the pause, then 4 s: about ten kept; a constant 1 fps
+    // output would add four duplicates for the pause.
+    assert!((8..=12).contains(&packets.len()), "{packets:?}");
+    let steps_ms: Vec<i64> = packets.windows(2).map(|w| (w[1].0 - w[0].0) / 90).collect();
+    assert!(steps_ms.iter().all(|s| *s >= 500), "{steps_ms:?}");
+    assert!(steps_ms.iter().any(|s| *s >= 4000), "{steps_ms:?}");
+    // One frame a second at 50 kb/s is about 6250 bytes a frame, once the
+    // rate control has settled past its first few frames; an encoder told
+    // the captured rate spends about a twentieth of that.
+    let settled = &packets[4..];
+    let bytes: i64 = settled.iter().map(|p| p.1).sum();
+    let kbps = bytes as f64 * 8.0 / settled.len() as f64 / 1000.0;
+    assert!((35.0..=65.0).contains(&kbps), "{kbps} kb/s {packets:?}");
+}
+
+/// A target above two thirds of the captured rate still decimates: 25 of
+/// 30 fps keeps about 25 frames a second, not all 30.
+#[test]
+fn a_target_close_to_the_captured_rate_still_decimates() {
+    let Some(packets) = run_leg(25, 30, &[(90, 0)]) else {
+        return;
+    };
+    // 3 s of frames: 75 slots, against 90 frames written.
+    assert!((70..=80).contains(&packets.len()), "{}", packets.len());
 }
 
 /// The stamp filter itself, run through a real `ffmpeg` when one is
@@ -203,6 +275,7 @@ fn the_thumbnail_decimation_keeps_a_gap_a_gap() {
 fn the_wallclock_stamp_follows_when_frames_arrive() {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    let _one_at_a_time = REAL_TIME_FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         eprintln!("ffmpeg not installed: stamp filter run skipped");
         return;
