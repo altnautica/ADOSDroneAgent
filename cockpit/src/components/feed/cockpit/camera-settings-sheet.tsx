@@ -2,12 +2,13 @@ import { useEffect } from "react";
 import { Circle, Square } from "lucide-react";
 
 import { Sheet } from "@/components/ui/sheet";
-import { recordRoute, STREAM_QUALITIES, useStreamQualityStore } from "@/lib/camera-actions";
+import { recordRoute } from "@/lib/camera-actions";
 import { runCockpitAction } from "@/lib/cockpit-actions";
 import { cameraLabel } from "@/lib/feed-legs";
 import type { RosterCamera } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { pressOrExplain } from "@/lib/zone-press";
+import { STREAM_QUALITIES, useStreamQualityStore } from "@/lib/stream-quality";
 import { specText } from "@/shared/hud/spec-text";
 import { useFeedStore } from "@/stores/feed-store";
 import { useStatusStore } from "@/stores/status-store";

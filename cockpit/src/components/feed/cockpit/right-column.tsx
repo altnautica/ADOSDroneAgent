@@ -1,7 +1,7 @@
 // The cockpit grid's right column (cockpit spec `layout.json`): shutter,
 // photo/video switch, zoom, gimbal pad and camera settings.
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { Camera, Circle, ImageIcon, Minus, Plus, SlidersHorizontal, Square, Video } from "lucide-react";
 
 import { cameraRoute, recordRoute, runCameraAction, useMavCameraStore, type CameraAction } from "@/lib/camera-actions";
@@ -25,7 +25,10 @@ import { ZoneButton } from "./zone-button";
 const refreshMav = () => void useMavCameraStore.getState().refresh();
 
 /** Zoom in over zoom out, one pill. Without a camera extension's zoom the
- *  pill zooms the shown video digitally and names the level beside it. */
+ *  pill zooms the shown video digitally and names the level beside it. A
+ *  vehicle camera zooms while a button is held (a tap or a key press zooms
+ *  briefly), so each button presses on pointer-down and releases on
+ *  pointer-up; a keyboard activation is a press and its release at once. */
 function ZoomPill() {
   const inReason = useCameraReason("zoom_in");
   const outReason = useCameraReason("zoom_out");
@@ -35,7 +38,25 @@ function ZoomPill() {
   const zoom = useCockpitViewStore((s) => s.digitalZoom);
   const level = digital ? specText("camera.digital_zoom", { n: zoom }) : null;
   const btn = "flex h-1/2 w-full items-center justify-center active:bg-white/10 aria-disabled:opacity-45";
-  const press = (action: CameraAction, reason: string | null) => () => pressOrExplain(reason, () => void runCameraAction(action));
+  const hold = (action: CameraAction, reason: string | null) => {
+    const release = () => void runCameraAction(action, "release");
+    return {
+      onPointerDown: (e: PointerEvent<HTMLButtonElement>) => {
+        if (e.button !== 0) return;
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+        pressOrExplain(reason, () => void runCameraAction(action));
+      },
+      onPointerUp: release,
+      onPointerCancel: release,
+      onClick: (e: MouseEvent<HTMLButtonElement>) => {
+        if (e.detail !== 0) return;
+        pressOrExplain(reason, () => {
+          void runCameraAction(action);
+          release();
+        });
+      },
+    };
+  };
   const inLabel = specText("cockpit.zoom.in");
   const outLabel = specText("cockpit.zoom.out");
   return (
@@ -46,11 +67,11 @@ function ZoomPill() {
       aria-label={level ?? specText("cockpit.zoom")}
       data-zone="zoom"
     >
-      <button type="button" className={btn} onClick={press("zoom_in", inReason)} aria-disabled={inReason ? true : undefined} title={inReason ?? inLabel} aria-label={inReason ? `${inLabel}: ${inReason}` : inLabel}>
+      <button type="button" className={btn} {...hold("zoom_in", inReason)} aria-disabled={inReason ? true : undefined} title={inReason ?? inLabel} aria-label={inReason ? `${inLabel}: ${inReason}` : inLabel}>
         <Plus className="h-[20px] w-[20px]" aria-hidden />
       </button>
       <span className="mx-[12px] h-px bg-[var(--fs-border)]" aria-hidden />
-      <button type="button" className={btn} onClick={press("zoom_out", outReason)} aria-disabled={outReason ? true : undefined} title={outReason ?? outLabel} aria-label={outReason ? `${outLabel}: ${outReason}` : outLabel}>
+      <button type="button" className={btn} {...hold("zoom_out", outReason)} aria-disabled={outReason ? true : undefined} title={outReason ?? outLabel} aria-label={outReason ? `${outLabel}: ${outReason}` : outLabel}>
         <Minus className="h-[20px] w-[20px]" aria-hidden />
       </button>
       {level && zoom > 1 ? (

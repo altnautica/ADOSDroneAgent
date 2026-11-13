@@ -1,8 +1,9 @@
 // The cockpit's camera actions (shutter, zoom, gimbal recentre) and where
 // each goes. Every surface tries the same chain:
 //   zoom  — an installed camera extension's zoom skill, else the vehicle's
-//           own camera over MAVLink when it lists basic zoom, else a digital
-//           zoom of the shown video, 1× / 2× / 4×, labelled "Digital ×N";
+//           own camera over MAVLink when it lists basic zoom (a continuous
+//           zoom from the press to its release), else a digital zoom of the
+//           shown video, 1× / 2× / 4×, labelled "Digital ×N";
 //   photo — the extension's capture skill, else the vehicle's camera over
 //           MAVLink when it lists image capture, else a still of the shown
 //           video grabbed in the browser and downloaded ("Photo saved");
@@ -13,7 +14,6 @@
 // vehicle camera's is unavailable and says so.
 
 import { startNodeRecording, startRecording, stopNodeRecording, stopRecording } from "@/lib/api";
-import { LEASE_OWNER } from "@/lib/lease-owner";
 import { isDemoMode } from "@/lib/utils";
 import { ApiError, apiFetch, errorDetail } from "@/shared/api-fetch";
 import { registerCockpitActions, runCockpitAction } from "@/lib/cockpit-actions";
@@ -185,29 +185,75 @@ export function mavResultText(result: string): string {
   return hasSpecText(key) ? specText(key) : result;
 }
 
-/** Send one MAVLink camera command, once: the agent resends itself, and a
- *  resent capture shoots twice. The photo's result shows as a toast; a
- *  refusal or error shows `camera.capture_failed` / `camera.zoom_failed`
- *  with the vehicle's text, else the result's name. */
-export async function runMavCamera(action: CameraAction, componentId: number): Promise<MavCameraReply | null> {
-  const photo = action === "photo";
-  const failKey = photo ? "camera.capture_failed" : "camera.zoom_failed";
-  const body = photo ? { component_id: componentId } : { component_id: componentId, type: "step", value: action === "zoom_in" ? 1 : -1 };
+/** Send one MAVLink camera write, once: the agent resends where that is safe
+ *  (a resent capture would shoot twice). A refusal or error shows `failKey`
+ *  (`camera.capture_failed` / `camera.zoom_failed`) with the vehicle's text,
+ *  else the result's name. Never rejects. */
+async function mavCameraWrite(route: "capture" | "zoom", body: object, failKey: string): Promise<MavCameraReply | null> {
   try {
-    const r = await cameraFetch<MavCameraReply>(`/api/v1/camera/mavlink/${photo ? "capture" : "zoom"}`, CAMERA_WRITE_TIMEOUT_MS, {
+    const r = await cameraFetch<MavCameraReply>(`/api/v1/camera/mavlink/${route}`, CAMERA_WRITE_TIMEOUT_MS, {
       method: "POST",
       body,
     });
     // IN_PROGRESS is the camera still working on an accepted command, never
     // a failure, whatever `ok` says.
     if (!r.ok && r.result !== "IN_PROGRESS") toast.err(specText(failKey, { reason: r.statustext || mavResultText(r.result) }));
-    else if (photo) toast.ok(specText("camera.capture_sent"));
     return r;
   } catch (e) {
     const reason = e instanceof ApiError ? errorDetail(e.body, e.message) : refusalText("no response");
     toast.err(specText(failKey, { reason }));
     return null;
   }
+}
+
+/** True when the camera answered and refused: it is not acting on the command. */
+function refused(r: MavCameraReply | null): boolean {
+  return r !== null && !r.ok && r.result !== "IN_PROGRESS" && r.result !== "TIMEOUT";
+}
+
+/** One photo on the vehicle's camera; a taken photo shows as a toast. */
+export async function captureMavPhoto(componentId: number): Promise<MavCameraReply | null> {
+  const r = await mavCameraWrite("capture", { component_id: componentId }, "camera.capture_failed");
+  if (r !== null && (r.ok || r.result === "IN_PROGRESS")) toast.ok(specText("camera.capture_sent"));
+  return r;
+}
+
+/** A tap zooms at least this long, so a quick tap still moves the lens. */
+export const ZOOM_TAP_MS = 300;
+/** A held zoom whose release never comes (a lost pointer-up) stops here. */
+export const ZOOM_HOLD_MAX_MS = 10_000;
+
+let zoomWrites: Promise<unknown> = Promise.resolve();
+
+/** Set the vehicle camera's continuous zoom rate (`MAV_CMD_SET_CAMERA_ZOOM`
+ *  type continuous): -1 wide … 1 tele, 0 stops. ArduPilot's camera library
+ *  takes only a continuous or a range zoom and refuses a step. Writes go one
+ *  at a time, in order, so a stop never overtakes the rate it ends. */
+export function setMavZoomRate(componentId: number, rate: number): Promise<MavCameraReply | null> {
+  const write = zoomWrites.then(() => mavCameraWrite("zoom", { component_id: componentId, type: "continuous", value: rate }, "camera.zoom_failed"));
+  zoomWrites = write;
+  return write;
+}
+
+/** Zoom the vehicle camera at full rate (`dir` 1 tele, -1 wide) until the
+ *  returned release runs, at least `ZOOM_TAP_MS` and at most
+ *  `ZOOM_HOLD_MAX_MS` after the press, then stop it with a rate of 0 once the
+ *  rate's own answer is in. A camera that refused the rate gets no stop. */
+export function holdMavZoom(componentId: number, dir: 1 | -1): () => void {
+  const pressedAt = Date.now();
+  const started = setMavZoomRate(componentId, dir);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearTimeout(cap);
+    void started.then((reply) => {
+      if (refused(reply)) return;
+      setTimeout(() => void setMavZoomRate(componentId, 0), Math.max(0, ZOOM_TAP_MS - (Date.now() - pressedAt)));
+    });
+  };
+  const cap = setTimeout(release, ZOOM_HOLD_MAX_MS);
+  return release;
 }
 
 /** The recorder's route: unavailable without video. */
@@ -278,8 +324,32 @@ async function grabFrame(): Promise<void> {
   toast.ok(specText("camera.saved"));
 }
 
-/** Run a camera action through its chain; an unavailable one shows why. */
-export async function runCameraAction(action: CameraAction): Promise<void> {
+/** A zoom press: its action, and the release of the vehicle camera zoom it
+ *  started (null until it starts, or on another route). */
+interface ZoomPress {
+  action: CameraAction;
+  release: (() => void) | null;
+}
+
+/** The zoom press in progress. */
+let zoomPress: ZoomPress | null = null;
+
+/** Run a camera action through its chain; an unavailable one shows why.
+ *  A vehicle camera zooms from the zoom press to its release; every other
+ *  route acts on the press, and a release is a no-op. */
+export async function runCameraAction(action: CameraAction, phase: "press" | "release" = "press"): Promise<void> {
+  if (phase === "release") {
+    if (zoomPress?.action === action) {
+      zoomPress.release?.();
+      zoomPress = null;
+    }
+    return;
+  }
+  const press: ZoomPress | null = action === "zoom_in" || action === "zoom_out" ? { action, release: null } : null;
+  if (press) {
+    zoomPress?.release?.();
+    zoomPress = press;
+  }
   const videoLive = useFeedStore.getState().video.state === "live";
   const extensions = useExtensionsStore.getState().extensions;
   // The press routes on the last camera list and refreshes it in the
@@ -305,7 +375,14 @@ export async function runCameraAction(action: CameraAction): Promise<void> {
     return;
   }
   if (route.kind === "mavlink") {
-    await runMavCamera(action, route.componentId);
+    if (!press) {
+      await captureMavPhoto(route.componentId);
+      return;
+    }
+    const release = holdMavZoom(route.componentId, action === "zoom_in" ? 1 : -1);
+    // A release that came while the camera list loaded ends the zoom as a tap.
+    if (zoomPress === press) press.release = release;
+    else release();
     return;
   }
   if (action === "photo") {
@@ -352,80 +429,8 @@ export function registerCameraActions(groundStation: boolean): () => void {
         if (p === "press") void toggleRecording(groundStation);
       },
     },
-    { id: "camera.zoom_in", label: "Zoom in", group: "camera", run: (p) => void (p === "press" && runCameraAction("zoom_in")) },
-    { id: "camera.zoom_out", label: "Zoom out", group: "camera", run: (p) => void (p === "press" && runCameraAction("zoom_out")) },
+    { id: "camera.zoom_in", label: "Zoom in", group: "camera", run: (p) => void (p !== "hold" && runCameraAction("zoom_in", p)) },
+    { id: "camera.zoom_out", label: "Zoom out", group: "camera", run: (p) => void (p !== "hold" && runCameraAction("zoom_out", p)) },
     { id: "gimbal.recenter", label: "Recentre gimbal", group: "camera", run: (p) => void (p === "press" && runCameraAction("recenter")) },
   ]);
 }
-
-// Stream quality: the drone's attention profile (`/api/video/profile`). On
-// Auto the drone streams at the profile the ground station assigned; on High
-// this window holds a hero lease, renewed while it stays chosen, so the drone
-// streams full rate for this pilot without moving the fleet's assignment. A
-// node without the route (a ground station, no video pipeline) has no field.
-
-export const VIDEO_PROFILE_PATH = "/api/video/profile";
-export const STREAM_QUALITIES = ["auto", "high"] as const;
-export type StreamQuality = (typeof STREAM_QUALITIES)[number];
-/** The hero lease asked for, and how often it is renewed (well inside it). */
-export const QUALITY_LEASE_S = 30;
-export const QUALITY_RENEW_MS = 10_000;
-
-interface VideoProfileState {
-  leases?: { holder: string }[];
-}
-
-/** The quality this window has chosen, read from the profile state: High
- *  while it holds a lease. */
-export function streamQualityOf(state: VideoProfileState, holder: string): StreamQuality {
-  return state.leases?.some((l) => l.holder === holder) ? "high" : "auto";
-}
-
-/** The request that applies a quality for `holder`. */
-export function streamQualityRequest(q: StreamQuality, holder: string): { path: string; method: "POST" | "DELETE"; body?: unknown } {
-  return q === "high"
-    ? { path: VIDEO_PROFILE_PATH, method: "POST", body: { profile: "hero", holder, lease_s: QUALITY_LEASE_S } }
-    : { path: `${VIDEO_PROFILE_PATH}?holder=${encodeURIComponent(holder)}`, method: "DELETE" };
-}
-
-let renewTimer: number | undefined;
-
-async function applyQuality(q: StreamQuality): Promise<VideoProfileState> {
-  const r = streamQualityRequest(q, LEASE_OWNER);
-  return apiFetch<VideoProfileState>(r.path, { method: r.method, body: r.body });
-}
-
-/** The stream quality field's state: null until known, and while the node has
- *  no profile route. */
-export const useStreamQualityStore = create<{
-  quality: StreamQuality | null;
-  load: () => Promise<void>;
-  set: (q: StreamQuality) => Promise<void>;
-}>((set) => ({
-  quality: null,
-  load: async () => {
-    if (isDemoMode()) {
-      set({ quality: "auto" });
-      return;
-    }
-    try {
-      set({ quality: streamQualityOf(await apiFetch<VideoProfileState>(VIDEO_PROFILE_PATH), LEASE_OWNER) });
-    } catch {
-      set({ quality: null });
-    }
-  },
-  set: async (q) => {
-    window.clearInterval(renewTimer);
-    renewTimer = undefined;
-    if (isDemoMode()) {
-      set({ quality: q });
-      return;
-    }
-    try {
-      set({ quality: streamQualityOf(await applyQuality(q), LEASE_OWNER) });
-      if (q === "high") renewTimer = window.setInterval(() => void applyQuality("high").catch(() => undefined), QUALITY_RENEW_MS);
-    } catch (e) {
-      toast.err(e instanceof ApiError ? errorDetail(e.body, e.message) : String(e));
-    }
-  },
-}));

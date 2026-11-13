@@ -17,8 +17,9 @@
 // The loop stops while the page is hidden. The TV / kiosk class paints at
 // most 30 frames a second, since the kiosk's GPU also decodes the video.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
+import { usePageVisible } from "@/hooks/use-page-visible";
 import { LEASE_OWNER } from "@/lib/lease-owner";
 import { effectiveLayers } from "@/lib/cockpit-view";
 import { layerFrames } from "@/lib/layer-frames";
@@ -57,17 +58,6 @@ export interface LayerStackProps {
   /** Paint cap in frames per second (the spec's `overlay_fps_cap` for the
    *  width class: 30 on a television or the kiosk); 0 = every display frame. */
   fpsCap: number;
-}
-
-/** True while the page is visible. */
-function usePageVisible(): boolean {
-  const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState !== "hidden");
-  useEffect(() => {
-    const on = () => setVisible(document.visibilityState !== "hidden");
-    document.addEventListener("visibilitychange", on);
-    return () => document.removeEventListener("visibilitychange", on);
-  }, []);
-  return visible;
 }
 
 /** Hold a vision demand lease of `kind` on `cameraId` while `active`. */

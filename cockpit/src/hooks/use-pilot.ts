@@ -2,11 +2,13 @@
 // link) and the flight-state chip derived from it. A cockpit on a node with no
 // pilot running reads null and every pilot surface shows its absent state.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useActiveSkillDetail } from "@/hooks/use-follow-skill";
 import { useNow } from "@/hooks/use-now";
+import { usePageVisible } from "@/hooks/use-page-visible";
 import { layerFrames } from "@/lib/layer-frames";
+import { setChipEtaLease } from "@/lib/nav-stream";
 import { PILOT_SESSION } from "@/lib/pilot-link";
 import { chipInputs, freshLocalPos } from "@/shared/hud/chip-inputs";
 import type { ArFrame, PilotState } from "@/shared/hud/cockpit-frames";
@@ -44,7 +46,12 @@ export function currentArFrame(): { arFrame: ArFrame | null; arAgeMs: number } {
 }
 
 /** The chip for the current pilot state, re-evaluated twice a second so it
- *  dims when the state goes stale. Null with no pilot state at all. */
+ *  dims when the state goes stale. Null with no pilot state at all.
+ *
+ *  The mission ETA comes from the `ar` frame, which the agent computes only
+ *  for a leased camera, so while a mission runs (or is paused) and the page
+ *  shows, the chip holds its own `ar_route` lease: the ETA stays when the
+ *  video is lost or the map view takes the screen. */
 export function useFlightChip(): ChipView | null {
   const pilot = usePilot();
   const now = useNow(500);
@@ -52,7 +59,14 @@ export function useFlightChip(): ChipView | null {
   const localPos = useFlightStore((s) => s.telemetry?.local_position ?? null);
   const skillDetail = useActiveSkillDetail();
   const [completeAt, setCompleteAt] = useState<number | null>(null);
-  const complete = pilot?.data.mission?.state === "complete";
+  const missionState = pilot?.data.mission?.state ?? null;
+  const complete = missionState === "complete";
+  const wantsEta = usePageVisible() && (missionState === "active" || missionState === "paused");
+  useEffect(() => {
+    if (!wantsEta) return;
+    setChipEtaLease(true);
+    return () => setChipEtaLease(false);
+  }, [wantsEta]);
   // When the mission turned complete, adjusted while rendering.
   if (complete !== (completeAt !== null)) setCompleteAt(complete ? now : null);
   if (!pilot) return null;

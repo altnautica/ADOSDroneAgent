@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.119] - 2026-11-13
+
+### Fixed
+
+- Cockpit: a hidden page lets go of the vision detection lease (`hold_s: 0`) and takes it again when it shows, like the view and depth/surfaces leases; a backgrounded tab no longer keeps the drone detecting.
+- Cockpit: the flight-state chip keeps the mission ETA when the video stops or the map view takes the screen. While a mission runs or is paused the chip holds its own `ar_route` view lease on the nav stream, merged into the layers' lease, so the agent keeps computing the next waypoint's ETA for it.
+- Cockpit and dashboard video: a feed that was live within the last minute restarts every second (no doubling backoff), and a WHEP session that shows no first frame within 3 s is redialled, so the picture returns about a second after the agent's stream does. Measured outage replay: 0.7 s after the stream is back, down from 7.7 s.
+- Vehicle camera zoom: ArduPilot's camera library refuses a step zoom, so the cockpit zooms with a continuous rate from the press to its release (a tap zooms for 0.3 s, a lost release stops after 10 s) and the camera zoom route (`POST /api/v1/camera/mavlink/zoom`) takes only `continuous` and `range`. Zoom writes go one at a time so a stop never overtakes its rate, and both zoom types keep the agent's resends.
+
 ## [0.109.118] - 2026-11-13
 
 ### Fixed

@@ -2,17 +2,19 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   cameraRoute,
+  captureMavPhoto,
   fetchMavCameras,
-  QUALITY_LEASE_S,
-  QUALITY_RENEW_MS,
+  holdMavZoom,
   recordRoute,
-  runMavCamera,
+  runCameraAction,
+  setMavZoomRate,
   stepDigitalZoom,
-  STREAM_QUALITIES,
-  streamQualityOf,
-  streamQualityRequest,
+  useMavCameraStore,
+  ZOOM_HOLD_MAX_MS,
+  ZOOM_TAP_MS,
 } from "@/lib/camera-actions";
 import type { InstalledExtension } from "@/lib/extensions";
+import { QUALITY_LEASE_S, QUALITY_RENEW_MS, STREAM_QUALITIES, streamQualityOf, streamQualityRequest } from "@/lib/stream-quality";
 import { onToast, type ToastMessage } from "@/shared/api/toast";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -103,16 +105,16 @@ describe("the vehicle's own camera over MAVLink (between the extension and the l
     const seen: ToastMessage[] = [];
     const off = onToast((t) => seen.push(t));
     try {
-      await runMavCamera("photo", 101);
-      await runMavCamera("zoom_in", 100);
-      await runMavCamera("photo", 101);
+      await captureMavPhoto(101);
+      await setMavZoomRate(100, 1);
+      await captureMavPhoto(101);
     } finally {
       off();
       vi.unstubAllGlobals();
     }
     expect(sent).toEqual([
       { url: "/api/v1/camera/mavlink/capture", body: { component_id: 101 } },
-      { url: "/api/v1/camera/mavlink/zoom", body: { component_id: 100, type: "step", value: 1 } },
+      { url: "/api/v1/camera/mavlink/zoom", body: { component_id: 100, type: "continuous", value: 1 } },
       { url: "/api/v1/camera/mavlink/capture", body: { component_id: 101 } },
     ]);
     expect(seen.map((t) => [t.kind, t.message])).toEqual([
@@ -122,13 +124,97 @@ describe("the vehicle's own camera over MAVLink (between the extension and the l
     ]);
     expect(seen[1].message).toBe("Zoom failed: Denied");
   });
+});
 
+describe("the vehicle camera's zoom (ArduPilot takes a continuous or a range zoom, never a step)", () => {
+  /** Record each zoom write's body and when it went, answering `result`. */
+  function stubZoom(result = "ACCEPTED") {
+    const writes: { at: number; body: { type: string; value: number } }[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      writes.push({ at: Date.now(), body: JSON.parse(String(init.body)) });
+      const ok = result === "ACCEPTED";
+      return new Response(JSON.stringify({ ok, result, component_id: 100 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    return writes;
+  }
+
+  async function within(run: () => Promise<void>) {
+    vi.useFakeTimers();
+    const off = onToast(() => undefined);
+    try {
+      await run();
+    } finally {
+      off();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("zooms at full rate from the press and stops at the release", () =>
+    within(async () => {
+      const writes = stubZoom();
+      const t0 = Date.now();
+      const release = holdMavZoom(100, 1);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(writes.map((w) => w.body)).toEqual([{ component_id: 100, type: "continuous", value: 1 }]);
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(writes.map((w) => [w.at - t0, w.body.type, w.body.value])).toEqual([
+        [0, "continuous", 1],
+        [1500, "continuous", 0],
+      ]);
+    }));
+
+  it("zooms out with a negative rate, and a quick tap still zooms for the tap time", () =>
+    within(async () => {
+      const writes = stubZoom();
+      const t0 = Date.now();
+      holdMavZoom(100, -1)();
+      await vi.advanceTimersByTimeAsync(ZOOM_TAP_MS + 10);
+      expect(writes.map((w) => [w.at - t0, w.body.type, w.body.value])).toEqual([
+        [0, "continuous", -1],
+        [ZOOM_TAP_MS, "continuous", 0],
+      ]);
+    }));
+
+  it("a press whose release never comes stops on its own", () =>
+    within(async () => {
+      const writes = stubZoom();
+      holdMavZoom(100, 1);
+      await vi.advanceTimersByTimeAsync(ZOOM_HOLD_MAX_MS + 10);
+      expect(writes.map((w) => w.body.value)).toEqual([1, 0]);
+    }));
+
+  it("a camera that refused the rate gets no stop", () =>
+    within(async () => {
+      const writes = stubZoom("DENIED");
+      holdMavZoom(100, 1)();
+      await vi.advanceTimersByTimeAsync(ZOOM_TAP_MS * 2);
+      expect(writes.map((w) => w.body.value)).toEqual([1]);
+    }));
+
+  it("a zoom press and its release drive the cached vehicle camera", () =>
+    within(async () => {
+      const writes = stubZoom();
+      useMavCameraStore.setState({ cameras: [{ component_id: 100, can_zoom: true, can_capture_image: false }], loaded: true, refresh: async () => [] });
+      await runCameraAction("zoom_in");
+      await vi.advanceTimersByTimeAsync(800);
+      await runCameraAction("zoom_in", "release");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(writes.map((w) => [w.body.type, w.body.value])).toEqual([
+        ["continuous", 1],
+        ["continuous", 0],
+      ]);
+    }));
+});
+
+describe("the vehicle camera's photo", () => {
   it("a refused request reads the agent's detail in the failure toast", async () => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ detail: "no camera" }), { status: 404 }));
     const seen: ToastMessage[] = [];
     const off = onToast((t) => seen.push(t));
     try {
-      expect(await runMavCamera("photo", 7)).toBeNull();
+      expect(await captureMavPhoto(7)).toBeNull();
     } finally {
       off();
       vi.unstubAllGlobals();

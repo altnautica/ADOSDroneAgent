@@ -11,6 +11,14 @@
 //     the cascade restarts from the top after `retryMs`, doubling on each
 //     consecutive full failure up to `maxRetryMs` (reset by a presented frame),
 //     so a node with no video costs a few requests a minute, not a tight loop;
+//   - a feed that presented a frame within the last `recoverWindowMs` is
+//     recovering, not absent: a source outage ends with the agent's path
+//     coming back, and every dial is a cheap probe of whether it has (one
+//     the path cannot serve is refused at once), so the restart comes every
+//     `recoverRetryMs` without doubling, and a WHEP session that shows no
+//     first frame within `recoverFirstFrameMs` (the encoder sends a keyframe
+//     at least every second) counts as failed, so frames are back about a
+//     second after the path is;
 //   - a freeze re-dials the current transport once; a second freeze within
 //     `freezeWindowMs` moves to the next transport (flagged `highLatency` when
 //     that step trades WHEP for HLS);
@@ -63,6 +71,12 @@ export interface VideoTransportOptions {
   firstFrameMs?: number;
   retryMs?: number;
   maxRetryMs?: number;
+  /** How long after the last presented frame the feed counts as recovering. */
+  recoverWindowMs?: number;
+  /** The restart delay while recovering. */
+  recoverRetryMs?: number;
+  /** The WHEP first-frame wait while recovering. */
+  recoverFirstFrameMs?: number;
   freezeWindowMs?: number;
   primaryRetryMs?: number;
   onChange?: (snapshot: VideoTransportSnapshot) => void;
@@ -79,6 +93,8 @@ export interface VideoTransport {
 }
 
 export const VIDEO_NO_FRAME_MS = 2500;
+/** A feed that presented a frame this recently is recovering (see the policy). */
+export const VIDEO_RECOVER_WINDOW_MS = 60_000;
 
 /** The production dialer: WHEP sessions report a failed peer connection as
  *  lost; HLS sessions report hls.js giving up. */
@@ -146,6 +162,9 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
     firstFrameMs = Math.max(8000, noFrameMs * 3),
     retryMs = 3000,
     maxRetryMs = 30_000,
+    recoverWindowMs = VIDEO_RECOVER_WINDOW_MS,
+    recoverRetryMs = 1000,
+    recoverFirstFrameMs = 3000,
     freezeWindowMs = 60_000,
     primaryRetryMs = 60_000,
     onChange,
@@ -171,6 +190,8 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
   let stopFrames: (() => void) | null = null;
   let adoptedStream: MediaProvider | null = null;
   let lastFrameAt = 0;
+  /** When any session last presented a frame; 0 before the first. */
+  let lastLiveAt = 0;
   let sessionStartedAt = 0;
   let sawFrame = false;
   let freezes: number[] = [];
@@ -210,8 +231,11 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
 
   const isHighLatency = (i: number) => order[i] === "hls" && whepRank !== -1 && whepRank < i;
 
+  const recovering = () => lastLiveAt > 0 && Date.now() - lastLiveAt < recoverWindowMs;
+
   const onFrame = () => {
     lastFrameAt = Date.now();
+    lastLiveAt = lastFrameAt;
     sawFrame = true;
     fullFailures = 0;
     const w = video.videoWidth > 0 ? video.videoWidth : null;
@@ -225,13 +249,14 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
     sessionStartedAt = Date.now();
     lastFrameAt = 0;
     sawFrame = false;
+    const firstWait = order[index] === "whep" && recovering() ? Math.min(firstFrameMs, recoverFirstFrameMs) : firstFrameMs;
     stopFrames = watchFrames(video, onFrame);
     const tick = Math.max(100, Math.min(500, Math.floor(noFrameMs / 2)));
     watchdog = setInterval(() => {
       if (myGen !== gen) return;
       const now = Date.now();
       if (!sawFrame) {
-        if (now - sessionStartedAt >= firstFrameMs) failCurrent(myGen, i18n.t("video.error.noFrames"));
+        if (now - sessionStartedAt >= firstWait) failCurrent(myGen, i18n.t("video.error.noFrames"));
         return;
       }
       if (now - lastFrameAt >= noFrameMs) onFreeze(myGen);
@@ -273,8 +298,13 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
     teardown();
     gen += 1;
     emit({ state: "failed", error, width: null, height: null });
-    const delay = Math.min(maxRetryMs, retryMs * 2 ** fullFailures);
-    fullFailures += 1;
+    // The doubling counts only the restarts after the recovery window, so it
+    // starts again from `retryMs` once the feed counts as absent.
+    let delay = recoverRetryMs;
+    if (!recovering()) {
+      delay = Math.min(maxRetryMs, retryMs * 2 ** fullFailures);
+      fullFailures += 1;
+    }
     retryTimer = setTimeout(() => {
       retryTimer = null;
       freezes = [];

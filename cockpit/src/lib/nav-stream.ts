@@ -64,14 +64,39 @@ export interface ViewLease {
 /** Lease renewal period. */
 export const VIEW_LEASE_RENEW_MS = 2000;
 
+/** The layers' lease (the layer stack's camera and drawn layers). */
 let viewLease: ViewLease | null = null;
+/** Whether the flight-state chip holds its ETA lease. */
+let chipEta = false;
+/** The camera the chip's ETA lease names while no layer is leased: the last
+ *  one the layers leased, else the primary leg's served id. */
+let chipCamera = "main";
 let leaseSocket: WebSocket | null = null;
+
+/** The layer whose waypoint items carry each waypoint's ETA. */
+const ETA_LAYER = "ar_route";
+
+/** What this client leases: the layers' lease, plus `ar_route` while the chip
+ *  wants the next waypoint's ETA, alone on `chipCamera` when no layer is
+ *  leased (the video lost, the map view), so the chip's ETA never depends on
+ *  the picture. The agent keeps one lease per socket, so it is one message. */
+function currentLease(): ViewLease | null {
+  if (!chipEta || viewLease?.layers.includes(ETA_LAYER)) return viewLease;
+  if (viewLease) return { cameraId: viewLease.cameraId, layers: [ETA_LAYER, ...viewLease.layers] };
+  return { cameraId: chipCamera, layers: [ETA_LAYER] };
+}
+
+/** A lease as `<camera>:<layer,...>` (the poll's `view` query); "" for none. */
+function leaseKey(lease: ViewLease | null): string {
+  return lease && lease.layers.length > 0 ? `${lease.cameraId}:${lease.layers.join(",")}` : "";
+}
 
 function sendViewLease(): void {
   if (!leaseSocket || leaseSocket.readyState !== WebSocket.OPEN) return;
   // A null lease is sent as an empty layer set, which drops this client's demand.
-  const msg = viewLease
-    ? { type: "view", camera_id: viewLease.cameraId, layers: viewLease.layers }
+  const lease = currentLease();
+  const msg = lease
+    ? { type: "view", camera_id: lease.cameraId, layers: lease.layers }
     : { type: "view", camera_id: "", layers: [] };
   try {
     leaseSocket.send(JSON.stringify(msg));
@@ -80,16 +105,26 @@ function sendViewLease(): void {
   }
 }
 
-/** Set (or with null, drop) the view lease; sent at once when it changed. */
+/** Apply `change` to the lease inputs; sent at once when the lease changed. */
+function updateLease(change: () => void): void {
+  const before = leaseKey(currentLease());
+  change();
+  if (leaseKey(currentLease()) !== before) sendViewLease();
+}
+
+/** Set (or with null, drop) the layers' lease. */
 export function setViewLease(lease: ViewLease | null): void {
-  const same =
-    lease === viewLease ||
-    (lease !== null &&
-      viewLease !== null &&
-      lease.cameraId === viewLease.cameraId &&
-      lease.layers.join(",") === viewLease.layers.join(","));
-  viewLease = lease;
-  if (!same) sendViewLease();
+  updateLease(() => {
+    viewLease = lease;
+    if (lease) chipCamera = lease.cameraId;
+  });
+}
+
+/** Hold (true) or drop the flight-state chip's ETA lease. */
+export function setChipEtaLease(on: boolean): void {
+  updateLease(() => {
+    chipEta = on;
+  });
 }
 
 /** Parse one nav-stream frame; null for keepalives, unknown kinds and
@@ -188,7 +223,7 @@ export async function pollMapLive(signal?: AbortSignal): Promise<boolean> {
  * once `signal` is aborted.
  */
 export async function pollNavStatus(signal?: AbortSignal, now: () => number = Date.now): Promise<boolean> {
-  const view = viewLease && viewLease.layers.length > 0 ? `${viewLease.cameraId}:${viewLease.layers.join(",")}` : null;
+  const view = leaseKey(currentLease());
   const path = view ? `/api/v1/nav/status?view=${encodeURIComponent(view)}` : "/api/v1/nav/status";
   try {
     const raw = await apiFetch<unknown>(path, { signal });
@@ -309,7 +344,7 @@ export function connectNavStream(): () => void {
   void connect();
 
   const leaseTimer = setInterval(() => {
-    if (viewLease) sendViewLease();
+    if (currentLease()) sendViewLease();
   }, VIEW_LEASE_RENEW_MS);
 
   let inFlight: AbortController | null = null;

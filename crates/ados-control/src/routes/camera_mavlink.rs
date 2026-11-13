@@ -18,9 +18,11 @@
 //!   `MAV_CMD_IMAGE_START_CAPTURE` (one image: interval 0, count 1) to that
 //!   component.
 //! - `POST /api/v1/camera/mavlink/zoom {"component_id", "type", "value"}` sends
-//!   `MAV_CMD_SET_CAMERA_ZOOM`: `type` `step` (value -1..1, -1 wide, 1 tele),
-//!   `continuous` (rate -1..1, 0 stops) or `range` (0..100 percent of the
-//!   camera's range).
+//!   `MAV_CMD_SET_CAMERA_ZOOM`: `type` `continuous` (rate -1..1, -1 wide,
+//!   1 tele, 0 stops) or `range` (0..100 percent of the camera's range). These
+//!   are the two zoom types ArduPilot's camera library accepts; it answers
+//!   `DENIED` to a step zoom, so the route takes no `step` (a zoom button
+//!   sends a rate on press and 0 on release).
 //!
 //! Both writes answer 200 `{"ok", "result", "component_id"}` once the command
 //! was written: `result` is the camera's `MAV_RESULT` name (`ACCEPTED`,
@@ -30,9 +32,10 @@
 //! refusal is attached. The ACK is correlated and the send retried exactly as
 //! `POST /api/command` does. A component that has not answered
 //! `CAMERA_INFORMATION` (the write probes once more before refusing) is a 404;
-//! a camera whose flags lack the capability is a 409; a bad zoom type or value
-//! or component 0 is a 400; an MSP flight controller a 501; no flight
-//! controller or no MAVLink socket a 503.
+//! a camera whose flags lack the capability is a 409; a zoom value out of its
+//! type's range or component 0 is a 400, a zoom type other than `continuous`
+//! or `range` is refused by the body parser; an MSP flight controller a 501;
+//! no flight controller or no MAVLink socket a 503.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -62,8 +65,7 @@ use crate::state::AppState;
 
 /// The `CAMERA_INFORMATION` message id `MAV_CMD_REQUEST_MESSAGE` asks for.
 const MSG_ID_CAMERA_INFORMATION: f32 = 259.0;
-/// `CAMERA_ZOOM_TYPE` values (common.xml).
-const ZOOM_TYPE_STEP: f32 = 0.0;
+/// `CAMERA_ZOOM_TYPE` values (common.xml) ArduPilot accepts.
 const ZOOM_TYPE_CONTINUOUS: f32 = 1.0;
 const ZOOM_TYPE_RANGE: f32 = 2.0;
 /// A camera that answered within this long stays listed and addressable.
@@ -424,12 +426,10 @@ pub async fn post_capture(
     send(&state, capture_command((system, req.component_id)), false).await
 }
 
-/// How a zoom `value` is read.
+/// How a zoom `value` is read. No step: ArduPilot's camera library refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ZoomType {
-    /// One step: -1 wide, 1 tele.
-    Step,
     /// A zoom rate until stopped: -1..1, 0 stops.
     Continuous,
     /// A position: 0..100 percent of the camera's zoom range.
@@ -448,7 +448,6 @@ pub struct ZoomRequest {
 /// The `(type, value)` params of a zoom, or why the value is refused.
 fn zoom_params(kind: ZoomType, value: f32) -> Result<(f32, f32), String> {
     let (zoom_type, lo, hi) = match kind {
-        ZoomType::Step => (ZOOM_TYPE_STEP, -1.0, 1.0),
         ZoomType::Continuous => (ZOOM_TYPE_CONTINUOUS, -1.0, 1.0),
         ZoomType::Range => (ZOOM_TYPE_RANGE, 0.0, 100.0),
     };
@@ -481,8 +480,9 @@ pub async fn post_zoom(State(state): State<AppState>, Json(req): Json<ZoomReques
     send(
         &state,
         zoom_command((system, req.component_id), zoom_type, value),
-        // A step is relative: a resend after a lost ACK would step again.
-        req.kind != ZoomType::Step,
+        // A rate or a position set twice is the same zoom, so a resend after
+        // a lost ACK is harmless.
+        true,
     )
     .await
 }

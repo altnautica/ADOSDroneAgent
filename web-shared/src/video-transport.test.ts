@@ -5,6 +5,7 @@ import {
   type DialResult,
   type TransportKind,
   type VideoTransportSnapshot,
+  VIDEO_RECOVER_WINDOW_MS,
 } from "./video-transport";
 
 interface FakeVideo {
@@ -18,12 +19,17 @@ function fakeVideo(): HTMLVideoElement {
   return v as unknown as HTMLVideoElement;
 }
 
-/** A scripted harness: each dial pops the next scripted outcome for its kind,
- *  and frames are delivered by hand to whichever element is being watched. */
-function harness(order: TransportKind[], script: Partial<Record<TransportKind, boolean[]>>) {
+/** A scripted harness: each dial pops the next scripted outcome for its kind
+ *  (or asks `answers`, when given), and frames are delivered by hand to
+ *  whichever element is being watched. */
+function harness(
+  order: TransportKind[],
+  script: Partial<Record<TransportKind, boolean[]>>,
+  answers?: (kind: TransportKind) => boolean,
+) {
   const video = fakeVideo();
   const probe = fakeVideo();
-  const dials: { kind: TransportKind; el: HTMLVideoElement }[] = [];
+  const dials: { kind: TransportKind; el: HTMLVideoElement; at: number }[] = [];
   const lost: (() => void)[] = [];
   const closed: TransportKind[] = [];
   const watchers = new Map<HTMLVideoElement, () => void>();
@@ -43,9 +49,9 @@ function harness(order: TransportKind[], script: Partial<Record<TransportKind, b
       };
     },
     dial: async (kind, _url, el, onLost): Promise<DialResult> => {
-      dials.push({ kind, el });
+      dials.push({ kind, el, at: Date.now() });
       lost.push(onLost);
-      const ok = script[kind]?.shift() ?? true;
+      const ok = answers ? answers(kind) : (script[kind]?.shift() ?? true);
       if (!ok) return { ok: false, error: `${kind} refused` };
       return { ok: true, session: { close: () => void closed.push(kind) } };
     },
@@ -216,5 +222,76 @@ describe("createVideoTransport", () => {
     expect(h.closed).toEqual(["whep"]);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(h.dials).toHaveLength(1);
+  });
+});
+
+describe("recovery once a live stream stops", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The gaps between consecutive dials, in ms. */
+  const gaps = (dials: { at: number }[]) => dials.slice(1).map((d, i) => d.at - dials[i].at);
+
+  it("redials every second for a minute after the last frame, then backs off doubling", async () => {
+    let refusing = false;
+    const h = harness(["whep"], {}, () => !refusing);
+    h.transport.start();
+    await flush();
+    await playFor(h, 5000);
+    const lastFrameAt = Date.now() - 250;
+    // The stream goes away: every dial is refused from now on.
+    refusing = true;
+    await vi.advanceTimersByTimeAsync(VIDEO_RECOVER_WINDOW_MS + 120_000);
+    const after = h.dials.filter((d) => d.at > lastFrameAt);
+    const fast = gaps(after.filter((d) => d.at - lastFrameAt <= VIDEO_RECOVER_WINDOW_MS));
+    expect(fast.length).toBeGreaterThan(50);
+    expect(new Set(fast)).toEqual(new Set([1000]));
+    const slow = gaps(after.filter((d) => d.at - lastFrameAt >= VIDEO_RECOVER_WINDOW_MS));
+    expect(slow.slice(0, 6)).toEqual([3000, 6000, 12_000, 24_000, 30_000, 30_000]);
+  });
+
+  it("never-live feeds keep the doubling backoff from the start", async () => {
+    const h = harness(["whep"], {}, () => false);
+    h.transport.start();
+    await flush();
+    await vi.advanceTimersByTimeAsync(80_000);
+    expect(gaps(h.dials).slice(0, 4)).toEqual([3000, 6000, 12_000, 24_000]);
+  });
+
+  it("shows frames within 1.5 s of the path returning after an 11 s source outage", async () => {
+    // The measured outage: the path stays ready but silent for the outage
+    // (a dial answers, no frame comes), the agent then restarts its pipeline
+    // (0.69 s after the source returns, dials refused) and the path serves
+    // frames again 3.18 s after the source returned.
+    const OUTAGE_MS = 11_000;
+    const RESTART_AT = OUTAGE_MS + 690;
+    const READY_AT = OUTAGE_MS + 3180;
+    let t0: number | null = null;
+    const phase = () => {
+      if (t0 === null) return "ready";
+      const t = Date.now() - t0;
+      return t < RESTART_AT ? "silent" : t < READY_AT ? "absent" : "ready";
+    };
+    const h = harness(["whep", "hls"], {}, () => phase() !== "absent");
+    h.transport.start();
+    await flush();
+    await playFor(h, 5000);
+    t0 = Date.now();
+    let backAt: number | null = null;
+    for (let t = 0; t < 40_000 && backAt === null; t += 100) {
+      const last = h.dials[h.dials.length - 1];
+      // A session dialled into a ready path presents its first frame 400 ms on.
+      if (phase() === "ready" && last.at - t0 >= READY_AT && Date.now() - last.at >= 400) {
+        h.frame();
+        if (h.snap().state === "live") backAt = Date.now() - t0;
+      }
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(backAt).not.toBeNull();
+    expect(backAt! - READY_AT).toBeLessThanOrEqual(1500);
   });
 });

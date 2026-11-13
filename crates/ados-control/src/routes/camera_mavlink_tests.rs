@@ -368,8 +368,8 @@ async fn a_capture_with_no_ack_is_a_timeout() {
 #[tokio::test]
 async fn a_zoom_sends_set_camera_zoom_with_its_type_and_value() {
     for (kind, value, zoom_type) in [
-        (ZoomType::Step, 1.0, 0.0),
         (ZoomType::Continuous, -0.5, 1.0),
+        (ZoomType::Continuous, 0.0, 1.0),
         (ZoomType::Range, 50.0, 2.0),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -427,7 +427,7 @@ async fn an_unknown_component_is_404_and_nothing_is_commanded() {
     let state = state_with_socket(dir.path(), sock);
     assert_eq!(capture(&state, 42).await.status(), StatusCode::NOT_FOUND);
     assert_eq!(
-        zoom(&state, 42, ZoomType::Step, 1.0).await.status(),
+        zoom(&state, 42, ZoomType::Continuous, 1.0).await.status(),
         StatusCode::NOT_FOUND
     );
     assert!(
@@ -451,7 +451,7 @@ async fn bad_requests_and_missing_capabilities_are_refused_before_any_send() {
     let state = state_with_socket(dir.path(), sock);
     assert_eq!(capture(&state, 0).await.status(), StatusCode::BAD_REQUEST);
     for (kind, value) in [
-        (ZoomType::Step, 2.0),
+        (ZoomType::Continuous, 2.0),
         (ZoomType::Continuous, f32::NAN),
         (ZoomType::Range, -1.0),
         (ZoomType::Range, 100.5),
@@ -464,7 +464,7 @@ async fn bad_requests_and_missing_capabilities_are_refused_before_any_send() {
     }
     assert_eq!(capture(&state, CAM).await.status(), StatusCode::CONFLICT);
     assert_eq!(
-        zoom(&state, CAM, ZoomType::Step, 1.0).await.status(),
+        zoom(&state, CAM, ZoomType::Continuous, 1.0).await.status(),
         StatusCode::CONFLICT
     );
     assert!(vehicle
@@ -486,7 +486,7 @@ async fn writes_without_a_vehicle_link_are_503_and_msp_is_501() {
         .state
         .set_snapshot_for_test(json!({ "fc_connected": false }));
     assert_eq!(
-        zoom(&state, CAM, ZoomType::Step, 1.0).await.status(),
+        zoom(&state, CAM, ZoomType::Continuous, 1.0).await.status(),
         StatusCode::SERVICE_UNAVAILABLE,
         "no flight controller"
     );
@@ -507,15 +507,25 @@ async fn writes_without_a_vehicle_link_are_503_and_msp_is_501() {
 }
 
 #[test]
-fn the_zoom_type_reads_from_lowercase_names() {
+fn the_zoom_type_reads_from_lowercase_names_and_takes_no_step() {
     let req: ZoomRequest =
         serde_json::from_value(json!({"component_id": 100, "type": "continuous", "value": 0.5}))
             .unwrap();
     assert_eq!(req.kind, ZoomType::Continuous);
-    assert!(serde_json::from_value::<ZoomRequest>(
-        json!({"component_id": 100, "type": "focal", "value": 1})
-    )
-    .is_err());
+    let req: ZoomRequest =
+        serde_json::from_value(json!({"component_id": 100, "type": "range", "value": 40})).unwrap();
+    assert_eq!(req.kind, ZoomType::Range);
+    // ArduPilot's camera library answers DENIED to a step zoom, so the route
+    // never sends one.
+    for kind in ["step", "focal"] {
+        assert!(
+            serde_json::from_value::<ZoomRequest>(
+                json!({"component_id": 100, "type": kind, "value": 1})
+            )
+            .is_err(),
+            "{kind}"
+        );
+    }
 }
 
 #[test]

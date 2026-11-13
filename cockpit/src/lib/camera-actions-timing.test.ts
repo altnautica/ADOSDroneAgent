@@ -7,8 +7,9 @@ import {
   AGENT_CAMERA_WRITE_BUDGET_MS,
   CAMERA_LIST_TIMEOUT_MS,
   CAMERA_WRITE_TIMEOUT_MS,
+  captureMavPhoto,
   fetchMavCameras, frameCrop, runCameraAction,
-  runMavCamera,
+  setMavZoomRate,
   useMavCameraStore,
 } from "@/lib/camera-actions";
 import { onToast, type ToastMessage } from "@/shared/api/toast";
@@ -70,7 +71,7 @@ describe("camera timeouts", () => {
         init.signal?.addEventListener("abort", () => (clearTimeout(t), reject(init.signal?.reason)), { once: true });
       });
     });
-    const done = runMavCamera("photo", 101);
+    const done = captureMavPhoto(101);
     await vi.advanceTimersByTimeAsync(AGENT_CAMERA_WRITE_BUDGET_MS + 10);
     await expect(done).resolves.toEqual({ ok: true, result: "IN_PROGRESS" });
     expect(seen.map((t) => t.message)).toEqual([specText("camera.capture_sent")]);
@@ -112,7 +113,7 @@ describe("camera timeouts", () => {
 
   it("a stalled capture ends in the failure text with the no-answer wording", async () => {
     vi.stubGlobal("fetch", hangingFetch([]));
-    const done = runMavCamera("photo", 101);
+    const done = captureMavPhoto(101);
     await vi.advanceTimersByTimeAsync(CAMERA_WRITE_TIMEOUT_MS + 10);
     await expect(done).resolves.toBeNull();
     expect(seen.map((t) => t.message)).toEqual([specText("camera.capture_failed", { reason: refusalText("no response") })]);
@@ -120,7 +121,7 @@ describe("camera timeouts", () => {
 
   it("a stalled zoom ends in the zoom failure text with the no-answer wording", async () => {
     vi.stubGlobal("fetch", hangingFetch([]));
-    const done = runMavCamera("zoom_in", 100);
+    const done = setMavZoomRate(100, 1);
     await vi.advanceTimersByTimeAsync(CAMERA_WRITE_TIMEOUT_MS + 10);
     await done;
     expect(seen.map((t) => t.message)).toEqual([specText("camera.zoom_failed", { reason: refusalText("no response") })]);
