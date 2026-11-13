@@ -225,8 +225,7 @@ export const ZOOM_HOLD_MAX_MS = 10_000;
 /** A held zoom tells the agent it is still held this often; the agent stops
  *  a zoom that hears nothing for about a second. */
 export const ZOOM_KEEPALIVE_MS = 300;
-/** A stop the camera did not answer is sent again after this long, up to
- *  `ZOOM_STOP_TRIES` sends in all. */
+/** An unanswered stop is sent again this long after, `ZOOM_STOP_TRIES` sends in all. */
 export const ZOOM_STOP_RETRY_MS = 250;
 export const ZOOM_STOP_TRIES = 3;
 

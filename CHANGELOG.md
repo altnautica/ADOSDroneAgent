@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.124] - 2026-11-13
+
+### Changed
+
+- Camera zoom route: the zoom request, its deadman and `POST /api/v1/camera/mavlink/zoom` moved into their own module, keeping the camera route file within the size limit. No behaviour change.
+
 ## [0.109.123] - 2026-11-13
 
 ### Fixed
