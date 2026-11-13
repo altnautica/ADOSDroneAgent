@@ -10,6 +10,7 @@ import {
   panBy,
 } from "@/lib/local-minimap";
 import type { VehicleState } from "@/lib/types";
+import { parsePilotState } from "@/shared/hud/cockpit-frames";
 import { EMPTY_OCCUPANCY } from "@/shared/hud/local-frame";
 import type { FollowState, NavPose, NavScan } from "@/shared/hud/nav-types";
 
@@ -101,6 +102,7 @@ describe("localSceneInput", () => {
     occupancy: EMPTY_OCCUPANCY,
     occupancyAt: 10_000,
     trail: [],
+    pilot: null,
   };
 
   it("centres on the drone and puts the scan in the map frame", () => {
@@ -114,6 +116,21 @@ describe("localSceneInput", () => {
     expect(input.scanPoints).toBeNull();
     expect(input.occupancyStale).toBe(true);
     expect(localSceneInput({ ...base, occupancyAt: null }).occupancyStale).toBe(true);
+  });
+  it("draws the pilot's plan only while its frame is fresh", () => {
+    const data = parsePilotState({
+      owner: "goto",
+      plan_ned: [[3, 4], [8, 4]],
+      goal_ned: [8, 4, -5],
+      avoid_state: "blocked",
+    })!;
+    expect(localSceneInput({ ...base, pilot: { data, at: 9_000 } }).plan).toEqual({
+      points: [[3, 4], [8, 4]],
+      goal: [8, 4],
+      blocked: true,
+    });
+    expect(localSceneInput({ ...base, pilot: { data, at: 7_000 } }).plan).toBeNull();
+    expect(localSceneInput(base).plan).toBeNull();
   });
 });
 

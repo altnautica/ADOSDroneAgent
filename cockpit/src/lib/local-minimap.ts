@@ -2,8 +2,9 @@
 // choice (AUTO switches to local after 2 s below a 3D fix or when the active
 // EKF horizontal source carries no GNSS; a LOCAL / MAP pin wins), the drone
 // from the FC's LOCAL_POSITION_NED (the SLAM pose when the FC has none), the
-// follow target, the scan in the map frame, and whether the occupancy layer is
-// stale. Every source is age-gated so a dead link never draws a live marker.
+// follow target, the pilot's planned path and goal, the scan in the map frame,
+// and whether the occupancy layer is stale. Every source is age-gated so a
+// dead link never draws a live marker.
 
 import {
   poseYawDeg,
@@ -12,9 +13,17 @@ import {
   type OccupancyGrid,
   type TrailPoint,
 } from "@/shared/hud/local-frame";
-import { viewCentre, type LocalSceneDrone, type LocalSceneInput, type LocalSceneTarget } from "@/shared/hud/local-scene";
+import type { PilotState } from "@/shared/hud/cockpit-frames";
+import {
+  localPlan,
+  viewCentre,
+  type LocalSceneDrone,
+  type LocalSceneInput,
+  type LocalSceneTarget,
+} from "@/shared/hud/local-scene";
 import { activePosxySource, resolveMinimapMode, type MinimapFrame, type MinimapLocalReason, type MinimapPin } from "@/shared/hud/minimap-mode";
 import type { FollowState, NavPose, NavScan } from "@/shared/hud/nav-types";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import type { VehicleState } from "@/lib/types";
 
 /** LOCAL_POSITION_NED older than this is not drawn. */
@@ -103,6 +112,8 @@ export interface LocalSceneSources {
   occupancy: OccupancyGrid;
   occupancyAt: number | null;
   trail: readonly TrailPoint[];
+  /** The newest pilot frame and its receive time; its plan shows while fresh. */
+  pilot: { data: PilotState; at: number } | null;
 }
 
 export function localSceneInput(src: LocalSceneSources): LocalSceneInput {
@@ -128,6 +139,7 @@ export function localSceneInput(src: LocalSceneSources): LocalSceneInput {
     scanPoints,
     target: src.target,
     drone: src.drone,
+    plan: src.pilot && pilotFresh(src.pilot.at, src.now) ? localPlan(src.pilot.data) : null,
   };
 }
 

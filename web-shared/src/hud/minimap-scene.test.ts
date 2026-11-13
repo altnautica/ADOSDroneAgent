@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { EMPTY_OCCUPANCY } from "./local-frame";
-import { buildLocalScene, clampZoom, stepZoom, viewCentre, RECENTRE_AFTER_MS } from "./local-scene";
+import { buildLocalScene, clampZoom, localPlan, stepZoom, viewCentre, RECENTRE_AFTER_MS } from "./local-scene";
 import { activePosxySource, nextNoFixSince, resolveMinimapMode, MINIMAP_NO_FIX_HOLD_MS } from "./minimap-mode";
 import { parseCssColor, recolourOccupancy, withAlpha } from "./occupancy-bitmap";
 
@@ -55,6 +55,7 @@ describe("local scene", () => {
       scanPoints: [[1, 0], [100, 0]],
       target: { north: 2, east: 1, velNorth: 1, velEast: 0, dashed: true },
       drone: { north: 0, east: 0, yawDeg: 45 },
+      plan: null,
     });
     expect(scene.drone).toEqual({ sx: 50, sy: 40, yawDeg: 45 });
     expect(scene.target).toEqual({ sx: 60, sy: 20, tickX: 60, tickY: 10, dashed: true });
@@ -62,6 +63,52 @@ describe("local scene", () => {
     expect(scene.origin).toEqual({ sx: 50, sy: 40 });
     expect(scene.dim).toBe(true);
     expect(scene.scaleBar).toEqual({ m: 5, px: 50 });
+  });
+
+  it("projects the pilot's planned path and goal", () => {
+    const s = buildLocalScene({
+      width: 200,
+      height: 200,
+      view: { centreX: 0, centreY: 0, pxPerM: 10, cx: 100, cy: 100 },
+      occupancy: EMPTY_OCCUPANCY,
+      occupancyStale: false,
+      trail: [],
+      scanPoints: null,
+      target: null,
+      drone: { north: 0, east: 0, yawDeg: 0 },
+      plan: { points: [[0, 0], [5, 0]], goal: [5, 0], blocked: false },
+    });
+    expect(s.plan?.points).toHaveLength(2);
+    expect(s.plan?.goal).toEqual(s.plan?.points[1]);
+    expect(s.plan?.points[1][1]).toBeLessThan(s.plan!.points[0][1]); // north is up the screen
+    expect(s.plan?.blocked).toBe(false);
+  });
+
+  it("carries the blocked flag and a goal with no path", () => {
+    const s = buildLocalScene({
+      width: 200,
+      height: 200,
+      view: { centreX: 0, centreY: 0, pxPerM: 10, cx: 100, cy: 100 },
+      occupancy: EMPTY_OCCUPANCY,
+      occupancyStale: false,
+      trail: [],
+      scanPoints: null,
+      target: null,
+      drone: null,
+      plan: { points: [], goal: [0, 3], blocked: true },
+    });
+    expect(s.plan).toEqual({ points: [], goal: [130, 100], blocked: true });
+  });
+
+  it("reads the plan from a pilot frame", () => {
+    expect(localPlan(null)).toBeNull();
+    expect(localPlan({ planNed: [], goalNed: null, avoidState: "clear" })).toBeNull();
+    expect(localPlan({ planNed: [[0, 0], [4, 1]], goalNed: [4, 1, -5], avoidState: "blocked" })).toEqual({
+      points: [[0, 0], [4, 1]],
+      goal: [4, 1],
+      blocked: true,
+    });
+    expect(localPlan({ planNed: [], goalNed: [2, 2, -5], avoidState: "detour" })?.blocked).toBe(false);
   });
 });
 

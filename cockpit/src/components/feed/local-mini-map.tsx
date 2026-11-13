@@ -2,7 +2,8 @@
 // north metres around the drone. Layers bottom to top: grid, live occupancy
 // tiles (`/api/v1/map/live`, map_server greys recoloured in the HUD ink),
 // the SLAM trail from pose frames (dashed while degraded, broken where lost),
-// the scan in the map frame, the origin, the follow target (dashed while
+// the scan in the map frame, the origin, the pilot's planned path and goal
+// (dashed, red while blocked), the follow target (dashed while
 // coasting or searching, with a 1 s velocity tick) and the drone from the
 // FC's LOCAL_POSITION_NED. Drag pans (the view recentres on the drone 10 s
 // later), the wheel and the +/− buttons zoom. A long-press or a right-click
@@ -20,6 +21,7 @@ import { useElementSize } from "@/hooks/use-element-size";
 import { useNow } from "@/hooks/use-now";
 import { useOccupancyImages } from "@/hooks/use-occupancy-images";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import { STATE_COLORS } from "@/lib/cockpit-spec";
 import { HIT_AREA } from "@/lib/flight-layout";
 import { fcOrigin, flyHerePosition, localToLatLon } from "@/lib/fly-here";
 import { freshLocalPosition, localDrone, localSceneInput, localTarget, panBy, screenToLocal } from "@/lib/local-minimap";
@@ -42,6 +44,7 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
   const pose = useNavStreamStore((s) => s.pose);
   const scan = useNavStreamStore((s) => s.scan);
   const follow = useNavStreamStore((s) => s.follow);
+  const pilot = useNavStreamStore((s) => s.pilot);
   const occupancy = useNavStreamStore((s) => s.occupancy);
   const occupancyAt = useNavStreamStore((s) => s.occupancyAt);
   const trail = useNavStreamStore((s) => s.trail);
@@ -76,6 +79,7 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
           occupancy,
           occupancyAt,
           trail,
+          pilot,
         })
       : null;
   const scene = sceneInput ? buildLocalScene(sceneInput) : null;
@@ -185,6 +189,23 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
             <line x1={scene.origin.sx - ORIGIN_CROSS_ARM_PX} y1={scene.origin.sy} x2={scene.origin.sx + ORIGIN_CROSS_ARM_PX} y2={scene.origin.sy} />
             <line x1={scene.origin.sx} y1={scene.origin.sy - ORIGIN_CROSS_ARM_PX} x2={scene.origin.sx} y2={scene.origin.sy + ORIGIN_CROSS_ARM_PX} />
           </g>
+          {scene.plan ? (
+            <g
+              stroke={scene.plan.blocked ? STATE_COLORS.blocked : STATE_COLORS.goto}
+              fill="none"
+              strokeWidth={2}
+              data-testid="local-minimap-plan"
+            >
+              {scene.plan.points.length >= 2 ? (
+                <polyline
+                  points={scene.plan.points.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ")}
+                  strokeDasharray="5 4"
+                  strokeLinejoin="round"
+                />
+              ) : null}
+              {scene.plan.goal ? <circle cx={scene.plan.goal[0]} cy={scene.plan.goal[1]} r={5} /> : null}
+            </g>
+          ) : null}
           {scene.target ? (
             <g
               className={scene.target.dashed ? "text-hud-coast" : "text-hud-track"}
