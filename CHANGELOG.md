@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.131] - 2026-11-13
+
+### Fixed
+
+- Frame-bus thumbnail video no longer bursts duplicate keyframes after a pause. The thumbnail leg decimated to its 1 fps target with a constant output rate, which, on the wall-clock frame stamps, filled any gap in the frames (a vision-engine or camera outage, or a forward step of the system clock after a time sync) with copies of the last frame and sent them all at once when frames resumed. It now passes the stamps through and keeps one frame per target period in the filter chain, so a gap stays a gap and nothing is duplicated.
+
 ## [0.109.130] - 2026-11-13
 
 ### Fixed

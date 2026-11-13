@@ -9,6 +9,18 @@ use super::*;
 pub(super) const FRAMEBUS_WALLCLOCK_PTS: &str =
     "settb=1/90000,setpts=max(PREV_OUTPTS+1\\,(RTCTIME-RTCSTART)/(TB*1000000))";
 
+/// The filter that keeps a frame-bus frame only once `1/target` seconds of
+/// stamp time have passed since the last kept one, less half a captured frame
+/// period so jitter in the captured cadence does not skip a whole slot.
+pub(super) fn framebus_decimate(target_fps: u32, raw_fps: u32) -> String {
+    let (target, raw) = (target_fps.max(1), raw_fps.max(1));
+    format!(
+        "select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,{}/{})",
+        2 * raw - target,
+        2 * raw * target
+    )
+}
+
 /// `ffmpeg` command for USB / IP / frame-bus camera encoding.
 ///
 /// Network sources skip the v4l2 wrapper. V4L2 sources prepend the
@@ -154,7 +166,11 @@ pub(super) fn build_ffmpeg_command(
     // feed writes every frame at its capture time plus a small de-jitter
     // offset, so that is the capture cadence. At or above the captured rate
     // the stamps pass through untouched; a profile below it (the thumbnail)
-    // still decimates with `-r`, now on real time.
+    // decimates in the filter chain with `select` and still passes the stamps
+    // through. A constant output rate (`-r`) would fill any gap in the frames,
+    // or a forward step of the system clock, with duplicates of the last
+    // frame sent in one burst (every one a keyframe on the thumbnail);
+    // `select` keeps a gap a gap and duplicates nothing.
     //
     // Other inputs keep the output rate cap: it drops frames to the target
     // fps BEFORE encoding so the libx264 software path keeps up (USB cameras
@@ -164,15 +180,13 @@ pub(super) fn build_ffmpeg_command(
         Some(fb) => {
             filters.push(FRAMEBUS_WALLCLOCK_PTS.to_string());
             if params.fps < fb.raw.fps {
-                cmd.push("-r".into());
-                cmd.push(params.fps.to_string());
-            } else {
-                cmd.extend(
-                    ["-fps_mode", "passthrough", "-enc_time_base:v", "1/90000"]
-                        .iter()
-                        .map(|s| s.to_string()),
-                );
+                filters.push(framebus_decimate(params.fps, fb.raw.fps));
             }
+            cmd.extend(
+                ["-fps_mode", "passthrough", "-enc_time_base:v", "1/90000"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
             // A frame-bus input arrives at its captured size; the encoded size
             // is the leg's current profile (an attention switch shrinks it).
             if (fb.raw.width, fb.raw.height) != (params.width, params.height) {

@@ -63,7 +63,7 @@ fn an_attention_switch_rescales_instead_of_misreading_the_pipe() {
     assert!(has_pair(&cmd, "-video_size", "1280x800"), "{cmd:?}");
     assert!(has_pair(&cmd, "-framerate", "20"), "{cmd:?}");
     assert!(has_pair(&cmd, "-s", "320x180"), "{cmd:?}");
-    assert!(has_pair(&cmd, "-r", "1"), "{cmd:?}");
+    assert!(!cmd.iter().any(|t| t == "-r"), "{cmd:?}");
     let line = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rk_mpp())
         .unwrap()
         .join(" ");
@@ -118,6 +118,82 @@ fn a_device_camera_keeps_its_output_rate_cap() {
     assert!(has_pair(&cmd, "-r", "30"), "{cmd:?}");
     assert!(!cmd.iter().any(|t| t == "-fps_mode"), "{cmd:?}");
     assert!(!cmd.iter().any(|t| t.contains("RTCTIME")), "{cmd:?}");
+}
+
+#[test]
+fn a_framebus_thumbnail_decimates_without_filling_gaps() {
+    let p = EncoderParams {
+        width: 320,
+        height: 180,
+        fps: 1,
+        ..framebus_params(EncoderKind::Ffmpeg, Some(FrameFormat::Gray8))
+    };
+    let cmd = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rockchip()).unwrap();
+    // A constant output rate would duplicate the last frame across a gap.
+    assert!(!cmd.iter().any(|t| t == "-r"), "{cmd:?}");
+    assert!(has_pair(&cmd, "-fps_mode", "passthrough"), "{cmd:?}");
+    assert!(has_pair(&cmd, "-enc_time_base:v", "1/90000"), "{cmd:?}");
+    let vf = &cmd[cmd.iter().position(|t| t == "-vf").expect("-vf") + 1];
+    assert!(
+        vf.starts_with(crate::encoder::ffmpeg::FRAMEBUS_WALLCLOCK_PTS),
+        "{vf}"
+    );
+    assert!(
+        vf.ends_with(",select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,39/40)"),
+        "{vf}"
+    );
+}
+
+/// The thumbnail decimation run through a real `ffmpeg` when one is
+/// installed: 20 fps frames, a 6 s pause, then frames again come out about
+/// once a second with the pause kept, never filled with duplicates.
+#[test]
+fn the_thumbnail_decimation_keeps_a_gap_a_gap() {
+    use std::io::Write;
+    use std::process::{ChildStdin, Command, Stdio};
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("ffmpeg not installed: decimation run skipped");
+        return;
+    }
+    let vf = format!(
+        "{},{}",
+        crate::encoder::ffmpeg::FRAMEBUS_WALLCLOCK_PTS,
+        crate::encoder::ffmpeg::framebus_decimate(1, 20)
+    );
+    let mut child = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-f", "rawvideo"])
+        .args(["-pix_fmt", "gray", "-video_size", "4x2", "-framerate", "20"])
+        .args(["-i", "-", "-vf", &vf])
+        .args(["-fps_mode", "passthrough", "-enc_time_base:v", "1/90000"])
+        .args(["-f", "framecrc", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let burst = |stdin: &mut ChildStdin| {
+        for _ in 0..40 {
+            stdin.write_all(&[7u8; 8]).unwrap();
+            stdin.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    burst(&mut stdin);
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    burst(&mut stdin);
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let pts: Vec<i64> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split(',').nth(2)?.trim().parse().ok())
+        .collect();
+    // 2 s of frames on each side of the pause: about two kept per side; a
+    // constant 1 fps output would add six duplicates for the pause.
+    assert!((3..=6).contains(&pts.len()), "{pts:?}");
+    let steps_ms: Vec<i64> = pts.windows(2).map(|w| (w[1] - w[0]) / 90).collect();
+    assert!(steps_ms.iter().all(|s| *s >= 900), "{steps_ms:?}");
+    assert!(steps_ms.iter().any(|s| *s >= 6000), "{steps_ms:?}");
 }
 
 /// The stamp filter itself, run through a real `ffmpeg` when one is
