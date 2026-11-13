@@ -215,7 +215,7 @@ fn motion_items_fpv_fpath_fgoal_orbit() {
     let mut s = scene(mission("none", 0, Vec::new()));
     s.vel = [5.0, 0.0, 0.0];
     s.groundspeed = 5.0;
-    s.follow = Some(FollowIn {
+    s.motion = Some(MotionIn {
         plan_ne: vec![[10.0, 2.0]],
         goal: Some([20.0, 0.0, -10.0]),
         setpoint_d: Some(-10.0),
@@ -377,7 +377,7 @@ fn a_built_frame_parses_as_the_golden_schema() {
     let mut s = scene(mission("active", 2, route()));
     s.groundspeed = 3.0;
     s.vel = [3.0, 0.0, 0.0];
-    s.follow = Some(FollowIn {
+    s.motion = Some(MotionIn {
         plan_ne: vec![[10.0, 2.0]],
         goal: Some([20.0, 0.0, -10.0]),
         setpoint_d: None,

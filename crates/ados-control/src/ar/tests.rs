@@ -103,17 +103,28 @@ fn follow_geometry_comes_from_the_pilot_while_a_skill_flies() {
     let follow = json!({"follow_mode": "orbit", "target_ned": [20.0, 0.0, 0.0],
                         "orbit_radius_m": 8.0, "orbit_direction": "ccw"});
     let s = scene_from(&snapshot(), 7, Some(&pilot), Some(&follow));
-    let fi = s.follow.unwrap();
+    let fi = s.motion.unwrap();
     assert_eq!(fi.plan_ne, vec![[5.0, 1.0]]);
     assert_eq!(fi.setpoint_d, Some(-9.0));
     assert_eq!(fi.avoid_state, "detour");
     let o = fi.orbit.unwrap();
     assert!(!o.cw && o.radius_m == 8.0);
-    // The pilot flying sticks: no follow items.
+    // The pilot flying sticks: no motion items.
     let idle = json!({"owner": "pilot"});
     assert!(scene_from(&snapshot(), 7, Some(&idle), Some(&follow))
-        .follow
+        .motion
         .is_none());
+}
+
+#[test]
+fn a_goto_draws_its_planned_path_and_goal() {
+    let pilot = json!({"owner": "goto", "plan_ned": [[5.0, 1.0], [9.0, 2.0]], "goal_ned": [12.0, 3.0, -10.0],
+                       "setpoint_ned": [1.0, 0.0, -10.0], "avoid_state": "clear"});
+    let s = scene_from(&snapshot(), 7, Some(&pilot), None);
+    let fi = s.motion.expect("goto geometry");
+    assert_eq!(fi.plan_ne, vec![[5.0, 1.0], [9.0, 2.0]]);
+    assert_eq!(fi.goal, Some([12.0, 3.0, -10.0]));
+    assert!(fi.orbit.is_none());
 }
 
 #[test]

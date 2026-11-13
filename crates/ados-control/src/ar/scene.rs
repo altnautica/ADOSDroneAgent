@@ -8,7 +8,8 @@
 //!   next→after, `future` up to five more), `home`, and `edge` arrows for a
 //!   next waypoint or home that is off-frame or behind the camera;
 //! * layer `ar_motion`: `fpv` (where the vehicle will be in 3 s), and while a
-//!   follow skill runs `fpath` (vehicle → plan → goal), `fgoal` and `orbit`.
+//!   follow skill or a pilot go-to flies `fpath` (vehicle → plan → goal),
+//!   `fgoal` and `orbit`.
 //!
 //! The route is drawn while the mission is `active` or `paused`, and as a
 //! preview while it is `loaded` and the vehicle is disarmed or flown by the
@@ -54,10 +55,11 @@ pub struct MissionIn {
     pub wire: Value,
 }
 
-/// The follow geometry, from the pilot (`plan_ned`, `goal_ned`,
-/// `setpoint_ned`, `avoid_state`) and follow-me (orbit around `target_ned`).
+/// The planned motion of a follow skill or a pilot go-to, from the pilot
+/// (`plan_ned`, `goal_ned`, `setpoint_ned`, `avoid_state`) and follow-me
+/// (orbit around `target_ned`).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct FollowIn {
+pub struct MotionIn {
     pub plan_ne: Vec<[f64; 2]>,
     pub goal: Option<[f64; 3]>,
     pub setpoint_d: Option<f64>,
@@ -86,7 +88,7 @@ pub struct SceneIn {
     pub owner: Option<String>,
     pub home: Option<Home>,
     pub mission: Option<MissionIn>,
-    pub follow: Option<FollowIn>,
+    pub motion: Option<MotionIn>,
 }
 
 /// One camera to draw over.
@@ -245,8 +247,8 @@ fn camera_items(
                 items.push(json!({"t": "fpv", "k": "fpv", "x": r3(q[0]), "y": r3(q[1])}));
             }
         }
-        if let Some(follow) = scene.follow.as_ref() {
-            follow_items(pose, follow, &view, &mut items);
+        if let Some(motion) = scene.motion.as_ref() {
+            motion_items(pose, motion, &view, &mut items);
         }
     }
     items
@@ -311,11 +313,11 @@ fn route_items(
     }
 }
 
-fn follow_items(pose: &Pose, follow: &FollowIn, view: &View, items: &mut Vec<Value>) {
-    let d = follow.setpoint_d.unwrap_or(pose.ned[2]);
+fn motion_items(pose: &Pose, motion: &MotionIn, view: &View, items: &mut Vec<Value>) {
+    let d = motion.setpoint_d.unwrap_or(pose.ned[2]);
     let mut path: Vec<[f64; 3]> = vec![pose.ned];
-    path.extend(follow.plan_ne.iter().map(|p| [p[0], p[1], d]));
-    if let Some(g) = follow.goal {
+    path.extend(motion.plan_ne.iter().map(|p| [p[0], p[1], d]));
+    if let Some(g) = motion.goal {
         path.push([g[0], g[1], d]);
     }
     if path.len() >= 2 {
@@ -329,18 +331,18 @@ fn follow_items(pose: &Pose, follow: &FollowIn, view: &View, items: &mut Vec<Val
             }
         }
         if pts.len() >= 2 {
-            let state = if follow.avoid_state.is_empty() {
+            let state = if motion.avoid_state.is_empty() {
                 "clear"
             } else {
-                follow.avoid_state.as_str()
+                motion.avoid_state.as_str()
             };
             items.push(json!({"t": "fpath", "k": "fpath", "state": state, "pts": pts}));
         }
     }
-    if let Some(q) = follow.goal.and_then(|g| view.project([g[0], g[1], d])) {
+    if let Some(q) = motion.goal.and_then(|g| view.project([g[0], g[1], d])) {
         items.push(json!({"t": "fgoal", "k": "fgoal", "x": r3(q[0]), "y": r3(q[1])}));
     }
-    if let Some(o) = follow.orbit {
+    if let Some(o) = motion.orbit {
         let ring: Vec<Value> = (0..=ORBIT_POINTS)
             .filter_map(|i| {
                 let a = std::f64::consts::TAU * i as f64 / ORBIT_POINTS as f64;

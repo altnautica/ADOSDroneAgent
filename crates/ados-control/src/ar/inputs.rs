@@ -118,27 +118,27 @@ pub fn scene_from(
             .and_then(|v| f(v, "groundspeed"))
             .unwrap_or(0.0),
         armed: state.get("armed").and_then(Value::as_bool).unwrap_or(false),
-        follow: follow_from(owner.as_deref(), pilot, follow),
+        motion: motion_from(owner.as_deref(), pilot, follow),
         owner,
         home,
         mission,
     }
 }
 
-/// The follow geometry while a follow skill flies: the path and goal from the
-/// pilot (or, without a pilot, from follow-me's own state), the orbit from
-/// follow-me's mode, radius and target.
-pub(super) fn follow_from(
+/// The planned motion while a follow skill or a pilot go-to flies: the path
+/// and goal from the pilot (or, without a pilot, from follow-me's own state),
+/// the orbit from follow-me's mode, radius and target.
+pub(super) fn motion_from(
     owner: Option<&str>,
     pilot: Option<&Value>,
     follow: Option<&Value>,
-) -> Option<FollowIn> {
+) -> Option<MotionIn> {
     let follow_active = follow
         .and_then(|f| f.get("active"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let source = match (owner, pilot) {
-        (Some("skill"), Some(p)) => p,
+        (Some("skill" | "goto"), Some(p)) => p,
         (None, _) if follow_active => follow?,
         _ => return None,
     };
@@ -173,7 +173,7 @@ pub(super) fn follow_from(
             cw: fs.get("orbit_direction").and_then(Value::as_str) != Some("ccw"),
         })
     });
-    Some(FollowIn {
+    Some(MotionIn {
         plan_ne,
         goal,
         setpoint_d,

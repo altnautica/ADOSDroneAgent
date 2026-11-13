@@ -32,7 +32,7 @@ use crate::ipc::state_client::StateIpcClient;
 use crate::routes::nav::{NavHub, NavKind, ViewDemand};
 use geo::Home;
 use project::{Aim, Pose};
-use scene::{CameraIn, FollowIn, MissionIn, MissionItem, Orbit, SceneIn};
+use scene::{CameraIn, MissionIn, MissionItem, MotionIn, Orbit, SceneIn};
 
 use inputs::*;
 pub use inputs::{cameras_from, scene_from};
