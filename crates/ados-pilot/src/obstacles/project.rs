@@ -1,7 +1,7 @@
 //! Per-camera obstacle grid (C3 `obstacles.cameras`): each of the 32×18 cells
 //! casts its centre ray into the planar obstacle model. Obstacles are treated
-//! as vertical from the ground up to a little above the vehicle, since the
-//! planar scan sees only its own plane.
+//! as vertical from the ground up to half a metre above the scan plane: the
+//! planar scan sees nothing higher.
 //!
 //! A cell's ray goes through the pinhole the renderer and the AR layer use:
 //! cell `(c, r)` is the uniform image tile, its ray in the camera frame is
@@ -17,8 +17,8 @@ use base64::Engine as _;
 use super::Obstacles;
 use crate::geo::V2;
 
-/// How far above the vehicle an obstacle is assumed to extend.
-const OBSTACLE_TOP_ABOVE_M: f32 = 3.0;
+/// How far above the scan plane an obstacle is assumed to extend.
+const OBSTACLE_TOP_ABOVE_M: f32 = 0.5;
 /// Longest ray cast.
 const MAX_RANGE_M: f32 = 30.0;
 /// A ray steeper than this (horizontal part per metre) meets no wall.

@@ -205,11 +205,12 @@ fn camera_cells_follow_the_pinhole_and_the_airframe_pitch() {
         yaw_deg: 0.0,
         stabilised: false,
     };
-    // The wall top (3 m above the camera, 10 m out) sits 16.7° above the
-    // axis: through the pinhole at v = 0.5 - tan(16.7°)/tan(25°)/2 = 0.178,
-    // so row 3 is the first whose centre is below it.
+    // The wall top (0.5 m above the 3 m scan plane, 10 m out) sits 2.9°
+    // above the axis: through the pinhole at
+    // v = 0.5 - tan(2.9°)/tan(25°)/2 = 0.446, so row 8 is the first whose
+    // centre is below it.
     let level = project(&o, &body, Attitude::default());
-    assert_eq!(first_row(&level, 16), Some(3));
+    assert_eq!(first_row(&level, 16), Some(8));
     // The wall's returns span -20°..+19° (a hit counts within 0.35 m of a
     // ray, 2° at 10 m). Through the pinhole column 22's centre looks 18.8°
     // right and column 23's 21.5°, column 9's 18.8° left and column 7's 24°:
@@ -218,18 +219,45 @@ fn camera_cells_follow_the_pinhole_and_the_airframe_pitch() {
     for (c, on) in [(7, false), (9, true), (22, true), (23, false)] {
         assert_eq!(level[12 * 32 + c] != 0, on, "column {c}");
     }
-    // Nose up 10°: the wall top is 6.7° above the axis, v = 0.374, row 7.
+    // Nose up 10°: the wall top is 7.1° below the axis, v = 0.634, row 11.
     let nose_up = Attitude {
         pitch: 10f32.to_radians(),
         ..Attitude::default()
     };
-    assert_eq!(first_row(&project(&o, &body, nose_up), 16), Some(7));
+    assert_eq!(first_row(&project(&o, &body, nose_up), 16), Some(11));
     // A stabilised gimbal holds the horizon whatever the airframe pitch.
     let gimbal = ados_protocol::pilot::CameraModel {
         stabilised: true,
         ..body
     };
-    assert_eq!(first_row(&project(&o, &gimbal, nose_up), 16), Some(3));
+    assert_eq!(first_row(&project(&o, &gimbal, nose_up), 16), Some(8));
+}
+
+#[test]
+fn cells_stop_half_a_metre_above_the_scan_plane() {
+    let o = wall_ahead_at_10_m();
+    let cam = ados_protocol::pilot::CameraModel {
+        frame_w: 1280,
+        frame_h: 720,
+        hfov_deg: 80.0,
+        vfov_deg: 50.0,
+        tilt_down_deg: 0.0,
+        yaw_deg: 0.0,
+        stabilised: false,
+    };
+    let near = project(&o, &cam, Attitude::default());
+    // Centre column: the topmost marked row's ray must be at most 0.5 m above
+    // the 3 m scan plane at 10 m.
+    let top = first_row(&near, 16).expect("the wall is drawn");
+    let tan_v = (50f32.to_radians() / 2.0).tan();
+    let z = ((top as f32 + 0.5) / 18.0 * 2.0 - 1.0) * tan_v; // + down
+    let h_at_wall = 3.0 - 10.0 * z;
+    assert!(h_at_wall <= 3.5 + 0.3, "top cell at {h_at_wall} m");
+    // And still drawn down to the wall's foot: row 14's ray meets the wall
+    // 0.15 m above the ground; row 15's reaches the ground 8.9 m out, short of
+    // the wall, so it and every row below stay clear.
+    assert!((top..=14).all(|r| near[r * 32 + 16] != 0));
+    assert!((15..18).all(|r| near[r * 32 + 16] == 0));
 }
 
 #[test]
