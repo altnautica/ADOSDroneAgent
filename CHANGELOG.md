@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.122] - 2026-11-13
+
+### Fixed
+
+- Pilot: after a Land touchdown, Take control followed by a lift of under 1 m kept the touchdown hold, so Pause was refused and the link-loss and low-battery failsafes did not fire. Any sign of flight now ends the hold: the operator's Take control, an arm or disarm, a take-off, the FC's landed state leaving ON_GROUND, or a climb of 0.3 m seen by the rangefinder or the local position. The failsafes (link loss, low battery, controller loss) and the link-loss countdown follow the FC's own landed state and never wait on the hold, which only refuses Pause, goto, resume and a VTOL transition.
+
 ## [0.109.121] - 2026-11-13
 
 ### Fixed

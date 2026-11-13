@@ -401,6 +401,8 @@ impl Pilot {
         if !self.in_guided() {
             self.set_mode(g, now_ms);
         }
+        // The operator flies now: whatever the vehicle does next is theirs.
+        self.clear_touchdown();
         self.set_owner(Owner::Pilot, "take_control");
         self.engage_pilot(now_ms);
         self.sessions.arm_gate();

@@ -90,7 +90,7 @@ impl Pilot {
             None
         };
         let window = u64::from(self.settings.pilot.link_loss_s) * 1000;
-        let link_loss_in_s = if self.fc.armed && !self.landed() {
+        let link_loss_in_s = if self.fc.armed && !self.fc.landed() {
             self.failsafe.link_countdown_s(now_ms, window).map(wire)
         } else {
             None

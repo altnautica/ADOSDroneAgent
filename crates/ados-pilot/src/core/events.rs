@@ -79,6 +79,9 @@ impl Pilot {
             self.on_disarmed();
             return;
         }
+        if !was_armed && self.fc.armed {
+            self.touchdown = Default::default();
+        }
         if !was_armed && self.fc.armed && self.owner() == Owner::Idle && !self.in_guided() {
             self.set_owner(Owner::FcMode, "fc-mode");
         }

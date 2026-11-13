@@ -192,8 +192,8 @@ fn climbs(w: &World, from: usize) -> Vec<String> {
 #[test]
 fn pause_and_goto_after_a_land_touchdown_are_refused() {
     // The bench sequence: Land from 4 m under `ados`, Pause 0.3 s after
-    // touchdown, Take control and a goto to 2.5 m 2.5 s after it, while the
-    // FC has not yet reported the vehicle on the ground.
+    // touchdown, a goto to 2.5 m and Pause again 2.5 s after it, while the FC
+    // has not yet reported the vehicle on the ground.
     let (mut w, mut s) = hovering(4.0, false);
     assert_eq!(err(w.action("land")), None);
     fly_to_touchdown(&mut w, &mut s);
@@ -202,11 +202,7 @@ fn pause_and_goto_after_a_land_touchdown_are_refused() {
     fly(&mut w, &mut s, 300);
     assert_eq!(err(w.action("pause")).as_deref(), Some("landed"));
     assert_eq!(w.mode, copter::LAND, "a refused pause leaves the FC's land");
-    fly(&mut w, &mut s, 1100);
-    assert_eq!(err(w.action("control_mode:ados")), None);
-    // Take control is a safety action: never refused for the touchdown.
-    assert_eq!(err(w.action("take_control")), None);
-    fly(&mut w, &mut s, 1100);
+    fly(&mut w, &mut s, 2200);
     let goto = serde_json::json!({"lat": 12.0, "lon": 77.0, "alt_m": 2.5});
     assert_eq!(err(w.action_args("goto", goto)).as_deref(), Some("landed"));
     assert_eq!(err(w.action("pause")).as_deref(), Some("landed"));
@@ -218,6 +214,66 @@ fn pause_and_goto_after_a_land_touchdown_are_refused() {
     assert_eq!(w.p.state(w.now).landed, Some(false));
     assert_eq!(err(w.action("rth")), None, "RTH is never refused");
     assert_eq!(err(w.action("land")), None, "nor is Land");
+    assert_eq!(err(w.action("kill")), None, "nor is kill");
+}
+
+/// Land from 4 m to a touchdown, then Take control and climb 0.5 m on the
+/// sticks.
+fn take_control_and_lift() -> (World, Sim) {
+    let (mut w, mut s) = hovering(4.0, false);
+    w.action("land");
+    fly_to_touchdown(&mut w, &mut s);
+    fly(&mut w, &mut s, 500);
+    assert!(w.p.landed());
+    assert_eq!(err(w.action("control_mode:ados")), None);
+    // Take control is never refused, and the operator flies from here.
+    assert_eq!(err(w.action("take_control")), None);
+    assert!(!w.p.landed(), "Take control ends the touchdown");
+    // Centred sticks first (the take-over gate), then full up.
+    for _ in 0..40 {
+        w.input([0.0; 4]);
+        fly(&mut w, &mut s, 20);
+    }
+    let end = w.now + 10_000;
+    while -w.pos[2] < 0.5 {
+        assert!(w.now < end, "never lifted");
+        w.input([0.0, 0.0, 1.0, 0.0]);
+        fly(&mut w, &mut s, 20);
+    }
+    w.input([0.0; 4]);
+    fly(&mut w, &mut s, 200);
+    assert!(s.lifted && !w.landed);
+    assert!(!w.p.landed());
+    (w, s)
+}
+
+#[test]
+fn a_short_lift_after_take_control_pauses_and_fails_safe() {
+    // Pause holds in the air.
+    let (mut w, _) = take_control_and_lift();
+    assert_eq!(err(w.action("pause")), None);
+    assert_eq!(w.mode, copter::GUIDED);
+
+    // The surface link goes quiet: the link-loss RTH fires.
+    let (mut w, mut s) = take_control_and_lift();
+    let silent = w.now;
+    fly_until(&mut w, &mut s, |w, _| w.mode == copter::RTL, |_, _| {});
+    assert!(w.now - silent <= 10_500, "link loss after its window");
+
+    // The battery runs low: the low-battery RTH fires.
+    let (mut w, mut s) = take_control_and_lift();
+    let low = MavMessage::SYS_STATUS(SYS_STATUS_DATA {
+        battery_remaining: 10,
+        ..Default::default()
+    });
+    w.p.on_fc(FC_SYS, FC_COMP, &low, w.now);
+    // The surface stays linked throughout.
+    let end = w.now + 15_000;
+    while w.mode != copter::RTL {
+        assert!(w.now < end, "no low-battery RTH");
+        w.req(crate::core::Request::Hb { src: "mc".into() });
+        fly(&mut w, &mut s, 20);
+    }
 }
 
 #[test]
@@ -230,11 +286,27 @@ fn a_take_off_waits_for_the_fc_to_finish_its_land() {
     assert_eq!(w.mode, copter::LAND);
     fly(&mut w, &mut s, 1200);
     assert!(w.landed, "the FC's land detector finished");
-    // A deliberate take-off from the ground is the one way back up.
+    assert!(w.p.touchdown.floor_d.is_some());
+    // A deliberate take-off from the ground ends the touchdown.
     assert_eq!(err(w.action("takeoff")), None);
+    assert!(w.p.touchdown.floor_d.is_none());
     w.run(1500);
     assert_eq!(w.mode, copter::GUIDED);
     assert!(w.commands(MavCmd::MAV_CMD_NAV_TAKEOFF, None) > 0);
+}
+
+#[test]
+fn the_fc_leaving_the_ground_ends_the_touchdown() {
+    let (mut w, mut s) = hovering(4.0, true);
+    w.action("land");
+    fly_to_touchdown(&mut w, &mut s);
+    fly(&mut w, &mut s, 1500);
+    assert!(w.landed && w.p.touchdown.floor_d.is_some());
+    // The FC reports the vehicle in the air again, with no climb seen yet.
+    w.landed = false;
+    w.run(40);
+    assert!(!w.p.landed());
+    assert_eq!(err(w.action("pause")), None);
 }
 
 #[test]
@@ -256,19 +328,23 @@ fn an_fc_land_reaching_the_floor_refuses_pause() {
 
 #[test]
 fn a_climb_off_the_ground_ends_the_touchdown() {
-    let (mut w, mut s) = hovering(4.0, false);
-    w.action("land");
-    fly_to_touchdown(&mut w, &mut s);
-    fly(&mut w, &mut s, 300);
-    assert!(w.p.landed());
-    // An RC pilot switches to LOITER and climbs.
-    w.mode = copter::LOITER;
-    w.pos[2] = -1.5;
-    w.agl = Some(RF_GROUND_M + 1.5);
-    w.run(100);
-    assert!(!w.p.landed());
-    assert_eq!(err(w.action("pause")), None);
-    assert_eq!(w.mode, copter::GUIDED);
+    // Half a metre up, seen by the local position alone (no rangefinder) or
+    // by the rangefinder alone.
+    for (d, agl) in [(-0.5, None), (0.0, Some(RF_GROUND_M + 0.5))] {
+        let (mut w, mut s) = hovering(4.0, false);
+        w.action("land");
+        fly_to_touchdown(&mut w, &mut s);
+        fly(&mut w, &mut s, 300);
+        assert!(w.p.landed());
+        // An RC pilot switches to LOITER and climbs.
+        w.mode = copter::LOITER;
+        w.pos[2] = d;
+        w.agl = agl;
+        w.run(100);
+        assert!(!w.p.landed(), "{d} {agl:?}");
+        assert_eq!(err(w.action("pause")), None);
+        assert_eq!(w.mode, copter::GUIDED);
+    }
 }
 
 /// Land from `h` m with no usable rangefinder reading near the ground: the

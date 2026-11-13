@@ -180,7 +180,8 @@ impl Pilot {
     }
 
     fn failsafes(&mut self, now_ms: u64) {
-        let airborne = self.fc.armed && !self.landed();
+        // The FC's own landed state: a touchdown never holds a failsafe back.
+        let airborne = self.fc.armed && !self.fc.landed();
         // Controller lost: the owning session stopped streaming.
         if self.owner() == Owner::Pilot
             && self.sessions.owner.is_some()
@@ -225,7 +226,7 @@ impl Pilot {
             (Some(&l), Some(&c)) if l > 0.0 && c > 0.0 => l / c * 100.0,
             _ => 20.0,
         };
-        let airborne = self.fc.armed && !self.landed();
+        let airborne = self.fc.armed && !self.fc.landed();
         if !airborne || pct > low_pct + 5.0 {
             self.rth_deadline_ms = None;
             if pct > low_pct + 5.0 {
