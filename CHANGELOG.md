@@ -6,11 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.110.0] - 2026-11-14
+
+### Changed
+
+- Breaking: `ados-protocol`'s `PilotState`, `SpeedCap`, `Goal` and `GoalKind` are `#[non_exhaustive]`, so later fields and goal kinds stay additive. Code outside the crate builds a goal with `Goal::new` and a cap with `SpeedCap::new`, and a `PilotState` from `PilotState::default()`, and matches `GoalKind` with a catch-all arm.
+
 ### Added
 
-- Pilot: while the flight controller's EKF takes its horizontal position from something other than GNSS, every setpoint the pilot flies (skill goals, gotos, stick flight and swarm velocity) is held to `pilot.gnss_denied_max_speed_mps` (2.0 m/s) and `pilot.gnss_denied_max_accel_mps2` (1.5 m/s²). The active source set comes from vision-nav's `nav.state` and the FC's `EK3_SRCn_POSXY` parameters; without a fresh `nav.state` only a 3-D GPS fix counts as GNSS, so the cap fails closed. Capped goal setpoints are flown as a rate-limited velocity from the vehicle's own position, so the FC's position loop cannot pull past the cap. The pilot kind carries `speed_cap {reason: "gnss-denied", v_h_mps}` while the cap is in force.
-- Protocol: `PilotState`, `SpeedCap`, `Goal` and `GoalKind` are `#[non_exhaustive]`; build a goal with `Goal::new` and a cap with `SpeedCap::new`.
-- Pilot: skill goals and gotos obey the geofence and the altitude limits, as stick flight already did. A target past `pilot.max_dist_m` from home is flown to the fence circle and the outward velocity is removed at the fence; the setpoint height is held between the 0.5 m floor and `pilot.max_alt_agl_m` above ground, and a vertical feed-forward pushing past either bound is dropped.
+- Pilot: while the flight controller's EKF takes its horizontal position from something other than GNSS, every setpoint the pilot flies (skill goals, gotos, stick flight and swarm velocity) is held to `pilot.gnss_denied_max_speed_mps` (2.0 m/s) and `pilot.gnss_denied_max_accel_mps2` (1.5 m/s²). The active source set is the last one vision-nav's `nav.state` named, or set 1 before any; its `EK3_SRCn_POSXY` decides, and a 3-D GPS fix stands in only while that parameter is unknown. A source-set switch made by an RC switch or a ground station does not reach the pilot. The acceleration ramp runs before the obstacle brake and the geofence, so their cut flies at once, and it starts from at most the capped speed, so a cap switching on mid-flight never asks for more. Capped goal setpoints are flown as a velocity from the vehicle's own position, so the FC's position loop cannot pull past the cap. The pilot kind carries `speed_cap {reason: "gnss-denied", v_h_mps}` while the cap is in force.
+- Pilot: skill goals and gotos obey the geofence and the altitude limits, as stick flight already did. A target past `pilot.max_dist_m` from home is flown to the fence circle and the outward velocity is removed at the fence; the setpoint height is held between the 0.5 m floor and `pilot.max_alt_agl_m` above ground, holding the vehicle's height rather than pushing it when it is already past a bound, and a vertical feed-forward pushing past a bound is dropped. A goto past the fence or the ceiling arrives at the limit it is held to.
 
 ## [0.109.134] - 2026-11-14
 
@@ -26,6 +31,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - Frame-bus thumbnail video is encoded at its configured bitrate again. Since 0.109.131 the encoder was told the leg ran at the captured rate (20–30 fps) while it received one frame a second, so its rate control spent about a twentieth of the 50 kb/s budget and the thumbnail was heavily blocky. A leg that decimates now declares its own rate on the input, so the bitrate is spent per frame actually sent; gaps are still kept and nothing is duplicated.
 - A frame-bus leg set above two thirds of the captured rate (for example 25 fps over a 30 fps camera) now decimates to its rate. The filter keeps one frame per target slot instead of measuring from the last kept frame, which let every frame through above two thirds of the captured rate and halved the rate between one half and two thirds.
+
 ## [0.109.132] - 2026-11-13
 
 ### Changed
@@ -33,6 +39,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Obstacle cells on the camera view now end half a metre above the scan plane. The per-camera obstacle grid treated each planar-scan return as a wall reaching 3 m above the vehicle, so cells were drawn well above anything the scan could see.
 - The AR motion layer draws a pilot go-to's planned path (`fpath`) and goal (`fgoal`), as it already did for a follow skill.
 - Cockpit: the local minimap draws the pilot's planned path (dashed) and a ring on its goal while a go-to or a skill flies, in the go-to state colour, or red while the pilot reports the way blocked and still sends a goal (the goal brake holding on a clear plan). A go-to the planner found blocked sent no path or goal in this release, so the plan disappeared instead of turning red. The plan hides once the pilot frame is stale. The TUI has no minimap, so there is nothing to pair there.
+
 ## [0.109.131] - 2026-11-13
 
 ### Fixed
