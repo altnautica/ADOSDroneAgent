@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.127] - 2026-11-13
+
+### Fixed
+
+- ADOS Pilot: Take control is answered from the flight controller. Outside GUIDED the pilot asks the FC for it and answers ok, and becomes the owner, only once the FC confirms the mode (an accepting `COMMAND_ACK`, or a HEARTBEAT in GUIDED when the ack is lost). When the FC refuses (for example "Mode change to Guided failed: requires position" during its own failsafe landing) or does not answer within 2.5 s, the action is refused with `fc_refused:<the FC's reason>`, `fc_refused` or `fc_no_answer`, and the owner and control mode stay the FC's. Before, the pilot answered ok and reported itself as owner while the FC kept landing on its own. A second Take control while the FC answers is refused `pending`; Land, RTH, Pause, Kill, Resume, Hand to FC or Fly Here meanwhile ends it `busy`. An action's answer no longer holds up the sticks and heartbeats sent behind it on the same connection.
+- Cockpit and dashboard: new refusal texts `refusal.fc_refused`, `refusal.fc_refused_reason` (shows the FC's own words) and `refusal.fc_no_answer`.
+
 ## [0.109.126] - 2026-11-13
 
 ### Fixed

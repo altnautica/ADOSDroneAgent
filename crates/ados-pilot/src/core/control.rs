@@ -71,6 +71,7 @@ impl Pilot {
         if self.banner.as_ref().is_some_and(|b| b.until_ms <= now_ms) {
             self.banner = None;
         }
+        self.check_take(now_ms, false);
         if !self.fc.linked(now_ms) {
             return;
         }

@@ -1,7 +1,7 @@
 //! FC frames: arm/disarm, FC mode changes, adoption of an external GUIDED.
 
 use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, MavResult};
-use ados_protocol::pilot::{ControlMode, Owner};
+use ados_protocol::pilot::{ControlMode, Mission, Owner, CLIENT_MODE_TOPIC};
 use serde_json::json;
 
 use super::Pilot;
@@ -54,18 +54,54 @@ impl ClientMode {
 }
 
 impl Pilot {
+    /// Topics from the plugin event export, the router's state socket
+    /// (`mission`) or a `feed` relay.
+    pub fn on_feed(&mut self, topic: &str, payload: &serde_json::Value, now_ms: u64) {
+        match topic {
+            "plugin.world-engine.scan" => {
+                let Some(pos) = self.pos_ne(now_ms) else {
+                    return;
+                };
+                let att = self.fc.fresh_attitude(now_ms).unwrap_or_default();
+                let level = crate::obstacles::Level {
+                    roll: att.roll,
+                    pitch: att.pitch,
+                    yaw: att.yaw,
+                    agl: self.agl(now_ms),
+                };
+                self.obstacles.ingest_scan(payload, level, pos, now_ms);
+            }
+            "plugin.world-engine.occupancy" => self.obstacles.ingest_occupancy(payload),
+            "plugin.world-engine.pose" => {
+                let pos = self.pos_ne(now_ms);
+                self.obstacles.ingest_pose(payload, pos);
+            }
+            "mission" => {
+                let m = <Mission as serde::Deserialize>::deserialize(payload).ok();
+                self.on_mission(m, now_ms);
+            }
+            CLIENT_MODE_TOPIC => {
+                if let Some(c) = ClientMode::parse(payload) {
+                    self.client_mode = Some((c, now_ms));
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Fold one frame from the FC in.
     pub fn on_fc(&mut self, sysid: u8, compid: u8, msg: &MavMessage, now_ms: u64) {
         let was_armed = self.fc.armed;
         let first = self.fc.heartbeat_ms == 0;
         let changed = self.fc.update(sysid, compid, msg, now_ms);
         if let MavMessage::COMMAND_ACK(a) = msg {
-            if sysid == self.fc.sysid
-                && compid == self.fc.compid
-                && a.command == MavCmd::MAV_CMD_DO_REPOSITION
-                && a.result == MavResult::MAV_RESULT_ACCEPTED
-            {
-                self.on_fc_reposition(now_ms);
+            if sysid == self.fc.sysid && compid == self.fc.compid {
+                if a.command == MavCmd::MAV_CMD_DO_REPOSITION
+                    && a.result == MavResult::MAV_RESULT_ACCEPTED
+                {
+                    self.on_fc_reposition(now_ms);
+                }
+                self.take_ack(a, now_ms);
             }
             return;
         }
@@ -90,6 +126,7 @@ impl Pilot {
                 self.on_mode_change(prev, now_ms);
             }
         }
+        self.check_take(now_ms, false);
     }
 
     fn request_params(&mut self, now_ms: u64) {
@@ -108,6 +145,7 @@ impl Pilot {
     }
 
     fn on_disarmed(&mut self) {
+        self.take_disarmed();
         // The setup engine holds `tuning` across the whole air wizard, landings
         // between its flight steps included, and hands it back itself.
         if self.owner() != Owner::Tuning {

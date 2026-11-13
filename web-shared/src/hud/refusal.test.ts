@@ -44,6 +44,14 @@ describe("refusal text", () => {
     expect(refusalText("not_ready:something_new")).toBe("Not ready: something_new");
   });
 
+  it("words the flight controller's own reason for refusing a mode change", () => {
+    expect(refusalText("fc_refused:Mode change to Guided failed: requires position")).toBe(
+      "The flight controller refused: Mode change to Guided failed: requires position",
+    );
+    expect(refusalText("fc_refused")).toBe("The flight controller refused the mode change");
+    expect(refusalText("fc_no_answer")).toBe("No answer from the flight controller");
+  });
+
   it("shows an unknown code and says Refused for none", () => {
     expect(refusalText("something_new")).toBe("Refused: something_new");
     expect(refusalText(undefined)).toBe("Refused");

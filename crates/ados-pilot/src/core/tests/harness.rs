@@ -1,5 +1,5 @@
 use ados_protocol::mavlink::ardupilotmega::*;
-use ados_protocol::pilot::{ActionReq, Goal, GoalKind, Holder, Input, Request};
+use ados_protocol::pilot::{ActionReq, ActionResult, Goal, GoalKind, Holder, Input, Request};
 
 use crate::config::Settings;
 use crate::core::{Out, Pilot, Reply};
@@ -26,6 +26,16 @@ pub struct World {
     pub mavtype: MavType,
     /// Modes the scripted FC refuses to arm in.
     pub unarmable: Vec<u32>,
+    /// The scripted FC refuses DO_SET_MODE to this mode with this result,
+    /// sending this STATUSTEXT after its ack (`None`: no text).
+    pub refuse_mode: Option<(u32, MavResult, Option<&'static str>)>,
+    /// The scripted FC answers DO_SET_MODE with a COMMAND_ACK (off: the ack
+    /// is lost).
+    pub acks: bool,
+    /// Frames the scripted FC sends ahead of its next state.
+    pub inbox: Vec<MavMessage>,
+    /// Answers to deferred actions, by token.
+    pub answers: Vec<(u64, ActionResult)>,
 }
 
 impl World {
@@ -58,6 +68,10 @@ impl World {
             revoked: Vec::new(),
             mavtype: MavType::MAV_TYPE_QUADROTOR,
             unarmable: Vec::new(),
+            refuse_mode: None,
+            acks: false,
+            inbox: Vec::new(),
+            answers: Vec::new(),
         };
         w.feed();
         w
@@ -80,6 +94,9 @@ impl World {
 
     /// Send the FC's current state to the pilot.
     pub fn feed(&mut self) {
+        for m in std::mem::take(&mut self.inbox) {
+            self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
+        }
         let msgs = vec![
             self.heartbeat(),
             MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
@@ -146,6 +163,7 @@ impl World {
                     self.sent.push(*m);
                 }
                 Out::Revoked(r) => self.revoked.push((r.lease_id, r.reason)),
+                Out::Answer(t, a) => self.answers.push((t, a)),
                 Out::Sticks(_) | Out::Persist { .. } => {}
             }
         }
@@ -155,7 +173,7 @@ impl World {
     fn apply(&mut self, m: &MavMessage) {
         if let MavMessage::COMMAND_LONG(c) = m {
             match c.command {
-                MavCmd::MAV_CMD_DO_SET_MODE => self.mode = c.param2 as u32,
+                MavCmd::MAV_CMD_DO_SET_MODE => self.set_mode(c.param2 as u32),
                 MavCmd::MAV_CMD_COMPONENT_ARM_DISARM => {
                     if c.param1 < 0.5 || !self.unarmable.contains(&self.mode) {
                         self.armed = c.param1 > 0.5;
@@ -171,6 +189,29 @@ impl World {
         }
     }
 
+    /// The scripted FC's answer to DO_SET_MODE.
+    fn set_mode(&mut self, mode: u32) {
+        let (result, text) = match self.refuse_mode {
+            Some((m, result, text)) if m == mode => (result, text),
+            _ => {
+                self.mode = mode;
+                (MavResult::MAV_RESULT_ACCEPTED, None)
+            }
+        };
+        if self.acks {
+            self.inbox.push(MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+                command: MavCmd::MAV_CMD_DO_SET_MODE,
+                result,
+            }));
+        }
+        if let Some(t) = text {
+            self.inbox.push(MavMessage::STATUSTEXT(STATUSTEXT_DATA {
+                severity: MavSeverity::MAV_SEVERITY_WARNING,
+                text: t.into(),
+            }));
+        }
+    }
+
     /// Put the vehicle airborne, armed, in `mode`.
     pub fn airborne(&mut self, mode: u32) {
         self.armed = true;
@@ -183,7 +224,25 @@ impl World {
         self.collect();
     }
 
+    /// A request answered at once; a deferred one runs the world (20 ms
+    /// ticks, at most 3 s) until its answer comes.
     pub fn req(&mut self, r: Request) -> Reply {
+        let rep = self.req_now(r);
+        let Reply::Deferred(token) = rep else {
+            return rep;
+        };
+        let end = self.now + 3000;
+        while self.now < end {
+            if let Some(i) = self.answers.iter().position(|(t, _)| *t == token) {
+                return Reply::Action(self.answers.remove(i).1);
+            }
+            self.run(20);
+        }
+        panic!("deferred request {token} never answered");
+    }
+
+    /// A request as the pilot replies to it, deferred or not.
+    pub fn req_now(&mut self, r: Request) -> Reply {
         let rep = self.p.on_request(r, self.now);
         self.collect();
         rep

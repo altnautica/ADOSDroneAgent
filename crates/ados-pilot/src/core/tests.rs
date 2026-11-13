@@ -5,4 +5,5 @@ mod harness;
 mod mission;
 mod rules;
 mod safety;
+mod take;
 mod touchdown;

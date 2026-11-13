@@ -34,6 +34,7 @@ impl Pilot {
         {
             return Err("no_fc".into());
         }
+        self.take_superseded(name);
         // An operator safety action always ends a tuning flight first.
         if matches!(name, "pause" | "rth" | "land" | "kill" | "take_control")
             && self.owner() == Owner::Tuning
@@ -384,7 +385,13 @@ impl Pilot {
         Ok(())
     }
 
+    /// Take the vehicle as `pilot`. Outside GUIDED the FC is asked for it and
+    /// the request waits on its answer ([`super::take`]): nothing changes
+    /// hands until the FC confirms the mode.
     fn take_control(&mut self, now_ms: u64) -> ActionRes {
+        if self.take.pending() {
+            return Err("pending".into());
+        }
         if !self.fc.armed {
             return Err("disarmed".into());
         }
@@ -394,14 +401,22 @@ impl Pilot {
         if self.control_mode() == ControlMode::Ados {
             self.ready_to_take(now_ms)?;
         }
+        if self.in_guided() {
+            self.took_control(now_ms);
+        } else {
+            let g = self.family().guided();
+            self.set_mode(g, now_ms);
+            self.take.start(now_ms, self.owner());
+        }
+        Ok(())
+    }
+
+    /// The FC flies GUIDED for a Take control: the operator flies now, and
+    /// whatever the vehicle does next is theirs.
+    pub(super) fn took_control(&mut self, now_ms: u64) {
         if self.owner() == Owner::MissionFc {
             self.mission_paused = true;
         }
-        let g = self.family().guided();
-        if !self.in_guided() {
-            self.set_mode(g, now_ms);
-        }
-        // The operator flies now: whatever the vehicle does next is theirs.
         self.clear_touchdown();
         self.set_owner(Owner::Pilot, "take_control");
         self.engage_pilot(now_ms);
@@ -412,7 +427,6 @@ impl Pilot {
             &[("profile", json!(profile))],
             now_ms,
         ));
-        Ok(())
     }
 
     fn ready_to_take(&self, now_ms: u64) -> ActionRes {

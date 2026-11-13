@@ -1,5 +1,6 @@
 //! Wiring: the MAVLink socket, the core task, publishing and persistence.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,7 +13,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::config::{self, Settings};
-use crate::core::{Out, Pilot};
+use crate::core::{Out, Pilot, Reply};
 use crate::ipc::{CoreReq, SetupHandler, Shared};
 
 /// The pilot's MAVLink identity: the companion's system id (the FC's
@@ -180,6 +181,7 @@ impl Daemon {
             axes_tx: self.axes_tx,
             owner_tx: self.owner_tx,
             status_tx: self.status_tx,
+            deferred: HashMap::new(),
         };
         tokio::select! {
             r = server => r.unwrap_or_else(|e| Err(std::io::Error::other(e))),
@@ -197,6 +199,8 @@ struct Core {
     axes_tx: watch::Sender<[f32; 4]>,
     owner_tx: watch::Sender<ados_protocol::pilot::Owner>,
     status_tx: watch::Sender<SetupView>,
+    /// Requests whose reply waits on the FC, by their [`Reply::Deferred`] token.
+    deferred: HashMap<u64, oneshot::Sender<Reply>>,
 }
 
 impl Core {
@@ -240,7 +244,10 @@ impl Core {
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
                 r = req_rx.recv() => match r {
-                    Some((req, reply)) => { let _ = reply.send(self.pilot.on_request(req, now())); }
+                    Some((req, reply)) => match self.pilot.on_request(req, now()) {
+                        Reply::Deferred(token) => { self.deferred.insert(token, reply); }
+                        r => { let _ = reply.send(r); }
+                    },
                     None => return,
                 },
                 f = feed_rx.recv() => if let Some((topic, payload)) = f {
@@ -301,6 +308,11 @@ impl Core {
                     }
                 }
                 Out::Revoked(r) => self.publish("lease.revoked", &r),
+                Out::Answer(token, a) => {
+                    if let Some(reply) = self.deferred.remove(&token) {
+                        let _ = reply.send(Reply::Action(a));
+                    }
+                }
                 Out::Sticks(s) => self.publish("sticks", &s),
                 Out::Persist {
                     section,

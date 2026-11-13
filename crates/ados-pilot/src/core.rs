@@ -8,6 +8,7 @@ mod control;
 mod events;
 mod operator;
 mod state;
+mod take;
 mod touchdown;
 
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use ados_protocol::pilot::{
     ActionResult, Banner, Holder, LeaseReply, LeaseRevoked, Mission, Owner, Request, Sticks,
-    ViewDemand, CLIENT_MODE_TOPIC,
+    ViewDemand,
 };
 
 use crate::authority::Authority;
@@ -57,6 +58,8 @@ pub enum Out {
         key: &'static str,
         value: String,
     },
+    /// The answer to a deferred action ([`Reply::Deferred`]).
+    Answer(u64, ActionResult),
 }
 
 /// The reply to one request on the requester's connection.
@@ -65,6 +68,8 @@ pub enum Reply {
     None,
     Lease(LeaseReply),
     Action(ActionResult),
+    /// Answered later by [`Out::Answer`] with this token.
+    Deferred(u64),
 }
 
 /// A swarm velocity goal.
@@ -116,6 +121,7 @@ pub struct Pilot {
     /// Why the FC flies `fc_failsafe`: the `fc_mode_cause` code at the mode
     /// change. `None` while `fc_failsafe` is false.
     failsafe_cause: Option<&'static str>,
+    take: take::Take,
     rth_deadline_ms: Option<u64>,
     low_batt_cancelled: bool,
     view: ViewDemand,
@@ -170,6 +176,7 @@ impl Pilot {
             fc_hold: None,
             fc_failsafe: false,
             failsafe_cause: None,
+            take: take::Take::default(),
             rth_deadline_ms: None,
             low_batt_cancelled: false,
             view: ViewDemand::default(),
@@ -304,12 +311,15 @@ impl Pilot {
                     self.failsafe.on_surface(now_ms);
                 }
                 let res = self.action(&a.name, a.args.as_ref(), now_ms);
-                Reply::Action(ActionResult {
+                let result = ActionResult {
                     name: a.name,
                     id: a.id,
                     ok: res.is_ok(),
                     err: res.err(),
-                })
+                };
+                self.take
+                    .defer(result)
+                    .map_or_else(Reply::Action, Reply::Deferred)
             }
             Request::LeaseAcquire { holder, kind } => {
                 Reply::Lease(self.lease_acquire(holder, &kind, now_ms))
@@ -352,41 +362,6 @@ impl Pilot {
                 Reply::None
             }
             Request::Subscribe | Request::Other { .. } => Reply::None,
-        }
-    }
-
-    /// Topics from the plugin event export, the router's state socket
-    /// (`mission`) or a `feed` relay.
-    pub fn on_feed(&mut self, topic: &str, payload: &serde_json::Value, now_ms: u64) {
-        match topic {
-            "plugin.world-engine.scan" => {
-                let Some(pos) = self.pos_ne(now_ms) else {
-                    return;
-                };
-                let att = self.fc.fresh_attitude(now_ms).unwrap_or_default();
-                let level = crate::obstacles::Level {
-                    roll: att.roll,
-                    pitch: att.pitch,
-                    yaw: att.yaw,
-                    agl: self.agl(now_ms),
-                };
-                self.obstacles.ingest_scan(payload, level, pos, now_ms);
-            }
-            "plugin.world-engine.occupancy" => self.obstacles.ingest_occupancy(payload),
-            "plugin.world-engine.pose" => {
-                let pos = self.pos_ne(now_ms);
-                self.obstacles.ingest_pose(payload, pos);
-            }
-            "mission" => {
-                let m = <Mission as serde::Deserialize>::deserialize(payload).ok();
-                self.on_mission(m, now_ms);
-            }
-            CLIENT_MODE_TOPIC => {
-                if let Some(c) = events::ClientMode::parse(payload) {
-                    self.client_mode = Some((c, now_ms));
-                }
-            }
-            _ => {}
         }
     }
 

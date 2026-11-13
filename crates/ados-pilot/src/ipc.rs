@@ -107,17 +107,28 @@ async fn client(stream: UnixStream, shared: Shared) -> Result<(), pilot::PilotWi
             }
             req => {
                 let op = op_name(&req);
+                let action = matches!(req, Request::Action(_));
                 let (tx, rx) = oneshot::channel();
                 if shared.core.send((req, tx)).await.is_err() {
                     break Ok(());
                 }
-                let encoded = match rx.await {
-                    Ok(Reply::Lease(l)) => pilot::encode_op(op, &l).ok(),
-                    Ok(Reply::Action(a)) => pilot::encode_op("action_result", &a).ok(),
-                    _ => None,
+                let out = out_tx.clone();
+                let answer = async move {
+                    let encoded = match rx.await {
+                        Ok(Reply::Lease(l)) => pilot::encode_op(op, &l).ok(),
+                        Ok(Reply::Action(a)) => pilot::encode_op("action_result", &a).ok(),
+                        _ => None,
+                    };
+                    if let Some(b) = encoded {
+                        let _ = out.send(b).await;
+                    }
                 };
-                if let Some(b) = encoded {
-                    let _ = out_tx.send(b).await;
+                // An action may wait on the FC (Take control): its answer
+                // never holds up the sticks and heartbeats behind it.
+                if action {
+                    tokio::spawn(answer);
+                } else {
+                    answer.await;
                 }
             }
         }
