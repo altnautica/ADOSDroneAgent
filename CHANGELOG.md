@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.120] - 2026-11-13
+
+### Fixed
+
+- Pilot: once a landing touches down the pilot treats the vehicle as on the ground until a take-off, a 1 m climb or a disarm, even while the flight controller has not yet reported it landed (its land detector needs about a second on the ground). In that window Pause, Take control, RTH, Resume, hand-to-FC, a VTOL transition, a goto (from a surface or a ground station's reposition) and a skill's motion lease are refused with `landed`; a take-off is refused with `bad_state` until the FC itself reports the vehicle on the ground; and the pilot never switches the FC out of its land or return mode. The published `landed` follows the same state. Before, a Pause 0.4 s after touchdown switched the FC from LAND to GUIDED, which stopped its land detector, so the vehicle stayed "in the air" for the pilot; a goto 2.5 s later then flew off the ground and a SITL copter tipped over.
+- Pilot: Land under `ados` slows its descent toward the hand-over to the FC's LAND (1 m/s², with the FC's response lag allowed for), so the hand-over and the touchdown come at the FC's landing speed: `LAND_SPD_MS`, `LAND_SPEED` (cm/s) on older firmware, else 0.5 m/s. It used to hold 2 m/s down until 0.6 m. In the scripted-FC replay of a 4 m Land with `LAND_SPD_MS` 0.3 the touchdown drops from 1.25 m/s to 0.30 m/s.
+
 ## [0.109.119] - 2026-11-13
 
 ### Fixed

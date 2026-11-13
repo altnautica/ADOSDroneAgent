@@ -19,6 +19,9 @@ const EXTRA_PARAMS: &[&str] = &[
     "AIRSPEED_MAX",
     "AIRSPEED_CRUISE",
     "TKOFF_ALT",
+    // The landing speed: `LAND_SPD_MS` (m/s), `LAND_SPEED` (cm/s) before it.
+    "LAND_SPD_MS",
+    "LAND_SPEED",
 ];
 /// Re-request missing parameters this often.
 const PARAM_RETRY_MS: u64 = 15_000;
@@ -109,6 +112,7 @@ impl Pilot {
         }
         self.failsafe.reset_link();
         self.landing = false;
+        self.touchdown = None;
         self.goto = None;
         self.swarm = None;
         self.mission_paused = false;

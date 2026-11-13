@@ -24,7 +24,7 @@ const TAKEOVER_MS: u64 = 1000;
 const PREEMPT_AXIS: f32 = 0.3;
 const PREEMPT_MS: u64 = 300;
 /// Landing: switch to LAND below this height.
-const LAND_SWITCH_AGL_M: f32 = 0.6;
+pub(super) const LAND_SWITCH_AGL_M: f32 = 0.6;
 /// Floor for stick descent.
 const FLOOR_AGL_M: f32 = 0.5;
 /// Swarm goals older than this are dropped.
@@ -79,6 +79,7 @@ impl Pilot {
             self.brake_hold(now_ms, Some("lease-revoked"));
         }
         self.drive_launch(now_ms);
+        self.track_touchdown(now_ms);
         let axes = self.stick_axes();
         if self.owner() == Owner::Tuning {
             self.tuning_axes = axes;
@@ -179,7 +180,7 @@ impl Pilot {
     }
 
     fn failsafes(&mut self, now_ms: u64) {
-        let airborne = self.fc.armed && !self.fc.landed();
+        let airborne = self.fc.armed && !self.landed();
         // Controller lost: the owning session stopped streaming.
         if self.owner() == Owner::Pilot
             && self.sessions.owner.is_some()
@@ -224,7 +225,7 @@ impl Pilot {
             (Some(&l), Some(&c)) if l > 0.0 && c > 0.0 => l / c * 100.0,
             _ => 20.0,
         };
-        let airborne = self.fc.armed && !self.fc.landed();
+        let airborne = self.fc.armed && !self.landed();
         if !airborne || pct > low_pct + 5.0 {
             self.rth_deadline_ms = None;
             if pct > low_pct + 5.0 {
@@ -349,6 +350,7 @@ impl Pilot {
                 self.set_mode(m, now_ms);
                 self.set_owner(Owner::FcMode, "land");
                 self.landing = false;
+                self.touch_down(pos[2]);
                 return;
             }
         }
@@ -364,6 +366,10 @@ impl Pilot {
         if let Some(a) = agl {
             if a < FLOOR_AGL_M && !self.landing {
                 vz.1 = 0.0;
+            }
+            if self.landing {
+                let vd = self.fc.fresh_local(now_ms).map_or(0.0, |l| l.vd);
+                vz.1 = vz.1.min(self.land_descent_cap(a, vd));
             }
             if a >= self.settings.pilot.max_alt_agl_m {
                 vz.0 = 0.0;

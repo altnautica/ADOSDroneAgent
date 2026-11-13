@@ -90,7 +90,7 @@ impl Pilot {
             None
         };
         let window = u64::from(self.settings.pilot.link_loss_s) * 1000;
-        let link_loss_in_s = if self.fc.armed && !self.fc.landed() {
+        let link_loss_in_s = if self.fc.armed && !self.landed() {
             self.failsafe.link_countdown_s(now_ms, window).map(wire)
         } else {
             None
@@ -112,7 +112,7 @@ impl Pilot {
             fc_mode: self.fc.custom_mode,
             fc_mode_name,
             armed: fc_linked.then_some(self.fc.armed),
-            landed: fc_linked.then(|| self.fc.landed()),
+            landed: fc_linked.then(|| self.landed()),
             vtol_transitioning: fc_linked && self.fc.vtol_transitioning(),
             input_src: self.sessions.owner.as_ref().map(|o| o.src.clone()),
             input_age_ms: self
