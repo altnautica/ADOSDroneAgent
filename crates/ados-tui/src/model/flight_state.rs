@@ -20,7 +20,7 @@ use super::autonomy::Pilot;
 pub mod readouts;
 mod words;
 
-use words::fill;
+use words::{fill, word_label};
 
 /// The spec file, byte for byte.
 pub const FLIGHT_STATE_JSON: &str =
@@ -284,7 +284,7 @@ pub fn control_mode_text(mode: &str) -> String {
         .control_mode
         .get(mode)
         .cloned()
-        .unwrap_or_else(|| mode.to_uppercase())
+        .unwrap_or_else(|| word_label(mode))
 }
 
 /// The secondary line, in the spec's order: FC failsafe, a mission the pilot
@@ -357,7 +357,7 @@ pub fn flight_state_chip(f: &ChipFacts) -> ChipView {
     let Some(rule) = SPEC.rules.iter().find(|r| matches(&r.when, f)) else {
         return ChipView {
             rule_id: "none".into(),
-            text: f.owner.to_uppercase(),
+            text: word_label(&f.owner),
             color: "fc".into(),
             dim: false,
             button: None,

@@ -92,25 +92,32 @@ async fn pkill(sig: &str, name: &str) {
     }
 }
 
+/// The smallest mode a 4K panel advertises: at least this wide and tall.
+const UHD_MIN: (u32, u32) = (3840, 2160);
+
 /// The mode to set on one output that advertises `modes`, or `None` to keep
 /// the one cage picked. A preset applies when the output offers it. Under
-/// [`AUTO_MODE`] a panel wider than [`TV_MODE`] that offers it steps down to
-/// it; any other panel keeps its preferred mode.
+/// [`AUTO_MODE`] a 4K panel (a mode at least [`UHD_MIN`]) that offers
+/// [`TV_MODE`] steps down to it; any other panel, QHD and ultrawide included,
+/// keeps its preferred mode.
 pub fn mode_for_output(requested: &str, modes: &BTreeSet<String>) -> Option<String> {
     if requested != AUTO_MODE {
         return modes.contains(requested).then(|| requested.to_string());
     }
-    let tv_width = mode_width(TV_MODE).unwrap_or(0);
-    let widest = modes
+    let uhd = modes
         .iter()
-        .filter_map(|m| mode_width(m))
-        .max()
-        .unwrap_or(0);
-    (widest > tv_width && modes.contains(TV_MODE)).then(|| TV_MODE.to_string())
+        .filter_map(|m| mode_size(m))
+        .any(|(w, h)| w >= UHD_MIN.0 && h >= UHD_MIN.1);
+    (uhd && modes.contains(TV_MODE)).then(|| TV_MODE.to_string())
 }
 
-fn mode_width(mode: &str) -> Option<u32> {
-    mode.split_once('x')?.0.parse().ok()
+/// `WIDTHxHEIGHT`, ignoring anything after the height's digits (`@60`).
+fn mode_size(mode: &str) -> Option<(u32, u32)> {
+    let (w, rest) = mode.split_once('x')?;
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    Some((w.parse().ok()?, rest[..digits].parse().ok()?))
 }
 
 /// Set `mode` (a preset or [`AUTO_MODE`], resolved per output by

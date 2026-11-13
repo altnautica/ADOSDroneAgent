@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { startFlightTelemetryPoll } from "@/hooks/use-flight-telemetry";
 import { setupOfferUid } from "@/lib/aircraft-setup";
-import { tourAirborne } from "@/lib/controller-tour";
+import { liveArmed, tourAirborne } from "@/lib/controller-tour";
 import type { VehicleState } from "@/lib/types";
 import { TAB_ORDER } from "@/nav/screen-table";
 import { useDirtyStore } from "@/stores/dirty-store";
@@ -65,8 +65,7 @@ describe("arm state off the Feed", () => {
   it("lets the setup offer show on a known disarmed vehicle", async () => {
     reply = DISARMED;
     stop = await pollOnce();
-    const { telemetry } = useFlightStore.getState();
-    expect(setupOfferUid(NEEDS_SETUP, [], tourAirborne(null, telemetry?.armed ?? null))).toBe("fc-1");
+    expect(setupOfferUid(NEEDS_SETUP, [], tourAirborne(null, liveArmed(useFlightStore.getState())))).toBe("fc-1");
   });
 
   it("asks before dropping a draft on the way to the Feed when known disarmed", async () => {
@@ -80,9 +79,19 @@ describe("arm state off the Feed", () => {
   it("still treats an unanswered poll as possibly airborne", async () => {
     reply = new Error("down");
     stop = await pollOnce();
-    const { telemetry } = useFlightStore.getState();
-    expect(setupOfferUid(NEEDS_SETUP, [], tourAirborne(null, telemetry?.armed ?? null))).toBeNull();
+    expect(setupOfferUid(NEEDS_SETUP, [], tourAirborne(null, liveArmed(useFlightStore.getState())))).toBeNull();
     useNavStore.getState().goTab("feed");
     expect(useNavStore.getState().activeTabId).toBe("feed");
+  });
+
+  it("withdraws the setup offer once a later poll goes unanswered", async () => {
+    reply = DISARMED;
+    stop = await pollOnce();
+    reply = new Error("down");
+    await vi.waitFor(() => expect(useFlightStore.getState().stale).toBe(true), { timeout: 3000 });
+    // The disarmed snapshot is still kept, but it is no longer a reading.
+    expect(useFlightStore.getState().telemetry?.armed).toBe(false);
+    expect(liveArmed(useFlightStore.getState())).toBeNull();
+    expect(setupOfferUid(NEEDS_SETUP, [], tourAirborne(null, liveArmed(useFlightStore.getState())))).toBeNull();
   });
 });

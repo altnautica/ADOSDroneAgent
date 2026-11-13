@@ -14,7 +14,7 @@ import { useWidthClass } from "@/hooks/use-width-class";
 import { setupOfferUid } from "@/lib/aircraft-setup";
 import { gridMeasures } from "@/lib/cockpit-layout";
 import { bannerTextStyle } from "@/lib/shell-banners";
-import { tourAirborne } from "@/lib/controller-tour";
+import { liveArmed, tourAirborne } from "@/lib/controller-tour";
 import { specText } from "@/shared/hud/spec-text";
 import { fetchSetupStatus } from "@/shared/setup-wizard/client";
 import type { SetupStatus } from "@/shared/setup-wizard/types";
@@ -33,7 +33,7 @@ export function SetupOfferBanner() {
   const setOfferUid = useSetupOfferStore((s) => s.setUid);
   const close = useSetupOfferStore((s) => s.close);
   const pilot = useFreshPilot();
-  const telemetryArmed = useFlightStore((s) => s.telemetry?.armed ?? null);
+  const telemetryArmed = useFlightStore(liveArmed);
   const { widthClass } = useWidthClass();
   const scale = gridMeasures(widthClass, false).scale;
   // The offer is pointless over the setup screen it opens.

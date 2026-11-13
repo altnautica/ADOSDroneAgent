@@ -41,6 +41,25 @@ fn capital_first(s: &str) -> String {
     }
 }
 
+/// A wire identifier (`autotune_roll`) as a sentence-case word ("Autotune roll").
+pub(super) fn word_label(s: &str) -> String {
+    // Each run of `-`/`_` becomes one space, as the shared `[-_]+` replace does.
+    let mut spaced = String::with_capacity(s.len());
+    let mut in_sep = false;
+    for c in s.chars() {
+        if c == '-' || c == '_' {
+            if !in_sep {
+                spaced.push(' ');
+            }
+            in_sep = true;
+        } else {
+            spaced.push(c);
+            in_sep = false;
+        }
+    }
+    capital_first(&spaced.to_lowercase())
+}
+
 /// A profile as the mode sheet labels it (`mode_sheet.profile`), "Normal"
 /// when none is reported; an unknown value reads with a capital first letter.
 fn profile_label(profile: Option<&str>) -> String {
@@ -68,7 +87,7 @@ pub(super) fn fill(template: &str, f: &ChipFacts) -> String {
             "mode_detail" => f.mode_detail.clone().unwrap_or_else(|| "Active".into()),
             "dist_m" => num(f.dist_m),
             "home_dist_m" => num(f.home_dist_m),
-            "setup_step" => f.setup_step.as_deref().unwrap_or("").to_uppercase(),
+            "setup_step" => word_label(f.setup_step.as_deref().unwrap_or("")),
             "seq" => num(f.seq),
             "total" => num(f.total),
             "eta" => fmt_eta(f.eta_s),

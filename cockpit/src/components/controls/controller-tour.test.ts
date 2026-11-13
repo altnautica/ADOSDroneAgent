@@ -51,8 +51,8 @@ beforeEach(async () => {
   Object.assign(window, { innerWidth: 580, innerHeight: 360 });
   useControlsStore.setState({ tourSeen: false });
   useInputStore.setState({ pad: null, padAnnounced: true });
-  // On the ground: the tour waits while the arm state is unknown.
-  useFlightStore.setState({ telemetry: { armed: false } });
+  // On the ground, read live: the tour waits while the arm state is unknown.
+  useFlightStore.setState({ telemetry: { armed: false }, live: true, stale: false });
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);

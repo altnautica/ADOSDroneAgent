@@ -52,7 +52,6 @@ thiserror = { workspace = true }
 # request/response and chunked streaming bodies, zstd the compressed export.
 axum = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http = { workspace = true }

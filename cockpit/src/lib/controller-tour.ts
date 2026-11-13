@@ -26,6 +26,13 @@ export function tourAirborne(pilot: { armed: boolean | null; landed: boolean | n
   return telemetryArmed !== false;
 }
 
+/** The heartbeat's arm state only while the poll is live and fresh, else null
+ *  (unknown): a kept snapshot from an unanswered poll is not a reading. The
+ *  same freshness rule as `knownOnGround`. */
+export function liveArmed(s: { live: boolean; stale: boolean; telemetry: { armed?: boolean | null } | null }): boolean | null {
+  return s.live && !s.stale ? (s.telemetry?.armed ?? null) : null;
+}
+
 /** The tips' arm inputs. From the live pilot: its arm state as reported,
  *  null while unknown (its FC link is down), and airborne null with either
  *  unknown, so no tip shows and none is marked seen. With no live pilot the

@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.117] - 2026-11-13
+
+### Fixed
+
+- TUI: the flight-state chip words a setup step, an unknown control mode and an unnamed pilot owner in sentence case ("Tuning · Autotune roll"), as the cockpit and dashboard do.
+- Cockpit: the aircraft setup offer and the controller tour read the arm state only from a live, fresh telemetry poll; a disarmed snapshot kept from before an unanswered poll counts as unknown (possibly airborne).
+- HDMI kiosk: under `resolution: auto` only a 4K panel (a mode of at least 3840x2160) steps down to 1920x1080; QHD and ultrawide panels keep their native mode.
+
+### Changed
+
+- Crates: dropped dependencies the code never used (`anyhow` in ados-hal-probe, `time` in ados-hid, `tower-http` in ados-logd), and ados-swarmbus is a test-only dependency of ados-mavlink-router, so the workspace builds without Cargo's unused-dependency warnings.
+
 ## [0.109.116] - 2026-11-13
 
 ### Fixed

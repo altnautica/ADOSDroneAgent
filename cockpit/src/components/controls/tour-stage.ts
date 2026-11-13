@@ -3,7 +3,7 @@
 // capture the pad.
 
 import { useFreshPilot } from "@/hooks/use-pilot";
-import { tourAirborne, tourCapturesPad, tourStage } from "@/lib/controller-tour";
+import { liveArmed, tourAirborne, tourCapturesPad, tourStage } from "@/lib/controller-tour";
 import { useControlsStore } from "@/stores/controls-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useInputStore } from "@/stores/input-store";
@@ -13,7 +13,7 @@ export function useTourStage(): "none" | "press" | "tour" {
   const announced = useInputStore((s) => s.padAnnounced);
   const seen = useControlsStore((s) => s.tourSeen);
   const pilot = useFreshPilot();
-  const telemetryArmed = useFlightStore((s) => s.telemetry?.armed ?? null);
+  const telemetryArmed = useFlightStore(liveArmed);
   return tourStage(padReported, announced, seen, tourAirborne(pilot, telemetryArmed));
 }
 

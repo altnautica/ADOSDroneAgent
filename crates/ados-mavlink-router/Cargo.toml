@@ -14,8 +14,6 @@ ados-clock = { workspace = true }
 ados-swarm = { workspace = true }
 ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
-# For the beacon `status` bit layout the autonomy status block encodes into.
-ados-swarmbus = { path = "../ados-swarmbus" }
 # The PIC-verdict authority half the injector gate consults (ground-profile,
 # so the same verdict propagates over every bearer).
 ados-hid = { path = "../ados-hid" }
@@ -57,3 +55,6 @@ tempfile = "3"
 # real half-second. Dev-only: resolver 2 keeps test-util out of the shipped
 # binary's features.
 tokio = { workspace = true, features = ["test-util"] }
+# The tests check the autonomy status block against the beacon's own
+# `status` bit layout and neighbour payload.
+ados-swarmbus = { path = "../ados-swarmbus" }

@@ -165,9 +165,9 @@ fn the_autonomy_block_shows_follow_nav_lidar_and_map_as_words() {
     let text = draw(&mut app, 120, 40);
     for want in [
         "Autonomy",
-        "COASTING #12 1.4 s",
+        "Coasting #12 1.4 s",
         "10.2 m ± 0.6 m",
-        "Reacquire SMART",
+        "Reacquire Smart",
         "Set 1 · Ext nav Good",
         "30 Hz · GPS No fix",
         "min 2.5 m · 10 Hz",
@@ -420,7 +420,7 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
         "Avoid     ",
         "Follow    ",
         "Range     10.2 m",
-        "Reacquire SMART",
+        "Reacquire Smart",
         "Nav       ",
         "Odometry  30 Hz",
         "Lidar     min 2.5 m",
@@ -434,7 +434,7 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
     }
     assert!(text.contains("last good read 0 s ago"), "{text}");
     let buf = draw_buffer(&mut app, 160, 48);
-    assert_dim(&app, &buf, "COASTING #12");
+    assert_dim(&app, &buf, "Coasting #12");
     assert_dim(&app, &buf, "120000 pts");
 }
 

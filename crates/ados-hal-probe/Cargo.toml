@@ -32,7 +32,6 @@ serde_json = { workspace = true }
 # still resolve its real board instead of degrading to unknown / npu_tops 0.
 serde_norway = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
 # The probe binary's own log sink (journald is picked up by the unit's
 # StandardOutput=journal, so the plain fmt layer is enough here).
 tracing-subscriber = { workspace = true }
