@@ -22,6 +22,11 @@ const EXTRA_PARAMS: &[&str] = &[
     // The landing speed: `LAND_SPD_MS` (m/s), `LAND_SPEED` (cm/s) before it.
     "LAND_SPD_MS",
     "LAND_SPEED",
+    // The EKF's horizontal position source per source set (3 = GPS): the
+    // GNSS-denied speed cap.
+    "EK3_SRC1_POSXY",
+    "EK3_SRC2_POSXY",
+    "EK3_SRC3_POSXY",
 ];
 /// Re-request missing parameters this often.
 const PARAM_RETRY_MS: u64 = 15_000;
@@ -79,6 +84,13 @@ impl Pilot {
             "mission" => {
                 let m = <Mission as serde::Deserialize>::deserialize(payload).ok();
                 self.on_mission(m, now_ms);
+            }
+            "nav.state" => {
+                let set = payload
+                    .get("active_set")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|v| u8::try_from(v).ok());
+                self.nav_state = Some((set, now_ms));
             }
             CLIENT_MODE_TOPIC => {
                 if let Some(c) = ClientMode::parse(payload) {

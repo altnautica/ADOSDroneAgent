@@ -76,6 +76,8 @@ pub struct FcState {
     pub statustext: VecDeque<Stamped<(u8, String)>>,
     pub battery_pct: Option<f32>,
     pub params: HashMap<String, f32>,
+    /// GPS_RAW_INT `fix_type` (3 = 3-D fix), `None` until one arrives.
+    pub gps_fix: Option<Stamped<u8>>,
     pub rc: Option<Stamped<[u16; 18]>>,
 }
 
@@ -167,6 +169,12 @@ impl FcState {
             }
             MavMessage::SYS_STATUS(s) if s.battery_remaining >= 0 => {
                 self.battery_pct = Some(f32::from(s.battery_remaining));
+            }
+            MavMessage::GPS_RAW_INT(g) => {
+                self.gps_fix = Some(Stamped {
+                    v: g.fix_type as u8,
+                    at_ms: now_ms,
+                });
             }
             MavMessage::PARAM_VALUE(p) => {
                 let raw: Vec<u8> = p.param_id.iter().copied().take_while(|&b| b != 0).collect();

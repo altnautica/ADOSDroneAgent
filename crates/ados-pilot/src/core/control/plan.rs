@@ -7,7 +7,6 @@ use super::{FC_POS_GAIN, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_OBSTACLE_CLOSE};
 use crate::core::Pilot;
 use crate::fc::MASK_POS_VEL_YAW;
 use crate::geo;
-use crate::model::limits;
 
 impl Pilot {
     pub(super) fn fly_plan(&mut self, pos: [f32; 3], yaw: f32, now_ms: u64) {
@@ -24,13 +23,7 @@ impl Pilot {
                 None => (None, 0.0, pos[2], None, None),
             },
             _ => match self.goto {
-                Some(t) => (
-                    None,
-                    limits(self.settings.pilot.profile).v_h,
-                    t[2],
-                    None,
-                    None,
-                ),
+                Some(t) => (None, self.limits_now(now_ms).v_h, t[2], None, None),
                 None => (None, 0.0, pos[2], None, None),
             },
         };
@@ -64,9 +57,7 @@ impl Pilot {
         };
         self.hold_reason = None;
         self.plan_hold = None;
-        let v_cap = max_speed
-            .min(limits(self.settings.pilot.profile).v_h)
-            .max(0.5);
+        let v_cap = max_speed.min(self.limits_now(now_ms).v_h).max(0.5);
         let to = geo::sub(target, pos_ne);
         let detour = self.plan.state == AvoidState::Detour;
         let vel = match (&goal, detour) {
@@ -79,11 +70,20 @@ impl Pilot {
             None => yaw,
         });
         let ask = geo::add(vel, geo::scale(to, FC_POS_GAIN));
-        let (sp_ne, vel) = match self.goal_brake(pos_ne, ask, v_cap, now_ms) {
-            // At the vehicle's own position the FC's position loop adds
-            // nothing: it flies the braked velocity.
-            Some(v) => (pos_ne, v),
-            None => (target, vel),
+        let braked = self.goal_brake(pos_ne, ask, v_cap, now_ms);
+        let (sp_ne, vel) = if self.nav_cap(now_ms).is_some() {
+            // Capped, a distant position setpoint would let the FC's position
+            // loop pull past the cap, so the capped velocity is flown from the
+            // vehicle's own position.
+            let v = braked.unwrap_or_else(|| geo::clamp_len(ask, v_cap));
+            (pos_ne, self.cap_velocity(v, now_ms))
+        } else {
+            match braked {
+                // At the vehicle's own position the FC's position loop adds
+                // nothing: it flies the braked velocity.
+                Some(v) => (pos_ne, v),
+                None => (target, vel),
+            }
         };
         let sp = [sp_ne[0], sp_ne[1], goal_d];
         self.setpoint = Some(sp);

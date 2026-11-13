@@ -13,6 +13,8 @@ pub const TOPICS: &[&str] = &[
     "plugin.world-engine.scan",
     "plugin.world-engine.occupancy",
     "plugin.world-engine.pose",
+    // vision-nav's active EKF source set: the GNSS-denied speed cap.
+    "nav.state",
 ];
 
 /// The export socket (`ADOS_PLUGIN_HOST_DIR`-aware, like the control front).

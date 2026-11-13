@@ -2,26 +2,15 @@ use super::*;
 use ados_protocol::pilot::Candidates;
 
 fn follow_goal(n: f32, e: f32, subject: V2, radius: f32, angle_deg: f32) -> Goal {
-    Goal {
-        kind: GoalKind::Follow,
-        n,
-        e,
-        d: -4.0,
-        vn: 0.0,
-        ve: 0.0,
-        vd: 0.0,
-        yaw: None,
-        yaw_rate: None,
-        subject_ne: Some(subject),
-        max_speed_mps: 5.0,
-        candidates: Some(Candidates {
-            ring_center_ne: subject,
-            radius_m: radius,
-            angle_deg,
-            angle_span_deg: 90.0,
-        }),
-        margin_m: None,
-    }
+    let mut g = Goal::new(GoalKind::Follow, [n, e, -4.0], 5.0);
+    g.subject_ne = Some(subject);
+    g.candidates = Some(Candidates {
+        ring_center_ne: subject,
+        radius_m: radius,
+        angle_deg,
+        angle_span_deg: 90.0,
+    });
+    g
 }
 
 fn obs_with(points: &[V2], center: V2) -> Obstacles {

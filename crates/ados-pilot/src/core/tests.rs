@@ -3,6 +3,7 @@
 mod handoff;
 mod harness;
 mod mission;
+mod nav_cap;
 mod rules;
 mod safety;
 mod take;

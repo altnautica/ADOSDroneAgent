@@ -125,89 +125,86 @@ impl Pilot {
             .map(|m| (m, "rangefinder"))
             .or_else(|| self.fc.ekf_height(now_ms).map(|m| (m, "home")));
         let fc_linked = self.fc.linked(now_ms);
-        PilotState {
-            owner,
-            owner_label,
-            skill,
-            vehicle_class: self.fc.vehicle_class(),
-            control_mode: self.control_mode(),
-            profile: self.settings.pilot.profile,
-            avoid: self.settings.pilot.avoid,
-            fc_mode: self.fc.custom_mode,
-            fc_mode_name,
-            armed: fc_linked.then_some(self.fc.armed),
-            landed: fc_linked.then(|| self.fc.landed()),
-            vtol_transitioning: fc_linked && self.fc.vtol_transitioning(),
-            input_src: self.sessions.owner.as_ref().map(|o| o.src.clone()),
-            input_age_ms: self
-                .sessions
-                .owner
-                .as_ref()
-                .and(self.failsafe.input_age_ms(now_ms)),
-            hold_reason: self.hold_reason.clone(),
-            avoid_state,
-            min_clearance_m,
-            goal_ned,
-            plan_ned,
-            setpoint_ned: self.setpoint.map(|p| p.map(wire)),
-            readiness,
-            link_loss_in_s,
-            link_loss_action: self.settings.pilot.link_loss_action.as_str().to_owned(),
-            // A mission the pilot paused (a stick takeover, Pause) reads
-            // `paused`; the router sees GUIDED and reports it `loaded`.
-            mission: self.mission.clone().map(|mut m| {
-                if self.mission_paused && !matches!(m.state.as_str(), "complete" | "none") {
-                    m.state = "paused".to_owned();
-                }
-                m
-            }),
-            input_session: self.sessions.owner.clone(),
-            gate: self.sessions.gate(now_ms),
-            sequence: self.launch.as_ref().map(|l| Sequence {
-                step: l.step.as_str().to_owned(),
-                after: l.after.clone(),
-                error: l.error.clone(),
-            }),
-            banner: self.banner.clone().map(|b| ados_protocol::pilot::Banner {
-                until_ms: b.until_ms + self.epoch_offset_ms,
-                ..b
-            }),
-            rth_countdown_s: self
-                .rth_deadline_ms
-                .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0),
-            // The pilot flies a surface's point only while it owns motion; in
-            // `fc_manual` / `elrs` a surface uses the FC's reposition instead.
-            surface_ops: if self.control_mode() == ados_protocol::pilot::ControlMode::Ados {
-                super::actions::SURFACE_OPS
-                    .iter()
-                    .map(|s| (*s).to_owned())
-                    .collect()
-            } else {
-                Vec::new()
-            },
-            agl_m: agl.map(|(m, _)| wire(m)),
-            agl_source: agl.map(|(_, s)| s.to_owned()),
-            statustext: self
-                .fc
-                .statustext
+        let mut s = PilotState::default();
+        s.owner = owner;
+        s.owner_label = owner_label;
+        s.skill = skill;
+        s.vehicle_class = self.fc.vehicle_class();
+        s.control_mode = self.control_mode();
+        s.profile = self.settings.pilot.profile;
+        s.avoid = self.settings.pilot.avoid;
+        s.fc_mode = self.fc.custom_mode;
+        s.fc_mode_name = fc_mode_name;
+        s.armed = fc_linked.then_some(self.fc.armed);
+        s.landed = fc_linked.then(|| self.fc.landed());
+        s.vtol_transitioning = fc_linked && self.fc.vtol_transitioning();
+        s.input_src = self.sessions.owner.as_ref().map(|o| o.src.clone());
+        s.input_age_ms = self
+            .sessions
+            .owner
+            .as_ref()
+            .and(self.failsafe.input_age_ms(now_ms));
+        s.hold_reason = self.hold_reason.clone();
+        s.avoid_state = avoid_state;
+        s.min_clearance_m = min_clearance_m;
+        s.goal_ned = goal_ned;
+        s.plan_ned = plan_ned;
+        s.setpoint_ned = self.setpoint.map(|p| p.map(wire));
+        s.readiness = readiness;
+        s.link_loss_in_s = link_loss_in_s;
+        s.link_loss_action = self.settings.pilot.link_loss_action.as_str().to_owned();
+        // A mission the pilot paused (a stick takeover, Pause) reads
+        // `paused`; the router sees GUIDED and reports it `loaded`.
+        s.mission = self.mission.clone().map(|mut m| {
+            if self.mission_paused && !matches!(m.state.as_str(), "complete" | "none") {
+                m.state = "paused".to_owned();
+            }
+            m
+        });
+        s.input_session = self.sessions.owner.clone();
+        s.gate = self.sessions.gate(now_ms);
+        s.sequence = self.launch.as_ref().map(|l| Sequence {
+            step: l.step.as_str().to_owned(),
+            after: l.after.clone(),
+            error: l.error.clone(),
+        });
+        s.banner = self.banner.clone().map(|b| ados_protocol::pilot::Banner {
+            until_ms: b.until_ms + self.epoch_offset_ms,
+            ..b
+        });
+        s.rth_countdown_s = self
+            .rth_deadline_ms
+            .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0);
+        // The pilot flies a surface's point only while it owns motion; in
+        // `fc_manual` / `elrs` a surface uses the FC's reposition instead.
+        if self.control_mode() == ados_protocol::pilot::ControlMode::Ados {
+            s.surface_ops = super::actions::SURFACE_OPS
                 .iter()
-                .rev()
-                .map(|s| (s, now_ms.saturating_sub(s.at_ms)))
-                .take_while(|(_, age)| *age <= crate::fc::STATUSTEXT_MAX_AGE_MS)
-                .map(|(s, age_ms)| FcStatusText {
-                    severity: s.v.0,
-                    text: s.v.1.clone(),
-                    age_ms,
-                })
-                .collect(),
-            fc_failsafe: self.fc_failsafe,
-            failsafe_cause: self.failsafe_cause.map(str::to_owned),
-            setup_step: if owner == Owner::Tuning {
-                self.setup_step.map(str::to_owned)
-            } else {
-                None
-            },
+                .map(|s| (*s).to_owned())
+                .collect();
         }
+        s.agl_m = agl.map(|(m, _)| wire(m));
+        s.agl_source = agl.map(|(_, s)| s.to_owned());
+        s.statustext = self
+            .fc
+            .statustext
+            .iter()
+            .rev()
+            .map(|s| (s, now_ms.saturating_sub(s.at_ms)))
+            .take_while(|(_, age)| *age <= crate::fc::STATUSTEXT_MAX_AGE_MS)
+            .map(|(s, age_ms)| FcStatusText {
+                severity: s.v.0,
+                text: s.v.1.clone(),
+                age_ms,
+            })
+            .collect();
+        s.fc_failsafe = self.fc_failsafe;
+        s.failsafe_cause = self.failsafe_cause.map(str::to_owned);
+        if owner == Owner::Tuning {
+            s.setup_step = self.setup_step.map(str::to_owned);
+        }
+        s.speed_cap = self.nav_cap(now_ms);
+        s
     }
 
     /// The `obstacles` kind: sectors always; camera grids only for cameras a

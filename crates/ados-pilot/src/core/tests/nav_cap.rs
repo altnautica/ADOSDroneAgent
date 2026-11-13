@@ -1,0 +1,174 @@
+use ados_protocol::mavlink::ardupilotmega::MavMessage;
+use serde_json::json;
+
+use super::harness::World;
+use crate::modes::copter;
+
+const CAP: f32 = 2.0;
+const ACCEL: f32 = 1.5;
+const TICK_S: f32 = 0.02;
+
+fn ext_nav_world() -> World {
+    let mut w = World::new();
+    w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
+    w.p.fc.params.insert("EK3_SRC2_POSXY".into(), 6.0);
+    w.airborne(copter::GUIDED);
+    w
+}
+
+/// vision-nav reports source set 2 (external nav) active.
+fn ext_nav(w: &mut World) {
+    w.p.on_feed("nav.state", &json!({"active_set": 2, "gps_fix": 0}), w.now);
+}
+
+/// Run `ms` with vision-nav reporting external nav every 500 ms.
+fn run_ext_nav(w: &mut World, ms: u64) {
+    for _ in 0..ms / 500 {
+        ext_nav(w);
+        w.run(500);
+    }
+}
+
+/// Run `ms` as `run_ext_nav`, the skill re-sending its goal to 40 m north
+/// each time so its lease stays alive.
+fn fly_goal_ext_nav(w: &mut World, lease_id: u64, ms: u64) {
+    for _ in 0..ms / 500 {
+        ext_nav(w);
+        w.goal(lease_id, 40.0, 0.0);
+        w.run(500);
+    }
+    assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Skill);
+}
+
+/// Horizontal speed of every SET_POSITION_TARGET_LOCAL_NED sent from `from`.
+fn speeds(w: &World, from: usize) -> Vec<f32> {
+    w.sent[from..]
+        .iter()
+        .filter_map(|m| match m {
+            MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) => Some(s.vx.hypot(s.vy)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Horizontal distance the FC's position loop adds: the setpoint position
+/// away from the vehicle.
+fn pos_pull(w: &World) -> f32 {
+    let sp = w.last_setpoint().unwrap();
+    if sp.type_mask.bits() == crate::fc::MASK_VELOCITY {
+        return 0.0;
+    }
+    (sp.x - w.pos[0]).hypot(sp.y - w.pos[1])
+}
+
+#[test]
+fn the_harness_flies_uncapped_with_its_3d_fix() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    assert!(w.p.nav_cap(w.now).is_none());
+}
+
+#[test]
+fn goal_speed_is_capped_while_the_active_source_is_external_nav() {
+    let mut w = ext_nav_world();
+    ext_nav(&mut w);
+    let id = w.lease();
+    w.goal(id, 40.0, 0.0); // the harness goal asks 5 m/s
+    let from = w.sent.len();
+    fly_goal_ext_nav(&mut w, id, 3000);
+    for v in speeds(&w, from) {
+        assert!(v <= CAP + 1e-3, "{v} m/s");
+    }
+    assert!(pos_pull(&w) < 1e-3, "position pull {} m", pos_pull(&w));
+    let cap = w.p.nav_cap(w.now).unwrap();
+    assert_eq!(cap.reason, "gnss-denied");
+    assert_eq!(cap.v_h_mps, CAP);
+    assert_eq!(w.p.state(w.now).speed_cap, Some(cap));
+}
+
+#[test]
+fn capped_goal_velocity_changes_no_faster_than_the_accel_cap() {
+    let mut w = ext_nav_world();
+    ext_nav(&mut w);
+    let id = w.lease();
+    w.goal(id, 40.0, 0.0);
+    let from = w.sent.len();
+    fly_goal_ext_nav(&mut w, id, 3000);
+    let v = speeds(&w, from);
+    assert!(v.len() > 100);
+    let mut prev = 0.0;
+    for s in v {
+        assert!(s - prev <= ACCEL * TICK_S + 1e-3, "{prev} -> {s}");
+        prev = s;
+    }
+    assert!((prev - CAP).abs() < 1e-3, "settles at the cap, not {prev}");
+}
+
+#[test]
+fn gps_source_is_not_capped() {
+    let mut w = ext_nav_world();
+    w.p.on_feed("nav.state", &json!({"active_set": 1, "gps_fix": 3}), w.now);
+    assert!(w.p.nav_cap(w.now).is_none());
+    assert!(w.p.state(w.now).speed_cap.is_none());
+}
+
+#[test]
+fn a_stale_nav_state_falls_back_to_the_gps_fix() {
+    let mut w = ext_nav_world();
+    ext_nav(&mut w);
+    w.run(5000);
+    // The harness keeps feeding a 3-D fix.
+    assert!(w.p.nav_cap(w.now).is_none());
+}
+
+#[test]
+fn no_nav_state_and_no_3d_fix_fails_closed_to_the_cap() {
+    let mut w = World::new();
+    w.gps_fix = None;
+    w.airborne(copter::GUIDED);
+    w.run(3100); // the fix World::new fed goes stale
+    assert_eq!(w.p.nav_cap(w.now).unwrap().reason, "gnss-denied");
+    let mut w = World::new();
+    w.gps_fix = Some(2);
+    w.airborne(copter::GUIDED);
+    assert!(w.p.nav_cap(w.now).is_some());
+}
+
+#[test]
+fn gotos_are_capped_too() {
+    let mut w = ext_nav_world();
+    ext_nav(&mut w);
+    w.action("take_control");
+    w.req(ados_protocol::pilot::Request::Goto {
+        n: 40.0,
+        e: 0.0,
+        d: -4.0,
+        yaw: None,
+    });
+    let from = w.sent.len();
+    run_ext_nav(&mut w, 3000);
+    let v = speeds(&w, from);
+    assert!(!v.is_empty());
+    for s in v {
+        assert!(s <= CAP + 1e-3, "{s} m/s");
+    }
+    assert!(pos_pull(&w) < 1e-3);
+}
+
+#[test]
+fn stick_flight_is_capped_too() {
+    let mut w = ext_nav_world();
+    ext_nav(&mut w);
+    w.action("take_control");
+    w.stick([0.0; 4], 600); // pass the gate
+    let from = w.sent.len();
+    for _ in 0..8 {
+        ext_nav(&mut w);
+        w.stick([0.0, 1.0, 0.0, 0.0], 500);
+    }
+    let v = speeds(&w, from);
+    assert!(v.iter().any(|s| *s > 1.0), "sticks fly: {v:?}");
+    for s in v {
+        assert!(s <= CAP + 1e-3, "{s} m/s");
+    }
+}

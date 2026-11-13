@@ -294,21 +294,10 @@ fn centred_sticks_hold_after_settling_even_in_a_drift() {
 
 /// A follow skill's position goal with its feed-forward.
 fn follow_goal(ned: [f32; 3], vel_ne: [f32; 2]) -> Goal {
-    Goal {
-        kind: GoalKind::Position,
-        n: ned[0],
-        e: ned[1],
-        d: ned[2],
-        vn: vel_ne[0],
-        ve: vel_ne[1],
-        vd: 0.0,
-        yaw: None,
-        yaw_rate: None,
-        subject_ne: None,
-        max_speed_mps: 6.0,
-        candidates: None,
-        margin_m: None,
-    }
+    let mut g = Goal::new(GoalKind::Position, ned, 6.0);
+    g.vn = vel_ne[0];
+    g.ve = vel_ne[1];
+    g
 }
 
 /// What the FC asks of its velocity loop for a setpoint, at `pos`: the

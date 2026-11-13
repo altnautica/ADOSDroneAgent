@@ -2297,6 +2297,20 @@
           "title": "Avoid",
           "type": "string"
         },
+        "gnss_denied_max_accel_mps2": {
+          "default": 1.5,
+          "maximum": 6.0,
+          "minimum": 0.5,
+          "title": "Gnss Denied Max Accel Mps2",
+          "type": "number"
+        },
+        "gnss_denied_max_speed_mps": {
+          "default": 2.0,
+          "maximum": 15.0,
+          "minimum": 0.5,
+          "title": "Gnss Denied Max Speed Mps",
+          "type": "number"
+        },
         "height_ref": {
           "default": "agl",
           "enum": [

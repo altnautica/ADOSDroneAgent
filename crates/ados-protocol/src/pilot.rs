@@ -38,6 +38,7 @@ pub const CLIENT_MODE_TOPIC: &str = "client.mode";
 
 /// One goal from a skill holding the motion lease.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Goal {
     /// `follow`, `orbit` or `position`.
     pub kind: GoalKind,
@@ -68,8 +69,32 @@ pub struct Goal {
     pub margin_m: Option<f32>,
 }
 
+impl Goal {
+    /// A goal toward `[n, e, d]` at up to `max_speed_mps`, with no
+    /// feed-forward, heading, subject, candidates or own margin. Set the
+    /// other fields on the returned value.
+    pub fn new(kind: GoalKind, ned: [f32; 3], max_speed_mps: f32) -> Self {
+        Self {
+            kind,
+            n: ned[0],
+            e: ned[1],
+            d: ned[2],
+            vn: 0.0,
+            ve: 0.0,
+            vd: 0.0,
+            yaw: None,
+            yaw_rate: None,
+            subject_ne: None,
+            max_speed_mps,
+            candidates: None,
+            margin_m: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum GoalKind {
     Follow,
     Orbit,

@@ -6,6 +6,7 @@
 mod actions;
 mod control;
 mod events;
+mod nav_cap;
 mod operator;
 mod state;
 mod take;
@@ -131,6 +132,12 @@ pub struct Pilot {
     params_ms: u64,
     setpoint: Option<[f32; 3]>,
     plan_hold: Option<[f32; 3]>,
+    /// vision-nav's last `nav.state`: the EKF source set it reports active
+    /// (`None`: it named none) and when it came.
+    nav_state: Option<(Option<u8>, u64)>,
+    /// The last capped horizontal velocity setpoint and its time
+    /// ([`nav_cap`]).
+    cap_vel: Option<(V2, u64)>,
     last_tick_ms: Option<u64>,
     controller_lost_shown: bool,
     /// Setup engine verdict: `None` unknown (no item), `Some(None)` complete,
@@ -186,6 +193,8 @@ impl Pilot {
             params_ms: 0,
             setpoint: None,
             plan_hold: None,
+            nav_state: None,
+            cap_vel: None,
             last_tick_ms: None,
             controller_lost_shown: false,
             setup_needed: None,

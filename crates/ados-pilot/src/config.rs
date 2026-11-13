@@ -70,6 +70,11 @@ pub struct PilotSection {
     pub min_agl_fw_m: f32,
     pub link_loss_s: u32,
     pub link_loss_action: LinkLossAction,
+    /// Horizontal speed cap (m/s) while the EKF's horizontal position does
+    /// not come from GNSS.
+    pub gnss_denied_max_speed_mps: f32,
+    /// Horizontal acceleration cap (m/s²) under the same condition.
+    pub gnss_denied_max_accel_mps2: f32,
 }
 
 impl Default for PilotSection {
@@ -84,6 +89,8 @@ impl Default for PilotSection {
             min_agl_fw_m: 30.0,
             link_loss_s: 10,
             link_loss_action: LinkLossAction::Rth,
+            gnss_denied_max_speed_mps: 2.0,
+            gnss_denied_max_accel_mps2: 1.5,
         }
     }
 }

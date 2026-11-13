@@ -19,6 +19,9 @@ pub struct World {
     pub roll: f32,
     pub pitch: f32,
     pub agl: Option<f32>,
+    /// GPS_RAW_INT `fix_type` the scripted FC reports (`None`: no GPS
+    /// message). A 3-D fix by default, so flight is not speed-capped.
+    pub gps_fix: Option<u8>,
     pub landed: bool,
     pub sent: Vec<MavMessage>,
     pub revoked: Vec<(u64, String)>,
@@ -65,6 +68,7 @@ impl World {
             agl: Some(0.1),
             landed: true,
             sent: Vec::new(),
+            gps_fix: Some(3),
             revoked: Vec::new(),
             mavtype: MavType::MAV_TYPE_QUADROTOR,
             unarmable: Vec::new(),
@@ -139,6 +143,19 @@ impl World {
                 id: 0,
                 orientation: MavSensorOrientation::MAV_SENSOR_ROTATION_PITCH_270,
                 covariance: 0,
+            });
+            self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
+        }
+        if let Some(fix) = self.gps_fix {
+            let fix_type = match fix {
+                0 => GpsFixType::GPS_FIX_TYPE_NO_GPS,
+                1 => GpsFixType::GPS_FIX_TYPE_NO_FIX,
+                2 => GpsFixType::GPS_FIX_TYPE_2D_FIX,
+                _ => GpsFixType::GPS_FIX_TYPE_3D_FIX,
+            };
+            let m = MavMessage::GPS_RAW_INT(GPS_RAW_INT_DATA {
+                fix_type,
+                ..Default::default()
             });
             self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
         }
@@ -341,21 +358,7 @@ impl World {
     }
 
     pub fn goal(&mut self, lease_id: u64, n: f32, e: f32) {
-        let goal = Goal {
-            kind: GoalKind::Position,
-            n,
-            e,
-            d: -5.0,
-            vn: 0.0,
-            ve: 0.0,
-            vd: 0.0,
-            yaw: None,
-            yaw_rate: None,
-            subject_ne: None,
-            max_speed_mps: 5.0,
-            candidates: None,
-            margin_m: None,
-        };
+        let goal = Goal::new(GoalKind::Position, [n, e, -5.0], 5.0);
         self.req(Request::Goal { lease_id, goal });
     }
 

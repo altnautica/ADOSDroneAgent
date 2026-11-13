@@ -10,7 +10,7 @@ use super::{Out, Pilot, PLAN_PERIOD_MS, STICKS_PERIOD_MS};
 use crate::fc::{heartbeat, MASK_POS_VEL_YAW, MASK_VELOCITY};
 use crate::flows::banner;
 use crate::geo::{self, V2};
-use crate::model::{limits, Command, StickIn};
+use crate::model::{Command, StickIn};
 use crate::planner;
 
 mod brake;
@@ -255,20 +255,8 @@ impl Pilot {
         let margin = self.margin();
         let goal = match self.owner() {
             Owner::Skill => self.auth.lease().and_then(|l| l.goal.clone()),
-            Owner::Goto => self.goto.map(|g| ados_protocol::pilot::Goal {
-                kind: GoalKind::Position,
-                n: g[0],
-                e: g[1],
-                d: g[2],
-                vn: 0.0,
-                ve: 0.0,
-                vd: 0.0,
-                yaw: None,
-                yaw_rate: None,
-                subject_ne: None,
-                max_speed_mps: limits(self.settings.pilot.profile).v_h,
-                candidates: None,
-                margin_m: None,
+            Owner::Goto => self.goto.map(|g| {
+                ados_protocol::pilot::Goal::new(GoalKind::Position, g, self.limits_now(now_ms).v_h)
             }),
             _ => None,
         };
@@ -324,6 +312,7 @@ impl Pilot {
             Owner::Swarm => match self.swarm {
                 Some(g) if now_ms.saturating_sub(g.at_ms) <= SWARM_STALE_MS => {
                     let v = self.brake_limit(pos, [g.vel[0], g.vel[1]], now_ms);
+                    let v = self.cap_velocity(v, now_ms);
                     let m = self.tx().setpoint(
                         MASK_VELOCITY,
                         [0.0; 3],
@@ -340,7 +329,7 @@ impl Pilot {
     }
 
     fn fly_sticks(&mut self, axes: [f32; 4], pos: [f32; 3], yaw: f32, dt: f32, now_ms: u64) {
-        let lim = limits(self.settings.pilot.profile);
+        let lim = self.limits_now(now_ms);
         let agl = self.agl(now_ms);
         let mut axes = axes;
         if self.landing {
@@ -449,7 +438,7 @@ impl Pilot {
         if self.settings.pilot.avoid == AvoidMode::Off {
             return v;
         }
-        let lim = limits(self.settings.pilot.profile);
+        let lim = self.limits_now(now_ms);
         let vel = self
             .fc
             .fresh_local(now_ms)
@@ -478,7 +467,7 @@ impl Pilot {
         if self.settings.pilot.avoid == AvoidMode::Off {
             return None;
         }
-        let a_h = limits(self.settings.pilot.profile).a_h;
+        let a_h = self.limits_now(now_ms).a_h;
         let margin = self.margin();
         let vel = self
             .fc

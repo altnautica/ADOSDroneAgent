@@ -3,9 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Who currently commands motion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Owner {
+    #[default]
     Idle,
     Pilot,
     Skill,
@@ -163,8 +164,29 @@ pub struct FcStatusText {
     pub age_ms: u64,
 }
 
-/// The nav-stream `pilot` kind with the handover, launch and banner fields.
+/// A horizontal speed cap the pilot enforces on every setpoint it flies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SpeedCap {
+    /// Why: `gnss-denied` while the EKF's horizontal position does not come
+    /// from GNSS.
+    pub reason: String,
+    /// The horizontal speed limit in m/s.
+    pub v_h_mps: f32,
+}
+
+impl SpeedCap {
+    pub fn new(reason: impl Into<String>, v_h_mps: f32) -> Self {
+        Self {
+            reason: reason.into(),
+            v_h_mps,
+        }
+    }
+}
+
+/// The nav-stream `pilot` kind with the handover, launch and banner fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PilotState {
     pub owner: Owner,
     pub owner_label: String,
@@ -228,6 +250,9 @@ pub struct PilotState {
     /// while the owner is `tuning`; `None` otherwise.
     #[serde(default)]
     pub setup_step: Option<String>,
+    /// The horizontal speed cap in force, omitted while there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_cap: Option<SpeedCap>,
 }
 
 /// One camera's obstacle (or depth) grid: 32×18 cells, row-major, row 0 at

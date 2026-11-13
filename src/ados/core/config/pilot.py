@@ -40,3 +40,7 @@ class PilotConfig(BaseModel):
     min_agl_fw_m: float = Field(default=30.0, ge=10.0, le=300.0)
     link_loss_s: int = Field(default=10, ge=3, le=120)
     link_loss_action: Literal["rth", "hold", "land"] = "rth"
+    # Horizontal speed (m/s) and acceleration (m/s^2) caps the pilot applies to
+    # every setpoint it flies while the EKF's horizontal position is not GNSS.
+    gnss_denied_max_speed_mps: float = Field(default=2.0, ge=0.5, le=15.0)
+    gnss_denied_max_accel_mps2: float = Field(default=1.5, ge=0.5, le=6.0)

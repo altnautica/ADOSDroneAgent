@@ -202,3 +202,18 @@ fn the_registry_version_records_the_nullable_fc_state() {
         meta.description
     );
 }
+
+#[test]
+fn speed_cap_is_omitted_until_set() {
+    let mut s = crate::pilot::PilotState::default();
+    let v = serde_json::to_value(&s).unwrap();
+    assert!(v.get("speed_cap").is_none(), "{v}");
+    s.speed_cap = Some(crate::pilot::SpeedCap::new("gnss-denied", 2.0));
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(
+        v["speed_cap"],
+        serde_json::json!({"reason": "gnss-denied", "v_h_mps": 2.0})
+    );
+    let back: crate::pilot::PilotState = serde_json::from_value(v).unwrap();
+    assert_eq!(back, s);
+}
