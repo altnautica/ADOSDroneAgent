@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.129] - 2026-11-13
+
+### Fixed
+
+- ADOS Pilot: when Take control is refused (the FC did not answer within 2.5 s, refused GUIDED, or another action answered it `busy`) and the FC still enters GUIDED shortly after, that GUIDED is handled like any GUIDED the pilot did not ask for: under `ados` control the pilot adopts it and flies, otherwise the owner is the FC. Before, the pilot counted it as its own request and did nothing, so the vehicle held in GUIDED with no owner change and no setpoints.
+
 ## [0.109.128] - 2026-11-13
 
 ### Fixed

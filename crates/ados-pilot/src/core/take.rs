@@ -160,8 +160,18 @@ impl Pilot {
             .map(|s| s.v.1.clone())
     }
 
+    /// A refusal also gives up the pilot's claim on its GUIDED request: should
+    /// the FC still enter GUIDED, the pilot handles it like any GUIDED it did
+    /// not ask for (adopted under `ados`, else the FC's), instead of counting
+    /// it as a request nobody now stands behind.
     fn answer_take(&mut self, verdict: Result<(), String>) {
-        let Some((token, mut result)) = self.take.pending.take().and_then(|p| p.reply) else {
+        let Some(p) = self.take.pending.take() else {
+            return;
+        };
+        if verdict.is_err() && self.own_mode == Some((self.family().guided(), p.sent_ms)) {
+            self.own_mode = None;
+        }
+        let Some((token, mut result)) = p.reply else {
             return;
         };
         result.ok = verdict.is_ok();

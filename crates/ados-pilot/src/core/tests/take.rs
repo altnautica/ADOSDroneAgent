@@ -198,6 +198,25 @@ fn rth_while_the_fc_answers_ends_the_take_control_busy() {
     assert_eq!(w.p.owner(), Owner::FcMode);
 }
 
+/// The FC enters GUIDED just after Take control was refused: the pilot
+/// handles it like any GUIDED it did not ask for, so the vehicle is never
+/// left in GUIDED with nobody flying it.
+#[test]
+fn a_guided_after_the_refusal_is_not_left_unflown() {
+    let mut w = failsafe_landing();
+    w.refuse_mode = Some((copter::GUIDED, MavResult::MAV_RESULT_FAILED, None));
+    let t = take_now(&mut w);
+    w.run(2600);
+    assert_eq!(answered(&w, t), Some((false, Some("fc_no_answer"))));
+    assert_eq!(w.p.owner(), Owner::FcMode);
+    w.refuse_mode = None;
+    w.mode = copter::GUIDED;
+    w.run(200);
+    assert_eq!(w.p.owner(), Owner::Pilot, "the late GUIDED is adopted");
+    assert_eq!(w.p.state(w.now).owner, Owner::Pilot);
+    assert!(setpoints(&w) > 0);
+}
+
 #[test]
 fn in_guided_already_take_control_answers_at_once() {
     let mut w = World::new();
