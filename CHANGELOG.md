@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.118] - 2026-11-13
+
+### Fixed
+
+- HDMI kiosk: under `resolution: auto` a 2160-tall ultrawide (5120x2160 21:9, 7680x2160 32:9) keeps its native mode. 0.109.117 still stepped it down to 16:9 1080p; only a panel whose largest mode is 4K and no wider than 2:1 (16:9, or a TV that also lists 17:9 4096x2160) steps down now.
+
 ## [0.109.117] - 2026-11-13
 
 ### Fixed

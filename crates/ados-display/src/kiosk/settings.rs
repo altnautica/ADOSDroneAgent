@@ -38,11 +38,11 @@ pub fn load_config(path: &Path) -> Result<Value, String> {
 }
 
 /// The `auto` resolution: each output keeps the compositor's choice unless
-/// it is wider than [`TV_MODE`] and offers it (see
+/// it is a 4K panel that offers [`TV_MODE`] (see
 /// `compositor::mode_for_output`).
 pub const AUTO_MODE: &str = "auto";
-/// The mode `auto` steps a wider panel (a 4K TV) down to, so the cockpit's
-/// TV scale reads at the size it was laid out for instead of a quarter of it.
+/// The mode `auto` steps a 4K panel (a 4K TV) down to, so the cockpit's TV
+/// scale reads at the size it was laid out for instead of a quarter of it.
 pub const TV_MODE: &str = "1920x1080";
 
 /// `ground_station.kiosk.resolution` → the mode set on the connected outputs

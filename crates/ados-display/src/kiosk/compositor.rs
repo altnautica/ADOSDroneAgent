@@ -97,17 +97,20 @@ const UHD_MIN: (u32, u32) = (3840, 2160);
 
 /// The mode to set on one output that advertises `modes`, or `None` to keep
 /// the one cage picked. A preset applies when the output offers it. Under
-/// [`AUTO_MODE`] a 4K panel (a mode at least [`UHD_MIN`]) that offers
-/// [`TV_MODE`] steps down to it; any other panel, QHD and ultrawide included,
-/// keeps its preferred mode.
+/// [`AUTO_MODE`] a 4K panel that offers [`TV_MODE`] steps down to it: its
+/// largest mode is at least [`UHD_MIN`] and no wider than 2:1 (16:9, or the
+/// 17:9 4096x2160 many TVs also list). Any other panel keeps its preferred
+/// mode, QHD and ultrawide included (5120x2160 21:9, 7680x2160 32:9).
 pub fn mode_for_output(requested: &str, modes: &BTreeSet<String>) -> Option<String> {
     if requested != AUTO_MODE {
         return modes.contains(requested).then(|| requested.to_string());
     }
-    let uhd = modes
+    let largest = modes
         .iter()
         .filter_map(|m| mode_size(m))
-        .any(|(w, h)| w >= UHD_MIN.0 && h >= UHD_MIN.1);
+        .max_by_key(|&(w, h)| (u64::from(w) * u64::from(h), w));
+    let uhd = largest
+        .is_some_and(|(w, h)| w >= UHD_MIN.0 && h >= UHD_MIN.1 && u64::from(w) <= 2 * u64::from(h));
     (uhd && modes.contains(TV_MODE)).then(|| TV_MODE.to_string())
 }
 

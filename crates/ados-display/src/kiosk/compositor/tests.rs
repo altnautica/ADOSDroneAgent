@@ -88,12 +88,26 @@ fn auto_steps_a_4k_panel_down_to_1080p_and_leaves_smaller_panels_alone() {
     assert_eq!(mode_for_output(AUTO_MODE, &modes(&["1280x800"])), None);
     // A wide panel without a 1080p mode keeps its own.
     assert_eq!(mode_for_output(AUTO_MODE, &modes(&["3840x2160"])), None);
-    // QHD and ultrawide panels are not 4K: they keep their native mode.
+    // A 4K TV that also lists the 17:9 DCI mode or 8K still steps down.
+    for panel in [
+        &["4096x2160", "3840x2160", "1920x1080"][..],
+        &["7680x4320", "3840x2160", "1920x1080"][..],
+    ] {
+        assert_eq!(
+            mode_for_output(AUTO_MODE, &modes(panel)).as_deref(),
+            Some("1920x1080"),
+            "{panel:?}"
+        );
+    }
+    // QHD and ultrawide panels are not 4K: they keep their native mode, a
+    // 2160-tall 21:9 or 32:9 panel too, even when it also lists 3840x2160.
     for panel in [
         &["2560x1440", "1920x1080"][..],
         &["2560x1080", "1920x1080"][..],
         &["3440x1440", "1920x1080"][..],
         &["5120x1440", "1920x1080"][..],
+        &["5120x2160", "3840x2160", "1920x1080"][..],
+        &["7680x2160", "3840x2160", "1920x1080"][..],
     ] {
         assert_eq!(mode_for_output(AUTO_MODE, &modes(panel)), None, "{panel:?}");
     }
