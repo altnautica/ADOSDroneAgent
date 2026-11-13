@@ -10,6 +10,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - Pilot: while the flight controller's EKF takes its horizontal position from something other than GNSS, every setpoint the pilot flies (skill goals, gotos, stick flight and swarm velocity) is held to `pilot.gnss_denied_max_speed_mps` (2.0 m/s) and `pilot.gnss_denied_max_accel_mps2` (1.5 m/s²). The active source set comes from vision-nav's `nav.state` and the FC's `EK3_SRCn_POSXY` parameters; without a fresh `nav.state` only a 3-D GPS fix counts as GNSS, so the cap fails closed. Capped goal setpoints are flown as a rate-limited velocity from the vehicle's own position, so the FC's position loop cannot pull past the cap. The pilot kind carries `speed_cap {reason: "gnss-denied", v_h_mps}` while the cap is in force.
 - Protocol: `PilotState`, `SpeedCap`, `Goal` and `GoalKind` are `#[non_exhaustive]`; build a goal with `Goal::new` and a cap with `SpeedCap::new`.
+- Pilot: skill goals and gotos obey the geofence and the altitude limits, as stick flight already did. A target past `pilot.max_dist_m` from home is flown to the fence circle and the outward velocity is removed at the fence; the setpoint height is held between the 0.5 m floor and `pilot.max_alt_agl_m` above ground, and a vertical feed-forward pushing past either bound is dropped.
 
 ## [0.109.134] - 2026-11-14
 

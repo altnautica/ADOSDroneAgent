@@ -816,3 +816,86 @@ fn fc_warnings_reach_the_pilot_kind_newest_first_and_age_out() {
     assert_eq!(s.statustext.len(), crate::fc::STATUSTEXT_RING);
     assert_eq!(s.statustext[0].text, "e19");
 }
+
+#[test]
+fn skill_goal_stops_at_the_geofence() {
+    let mut w = World::new();
+    w.p.settings.pilot.max_dist_m = 20.0;
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    w.pos = [19.9, 0.0, -4.0];
+    // A goal past the fence, with a feed-forward carrying the vehicle out.
+    let mut goal = ados_protocol::pilot::Goal::new(
+        ados_protocol::pilot::GoalKind::Position,
+        [60.0, 0.0, -4.0],
+        5.0,
+    );
+    goal.vn = 3.0;
+    for _ in 0..4 {
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: goal.clone(),
+        });
+        w.run(100);
+        if w.pos[0] < 20.0 {
+            w.pos[0] = 20.0; // the FC's lag carries it onto the fence
+        }
+    }
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.vx <= 1e-3, "outward velocity {}", sp.vx);
+    assert!(
+        sp.x <= 20.0 + 1e-3,
+        "position setpoint {} past the fence",
+        sp.x
+    );
+}
+
+#[test]
+fn goto_stops_at_the_geofence() {
+    let mut w = World::new();
+    w.p.settings.pilot.max_dist_m = 20.0;
+    w.airborne(copter::GUIDED);
+    w.action("take_control");
+    w.pos = [20.0, 0.0, -5.0];
+    w.req(Request::Goto {
+        n: 60.0,
+        e: 0.0,
+        d: -5.0,
+        yaw: None,
+    });
+    w.run(400);
+    assert_eq!(w.p.owner(), Owner::Goto);
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.vx <= 1e-3, "outward velocity {}", sp.vx);
+    assert!(
+        sp.x <= 20.0 + 1e-3,
+        "position setpoint {} past the fence",
+        sp.x
+    );
+}
+
+#[test]
+fn skill_goal_altitude_is_held_under_the_ceiling() {
+    let mut w = World::new();
+    w.p.settings.pilot.max_alt_agl_m = 6.0;
+    w.airborne(copter::GUIDED);
+    // Ground 4 m below the vehicle at d = -5 (rising terrain, inside the
+    // rangefinder's height-reference band): the ceiling is at d = -7.
+    w.agl = Some(4.0);
+    let id = w.lease();
+    w.goal_d(id, 0.0, 0.0, -30.0); // asks 30 m up
+    w.run(400);
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.z >= -7.0 - 1e-3, "d {} above the 6 m ceiling", sp.z);
+}
+
+#[test]
+fn skill_goal_altitude_is_held_over_the_floor() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED); // d = -5, 5 m above the ground
+    let id = w.lease();
+    w.goal_d(id, 0.0, 0.0, 3.0); // asks for a point under the ground
+    w.run(400);
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.z <= -0.5 + 1e-3, "d {} under the floor", sp.z);
+}

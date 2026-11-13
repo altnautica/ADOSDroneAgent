@@ -362,6 +362,12 @@ impl World {
         self.req(Request::Goal { lease_id, goal });
     }
 
+    /// A position goal to `[n, e, d]` (the harness's 5 m/s).
+    pub fn goal_d(&mut self, lease_id: u64, n: f32, e: f32, d: f32) {
+        let goal = Goal::new(GoalKind::Position, [n, e, d], 5.0);
+        self.req(Request::Goal { lease_id, goal });
+    }
+
     pub fn last_setpoint(&self) -> Option<&SET_POSITION_TARGET_LOCAL_NED_DATA> {
         self.sent.iter().rev().find_map(|m| match m {
             MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) => Some(s),

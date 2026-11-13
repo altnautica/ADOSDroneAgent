@@ -1,12 +1,15 @@
 //! Planner-driven flight: the setpoint for a skill goal or a goto, braked
-//! the same way stick flight is.
+//! the same way stick flight is, and held inside the geofence and the
+//! altitude limits.
 
 use ados_protocol::pilot::{AvoidMode, AvoidState, Owner};
 
-use super::{FC_POS_GAIN, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_OBSTACLE_CLOSE};
+use super::{
+    geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_OBSTACLE_CLOSE,
+};
 use crate::core::Pilot;
 use crate::fc::MASK_POS_VEL_YAW;
-use crate::geo;
+use crate::geo::{self, V2};
 
 impl Pilot {
     pub(super) fn fly_plan(&mut self, pos: [f32; 3], yaw: f32, now_ms: u64) {
@@ -71,26 +74,72 @@ impl Pilot {
         });
         let ask = geo::add(vel, geo::scale(to, FC_POS_GAIN));
         let braked = self.goal_brake(pos_ne, ask, v_cap, now_ms);
+        let home = self.fc.home_ne();
+        let max_dist = self.settings.pilot.max_dist_m;
+        let fence = |v: V2| geofence(pos_ne, home, max_dist, v);
         let (sp_ne, vel) = if self.nav_cap(now_ms).is_some() {
             // Capped, a distant position setpoint would let the FC's position
             // loop pull past the cap, so the capped velocity is flown from the
             // vehicle's own position.
-            let v = braked.unwrap_or_else(|| geo::clamp_len(ask, v_cap));
+            let v = fence(braked.unwrap_or_else(|| geo::clamp_len(ask, v_cap)));
             (pos_ne, self.cap_velocity(v, now_ms))
         } else {
             match braked {
                 // At the vehicle's own position the FC's position loop adds
                 // nothing: it flies the braked velocity.
-                Some(v) => (pos_ne, v),
-                None => (target, vel),
+                Some(v) => (pos_ne, fence(v)),
+                None => (inside_fence(target, home, max_dist), fence(vel)),
             }
         };
+        let (goal_d, vd) = clamp_d(
+            goal_d,
+            goal.as_ref().map_or(0.0, |g| g.vd),
+            pos[2],
+            self.agl(now_ms),
+            FLOOR_AGL_M,
+            self.settings.pilot.max_alt_agl_m,
+        );
         let sp = [sp_ne[0], sp_ne[1], goal_d];
         self.setpoint = Some(sp);
-        let vd = goal.as_ref().map_or(0.0, |g| g.vd);
         let m = self
             .tx()
             .setpoint(MASK_POS_VEL_YAW, sp, [vel[0], vel[1], vd], yaw_cmd, 0.0);
         self.mav(m);
     }
+}
+
+/// `p`, or the point on the geofence circle toward it when it lies outside.
+fn inside_fence(p: V2, home: V2, max_dist: f32) -> V2 {
+    let rel = geo::sub(p, home);
+    let d = geo::norm(rel);
+    if d <= max_dist {
+        return p;
+    }
+    geo::add(home, geo::scale(rel, max_dist / d))
+}
+
+/// The setpoint down position and down velocity held to an AGL within
+/// `[floor, ceil]`, from the vehicle's `d_now` and its height above ground.
+/// A down velocity pushing past a bound it is held at is dropped. Without a
+/// height above ground both pass through.
+fn clamp_d(
+    goal_d: f32,
+    vd: f32,
+    d_now: f32,
+    agl: Option<f32>,
+    floor: f32,
+    ceil: f32,
+) -> (f32, f32) {
+    let Some(a) = agl else {
+        return (goal_d, vd);
+    };
+    let ground_d = d_now + a; // NED: the ground is below
+    let (top, bottom) = (ground_d - ceil, ground_d - floor);
+    let d = goal_d.clamp(top.min(bottom), bottom);
+    let vd = if (d <= top && vd < 0.0) || (d >= bottom && vd > 0.0) {
+        0.0
+    } else {
+        vd
+    };
+    (d, vd)
 }
