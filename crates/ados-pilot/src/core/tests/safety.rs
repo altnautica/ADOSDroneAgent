@@ -316,6 +316,223 @@ fn a_new_nearest_surface_is_not_a_closing_speed() {
     assert!(b.v[0] > 0.9, "a hover braked by a new surface: {:?}", b.v);
 }
 
+/// Body bearings 30-50° and 310-330° (two crowns at ±40° off the nose), each
+/// beam's range from `crown(beam)`; nothing elsewhere.
+fn crowns_scan(crown: impl Fn(usize) -> f32) -> Value {
+    let ranges: Vec<f32> = (0..360)
+        .map(|i| {
+            if (30..=50).contains(&i) || (310..=330).contains(&i) {
+                crown(i)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    json!({"frame": "body_frd", "angle_start_rad": 0.0,
+           "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
+}
+
+/// What the brake leaves of 6 m/s straight ahead for a vehicle hovering
+/// through 20 scans at 10 Hz, scan `k`'s beam `i` at `crown(k, i)`.
+fn hover_ask_after(crown: impl Fn(u64, usize) -> f32) -> Braked {
+    let level = Level {
+        roll: 0.0,
+        pitch: 0.0,
+        yaw: 0.0,
+        agl: Some(4.0),
+    };
+    let mut o = Obstacles::new();
+    for k in 0..20u64 {
+        o.ingest_scan(
+            &crowns_scan(|i| crown(k, i)),
+            level,
+            [0.0, 0.0],
+            1000 + 100 * k,
+        );
+    }
+    brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [6.0, 0.0], 3.0, 1.5, 2900)
+}
+
+#[test]
+fn jittering_leaf_returns_are_not_a_closing_obstacle() {
+    // Leaf returns inside a crown (a beam grazing a trunk's edge, rain, dust)
+    // land at a random depth every scan: a hovering vehicle closes on none of
+    // them. Each scan draws every crown beam somewhere in 2.0-2.6 m; the goal
+    // ahead must be braked no harder than for the same crowns seen steadily at
+    // their nearest range.
+    let jitter = |k: u64, i: usize| {
+        let h = (k.wrapping_mul(2_654_435_761) ^ (i as u64).wrapping_mul(40_503)) % 1000;
+        2.0 + 0.6 * h as f32 / 1000.0
+    };
+    let steady = hover_ask_after(|_, _| 2.0).v[0];
+    let leafy = hover_ask_after(jitter).v[0];
+    assert!(
+        steady > 0.3,
+        "steady crowns at 2 m leave the open nose flyable"
+    );
+    assert!(
+        leafy >= 0.9 * steady,
+        "jittering returns braked the goal to {leafy:.2} m/s, steady ones at their nearest range to {steady:.2}"
+    );
+}
+
+/// The first two numbers of a JSON array.
+fn v2_of(v: &Value) -> [f32; 2] {
+    let v = f32s(v);
+    [v[0], v[1]]
+}
+
+/// Ingest one recorded frame's scan into `o` as the pilot does (levelled with
+/// the frame's attitude and AGL, at its position) and rebuild the grid there.
+/// Returns the position, the ask and the time.
+fn ingest_frame(o: &mut Obstacles, f: &Value) -> ([f32; 2], [f32; 2], u64) {
+    let num = |k: &str| f[k].as_f64().unwrap() as f32;
+    let pos = v2_of(&f["pos_ne"]);
+    let now = 1000 + f["t_ms"].as_u64().unwrap();
+    let level = Level {
+        roll: num("roll"),
+        pitch: num("pitch"),
+        yaw: num("yaw"),
+        agl: Some(num("agl_m")),
+    };
+    let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
+                      "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
+    o.ingest_scan(&scan, level, pos, now);
+    o.rebuild(pos, now);
+    (pos, v2_of(&f["ask_ne"]), now)
+}
+
+/// A recorded follow past tree crowns whose leaf returns jitter scan to
+/// scan, replayed scan by scan. The goal's pull is never stopped while
+/// nothing on the way to it (±30°) lies within the margin plus what the
+/// vehicle covers at its speed in the FC's response time, plus 0.5 m: no
+/// return there is near enough to stop for, so a stop could only come from
+/// a closing speed the vehicle does not have.
+#[test]
+fn replayed_follow_past_leafy_crowns_is_not_stopped_by_their_jitter() {
+    let fx: Value = serde_json::from_str(include_str!("fixtures/foliage_follow.json")).unwrap();
+    let mut o = Obstacles::new();
+    let mut checked = 0;
+    for f in fx["frames"].as_array().unwrap() {
+        let (pos, ask, now) = ingest_frame(&mut o, f);
+        let vel = v2_of(&f["vel_ne"]);
+        let dir = geo::scale(ask, 1.0 / geo::norm(ask));
+        let ahead = o
+            .hits(now)
+            .iter()
+            .map(|h| geo::sub(h.ne, pos))
+            .filter(|rel| geo::dot(*rel, dir) >= geo::norm(*rel) * 30f32.to_radians().cos())
+            .map(geo::norm)
+            .fold(f32::INFINITY, f32::min);
+        if ahead <= 1.5 + BRAKE_LAG_S * geo::norm(vel) + 0.5 {
+            continue;
+        }
+        checked += 1;
+        let b = brake_limit(&o, pos, vel, ask, 3.0, 1.5, now);
+        let toward = geo::dot(b.v, dir);
+        assert!(
+            toward >= 0.1,
+            "{} ms: the goal braked to {toward:.2} m/s, nothing within {ahead:.1} m of its way",
+            f["t_ms"]
+        );
+    }
+    assert!(checked >= 20, "only {checked} frames checked");
+}
+
+/// Scans of a wall approached at `closing(k)` m/s (scan `k` of 10 Hz, from
+/// `d0` metres), each beam with up to ±2 cm of range noise (the planar lidar
+/// is good to ±30 mm 3σ). Returns the obstacles after the last scan, at
+/// `1000 + 100 · (scans − 1)` ms, and the wall's distance then.
+fn noisy_wall_approach(d0: f32, scans: u64, closing: impl Fn(u64) -> f32) -> (Obstacles, f32) {
+    let level = Level {
+        roll: 0.0,
+        pitch: 0.0,
+        yaw: 0.0,
+        agl: Some(2.5),
+    };
+    let mut o = Obstacles::new();
+    let mut d = d0;
+    for k in 0..scans {
+        if k > 0 {
+            d -= 0.1 * closing(k);
+        }
+        let mut scan = wall_scan(d);
+        for (i, r) in scan["ranges_m"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            let x = r.as_f64().unwrap();
+            if x > 0.0 {
+                let h = (k.wrapping_mul(2_654_435_761) ^ (i as u64).wrapping_mul(40_503)) % 1000;
+                *r = json!(x + 0.04 * (h as f64 / 1000.0 - 0.5));
+            }
+        }
+        o.ingest_scan(&scan, level, [0.0, 0.0], 1000 + 100 * k);
+    }
+    o.rebuild([0.0, 0.0], 1000 + 100 * (scans - 1));
+    (o, d)
+}
+
+#[test]
+fn a_wall_approached_through_range_noise_still_brakes_a_lagging_estimate() {
+    // 2.2 m/s at a wall, the EKF behind delayed external navigation reporting
+    // 0.7 m/s: the scans' closing speed is the real one, and 3 m out the brake
+    // caps the ask as it would knowing the real speed (here: nothing more).
+    let (o, d) = noisy_wall_approach(4.5, 8, |_| 2.2);
+    let now = 1700;
+    let closing = o.scan_closing([1.0, 0.0], now);
+    assert!(
+        (closing - 2.2).abs() < 0.3,
+        "measured {closing:.2} m/s closing on a wall approached at 2.2 m/s"
+    );
+    let lagging = brake_limit(&o, [0.0, 0.0], [0.7, 0.0], [2.2, 0.0], 3.0, 1.5, now);
+    let known = stop_cap(d - crate::obstacles::CELL_M / 2.0, 2.2, 3.0, 1.5);
+    assert!(
+        lagging.cut && lagging.v[0] <= known + 0.1,
+        "{d:.2} m out still asks {:?}, the real closing speed allows {known:.2}",
+        lagging.v
+    );
+    // Braking at 3 m/s² bends the ranges, and the closing speed holds: from
+    // 2.2 m/s down 0.3 m/s per scan to 1.0 m/s at the last.
+    let slowing = |k: u64| 2.2 - 0.3 * k.saturating_sub(3) as f32;
+    let (o, _) = noisy_wall_approach(4.5, 8, slowing);
+    let closing = o.scan_closing([1.0, 0.0], now);
+    assert!(
+        closing > 1.0,
+        "a braking approach (1.0-1.9 m/s over the last scans) measured {closing:.2} m/s"
+    );
+}
+
+/// The recorded full-stick approach of a column, every scan replayed into one
+/// obstacle model as it arrived, with a velocity estimate trailing the real
+/// motion (30 % of the recorded one: delayed external navigation). The brake
+/// must allow no more toward the column than it does knowing the simulator's
+/// true velocity, the scans' closing speed standing in for the estimate, and
+/// it must still stop the stick before the column.
+#[test]
+fn replayed_column_approach_brakes_a_lagging_estimate_as_the_true_speed() {
+    let fx: Value = serde_json::from_str(include_str!("fixtures/column_full_stick.json")).unwrap();
+    let mut o = Obstacles::new();
+    let mut stopped = false;
+    for f in fx["frames"].as_array().unwrap() {
+        let (pos, ask, now) = ingest_frame(&mut o, f);
+        let lagging = geo::scale(v2_of(&f["vel_ne"]), 0.3);
+        let dir = geo::scale(ask, 1.0 / geo::norm(ask));
+        let allowed = geo::dot(brake_limit(&o, pos, lagging, ask, 3.0, 1.5, now).v, dir);
+        let known = brake_limit(&o, pos, v2_of(&f["truth_vel_ne"]), ask, 3.0, 1.5, now);
+        let known = geo::dot(known.v, dir);
+        assert!(
+            allowed <= known + 0.3,
+            "{} ms: allows {allowed:.2} m/s toward the column, {known:.2} knowing the true speed",
+            f["t_ms"]
+        );
+        stopped |= allowed < 0.1;
+    }
+    assert!(stopped, "the stick was never stopped short of the column");
+}
+
 #[test]
 fn the_push_never_closes_on_a_nearer_post() {
     // A wall 1.3 m east fills many sectors, a post 1.05 m west one or two:
