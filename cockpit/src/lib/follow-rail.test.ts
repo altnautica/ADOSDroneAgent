@@ -4,6 +4,7 @@ import { BOTTOM_CHROME_CLEARANCE_PX } from "@/lib/cockpit-layout";
 import {
   avoidChip,
   followButton,
+  predictiveShown,
   RADAR_PX,
   railBottomPx,
   railButtonPx,
@@ -130,5 +131,13 @@ describe("reacquiredToastText", () => {
     const reacquired = { topic: "follow.reacquired" as const, trackId: 15, similarity: 0.862, gapS: 4.2, mahalanobis: 1.1, phase: "searching" as const };
     expect(reacquiredToastText(reacquired, "narrow")).toBe("Re-acquired #15 · 0.86 · 4.2 s gap · Behind a trunk or column");
     expect(reacquiredToastText(reacquired, "wide")).toBe("Re-acquired #15 · 0.86 · 4.2 s gap · Behind a wall or corner");
+  });
+});
+
+describe("predictiveShown", () => {
+  it("shows the predictive search switch only outside STRICT re-acquire", () => {
+    expect(predictiveShown("strict")).toBe(false);
+    expect(predictiveShown("smart")).toBe(true);
+    expect(predictiveShown(null)).toBe(true);
   });
 });

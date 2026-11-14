@@ -16,10 +16,10 @@ import { usePilot } from "@/hooks/use-pilot";
 import { useSkillParam } from "@/hooks/use-skill-setting";
 import { startNodeRecording, startRecording, stopNodeRecording, stopRecording } from "@/lib/api";
 import type { WidthClass } from "@/lib/cockpit-layout";
-import { avoidChip, followButton, railButtonPx, railLayout, RAIL_GAP_PX, type RailButton } from "@/lib/follow-rail";
+import { avoidChip, followButton, predictiveShown, railButtonPx, railLayout, RAIL_GAP_PX, type RailButton } from "@/lib/follow-rail";
 import { FLIGHT_PX } from "@/lib/flight-layout";
 import { executeSkill, requestSkill, useSkillBusy } from "@/lib/skill-runner";
-import type { Skill } from "@/lib/skills";
+import type { ParamValue, Skill } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
 import { specText } from "@/shared/hud/spec-text";
@@ -72,9 +72,12 @@ function RailSlot({
 }
 
 /** The predictive search switch (`predictive_search`), written through the
- *  plugin config and settled by its echo like every rail setting. */
-function PredictiveToggle({ skill, fallback }: { skill: Skill; fallback: boolean }) {
+ *  plugin config and settled by its echo like every rail setting. It shows
+ *  only in SMART re-acquire; in STRICT it does nothing. */
+function PredictiveToggle({ skill, fallback, modeFallback }: { skill: Skill; fallback: boolean; modeFallback: ParamValue | null }) {
   const p = useSkillParam(skill, "predictive_search", fallback);
+  const mode = useSkillParam(skill, "reacquire_mode", modeFallback);
+  if (!predictiveShown(mode.value)) return null;
   const on = p.value === true;
   return (
     <button
@@ -194,7 +197,12 @@ export function FollowRail({
         ) : null;
       case "predictive":
         return follow && predictiveParam ? (
-          <PredictiveToggle key={b} skill={follow.skill} fallback={predictiveParam.defaultValue !== false} />
+          <PredictiveToggle
+            key={b}
+            skill={follow.skill}
+            fallback={predictiveParam.defaultValue !== false}
+            modeFallback={modeSetting?.defaultValue ?? null}
+          />
         ) : null;
       case "pattern":
         return follow && patternSetting ? (

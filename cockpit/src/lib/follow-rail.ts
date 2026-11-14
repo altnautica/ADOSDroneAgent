@@ -96,6 +96,12 @@ export function followButton(
   return designated ? "follow" : null;
 }
 
+/** The predictive search switch shows only in SMART re-acquire, as the
+ *  manifest's `visible_if reacquire_mode == smart`; in STRICT it does nothing. */
+export function predictiveShown(reacquireMode: ParamValue | null): boolean {
+  return reacquireMode !== "strict";
+}
+
 export interface SettingDisplayInput {
   /** The value the plugin echoes it runs with, or null. */
   echo: ParamValue | null;
