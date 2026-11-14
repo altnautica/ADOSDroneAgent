@@ -86,6 +86,7 @@ fn the_pilot_kind_reads_the_golden_frame() {
         }]
     );
     assert_eq!(p.setup_step, None);
+    assert_eq!(p.setup_abort, None);
     assert_eq!(
         p.mission,
         Some(PilotMission {

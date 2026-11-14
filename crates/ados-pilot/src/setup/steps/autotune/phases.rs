@@ -28,6 +28,7 @@ impl Autotune {
                 cx.adapter.tuning_box_m(true),
             ));
             flight::set_mode(cx, Mode::Autotune);
+            self.entered = false;
             self.phase = Phase::PlaneTuning { since: cx.now };
         }
     }
@@ -58,7 +59,14 @@ impl Autotune {
         };
         self.manual(cx, x, y, thr, r);
         let el = cx.now.saturating_sub(since);
-        if el > 3000 && !flight::in_mode(cx, Mode::Autotune) && el % 2000 < MANUAL_MS {
+        if flight::in_mode(cx, Mode::Autotune) {
+            self.entered = true;
+        } else if self.entered {
+            // The FC (or the pilot's switch) left AUTOTUNE: never force it back.
+            self.phase = Phase::Idle;
+            self.core.fail("setup.blocker.autotune_failed");
+            return;
+        } else if el > 3000 && el % 2000 < MANUAL_MS {
             flight::set_mode(cx, Mode::Autotune);
         }
         for e in self.tick_texts(cx) {

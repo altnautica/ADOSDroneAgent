@@ -20,6 +20,7 @@ pub mod copter {
 
 /// Plane (and QuadPlane) modes.
 pub mod plane {
+    pub const CIRCLE: u32 = 1;
     pub const FBWA: u32 = 5;
     pub const CRUISE: u32 = 7;
     pub const AUTOTUNE: u32 = 8;

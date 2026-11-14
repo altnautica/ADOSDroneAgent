@@ -54,6 +54,9 @@ pub enum CoreCmd {
     SetupNeeded(Option<String>),
     /// The setup engine's active step id, `None` without a run.
     SetupStep(Option<&'static str>),
+    /// The setup-strings key of the air wizard's last non-operator abort
+    /// while it is shown, `None` otherwise.
+    SetupAbort(Option<String>),
     /// The setup engine is about to ask the FC for this custom mode.
     SetupMode(u32),
 }
@@ -97,6 +100,10 @@ impl PilotHandle {
 
     pub async fn setup_step(&self, step: Option<&'static str>) {
         let _ = self.cmd.send(CoreCmd::SetupStep(step)).await;
+    }
+
+    pub async fn setup_abort(&self, key: Option<String>) {
+        let _ = self.cmd.send(CoreCmd::SetupAbort(key)).await;
     }
 
     /// Note a mode the setup engine commands, before its DO_SET_MODE goes
@@ -285,6 +292,7 @@ impl Core {
                     Some(CoreCmd::SetRcAdosPosition(n)) => self.pilot.set_rc_ados_position(n),
                     Some(CoreCmd::SetupNeeded(msg)) => self.pilot.setup_needed = Some(msg),
                     Some(CoreCmd::SetupStep(step)) => self.pilot.setup_step = step,
+                    Some(CoreCmd::SetupAbort(key)) => self.pilot.setup_abort = key,
                     Some(CoreCmd::SetupMode(mode)) => self.pilot.note_setup_mode(mode, now()),
                     None => {}
                 },

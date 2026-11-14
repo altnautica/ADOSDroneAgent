@@ -1,10 +1,10 @@
 //! The status pill's alert list, as the shared `status-pill.ts` `pillAlerts`
 //! builds it: the shared base alerts (link, battery, packs, GPS), the agent
 //! not answering, a pilot state too old to trust or the FC's own failsafe,
-//! failing readiness items, a lost controller, failing pre-flight items, a
-//! degraded navigation source, the FC's PreArm/Arm text, its status texts at
-//! WARNING or worse, and the on-board storage. The same rules, ids, texts and
-//! order, held to the golden `pill-cases.json`.
+//! why the setup wizard aborted, failing readiness items, a lost controller,
+//! failing pre-flight items, a degraded navigation source, the FC's PreArm/Arm
+//! text, its status texts at WARNING or worse, and the on-board storage. The
+//! same rules, ids, texts and order, held to the golden `pill-cases.json`.
 
 use super::autonomy::Pilot;
 use super::base_alerts::{storage_crit_pct, storage_warn_pct, BaseAlert, Level};
@@ -126,6 +126,14 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
             push(&mut out, "failsafe", Severity::Critical, text);
         }
         _ => {}
+    }
+    // Why the setup wizard aborted the air run; an unknown key reads as itself.
+    if let Some(key) = fresh
+        .and_then(|p| p.setup_abort.as_deref())
+        .filter(|k| !k.is_empty())
+    {
+        let text = spec_text(key, &[]);
+        push(&mut out, "setup_abort", Severity::Warning, text);
     }
     for r in fresh
         .into_iter()
@@ -428,6 +436,7 @@ mod tests {
                 age_ms: i["pilot_age_ms"].as_u64(),
                 fc_failsafe: i["fc_failsafe"].as_bool() == Some(true),
                 failsafe_cause: i["failsafe_cause"].as_str().map(String::from),
+                setup_abort: i["setup_abort"].as_str().map(String::from),
                 ..Pilot::default()
             };
             let prearm: Option<Vec<String>> = i["prearm"].as_array().map(|a| {

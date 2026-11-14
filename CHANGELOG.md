@@ -6,6 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.1] - 2026-11-15
+
+### Fixed
+
+- Setup wizard: an FC failsafe ends the air wizard at once. When the FC enters a failsafe mode the wizard did not command (Copter RTL, SMART_RTL, AUTO_RTL, LAND or BRAKE; Plane RTL, QRTL, QLAND, the short failsafe's CIRCLE or the FBWA glide), the step aborts with "the flight controller's failsafe took over": the wizard sends no mode or navigation command and hands the aircraft back. Every value the step changed goes back, its temporary limits such as `THR_MAX` and the limits it had measured; a write already sent whose reply has not come back is put back too, and nothing the wizard was about to change reaches the FC. It had written `THR_MAX` 0 inside a battery-failsafe RTL and then switched the aircraft to GUIDED. The FC's low or critical battery warning on its own is not taken for a failsafe: it aborts with "the flight controller reported a low battery", puts the same values back and flies the wizard's own landing, which yields if the FC then acts. A `tecs_measure` stage's temporary limits apply only in the GUIDED flight it commanded: in any other mode they go back at once and the step stops with "the flight mode changed". Plane AUTOTUNE is never switched back into AUTOTUNE once the FC has left it.
+- Setup wizard: an altitude floor and a ground-contact abort. Plane AUTOTUNE aborts below 40 m, the fixed-wing cruise phases (first flight, trims, airspeed calibration, TECS, verify) below 30 m and a hover tune below 2 m; any of them on touching the ground (landed, or under 1 m). A step that met the ground fails, never completes. An aborted autotune puts back the gains of the round it cut short; axes the FC already finished and saved keep their gains.
+- Setup wizard: a fixed-wing the FC does not report on the ground counts as airborne above 5 m/s ground speed, whatever its height, and no step sends a take-off to an armed aircraft that is neither flying nor on the ground (copter, VTOL and plane alike). Verify climbed a plane skimming the ground at 16 m/s with a TAKEOFF command; it now climbs it to the loiter, and stops with "armed but neither flying nor on the ground" when the aircraft is slow and not landed. A plane on the ground in wind still takes off.
+- Typing only: the camera and modem dict annotations satisfy the strict mypy ceiling (no behaviour change).
+
+### Added
+
+- The pilot kind carries `setup_abort`, the setup-strings key of the air wizard's last abort the operator did not ask for, for 2 minutes. The cockpit, kiosk, dashboard and terminal UI show it in the status pill.
+
 ## [0.113.0] - 2026-11-14
 
 ### Changed

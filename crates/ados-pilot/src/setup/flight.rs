@@ -59,9 +59,32 @@ pub fn height(cx: &Cx) -> Option<f32> {
     cx.fc.rel_alt_m.or_else(|| cx.fc.local.map(|(l, _)| -l[2]))
 }
 
-/// The vehicle is airborne.
+/// A fixed-wing the FC does not report on the ground, moving over the ground
+/// this fast (m/s), is airborne whatever its height: a plane skimming the
+/// ground at 16 m/s is flying. Ground speed, not airspeed: a plane parked
+/// in a 6 m/s wind reads that on its airspeed sensor.
+pub const FW_AIRBORNE_MPS: f32 = 5.0;
+/// Below this height (m) a flight step that should be cruising has touched
+/// the ground.
+pub const GROUND_CONTACT_M: f32 = 1.0;
+/// Fixed-wing cruise phases (first flight, trims, TECS, verify) abort below
+/// this height (m).
+pub const PLANE_FLOOR_M: f32 = 30.0;
+
+/// Flying as a fixed-wing: a plane, or a VTOL in forward flight.
+pub fn fixedwing_flight(cx: &Cx) -> bool {
+    cx.adapter.class == Class::Fixedwing
+        || cx.fc.vtol_state == Some(MavVtolState::MAV_VTOL_STATE_FW)
+}
+
+/// The vehicle is airborne. A fixed-wing counts by its ground speed as well
+/// as its height.
 pub fn airborne(cx: &Cx) -> bool {
-    cx.fc.armed && !cx.fc.on_ground() && height(cx).is_some_and(|h| h > 0.5)
+    if !cx.fc.armed || cx.fc.on_ground() {
+        return false;
+    }
+    let moving = cx.fc.groundspeed.is_some_and(|s| s > FW_AIRBORNE_MPS);
+    (fixedwing_flight(cx) && moving) || height(cx).is_some_and(|h| h > 0.5)
 }
 
 /// The mode a take-off uses: GUIDED take-off on copters and QuadPlanes,
@@ -92,6 +115,9 @@ impl Hop {
         self.sent_ms = 0;
         self.leg = if airborne(cx) {
             Leg::Holding
+        } else if cx.fc.armed && !cx.fc.on_ground() {
+            // Armed, neither flying nor landed: no take-off (or GUIDED) over it.
+            Leg::Failed("flight_state")
         } else {
             Leg::Arming
         };
@@ -273,6 +299,8 @@ fn reposition(cx: &mut Cx, (lat, lon): (i32, i32), alt_m: f32) {
         lon,
         alt_m,
     );
+    // The change-mode flag (param 2) switches the FC to GUIDED: the wizard's own mode.
+    cx.out.modes_sent.push(crate::modes::plane::GUIDED);
     change_alt(cx, alt_m, 0.0);
 }
 

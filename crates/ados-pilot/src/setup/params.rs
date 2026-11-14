@@ -23,6 +23,8 @@ struct PendingWrite {
     value: f32,
     sent_ms: u64,
     tries: u8,
+    /// Puts back a value the wizard changed (see [`ParamStore::set_back`]).
+    back: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -143,9 +145,22 @@ impl ParamStore {
         });
     }
 
-    /// Queues a write. A value already equal is not written.
+    /// Queues a write. A value already equal is not written, unless a write
+    /// of another value is still pending: that one may already be on its way,
+    /// so the new value replaces it and is written.
     pub fn set(&mut self, name: &str, value: f32) {
-        if self.get(name).is_some_and(|v| close(v, value)) {
+        self.queue(name, value, false);
+    }
+
+    /// Queues a write that puts back a value the wizard changed (a step's
+    /// temporary limit, the gains before a discarded tune). These are the
+    /// only writes that survive [`ParamStore::drop_forward_writes`].
+    pub fn set_back(&mut self, name: &str, value: f32) {
+        self.queue(name, value, true);
+    }
+
+    fn queue(&mut self, name: &str, value: f32, back: bool) {
+        if !self.writes.contains_key(name) && self.get(name).is_some_and(|v| close(v, value)) {
             return;
         }
         self.failed.retain(|n| n != name);
@@ -155,8 +170,34 @@ impl ParamStore {
                 value,
                 sent_ms: 0,
                 tries: 0,
+                back,
             },
         );
+    }
+
+    /// The wizard stopped in flight: drops every pending write except the
+    /// put-backs, so nothing the wizard was about to change reaches the FC.
+    /// A forward write already sent may still land, so it becomes a put-back
+    /// of the value the FC last reported for it.
+    pub fn drop_forward_writes(&mut self) {
+        let values = &self.values;
+        self.writes.retain(|name, w| {
+            if w.back {
+                return true;
+            }
+            match values.get(name) {
+                Some(&(old, _)) if w.sent_ms > 0 && !close(old, w.value) => {
+                    *w = PendingWrite {
+                        value: old,
+                        sent_ms: 0,
+                        tries: 0,
+                        back: true,
+                    };
+                    true
+                }
+                _ => false,
+            }
+        });
     }
 
     /// No write or read in flight.

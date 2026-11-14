@@ -8,7 +8,8 @@ use serde_json::{json, Map, Value};
 use crate::setup::adapters::{ardupilot_plane, Mode};
 use crate::setup::fcstate::Class;
 use crate::setup::flight::{
-    self, airborne, height, plane_loiter, Hop, Leg, Transition, PLANE_LOITER_ALT_M,
+    self, airborne, fixedwing_flight, height, plane_loiter, Hop, Leg, Transition,
+    PLANE_LOITER_ALT_M,
 };
 use crate::setup::measure::Acc;
 use crate::setup::schema::{obj, Action};
@@ -52,13 +53,10 @@ impl Default for ToLoiter {
     }
 }
 
-fn fixedwing_flight(cx: &Cx) -> bool {
-    cx.adapter.class == Class::Fixedwing
-        || cx.fc.vtol_state
-            == Some(ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW)
-}
-
 impl ToLoiter {
+    /// Takes off only from the ground: an armed aircraft that is neither on
+    /// the ground nor airborne (a plane skimming slowly, a landed state the FC
+    /// does not report) gets no take-off command.
     pub fn start(&mut self, cx: &mut Cx) {
         *self = ToLoiter::default();
         // A lone step started in flight has no take-off to centre the box on.
@@ -70,6 +68,8 @@ impl ToLoiter {
             } else {
                 self.trans = Transition::to_fw(cx);
             }
+        } else if cx.fc.armed && !cx.fc.on_ground() {
+            self.failed = Some("flight_state");
         } else {
             let alt = if cx.adapter.class == Class::Vtol {
                 VTOL_CLIMB_M
@@ -162,6 +162,9 @@ pub struct PlaneAir {
     /// TECS stage samples (m/s, positive up).
     climb: Vec<f32>,
     restore: Vec<(String, f32)>,
+    /// The values from before the step of the limits a stage measured and
+    /// wrote: kept when the step completes, put back when it aborts.
+    measured: Vec<(String, f32)>,
 }
 
 impl PlaneAir {
@@ -175,6 +178,7 @@ impl PlaneAir {
             result: Map::new(),
             climb: Vec::new(),
             restore: Vec::new(),
+            measured: Vec::new(),
         }
     }
 
@@ -198,9 +202,19 @@ impl PlaneAir {
     }
 
     fn begin_measure(&mut self, cx: &mut Cx) {
+        let switch = match self.kind {
+            Kind::TrimAir => Some("SERVO_AUTO_TRIM"),
+            Kind::AirspeedCal => Some("ARSPD_AUTOCAL"),
+            _ => None,
+        };
+        if let Some(n) = switch {
+            // An abort puts the switch back as it was.
+            let before = cx.params.get(n).unwrap_or(0.0);
+            self.measured.push((n.into(), before));
+            cx.params.set(n, 1.0);
+        }
         match self.kind {
-            Kind::TrimAir => cx.params.set("SERVO_AUTO_TRIM", 1.0),
-            Kind::AirspeedCal => cx.params.set("ARSPD_AUTOCAL", 1.0),
+            Kind::TrimAir | Kind::AirspeedCal => {}
             Kind::TecsMeasure => {
                 self.start_tecs_stage(cx, 0);
                 return;
@@ -250,10 +264,39 @@ impl PlaneAir {
         };
     }
 
-    fn end_tecs(&mut self, cx: &mut Cx) {
+    /// Puts the FC limits the stages raised back.
+    fn put_back(&mut self, cx: &mut Cx) {
         for (n, v) in self.restore.drain(..) {
-            cx.params.set(&n, v);
+            cx.params.set_back(&n, v);
         }
+    }
+
+    /// The step stopped short: every value it changed goes back, the measured
+    /// limits too. A put-back replaces a write of the same name still
+    /// pending, and if that write already went out it lands first.
+    fn put_back_all(&mut self, cx: &mut Cx) {
+        self.put_back(cx);
+        for (n, v) in self.measured.drain(..) {
+            cx.params.set_back(&n, v);
+        }
+    }
+
+    /// Writes a measured limit, keeping the value from before the step for an abort.
+    fn write_measured(&mut self, cx: &mut Cx, name: &str, v: f32) {
+        let before = match self.restore.iter().position(|(n, _)| n == name) {
+            Some(i) => Some(self.restore.remove(i).1),
+            None => cx.params.get(name),
+        };
+        if let Some(b) = before {
+            if !self.measured.iter().any(|(n, _)| n == name) {
+                self.measured.push((name.into(), b));
+            }
+        }
+        cx.params.set(name, v);
+    }
+
+    fn end_tecs(&mut self, cx: &mut Cx) {
+        self.put_back(cx);
         if let Some(n) = cx.params.first_present(ardupilot_plane::AIRSPEED_CRUISE) {
             let cruise = cx
                 .params
@@ -355,6 +398,11 @@ impl Step for PlaneAir {
         true
     }
 
+    fn flight_floor(&self, _cx: &Cx) -> Option<f32> {
+        matches!(self.phase, Phase::Measuring { .. } | Phase::Tecs { .. })
+            .then_some(flight::PLANE_FLOOR_M)
+    }
+
     fn optional(&self) -> bool {
         self.kind != Kind::FirstFlight
     }
@@ -412,6 +460,15 @@ impl Step for PlaneAir {
                 }
             }
             Phase::Tecs { stage, since } => {
+                // The raised limits (THR_MAX 0 above all) are for the GUIDED flight the
+                // stage commanded. In any other mode (the pilot's switch, a failsafe)
+                // they are put back at once and the stage stops.
+                if !flight::in_mode(cx, Mode::Guided) {
+                    self.put_back_all(cx);
+                    self.phase = Phase::Idle;
+                    self.core.fail("setup.blocker.mode_changed");
+                    return;
+                }
                 let el = cx.now.saturating_sub(since);
                 if el > TECS_SETTLE_MS {
                     if let Some(c) = cx.fc.climb {
@@ -431,8 +488,7 @@ impl Step for PlaneAir {
                                 let v = (TECS_MARGIN * m * 10.0).round() / 10.0;
                                 self.result.insert("climb_measured_mps".into(), json!(m));
                                 self.result.insert("TECS_CLMB_MAX".into(), json!(v));
-                                self.restore.retain(|(n, _)| n != "TECS_CLMB_MAX");
-                                cx.params.set("TECS_CLMB_MAX", v);
+                                self.write_measured(cx, "TECS_CLMB_MAX", v);
                             }
                             // Climb done: back to the loiter height before gliding.
                             self.start_tecs_stage(cx, 1);
@@ -441,7 +497,7 @@ impl Step for PlaneAir {
                             if let Some(m) = m.filter(|m| *m < -0.2) {
                                 let v = ((-m) * 10.0).round() / 10.0;
                                 self.result.insert("TECS_SINK_MIN".into(), json!(v));
-                                cx.params.set("TECS_SINK_MIN", v);
+                                self.write_measured(cx, "TECS_SINK_MIN", v);
                             }
                             self.start_tecs_stage(cx, 2);
                         }
@@ -451,8 +507,7 @@ impl Step for PlaneAir {
                                 self.result
                                     .insert("sink_max_measured_mps".into(), json!(-m));
                                 self.result.insert("TECS_SINK_MAX".into(), json!(v));
-                                self.restore.retain(|(n, _)| n != "TECS_SINK_MAX");
-                                cx.params.set("TECS_SINK_MAX", v);
+                                self.write_measured(cx, "TECS_SINK_MAX", v);
                             }
                             self.finish(cx);
                         }
@@ -487,12 +542,7 @@ impl Step for PlaneAir {
     }
 
     fn abort(&mut self, cx: &mut Cx) {
-        for (n, v) in self.restore.drain(..) {
-            cx.params.set(&n, v);
-        }
-        if self.kind == Kind::AirspeedCal && matches!(self.phase, Phase::Measuring { .. }) {
-            cx.params.set("ARSPD_AUTOCAL", 0.0);
-        }
+        self.put_back_all(cx);
         self.phase = Phase::Idle;
     }
 }

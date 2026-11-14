@@ -91,13 +91,18 @@ describe("parsePilotState on the golden fixture", () => {
     expect([p!.aglM, p!.aglSource]).toEqual([4.2, "rangefinder"]);
     expect(p!.statustext).toEqual([{ severity: 4, text: "PreArm: Compass not calibrated", ageMs: 1200 }]);
     // The agent omits `fc_failsafe` while false and sends `failsafe_cause: null`.
-    expect([p!.fcFailsafe, p!.failsafeCause]).toEqual([false, null]);
+    expect([p!.fcFailsafe, p!.failsafeCause, p!.setupAbort]).toEqual([false, null, null]);
   });
 
   it("reads an FC failsafe and its cause", () => {
     const raw = { ...(fixture("pilot-frame.json") as object), owner: "fc_mode", fc_failsafe: true, failsafe_cause: "rc_or_failsafe" };
     expect(parsePilotState(raw)).toMatchObject({ fcFailsafe: true, failsafeCause: "rc_or_failsafe" });
     expect(parsePilotState({ owner: "fc_mode", fc_failsafe: true, failsafe_cause: "fc" })).toMatchObject({ fcFailsafe: true, failsafeCause: "fc" });
+  });
+
+  it("reads the setup wizard's last abort key", () => {
+    const raw = { ...(fixture("pilot-frame.json") as object), setup_abort: "setup.blocker.aborted_wind" };
+    expect(parsePilotState(raw)!.setupAbort).toBe("setup.blocker.aborted_wind");
   });
 
   it("reads a mission the pilot holds paused", () => {

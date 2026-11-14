@@ -221,6 +221,7 @@ impl Pilot {
         if owner == Owner::Tuning {
             s.setup_step = self.setup_step.map(str::to_owned);
         }
+        s.setup_abort = self.setup_abort.clone();
         // The cap is shown only while the pilot flies setpoints under it: not
         // in an FC mode or mission, on the ground, in forward flight, or with
         // the FC unheard.

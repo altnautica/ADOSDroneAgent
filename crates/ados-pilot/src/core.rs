@@ -156,6 +156,9 @@ pub struct Pilot {
     pub setup_needed: Option<Option<String>>,
     /// The setup engine's active step, published while the owner is `Tuning`.
     pub setup_step: Option<&'static str>,
+    /// The setup-strings key of the air wizard's last non-operator abort,
+    /// published while the setup engine still shows it.
+    pub setup_abort: Option<String>,
     /// Wall-clock epoch ms at monotonic 0, for published absolute times.
     pub epoch_offset_ms: u64,
     /// Sticks handed to the setup engine while the owner is `Tuning`.
@@ -213,6 +216,7 @@ impl Pilot {
             controller_lost_shown: false,
             setup_needed: None,
             setup_step: None,
+            setup_abort: None,
             epoch_offset_ms: 0,
             tuning_axes: [0.0; 4],
             out: Vec::new(),

@@ -33,6 +33,23 @@ pub struct Script {
     pub reboot_returns: bool,
     /// SYS_STATUS sensors present, when not derived from the parameters.
     pub sensors_present: Option<MavSysStatusSensor>,
+    /// A fixed-wing in AUTOTUNE flies this vertical model instead of holding
+    /// its height.
+    pub plane_tune: Option<PlaneTune>,
+    /// The FC applies a PARAM_SET of these names but its PARAM_VALUE reply is
+    /// lost: the write lands while the wizard still has it pending.
+    pub unacked_params: Vec<String>,
+}
+
+/// Vertical speed (m/s) of a fixed-wing in AUTOTUNE: `-sink`, less
+/// `bank_loss` per unit of roll stick, plus `pitch_gain` per unit of
+/// nose-up stick and `thr_gain` per unit of throttle above `TRIM_THROTTLE`.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaneTune {
+    pub sink: f32,
+    pub bank_loss: f32,
+    pub pitch_gain: f32,
+    pub thr_gain: f32,
 }
 
 impl Default for Script {
@@ -44,6 +61,8 @@ impl Default for Script {
             refuse_autotune: false,
             reboot_returns: true,
             sensors_present: None,
+            plane_tune: None,
+            unacked_params: Vec::new(),
         }
     }
 }
@@ -60,6 +79,8 @@ pub struct FakeFc {
     pub battery_v: f32,
     pub wind: Option<(f32, f32)>,
     pub rc: Option<Vec<u16>>,
+    /// VFR_HUD ground speed (m/s).
+    pub groundspeed: f32,
     pub script: Script,
     /// Every frame the engine sent, in order.
     pub sent: Vec<MavMessage>,
@@ -77,6 +98,10 @@ pub struct FakeFc {
     last_hb: u64,
     last_tel: u64,
     manual_z: f32,
+    /// MANUAL_CONTROL `x` (pitch, > 0 nose down) and `y` (roll), -1..1.
+    manual_xy: (f32, f32),
+    /// Height at the last telemetry frame, for VFR_HUD climb.
+    tel_alt: f32,
     /// The airspeed zero calibration concludes at this time.
     airspeed_cal_until: Option<u64>,
     /// ArduPlane GUIDED's offboard height from GUIDED_CHANGE_ALTITUDE: once
@@ -108,6 +133,7 @@ impl FakeFc {
             battery_v: 16.0,
             wind: Some((90.0, 2.0)),
             rc: None,
+            groundspeed: 0.0,
             script: Script::default(),
             sent: Vec::new(),
             effects: Vec::new(),
@@ -123,6 +149,8 @@ impl FakeFc {
             last_hb: 0,
             last_tel: 0,
             manual_z: 0.5,
+            manual_xy: (0.0, 0.0),
+            tel_alt: 0.0,
             airspeed_cal_until: None,
             offboard_alt: None,
             vtol_fw: false,
@@ -211,13 +239,16 @@ impl FakeFc {
                     .to_string();
                 if self.params.contains_key(&name) {
                     self.params.insert(name.clone(), s.param_value);
-                    let i = self.params.keys().position(|k| *k == name).unwrap_or(0) as u16;
-                    let v = self.param_value(&name, i);
-                    self.queue.push_back(v);
+                    if !self.script.unacked_params.contains(&name) {
+                        let i = self.params.keys().position(|k| *k == name).unwrap_or(0) as u16;
+                        let v = self.param_value(&name, i);
+                        self.queue.push_back(v);
+                    }
                 }
             }
             MavMessage::MANUAL_CONTROL(mc) => {
                 self.manual_z = mc.z as f32 / 1000.0;
+                self.manual_xy = (mc.x as f32 / 1000.0, mc.y as f32 / 1000.0);
             }
             MavMessage::COMMAND_INT(c) => {
                 self.queue
@@ -378,8 +409,11 @@ impl FakeFc {
                         };
                         let axes = self.params.get(axes_p).copied().unwrap_or(3.0) as u32;
                         let mut names = Vec::new();
+                        let mut scaled: Vec<(String, f32)> = Vec::new();
                         let mut scale = |n: &str, k: f32| {
-                            *self.params.get_mut(&format!("{atc}_{n}")).unwrap() *= k
+                            let n = format!("{atc}_{n}");
+                            let v = self.params[&n] * k;
+                            scaled.push((n, v));
                         };
                         if axes & 1 != 0 {
                             names.push("Roll");
@@ -393,6 +427,10 @@ impl FakeFc {
                         if axes & 4 != 0 {
                             names.push("Yaw");
                             scale("RAT_YAW_P", 1.5);
+                        }
+                        // AP_Param::save sends each saved value to the GCS.
+                        for (n, v) in scaled {
+                            self.set_param_notify(&n, v);
                         }
                         self.queue.push_back(text(&format!(
                             "AutoTune: Saved gains for {}",
@@ -418,6 +456,20 @@ impl FakeFc {
             _ => {}
         }
         self.queue.push_back(ack(c.command, result));
+    }
+
+    /// The FC sends a STATUSTEXT.
+    pub fn push_text(&mut self, s: &str) {
+        self.queue.push_back(text(s));
+    }
+
+    /// The FC changes a parameter on its own (an autotune saving an axis) and
+    /// says so with a PARAM_VALUE.
+    pub fn set_param_notify(&mut self, name: &str, v: f32) {
+        self.params.insert(name.to_string(), v);
+        let i = self.params.keys().position(|k| k == name).unwrap_or(0) as u16;
+        let m = self.param_value(name, i);
+        self.queue.push_back(m);
     }
 
     /// One 20 ms step: FC frames into the engine, engine tick, engine

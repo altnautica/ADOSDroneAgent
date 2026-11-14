@@ -59,12 +59,14 @@ export function pillWiring(i: {
   preflightFailing: { id: string; label: string }[];
   fcFailsafe: boolean;
   failsafeCause: string | null;
+  setupAbort: string | null;
 } {
   return {
     pilotAgeMs: i.pilot ? Math.max(0, i.nowMs - i.pilot.at) : null,
     agentReachable: !i.statusStale,
     controllerLost: controllerLost(i.pilot?.data ?? null),
     ...pilotFailsafe(i.pilot?.data ?? null),
+    setupAbort: i.pilot?.data.setupAbort ?? null,
     // Unknown arm state (FC link down) counts as possibly airborne.
     preflightFailing: preflightFailing(i.checks, i.alerts, i.armed),
   };

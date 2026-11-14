@@ -172,6 +172,9 @@ pub struct Pilot {
     pub fc_failsafe: bool,
     /// What tripped that failsafe (`fc`, `rc_or_failsafe`), when the pilot said.
     pub failsafe_cause: Option<String>,
+    /// The setup-strings key of the air wizard's last abort that was not the
+    /// operator's (`setup.blocker.aborted_<reason>`), while the agent shows it.
+    pub setup_abort: Option<String>,
     /// The horizontal speed cap (m/s) the pilot applies to every setpoint it
     /// flies (`speed_cap.v_h_mps`, e.g. while GNSS-denied); `None` without one.
     pub speed_cap_mps: Option<f64>,
@@ -399,6 +402,11 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         }),
         fc_failsafe: d.get("fc_failsafe").and_then(Value::as_bool) == Some(true),
         failsafe_cause: one_of(d, "failsafe_cause", &["fc", "rc_or_failsafe"]),
+        setup_abort: d
+            .get("setup_abort")
+            .and_then(Value::as_str)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
         speed_cap_mps: d
             .get("speed_cap")
             .filter(|c| c.get("reason").and_then(Value::as_str).is_some())

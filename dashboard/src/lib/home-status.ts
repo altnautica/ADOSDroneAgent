@@ -109,6 +109,7 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       agentReachable: i.agentReachable,
       controllerLost: controllerLost(i.pilot),
       ...pilotFailsafe(i.pilot),
+      setupAbort: i.pilot?.setupAbort ?? null,
       preflightFailing: preflightFailing(checks, alerts, armed),
       armed,
       navSource: homeNavSource(i),

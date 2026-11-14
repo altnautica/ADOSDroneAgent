@@ -96,8 +96,12 @@ impl FakeFc {
                 }));
             self.queue
                 .push_back(MavMessage::ATTITUDE(ATTITUDE_DATA::default()));
+            let climb = (self.alt - self.tel_alt) / 0.1;
+            self.tel_alt = self.alt;
             self.queue.push_back(MavMessage::VFR_HUD(VFR_HUD_DATA {
                 throttle: 40,
+                groundspeed: self.groundspeed,
+                climb,
                 ..Default::default()
             }));
             self.queue.push_back(MavMessage::VIBRATION(VIBRATION_DATA {
@@ -132,6 +136,19 @@ impl FakeFc {
             return;
         }
         self.vtol_physics(now, dt);
+        let plane_tune = self
+            .script
+            .plane_tune
+            .filter(|_| self.custom_mode == 8 && (!self.is_copter() || self.vtol_fw));
+        if let Some(m) = plane_tune {
+            let trim = self.params.get("TRIM_THROTTLE").copied().unwrap_or(45.0) / 100.0;
+            let (x, y) = self.manual_xy;
+            let vz = -m.sink - m.bank_loss * y.abs()
+                + m.pitch_gain * (-x)
+                + m.thr_gain * (self.manual_z - trim);
+            self.alt = (self.alt + vz * dt).max(0.0);
+            return;
+        }
         // A QuadPlane lands in QLAND once it hovers again.
         let land =
             self.custom_mode == self.mode_land() && !self.vtol_fw && self.vtol_trans.is_none();

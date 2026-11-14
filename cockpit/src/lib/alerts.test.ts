@@ -62,6 +62,14 @@ describe("the status pill's pilot, agent, controller and pre-flight inputs", () 
     expect(stale.map((a) => a.id)).toEqual(["pilot_not_answering"]);
   });
 
+  it("says why the setup wizard aborted from a fresh pilot state only", () => {
+    const aborted = { ...base, pilot: pilot({ setupAbort: "setup.blocker.aborted_wind" }), checks: [] };
+    const fresh = pillAlerts({ alerts: [], readiness: [], prearm: undefined, storagePct: null, ...pillWiring(aborted) });
+    expect(fresh.map((a) => [a.id, a.severity, a.text])).toEqual([["setup_abort", "warning", "Aborted: wind above 8 m/s"]]);
+    const stale = pillAlerts({ alerts: [], readiness: [], prearm: undefined, storagePct: null, ...pillWiring({ ...aborted, nowMs: 3000 }) });
+    expect(stale.map((a) => a.id)).toEqual(["pilot_not_answering"]);
+  });
+
   it("calls the agent unreachable while its status poll fails", () => {
     expect(pillWiring(base).agentReachable).toBe(true);
     expect(pillWiring({ ...base, statusStale: true }).agentReachable).toBe(false);

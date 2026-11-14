@@ -53,6 +53,11 @@ pub const ABORT_BATTERY_PCT: i8 = 30;
 pub const ABORT_WIND_MPS: f32 = 8.0;
 /// Operator stick deflection that takes over a non-blending air step.
 pub const TAKEOVER_AXIS: f32 = 0.3;
+/// A mode the wizard commanded within this long (ms), or its last one, is
+/// its own: any other return or landing the FC flies is the FC's failsafe.
+const OWN_MODE_MS: u64 = 5000;
+/// The pilot state names the last air abort for this long (ms).
+pub const ABORT_SHOW_MS: u64 = 120_000;
 /// PreArm texts count for `setup_needed` this long.
 const PREARM_WINDOW_MS: u64 = 10_000;
 /// AUTOPILOT_VERSION message id.
@@ -107,6 +112,14 @@ pub struct Engine {
     /// The owner reported by the pilot is `tuning`.
     pilot_tuning: bool,
     epoch_offset_ms: u64,
+    /// Modes the wizard commanded and when (see [`OWN_MODE_MS`]).
+    own_modes: Vec<(u32, u64)>,
+    /// STATUSTEXT cursor of the failsafe check.
+    fs_text_cursor: u64,
+    /// The FC mode the failsafe check saw last, to tell a mode it enters.
+    fs_mode_seen: Option<u32>,
+    /// The last air abort's blocker key and when (see [`Engine::last_abort`]).
+    last_abort: Option<(String, u64)>,
 }
 
 /// The vehicle class from the heartbeat type and `Q_ENABLE`.
@@ -128,6 +141,22 @@ pub fn vehicle_class(mav_type: MavType, q_enable: Option<f32>) -> Class {
         | MAV_TYPE_VTOL_TILTWING
         | MAV_TYPE_VTOL_RESERVED5 => Class::Vtol,
         _ => Class::Multirotor,
+    }
+}
+
+/// A mode an ArduPilot failsafe action selects. Copter: RTL, SMART_RTL,
+/// AUTO_RTL, LAND and BRAKE. Plane and QuadPlane: RTL, QRTL and QLAND, plus
+/// CIRCLE (the short failsafe, `FS_SHORT_ACTN` 0/1) and FBWA (the glide
+/// either failsafe selects with action 2). Entered without the wizard
+/// commanding it, it is the FC's failsafe or the pilot's switch, and the
+/// wizard never commands over it.
+fn fc_failsafe_mode(class: Class, mode: u32) -> bool {
+    use crate::modes::{plane, Family};
+    match class {
+        Class::Multirotor => Family::Copter.is_failsafe_mode(mode),
+        Class::Fixedwing | Class::Vtol => {
+            Family::Plane.is_failsafe_mode(mode) || matches!(mode, plane::CIRCLE | plane::FBWA)
+        }
     }
 }
 
@@ -170,6 +199,10 @@ impl Engine {
             wizard_dirty: false,
             pilot_tuning: false,
             epoch_offset_ms,
+            own_modes: Vec::new(),
+            fs_text_cursor: 0,
+            fs_mode_seen: None,
+            last_abort: None,
         }
     }
 
@@ -326,9 +359,74 @@ impl Engine {
             }
         }
         self.adopt_identity(now);
+        // Before any queued write goes out: an FC failsafe stops the wizard first.
+        self.check_fc_failsafe(now);
         self.params.tick(&mut self.out.msgs, now);
         self.tick_abort_flight(now);
         self.tick_run(now);
+    }
+
+    /// The FC has taken over: it flies a failsafe mode the wizard did not
+    /// command (its battery, link or RC failsafe, or the pilot's mode
+    /// switch). The wizard stops at once and hands the aircraft back. It
+    /// sends no mode command, and of the parameter writes it had queued only
+    /// the put-backs of values it changed (a step's temporary limits, the
+    /// gains of a discarded tune) go out. The FC's low or critical battery
+    /// warning alone is no failsafe: the FC may have no action set for it. It
+    /// is the `battery_warning` abort, which puts back the same values and
+    /// flies the wizard's own landing; if the FC then acts, its mode change
+    /// is the failsafe and the wizard's landing yields to it.
+    fn check_fc_failsafe(&mut self, now: u64) {
+        for m in self.out.modes_sent.drain(..) {
+            self.own_modes.push((m, now));
+        }
+        let last = self.own_modes.len().saturating_sub(1);
+        let mut i = 0;
+        self.own_modes.retain(|(_, t)| {
+            let keep = i == last || now.saturating_sub(*t) < OWN_MODE_MS;
+            i += 1;
+            keep
+        });
+        let (texts, cursor) = self.fc.texts_after(self.fs_text_cursor);
+        self.fs_text_cursor = cursor;
+        // A failsafe is a mode the FC enters: a lone step started in flight in
+        // FBWA or CIRCLE flies on from it.
+        let mode = self.fc.custom_mode;
+        let entered = self.fs_mode_seen.replace(mode) != Some(mode);
+        let flying = self.fc.armed
+            && (self.abort_flight.is_some()
+                || self.run.as_ref().is_some_and(|r| {
+                    r.wizard == WizardId::Air && r.steps.get(r.idx).is_some_and(|s| s.flight())
+                }));
+        let Some(adapter) = self.adapter() else {
+            return;
+        };
+        if !flying || adapter.fw != Fw::ArduPilot {
+            return;
+        }
+        let fs_mode = entered
+            && fc_failsafe_mode(adapter.class, mode)
+            && !self.own_modes.iter().any(|(m, _)| *m == mode);
+        let battery_text = texts.iter().any(|t| {
+            let l = t.to_ascii_lowercase();
+            l.contains("battery") && (l.contains(" low") || l.contains("critical"))
+        });
+        let reason = if fs_mode {
+            "fc_failsafe"
+        } else if battery_text && self.run.is_some() {
+            "battery_warning"
+        } else {
+            return;
+        };
+        if self.run.is_some() {
+            self.abort_air(reason, false, now);
+        } else if reason == "fc_failsafe" {
+            // The wizard's own abort landing or return yields to the FC's.
+            tracing::warn!(reason, "fc_setup_abort_flight_yields");
+            self.abort_flight = None;
+            self.release_tuning();
+        }
+        self.params.drop_forward_writes();
     }
 
     fn tick_abort_flight(&mut self, now: u64) {
@@ -428,11 +526,24 @@ impl Engine {
                 // An operator action ended `tuning`, or the sticks moved.
                 let sticks =
                     !step.blends_sticks() && cx.inputs.axes.iter().any(|a| a.abs() > TAKEOVER_AXIS);
+                // Below the phase's floor, or on the ground, while it should be cruising.
+                let low = step.flight_floor(&cx).and_then(|floor| {
+                    let h = flight::height(&cx);
+                    if (cx.fc.on_ground() && cx.fc.landed.is_some())
+                        || h.is_some_and(|h| h < flight::GROUND_CONTACT_M)
+                    {
+                        Some("ground_contact")
+                    } else {
+                        h.is_some_and(|h| h < floor).then_some("altitude_floor")
+                    }
+                });
                 if !*pilot_tuning || sticks {
                     abort = Some("operator");
                     takeover = true;
                 } else if cx.inputs.link_lost {
                     abort = Some("link_loss");
+                } else if let Some(r) = low {
+                    abort = Some(r);
                 } else if cx.fc.battery_pct.is_some_and(|p| p < ABORT_BATTERY_PCT) {
                     abort = Some("battery");
                 } else if cx.fc.wind.is_some_and(|(_, s, _)| s > ABORT_WIND_MPS) {
@@ -666,6 +777,9 @@ impl Engine {
             return;
         };
         tracing::warn!(reason, takeover, "fc_setup_air_abort");
+        if !matches!(reason, "operator" | "operator_abort") {
+            self.last_abort = Some((format!("setup.blocker.aborted_{reason}"), now));
+        }
         let ground_done = self.state.ground.state == WizardState::Done;
         if let Some(run) = self.run.as_mut() {
             let Engine {
@@ -711,6 +825,10 @@ impl Engine {
             if self.pilot_tuning {
                 self.out.effect(Effect::ExitTuning { operator: true });
             }
+        } else if reason == "fc_failsafe" {
+            // The FC flies its failsafe: no mode command goes over it, and the pilot
+            // yields to the FC.
+            self.release_tuning();
         } else if self.fc.armed && !self.fc.on_ground() {
             let plane = adapter.class == Class::Fixedwing
                 || self.fc.vtol_state
@@ -772,6 +890,7 @@ impl Engine {
             return reply_err("detecting");
         };
         self.run = Some(run);
+        self.last_abort = None;
         if w == WizardId::Air {
             self.forget_tuning_box();
         }
@@ -845,6 +964,7 @@ impl Engine {
         if w == WizardId::Air {
             self.forget_tuning_box();
         }
+        self.last_abort = None;
         self.run = Some(Run {
             wizard: w,
             steps: vec![s],
@@ -1104,6 +1224,17 @@ impl Engine {
     pub fn active_step(&self) -> Option<&'static str> {
         let run = self.run.as_ref()?;
         run.steps.get(run.idx).map(|s| s.id())
+    }
+
+    /// The `setup.blocker.aborted_<reason>` key of the air wizard's last
+    /// abort that the operator did not ask for, for [`ABORT_SHOW_MS`] after
+    /// it and until the next run: the pilot state carries it so every
+    /// surface says why the wizard stopped.
+    pub fn last_abort(&self, now: u64) -> Option<String> {
+        self.last_abort
+            .as_ref()
+            .filter(|(_, t)| now.saturating_sub(*t) < ABORT_SHOW_MS)
+            .map(|(k, _)| k.clone())
     }
 
     fn wizard_view(&self, w: WizardId, now: u64) -> WizardView {

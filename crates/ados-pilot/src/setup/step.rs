@@ -196,6 +196,15 @@ pub trait Step: Send {
         false
     }
 
+    /// The lowest height (m above take-off) the step's current phase may fly
+    /// at, while it should be cruising rather than taking off or landing. The
+    /// air abort monitor aborts `altitude_floor` below it, and
+    /// `ground_contact` once the aircraft is on (or within a metre of) the
+    /// ground.
+    fn flight_floor(&self, _cx: &Cx) -> Option<f32> {
+        None
+    }
+
     fn begin(&mut self, cx: &mut Cx);
     fn on_msg(&mut self, _msg: &MavMessage, _cx: &mut Cx) {}
     fn tick(&mut self, cx: &mut Cx);

@@ -262,6 +262,11 @@ pub struct PilotState {
     /// while the owner is `tuning`; `None` otherwise.
     #[serde(default)]
     pub setup_step: Option<String>,
+    /// The `setup.blocker.aborted_<reason>` key of the air wizard's last
+    /// abort that was not the operator's, for a while after it; `None`
+    /// otherwise.
+    #[serde(default)]
+    pub setup_abort: Option<String>,
     /// The horizontal speed cap in force, omitted while there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_cap: Option<SpeedCap>,

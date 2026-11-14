@@ -50,6 +50,10 @@ const HOLD_MS: u64 = 1000;
 /// The FC has refused the tune (or hold) mode when it is not in it by now.
 const TUNE_ENTER_MS: u64 = 10_000;
 const POLL_MS: u64 = 1000;
+/// Plane AUTOTUNE aborts below this height (m): half the loiter height.
+pub const PLANE_TUNE_FLOOR_M: f32 = 40.0;
+/// A copter-style tune (8 m up) aborts below this height (m).
+pub const HOVER_TUNE_FLOOR_M: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Stage {
@@ -103,6 +107,8 @@ pub struct Autotune {
     last_poll: u64,
     text_cursor: u64,
     before: Map<String, Value>,
+    /// The gains as the round under way started (see `in_open_round`).
+    round_before: Map<String, Value>,
     notes: Vec<Value>,
     /// The FC took the tune mode at least once this round.
     entered: bool,
@@ -124,6 +130,7 @@ impl Default for Autotune {
             last_poll: 0,
             text_cursor: 0,
             before: Map::new(),
+            round_before: Map::new(),
             notes: Vec::new(),
             entered: false,
         }
@@ -407,8 +414,44 @@ impl Step for Autotune {
         }
     }
 
-    fn abort(&mut self, _cx: &mut Cx) {
+    /// An aborted tune keeps none of the gains of the round it cut short: a
+    /// tune that sank into the ground or met a failsafe measured the aircraft
+    /// in a state it does not normally fly in. Those go back to their values
+    /// from the start of the round. Axes the FC already finished and saved
+    /// (an earlier round, or an axis done within this one) keep their gains.
+    fn abort(&mut self, cx: &mut Cx) {
+        let mut discarded = Vec::new();
+        let mut put_back = Map::new();
+        for (n, v) in &self.round_before {
+            let Some(v) = v.as_f64() else { continue };
+            if !self.in_open_round(cx, n) {
+                continue;
+            }
+            if cx
+                .params
+                .get(n)
+                .is_some_and(|now| !crate::setup::params::close(now, v as f32))
+            {
+                discarded.push(n.clone());
+            }
+            cx.params.set_back(n, v as f32);
+            put_back.insert(n.clone(), json!(v));
+        }
+        if !put_back.is_empty() {
+            self.core.result = Some(obj([
+                ("gains_discarded", json!(discarded)),
+                ("gains_before", Value::Object(put_back)),
+            ]));
+        }
         self.phase = Phase::Idle;
         self.hop.leg = Leg::Idle;
+    }
+
+    fn flight_floor(&self, _cx: &Cx) -> Option<f32> {
+        match self.phase {
+            Phase::PlaneTuning { .. } => Some(PLANE_TUNE_FLOOR_M),
+            Phase::Tuning { .. } => Some(HOVER_TUNE_FLOOR_M),
+            _ => None,
+        }
     }
 }

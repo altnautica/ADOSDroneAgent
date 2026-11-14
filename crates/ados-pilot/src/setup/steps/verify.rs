@@ -175,6 +175,11 @@ impl Step for Verify {
         true
     }
 
+    fn flight_floor(&self, _cx: &Cx) -> Option<f32> {
+        matches!(self.phase, Phase::Bank { .. } | Phase::Climb { .. })
+            .then_some(flight::PLANE_FLOOR_M)
+    }
+
     fn begin(&mut self, cx: &mut Cx) {
         *self = Verify::default();
         self.core.body_variant = match cx.adapter.class {

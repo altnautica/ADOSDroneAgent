@@ -57,6 +57,12 @@ describe("home status card", () => {
     expect(homePill({ ...base, pilot }).text).toBe("All systems OK");
   });
 
+  it("says why the setup wizard aborted", () => {
+    const pilot = parsePilotState({ ...raw, readiness: [], statustext: [], setup_abort: "setup.blocker.aborted_battery" });
+    const pill = homePill({ ...base, pilot });
+    expect(pill.alerts.map((a) => [a.id, a.severity, a.text])).toEqual([["setup_abort", "warning", "Aborted: battery below 30 %"]]);
+  });
+
   it("builds the link-loss, AGL, sticks and time-to-reserve lines from the shared rules", () => {
     const pilot = parsePilotState({ ...raw, link_loss_in_s: 3.4, link_loss_action: "rth", agl_m: 4.12, agl_source: "home" });
     const lines = homeStatusLines({

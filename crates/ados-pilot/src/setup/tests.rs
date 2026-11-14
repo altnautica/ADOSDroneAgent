@@ -1316,7 +1316,8 @@ fn refused_autotune_mode_fails_fast_and_lands() {
 
 #[test]
 fn autotune_stops_when_the_fc_leaves_the_tune_mode() {
-    // A failsafe takes the FC out of AUTOTUNE: the step fails and never sends AUTOTUNE again.
+    // A failsafe takes the FC out of AUTOTUNE: the wizard ends, hands the aircraft
+    // back and sends no mode over the FC's.
     let mut s = air_ready();
     s.fc.script.autotune_s = 600;
     assert_eq!(s.e.run_step(A, "autotune", s.now)["ok"], json!(true));
@@ -1324,13 +1325,17 @@ fn autotune_stops_when_the_fc_leaves_the_tune_mode() {
     s.act(A, "autotune", "start", json!({}));
     s.until(|s| s.fc.custom_mode == 15, 30_000);
     s.run(2000);
-    s.fc.custom_mode = 6; // RTL
-    s.until(|s| s.state() == Some(StepState::Failed), 5_000);
-    assert_eq!(
-        s.e.current_view().unwrap().blockers,
-        vec!["setup.blocker.autotune_failed".to_string()]
-    );
     let sent = s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).len();
+    s.fc.custom_mode = 6; // RTL
+    s.until(|s| s.e.current_view().is_none(), 5_000);
+    assert_eq!(
+        s.e.state.air.steps["autotune"]["blockers"],
+        json!(["setup.blocker.aborted_fc_failsafe"])
+    );
+    assert!(s
+        .fc
+        .effects
+        .contains(&Effect::ExitTuning { operator: false }));
     s.run(10_000);
     assert_eq!(s.fc.custom_mode, 6, "the FC keeps its own mode");
     assert_eq!(
@@ -1541,3 +1546,5 @@ fn vtol_air_wizard_flies_every_step() {
     assert_eq!(s.result(A, "first_hover")["transition_mc"], json!(true));
     assert!(!s.fc.armed);
 }
+
+mod safety;

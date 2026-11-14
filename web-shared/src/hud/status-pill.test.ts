@@ -252,6 +252,7 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
         preflightFailing: i.preflight_failing,
         fcFailsafe: i.fc_failsafe,
         failsafeCause: i.failsafe_cause,
+        setupAbort: i.setup_abort,
         armed: i.armed,
         navSource: i.nav_source as PillInputs["navSource"],
       });

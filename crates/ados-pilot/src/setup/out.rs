@@ -25,6 +25,10 @@ pub struct Outbox {
     pub msgs: Vec<MavMessage>,
     pub effects: Vec<Effect>,
     pub target: (u8, u8),
+    /// Custom modes (`main`) commanded since the engine last drained them: a
+    /// return or landing the FC flies that is not among the wizard's own is
+    /// the FC's failsafe.
+    pub modes_sent: Vec<u32>,
 }
 
 impl Outbox {
@@ -92,6 +96,7 @@ impl Outbox {
     /// DO_SET_MODE with a custom mode (ArduPilot: `main` is the mode number;
     /// PX4: main and sub mode).
     pub fn set_mode(&mut self, main: u32, sub: u32) {
+        self.modes_sent.push(main);
         self.cmd(
             MavCmd::MAV_CMD_DO_SET_MODE,
             [1.0, main as f32, sub as f32, 0.0, 0.0, 0.0, 0.0],

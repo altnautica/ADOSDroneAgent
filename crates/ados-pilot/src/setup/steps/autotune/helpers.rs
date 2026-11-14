@@ -53,6 +53,7 @@ impl Autotune {
 
     pub(super) fn start_copter_round(&mut self, cx: &mut Cx) {
         self.stage = Stage::Copter;
+        self.snapshot_round(cx);
         self.hop.start(cx, TUNE_ALT_M);
         self.phase = Phase::TakeOff;
         self.core.phase_key = Some(if self.yaw_round { "yaw" } else { "roll_pitch" }.into());
@@ -60,11 +61,71 @@ impl Autotune {
 
     pub(super) fn start_plane(&mut self, cx: &mut Cx) {
         self.stage = Stage::Plane;
+        self.snapshot_round(cx);
         self.to.start(cx);
         self.phase = Phase::PlanePosition;
         self.core.phase_key = Some("plane".into());
     }
 
+    /// The gains as the round starts: an abort puts back only those of the
+    /// round's own axes that it has not finished.
+    fn snapshot_round(&mut self, cx: &Cx) {
+        self.round_before = cx
+            .adapter
+            .report_gains()
+            .into_iter()
+            .filter_map(|n| cx.params.get(&n).map(|v| (n, json!(v))))
+            .collect();
+    }
+
+    /// `name` is a gain the round under way tunes on an axis it has not
+    /// finished. A finished round (landed and saved, waiting for the battery
+    /// swap, or reading its gains back) owns none.
+    pub(super) fn in_open_round(&self, cx: &Cx, name: &str) -> bool {
+        let open = matches!(
+            self.phase,
+            Phase::TakeOff
+                | Phase::Settle { .. }
+                | Phase::Params
+                | Phase::Tuning { .. }
+                | Phase::LandSave
+                | Phase::PlanePosition
+                | Phase::PlaneTuning { .. }
+        );
+        if !open {
+            return false;
+        }
+        let plane_gain = name.starts_with("RLL_RATE_") || name.starts_with("PTCH_RATE_");
+        let axis = gain_axis(name);
+        match self.stage {
+            Stage::Plane => plane_gain && axis.is_none_or(|a| !self.plane_done.contains(&a)),
+            Stage::Copter if cx.adapter.fw == Fw::Px4 => true,
+            Stage::Copter => {
+                let round_axis = match axis {
+                    Some(Axis::Yaw) => self.yaw_round,
+                    Some(_) => !self.yaw_round,
+                    None => true,
+                };
+                !plane_gain && round_axis && axis.is_none_or(|a| !self.copter_done.contains(&a))
+            }
+        }
+    }
+}
+
+/// The axis a gain parameter belongs to, from its name.
+fn gain_axis(name: &str) -> Option<Axis> {
+    if name.contains("RLL") || name.contains("ROLL") {
+        Some(Axis::Roll)
+    } else if name.contains("PIT") || name.contains("PTCH") {
+        Some(Axis::Pitch)
+    } else if name.contains("YAW") {
+        Some(Axis::Yaw)
+    } else {
+        None
+    }
+}
+
+impl Autotune {
     pub(super) fn after_copter(&mut self, cx: &mut Cx) {
         if !self.yaw_round && cx.adapter.fw == Fw::ArduPilot {
             if cx.fc.battery_pct.is_some_and(|p| p >= YAW_MIN_BATTERY) {

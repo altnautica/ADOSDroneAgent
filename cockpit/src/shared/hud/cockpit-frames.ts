@@ -165,6 +165,10 @@ export interface PilotState {
   /** Why `fcFailsafe`: `rc_or_failsafe` (RC input was present, so an RC
    *  switch is possible) or `fc`; null while not in a failsafe. */
   failsafeCause: string | null;
+  /** The setup-strings key (`setup.blocker.aborted_<reason>`) of the air
+   *  wizard's last abort that was not the operator's while the engine still
+   *  shows it, or null. */
+  setupAbort: string | null;
   /** A horizontal speed cap the pilot applies to every setpoint it flies
    *  (`gnss-denied` while the EKF horizontal source is not GNSS), or null. */
   speedCap: SpeedCap | null;
@@ -244,6 +248,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     setupStep: str(p.setup_step),
     fcFailsafe: p.fc_failsafe === true,
     failsafeCause: str(p.failsafe_cause),
+    setupAbort: str(p.setup_abort),
     speedCap: parseSpeedCap(p.speed_cap),
     sensors: p.sensors ?? null,
   };
