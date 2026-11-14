@@ -207,19 +207,21 @@ fn wire_floats_are_short_decimals() {
 
 #[test]
 fn the_registry_version_records_the_nullable_fc_state() {
-    // `state.armed` and `state.landed` are null while the FC link is down: a
-    // change of the state message's shape, so the contract version moved
-    // with it and the registry describes it.
-    assert_eq!(crate::pilot::PILOT_V1_VERSION, 2);
+    // `state.armed`, `state.landed` (v2), `state.fc_mode` and
+    // `state.fc_mode_name` (v3) are null while the FC link is down: changes
+    // of the state message's shape, so the contract version moved with them
+    // and the registry describes them.
+    assert_eq!(crate::pilot::PILOT_V1_VERSION, 3);
     let meta = crate::contracts::CONTRACTS
         .iter()
         .find(|c| c.id == "pilot.v1")
         .expect("pilot.v1 is registered");
-    assert!(
-        meta.description.contains("armed and landed are null"),
-        "{}",
-        meta.description
-    );
+    for text in [
+        "armed and landed are null",
+        "fc_mode and fc_mode_name are null",
+    ] {
+        assert!(meta.description.contains(text), "{}", meta.description);
+    }
 }
 
 #[test]

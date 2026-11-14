@@ -22,7 +22,9 @@ impl Pilot {
     pub fn state(&self, now_ms: u64) -> PilotState {
         let fam = self.family();
         let owner = self.owner();
-        let fc_mode_name = fam.mode_name(self.fc.custom_mode);
+        // Unknown (null) until the FC's heartbeat arrives, as armed/landed.
+        let fc_linked = self.fc.linked(now_ms);
+        let fc_mode_name = fc_linked.then(|| fam.mode_name(self.fc.custom_mode));
         let readiness = self.readiness(now_ms);
         let skill = self.auth.lease().map(|l| SkillRef {
             plugin_id: l.holder.plugin_id.clone(),
@@ -45,14 +47,16 @@ impl Pilot {
             },
             Owner::Swarm => "SWARM".into(),
             Owner::MissionFc => "MISSION".into(),
-            Owner::FcMode if fam.is_rtl(self.fc.custom_mode) => {
+            Owner::FcMode if fc_linked && fam.is_rtl(self.fc.custom_mode) => {
                 let d = self
                     .pos_ne(now_ms)
                     .map(|p| crate::geo::dist(p, self.fc.home_ne()));
                 d.map_or("RTH".into(), |d| format!("RTH · {d:.0} m"))
             }
-            Owner::FcMode if fam.is_land(self.fc.custom_mode) => "LANDING".into(),
-            Owner::FcMode => format!("FC · {fc_mode_name}"),
+            Owner::FcMode if fc_linked && fam.is_land(self.fc.custom_mode) => "LANDING".into(),
+            Owner::FcMode => fc_mode_name
+                .as_deref()
+                .map_or_else(|| "FC".into(), |n| format!("FC · {n}")),
             Owner::Tuning => "TUNING".into(),
         };
         // Stale or no obstacle data: the reported state says which.
@@ -134,7 +138,6 @@ impl Pilot {
             .rangefinder_agl(now_ms)
             .map(|m| (m, "rangefinder"))
             .or_else(|| self.fc.ekf_height(now_ms).map(|m| (m, "home")));
-        let fc_linked = self.fc.linked(now_ms);
         let mut s = PilotState::default();
         s.owner = owner;
         s.owner_label = owner_label;
@@ -143,7 +146,7 @@ impl Pilot {
         s.control_mode = self.control_mode();
         s.profile = self.settings.pilot.profile;
         s.avoid = self.settings.pilot.avoid;
-        s.fc_mode = self.fc.custom_mode;
+        s.fc_mode = fc_linked.then_some(self.fc.custom_mode);
         s.fc_mode_name = fc_mode_name;
         s.armed = fc_linked.then_some(self.fc.armed);
         s.landed = fc_linked.then(|| self.fc.landed());
@@ -164,9 +167,14 @@ impl Pilot {
         s.link_loss_in_s = link_loss_in_s;
         s.link_loss_action = self.settings.pilot.link_loss_action.as_str().to_owned();
         // A mission the pilot paused (a stick takeover, Pause) reads
-        // `paused`; the router sees GUIDED and reports it `loaded`.
+        // `paused`; the router sees GUIDED and reports it `loaded`. Not
+        // during an FC failsafe: the FC flies its own return or landing, and
+        // the mission cannot be resumed until the operator changes mode.
         s.mission = self.mission.clone().map(|mut m| {
-            if self.mission_paused && !matches!(m.state.as_str(), "complete" | "none") {
+            if self.mission_paused
+                && !self.fc_failsafe
+                && !matches!(m.state.as_str(), "complete" | "none")
+            {
                 m.state = "paused".to_owned();
             }
             m

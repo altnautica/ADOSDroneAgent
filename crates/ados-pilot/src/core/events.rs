@@ -270,7 +270,13 @@ impl Pilot {
             }
             return;
         }
-        if fam.is_auto(mode) {
+        // An operator's change: the pilot's own, or a ground station's mode
+        // command (Mode sheet, RTH, land) the router saw.
+        let operator = self.mode_is_ours(mode, now_ms) || self.mode_is_clients(mode, now_ms);
+        // Copter AUTO_RTL nobody commanded is a failsafe action (Auto
+        // DO_LAND_START or RTL), not a mission the operator flies: the FC
+        // owns it below, so Take control and the stick preempt cannot leave it.
+        if fam.is_auto(mode) && (operator || !fam.is_failsafe_mode(mode)) {
             if self.owner() != Owner::MissionFc {
                 self.set_owner(Owner::MissionFc, "fc-mode");
             }
@@ -281,13 +287,9 @@ impl Pilot {
             return;
         }
         // Any other mode: the FC flies.
-        let was_ours = self.mode_is_ours(mode, now_ms);
-        // An operator's change: the pilot's own, or a ground station's mode
-        // command (Mode sheet, RTH, land) the router saw.
-        let operator = was_ours || self.mode_is_clients(mode, now_ms);
-        // An RTL or land nobody commanded: an RC switch or an FC failsafe
-        // (radio, battery, EKF).
-        self.fc_failsafe = !operator && (fam.is_rtl(mode) || fam.is_land(mode));
+        // A return, land or brake nobody commanded: an RC switch or an FC
+        // failsafe (radio, battery, EKF).
+        self.fc_failsafe = !operator && fam.is_failsafe_mode(mode);
         self.failsafe_cause = self.fc_failsafe.then(|| self.fc_mode_cause());
         if self.owner() != Owner::FcMode {
             self.set_owner(Owner::FcMode, "fc-mode");

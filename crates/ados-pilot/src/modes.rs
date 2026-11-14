@@ -108,6 +108,16 @@ impl Family {
         }
     }
 
+    /// A mode an FC failsafe action can select: a return or a landing, and
+    /// on Copter also AUTO_RTL ("Auto DO_LAND_START or RTL") and BRAKE
+    /// ("Brake or Land"). Entered with no operator command, it is the FC's
+    /// failsafe (or an RC switch) that the pilot never overrides.
+    pub fn is_failsafe_mode(self, mode: u32) -> bool {
+        self.is_rtl(mode)
+            || self.is_land(mode)
+            || (self == Self::Copter && matches!(mode, copter::AUTO_RTL | copter::BRAKE))
+    }
+
     /// The hold mode `hand_to_fc` selects.
     pub fn hand_mode(self, name: &str) -> u32 {
         match (self, name) {

@@ -289,6 +289,11 @@ function resolveBuiltin(skill: Skill, b: BuiltinBinding, ctx: SkillContext): Ski
   if (skill.id === "pause" && (pilot?.fcFailsafe || (!pilot?.fresh && fcFailsafeForPause(ctx.fc, ctx.now)))) {
     return disabled(refusalText("failsafe"));
   }
+  // Resume and Take control would put the flight controller back in AUTO or
+  // GUIDED, out of its failsafe: the pilot refuses both while it reports one.
+  if ((skill.id === "resume" || skill.id === "take_control") && pilot?.fcFailsafe) {
+    return disabled(refusalText("failsafe"));
+  }
   const noLink = ctx.linkReason ?? refusalText("no_fc");
   const route = builtinRoute(skill, ctx);
   if (route === null) {

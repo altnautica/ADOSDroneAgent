@@ -204,8 +204,11 @@ pub struct PilotState {
     pub control_mode: ControlMode,
     pub profile: Profile,
     pub avoid: AvoidMode,
-    pub fc_mode: u32,
-    pub fc_mode_name: String,
+    /// The FC's custom mode; `None` (JSON `null`) while the FC link is down,
+    /// so a surface shows the mode as unknown.
+    pub fc_mode: Option<u32>,
+    /// The FC's mode name; `None` (JSON `null`) while the FC link is down.
+    pub fc_mode_name: Option<String>,
     /// Whether the FC reports armed; `None` (JSON `null`) while the FC link
     /// is down, so a surface treats the vehicle as possibly airborne.
     pub armed: Option<bool>,

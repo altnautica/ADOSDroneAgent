@@ -140,3 +140,84 @@ fn launch_refused_on_the_ground_during_an_fc_failsafe() {
         assert_eq!(w.set_modes(copter::GUIDED), 0, "{name}");
     }
 }
+
+/// Copter's failsafe actions "Auto DO_LAND_START or RTL" (AUTO_RTL) and
+/// "Brake or Land" (BRAKE) are FC failsafes too when nobody commanded them:
+/// the FC owns the vehicle, and Take control is refused.
+#[test]
+fn uncommanded_auto_rtl_and_brake_are_fc_failsafes() {
+    for mode in [copter::AUTO_RTL, copter::BRAKE] {
+        let mut w = fc_failsafe(mode);
+        assert_eq!(
+            err(&w.action("take_control")),
+            Some("failsafe"),
+            "mode {mode}"
+        );
+        w.run(300);
+        assert_eq!(w.p.owner(), Owner::FcMode, "mode {mode}");
+        assert_eq!(w.mode, mode, "the FC keeps flying its failsafe");
+        assert_eq!(w.set_modes(copter::GUIDED), 0, "mode {mode}");
+    }
+}
+
+/// A mission in AUTO whose FC switches itself to AUTO_RTL is not the
+/// operator's mission any more: the owner is the FC's, and a stick
+/// deflection does not take the vehicle into GUIDED.
+#[test]
+fn uncommanded_auto_rtl_from_a_mission_is_not_a_mission() {
+    let mut w = World::new();
+    w.airborne(copter::AUTO);
+    w.run(100);
+    assert_eq!(w.p.owner(), Owner::MissionFc);
+    w.mode = copter::AUTO_RTL;
+    w.run(100);
+    assert!(w.p.state(w.now).fc_failsafe);
+    assert_eq!(w.p.owner(), Owner::FcMode);
+    w.sent.clear();
+    w.stick([0.0, 0.5, 0.0, 0.0], 600);
+    assert_eq!(w.mode, copter::AUTO_RTL);
+    assert_eq!(w.set_modes(copter::GUIDED), 0);
+    assert_eq!(err(&w.action("take_control")), Some("failsafe"));
+}
+
+/// The operator's own AUTO_RTL or BRAKE (a ground station's mode command
+/// the router saw) is no failsafe: Take control flies again.
+#[test]
+fn operator_commanded_auto_rtl_and_brake_are_not_failsafes() {
+    for mode in [copter::AUTO_RTL, copter::BRAKE] {
+        let mut w = World::new();
+        w.airborne(copter::LOITER);
+        w.run(100);
+        w.p.on_feed(CLIENT_MODE_TOPIC, &json!({ "mode": mode }), w.now);
+        w.mode = mode;
+        w.run(100);
+        assert!(!w.p.state(w.now).fc_failsafe, "mode {mode}");
+        assert!(ok(&w.action("take_control")), "mode {mode}");
+        w.run(200);
+        assert_eq!(w.mode, copter::GUIDED, "mode {mode}");
+        assert_eq!(w.p.owner(), Owner::Pilot, "mode {mode}");
+    }
+}
+
+/// A mission the pilot paused, then an FC failsafe return: the frame shows
+/// the router's mission state, not `paused`, since Resume is refused until
+/// the operator changes mode.
+#[test]
+fn a_paused_mission_does_not_read_paused_during_an_fc_failsafe() {
+    let mut w = World::new();
+    w.airborne(copter::AUTO);
+    w.run(40);
+    w.mission("active", 2, 4);
+    w.stick([0.0, 0.5, 0.0, 0.0], 400);
+    assert_eq!(w.p.owner(), Owner::Pilot);
+    w.mission("loaded", 2, 4);
+    assert_eq!(w.p.state(w.now).mission.unwrap().state, "paused");
+    w.stick([0.0; 4], 600);
+    w.mode = copter::RTL;
+    w.run(100);
+    w.mission("returning", 2, 4);
+    let s = w.p.state(w.now);
+    assert!(s.fc_failsafe);
+    assert_eq!(s.mission.unwrap().state, "returning");
+    assert_eq!(err(&w.action("resume")), Some("failsafe"));
+}

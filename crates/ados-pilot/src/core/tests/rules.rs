@@ -479,6 +479,27 @@ fn arm_and_landed_are_null_without_an_fc_link() {
     assert_eq!(v.get("landed"), Some(&serde_json::Value::Null));
 }
 
+/// Before the FC's first heartbeat the frame does not claim a mode: the
+/// mode and its name serialise as JSON `null` (unknown, never mode 0 /
+/// STABILIZE), and carry the FC's mode once its heartbeat arrives.
+#[test]
+fn fc_mode_is_null_until_the_fc_heartbeat() {
+    let p = crate::core::Pilot::new(crate::config::Settings::default());
+    let v = serde_json::to_value(p.state(1000)).unwrap();
+    assert_eq!(v.get("fc_mode"), Some(&serde_json::Value::Null));
+    assert_eq!(v.get("fc_mode_name"), Some(&serde_json::Value::Null));
+
+    let mut w = World::new();
+    w.airborne(copter::LOITER);
+    let v = serde_json::to_value(w.p.state(w.now)).unwrap();
+    assert_eq!(v.get("fc_mode"), Some(&serde_json::json!(copter::LOITER)));
+    assert_eq!(v.get("fc_mode_name"), Some(&serde_json::json!("LOITER")));
+    // The heartbeat goes quiet for longer than the link window.
+    let v = serde_json::to_value(w.p.state(w.now + 3000)).unwrap();
+    assert_eq!(v.get("fc_mode"), Some(&serde_json::Value::Null));
+    assert_eq!(v.get("fc_mode_name"), Some(&serde_json::Value::Null));
+}
+
 fn home_at(w: &mut World, lat: f64, lon: f64) {
     let m = MavMessage::HOME_POSITION(HOME_POSITION_DATA {
         latitude: (lat * 1e7) as i32,

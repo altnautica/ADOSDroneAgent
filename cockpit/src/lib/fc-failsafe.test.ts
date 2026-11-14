@@ -89,3 +89,20 @@ describe("the Pause gate's read while a sent return awaits its answer", () => {
     expect(fcFailsafeForPause({ mode: "RTL", systemStatus: 6 }, T0 + 100)).toBe(true);
   });
 });
+
+describe("Resume and Take control during the pilot's reported failsafe", () => {
+  const failsafe = { ...stale, fresh: true, fcFailsafe: true };
+  const at = (pilot: typeof failsafe): SkillContext => ({ ...ctx("RTL", T0), pilot });
+
+  it("disables both with the failsafe reason, as Pause", () => {
+    for (const id of ["resume", "take_control", "pause"] as const) {
+      expect(resolveSkillState(BUILTIN_SKILL_BY_ID[id]!, at(failsafe))).toEqual({ enabled: false, reason: specText("refusal.failsafe") });
+    }
+  });
+
+  it("offers them again once the pilot clears the failsafe", () => {
+    for (const id of ["resume", "take_control"] as const) {
+      expect(resolveSkillState(BUILTIN_SKILL_BY_ID[id]!, at({ ...failsafe, fcFailsafe: false })).enabled).toBe(true);
+    }
+  });
+});
