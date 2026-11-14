@@ -218,6 +218,49 @@ fn a_searching_follow_shows_the_time_left_the_step_and_the_occluder() {
     assert!(!text.contains("Target lost"), "{text}");
 }
 
+/// An older follow-me's `coasting` and `lost` read in the new words, never
+/// as a raw phase name.
+#[test]
+fn an_older_follows_phases_read_as_predicting_and_holding() {
+    for (phase, want) in [("coasting", "Predicting #7"), ("lost", "Hold #7")] {
+        let mut app = live_app();
+        land(
+            &mut app,
+            ResourceId::NavStatus,
+            follow_status(
+                json!({"phase": phase, "track_id": 7, "active": true, "commanding": true}),
+            ),
+        );
+        let text = draw(&mut app, 160, 48);
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+        assert!(
+            !text.contains(&format!("{phase} #7")),
+            "raw {phase:?}\n{text}"
+        );
+        assert!(!text.contains("Target lost"), "{text}");
+    }
+}
+
+/// A camera loss while follow waits for the operator keeps the prompt and
+/// names the reason in the spec's words.
+#[test]
+fn a_camera_loss_while_waiting_names_its_reason() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        follow_status(json!({"phase": "holding-await-operator",
+            "hold_reason": "camera-lost", "track_id": 7})),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(
+        text.contains("Target lost: holding, waiting for instructions"),
+        "{text}"
+    );
+    assert!(text.contains("Reason    Camera lost"), "{text}");
+    assert!(!text.contains("camera-lost"), "{text}");
+}
+
 #[test]
 fn every_prompt_case_matches_the_shared_fixture() {
     let cases: Value = serde_json::from_str(include_str!(

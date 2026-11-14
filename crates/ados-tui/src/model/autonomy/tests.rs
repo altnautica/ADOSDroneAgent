@@ -49,6 +49,25 @@ fn a_scan_with_no_return_has_no_nearest_range() {
     assert_eq!(a.lidar.unwrap().min_range_m, None);
 }
 
+/// Follow-me 0.4.9 and older report `coasting` and `lost`: they read as
+/// `predicting` and `holding`, with no waiting prompt.
+#[test]
+fn an_older_follows_coasting_and_lost_read_as_predicting_and_holding() {
+    let follow = |phase: &str| {
+        Autonomy::from_value(&json!({"follow": {"ts_ms": 1, "age_ms": 40, "data": {
+            "phase": phase, "active": true, "commanding": true}}}))
+        .follow
+        .unwrap()
+    };
+    let coasting = follow("coasting");
+    assert_eq!(coasting.phase.as_deref(), Some("predicting"));
+    assert_eq!(coasting.prompt_title, None);
+    let lost = follow("lost");
+    assert_eq!(lost.phase.as_deref(), Some("holding"));
+    assert_eq!(lost.prompt_title, None);
+    assert_eq!(follow("searching").phase.as_deref(), Some("searching"));
+}
+
 /// The shared golden pilot frame, read from the control crate's fixture.
 pub(crate) fn pilot_frame() -> Value {
     serde_json::from_str(include_str!(

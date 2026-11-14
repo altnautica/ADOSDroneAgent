@@ -89,6 +89,8 @@ pub struct Follow {
     pub occluder_kind: Option<String>,
     /// The waiting prompt's title while follow holds for the operator.
     pub prompt_title: Option<String>,
+    /// Why follow holds (`camera-lost`, `search-exhausted`, ...).
+    pub hold_reason: Option<String>,
     /// Height above ground the follow skill flies on (`rng` or `baro`).
     pub agl_m: Option<f64>,
     pub agl_source: Option<String>,
@@ -104,6 +106,18 @@ pub struct Follow {
 pub fn follow_prompt_title(state: &Value) -> Option<String> {
     (state.get("phase").and_then(Value::as_str) == Some("holding-await-operator"))
         .then(|| spec_text("follow.prompt.await_title", &[]))
+}
+
+/// The phase of a `follow.state` payload. Follow-me 0.4.9 and older report
+/// `coasting` (flying on the prediction of a lost lock) and `lost` (holding):
+/// they read as `predicting` and `holding`, the rule of the shared
+/// `parseFollowState` (`web-shared/src/hud/nav-types.ts`).
+fn follow_phase(state: &Value) -> Option<String> {
+    s(state, "phase").map(|p| match p.as_str() {
+        "coasting" => "predicting".to_owned(),
+        "lost" => "holding".to_owned(),
+        _ => p,
+    })
 }
 
 /// The navigation source (vision-nav `nav.state`).
@@ -291,7 +305,7 @@ impl Autonomy {
     pub fn from_value(v: &Value) -> Self {
         let pilot = kind(v, "pilot").map(|(d, age, stale)| pilot(d, age, stale));
         let follow = kind(v, "follow").map(|(d, age_ms, stale)| Follow {
-            phase: s(d, "phase"),
+            phase: follow_phase(d),
             track_id: i(d, "track_id"),
             range_m: f(d, "range_m"),
             range_sigma_m: f(d, "range_sigma_m"),
@@ -302,6 +316,7 @@ impl Autonomy {
                 .get("occluder")
                 .and_then(|o| one_of(o, "kind", &["narrow", "wide"])),
             prompt_title: follow_prompt_title(d),
+            hold_reason: s(d, "hold_reason"),
             agl_m: f(d, "agl_m"),
             agl_source: one_of(d, "agl_source", &["rng", "baro"]),
             age_ms,

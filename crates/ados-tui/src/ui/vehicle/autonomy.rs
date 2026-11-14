@@ -177,6 +177,18 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
         if let Some(title) = &follow.prompt_title {
             rows.push(kv(t, "", 0, tone_span(core, Tone::Fault, title.clone())));
         }
+        // Why it holds, in the spec's words (`follow.hold_reason.*`).
+        if matches!(phase.as_str(), "holding" | "holding-await-operator") {
+            if let Some(reason) = &follow.hold_reason {
+                let key = format!("follow.hold_reason.{reason}");
+                let word = if has_spec_text(&key) {
+                    spec_text(&key, &[])
+                } else {
+                    reason.clone()
+                };
+                rows.push(kv_text(t, "Reason", LABEL, word));
+            }
+        }
         let search: Vec<String> = [
             follow.search_step.map(|n| format!("step {}", n + 1)),
             follow
