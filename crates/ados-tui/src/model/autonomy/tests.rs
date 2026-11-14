@@ -15,8 +15,8 @@ fn every_kind_null_reads_as_nothing_published() {
 fn kinds_are_read_with_their_age() {
     let a = Autonomy::from_value(&json!({
         "follow": {"ts_ms": 1, "age_ms": 40, "data": {
-            "phase": "coasting", "track_id": 12, "range_m": 10.2, "range_sigma_m": 0.6,
-            "reacquire_mode": "smart", "coast_remaining_s": 1.4}},
+            "phase": "searching", "track_id": 12, "range_m": 10.2, "range_sigma_m": 0.6,
+            "reacquire_mode": "smart", "reacquire_remaining_s": 1.4, "search_step": 2}},
         "nav": {"ts_ms": 1, "age_ms": 9000, "data": {
             "mode": "external_nav", "active_set": 1, "extnav_health": "good",
             "odom_rate_hz": 30.0, "obstacle_rate_hz": 10.0, "min_obstacle_m": 3.2, "gps_fix": 0}},
@@ -26,7 +26,9 @@ fn kinds_are_read_with_their_age() {
             "memory_used_mb": 210, "memory_budget_mb": 614, "keyframes_dropped": 3}},
     }));
     let follow = a.follow.unwrap();
-    assert_eq!(follow.phase.as_deref(), Some("coasting"));
+    assert_eq!(follow.phase.as_deref(), Some("searching"));
+    assert_eq!(follow.reacquire_remaining_s, Some(1.4));
+    assert_eq!(follow.search_step, Some(2));
     assert_eq!(follow.track_id, Some(12));
     assert!(!follow.stale);
     assert_eq!(follow.age_ms, Some(40));

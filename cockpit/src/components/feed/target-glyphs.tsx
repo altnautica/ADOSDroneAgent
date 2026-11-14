@@ -14,10 +14,10 @@ const STROKE: Record<TargetKind, string> = {
   ACQUIRING: "var(--hud-track)",
   FOLLOWING: "var(--hud-track)",
   HOLDING: "var(--hud-track)",
-  COASTING: "var(--hud-coast)",
+  PREDICTING: "var(--hud-coast)",
   SEARCHING: "var(--hud-coast)",
   SEARCHING_OFFFRAME: "var(--hud-coast)",
-  LOST: "var(--hud-crit)",
+  AWAIT_OPERATOR: "var(--hud-crit)",
   GT: "var(--hud-gt)",
 };
 
@@ -49,7 +49,7 @@ function Outlined({ d, color, width, dash }: { d: string; color: string; width: 
 /** One drawn item's marks (SVG). */
 export const GlyphMarks = memo(function GlyphMarks({ g, minimal }: { g: GlyphLayout; minimal: boolean }) {
   const color = STROKE[g.kind];
-  const fade = g.kind === "LOST" ? 1 - (g.item.lostProgress ?? 0) : 1;
+  const fade = g.kind === "AWAIT_OPERATOR" ? 1 - (g.item.lostProgress ?? 0) : 1;
   const box = g.box;
   return (
     <g opacity={fade} data-ease-key={g.key}>
@@ -70,7 +70,7 @@ export const GlyphMarks = memo(function GlyphMarks({ g, minimal }: { g: GlyphLay
           )}
           style={{ transformBox: "fill-box" }}
         >
-          <Outlined d={g.brackets} color={color} width={2.5} dash={g.kind === "COASTING" ? "4 3" : undefined} />
+          <Outlined d={g.brackets} color={color} width={2.5} dash={g.kind === "PREDICTING" ? "4 3" : undefined} />
         </g>
       ) : null}
       {g.reticle ? <Outlined d={g.reticle} color="var(--hud-ink)" width={2} /> : null}
@@ -116,7 +116,7 @@ export const GlyphMarks = memo(function GlyphMarks({ g, minimal }: { g: GlyphLay
 
 /** One drawn item's word tags (HTML, so the type is crisp and blurs its plate). */
 export function GlyphTags({ g }: { g: GlyphLayout }) {
-  const fade = g.kind === "LOST" ? 1 - (g.item.lostProgress ?? 0) : 1;
+  const fade = g.kind === "AWAIT_OPERATOR" ? 1 - (g.item.lostProgress ?? 0) : 1;
   const tags = [...(g.topTag ? [g.topTag] : []), ...g.bottomTags];
   return (
     <div data-ease-key={g.key} className="absolute inset-0">

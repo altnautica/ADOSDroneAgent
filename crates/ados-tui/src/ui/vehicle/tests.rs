@@ -494,7 +494,7 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
     );
     assert!(text.contains("last good read 0 s ago"), "{text}");
     let buf = draw_buffer(&mut app, 160, 48);
-    assert_dim(&app, &buf, "Coasting #12");
+    assert_dim(&app, &buf, "Predicting #12");
     assert_dim(&app, &buf, "120000 pts");
 }
 
