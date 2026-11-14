@@ -1056,10 +1056,11 @@ fn vantage_with_scan(
 }
 
 /// A trunk hides the prediction; the vantage beside it is reached by a
-/// straight, free way, which is clear flight: the frame says `clear` (no
-/// surface reads "Avoiding") and draws the straight line to the point.
+/// straight, free way, so the plan is clear flight and the frame draws the
+/// straight line to the point. Only the brake's clearance speed near the
+/// trunk may read as avoiding, as on any goal; nothing holds.
 #[test]
-fn a_vantage_goal_on_a_free_straight_way_reads_clear() {
+fn a_vantage_goal_on_a_free_straight_way_plans_straight() {
     use super::safety::trunk_scan;
     use ados_protocol::pilot::{AvoidState, VantageState};
     let mut w = World::new();
@@ -1071,8 +1072,9 @@ fn a_vantage_goal_on_a_free_straight_way_reads_clear() {
     let v = st.vantage_ne.expect("a vantage beside the trunk");
     assert!(v[1].abs() > 1.0, "{v:?}");
     let s = w.p.state(w.now);
-    assert_eq!(s.avoid_state, AvoidState::Clear);
+    assert_ne!(s.avoid_state, AvoidState::Blocked);
     assert_eq!(s.hold_reason, None);
+    assert_eq!(w.p.plan.state, AvoidState::Clear);
     assert_eq!(s.plan_ned.len(), 2, "{:?}", s.plan_ned);
     let end = s.plan_ned[1];
     let near = |a: f64, b: f32| (a - f64::from(b)).abs() < 0.05;
@@ -1080,7 +1082,7 @@ fn a_vantage_goal_on_a_free_straight_way_reads_clear() {
 }
 
 /// The hard stop acts on a vantage goal as on any goal: an obstacle inside
-/// the stop distance holds the vehicle.
+/// the stop distance stops the ask and only pushes the vehicle back out.
 #[test]
 fn a_vantage_goal_holds_at_the_hard_stop() {
     use super::safety::wall_scan;
@@ -1091,7 +1093,7 @@ fn a_vantage_goal_holds_at_the_hard_stop() {
     let s = w.p.state(w.now);
     assert_eq!(s.hold_reason.as_deref(), Some("obstacle-close"));
     let sp = w.last_setpoint().unwrap();
-    assert!(sp.vx.hypot(sp.vy) < 0.05, "{sp:?}");
+    assert!(sp.vx < 0.05 && sp.vy.abs() < 0.05, "{sp:?}");
 }
 
 /// No point inside the search bound sees the prediction behind a wall:

@@ -30,6 +30,17 @@ impl Pilot {
             )));
             return;
         };
+        // Stale scans: the map no longer shows what is there, so no point is
+        // chosen over it; the vehicle holds and the holder hears no vantage.
+        if self.obstacle_data_stale(now_ms) {
+            self.plan = planner::Plan::hold(AvoidState::Stale);
+            self.out.push(Out::GoalStatus(GoalStatus::new(
+                lease_id,
+                VantageState::NoVantage,
+                0.0,
+            )));
+            return;
+        }
         let v_cap = goal.max_speed_mps.min(self.limits_now(now_ms).v_h).max(0.5);
         let fence = Some((self.fc.home_ne(), self.settings.pilot.max_dist_m));
         let c = vantage::choose(&self.obstacles, spec, pos, fence, margin, v_cap);

@@ -205,6 +205,35 @@ fn stale_scans_hold_a_skill_goal_and_refuse_swarm_goals() {
     assert_eq!(hold_reason(&w).as_deref(), Some(STALE));
 }
 
+/// A vantage goal plans over the obstacle map, so stale scans hold it like
+/// any skill goal: no point is chosen over obstacles the pilot can no
+/// longer see, and the holder hears no vantage.
+#[test]
+fn stale_scans_hold_a_vantage_goal() {
+    use ados_protocol::pilot::VantageState;
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    w.hold_vantage(id, [20.0, 0.0], [0.0, 0.0], 600);
+    assert_ne!(w.goal_status.last().unwrap().state, VantageState::NoVantage);
+    w.pos = [1.0, 0.0, -5.0];
+    w.lidar = false;
+    w.hold_vantage(id, [20.0, 0.0], [0.0, 0.0], 1000);
+    let sp = w.last_setpoint().unwrap().clone();
+    assert_eq!(w.p.owner(), Owner::Skill);
+    assert!(
+        (sp.x - 1.0).abs() < 0.3 && sp.vx.hypot(sp.vy) < 1e-3,
+        "vantage flown blind: x {} vx {}",
+        sp.x,
+        sp.vx
+    );
+    assert_eq!(avoid_state(&w), "stale");
+    assert_eq!(hold_reason(&w).as_deref(), Some(STALE));
+    let st = w.goal_status.last().unwrap();
+    assert_eq!(st.state, VantageState::NoVantage);
+    assert_eq!(st.vantage_ne, None);
+}
+
 #[test]
 fn land_rtl_and_pause_still_act_on_stale_scans() {
     let mut w = World::new();
