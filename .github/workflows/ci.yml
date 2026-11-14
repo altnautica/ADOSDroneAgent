@@ -142,11 +142,11 @@ jobs:
           fail=0
 
           # package<TAB>ceiling, measured with mypy 2.3.1 on a .[dev] install
-          CEILINGS='src/ados/hal 5
-          src/ados/setup 21
-          src/ados/sdk 31
-          src/ados/plugins 169
-          src/ados/api 191'
+          CEILINGS='src/ados/hal 0
+          src/ados/setup 16
+          src/ados/sdk 12
+          src/ados/plugins 96
+          src/ados/api 43'
 
           checked=0
           while read -r pkg ceiling; do
