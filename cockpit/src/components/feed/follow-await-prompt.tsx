@@ -92,7 +92,14 @@ export function FollowAwaitPrompt({ widthClass }: { widthClass: WidthClass }) {
           <button
             key={a}
             type="button"
-            onClick={() => run(a)}
+            // Space on a focused button presses that button, never Pause
+            // (`use-skill-keys`): a tap leaves focus where it was, and a
+            // button pressed from the keyboard hands it to the prompt.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              if (document.activeElement === e.currentTarget) ref.current?.focus();
+              run(a);
+            }}
             aria-keyshortcuts={FOLLOW_ACTION_KEYS[a].toUpperCase()}
             style={{ minHeight: size, minWidth: size * 2 }}
             className={cn(

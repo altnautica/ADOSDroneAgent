@@ -156,6 +156,28 @@ describe("FollowAwaitPrompt", () => {
     expect(useNavStreamStore.getState().designated).toBeNull();
   });
 
+  it("a tapped button never keeps focus, so Space stays the Pause key", async () => {
+    setFollow(AWAITING);
+    await mount("medium");
+    for (const a of ["resume", "redesignate", "rth", "land", "stop"]) {
+      const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+      button(specText(`follow.prompt.action.${a}`)).dispatchEvent(down);
+      // The default action of a mousedown is to focus the button.
+      expect(down.defaultPrevented).toBe(true);
+    }
+  });
+
+  it("a button pressed from the keyboard hands focus to the prompt, so Space stays the Pause key", async () => {
+    setFollow(AWAITING);
+    const prompt = (await mount("medium"))!;
+    const pick = button(specText("follow.prompt.action.redesignate"));
+    await act(async () => pick.focus());
+    await act(async () => pick.click());
+    expect(useNavStreamStore.getState().designated).toBeNull();
+    expect(document.activeElement).toBe(prompt);
+    expect(document.activeElement?.tagName).not.toBe("BUTTON");
+  });
+
   it("never takes focus on its own: with focus elsewhere its keys reach the window", async () => {
     const outside = document.createElement("button");
     document.body.appendChild(outside);
