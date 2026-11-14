@@ -10,7 +10,7 @@ pub const CLOSING_MIN_SCANS: usize = 4;
 /// fitted through them over [`CLOSING_TUNED_SPAN_S`] for the line's slope to
 /// count as a closing speed. A surface the vehicle moves toward (a wall, a
 /// column, a trunk) stays well inside it: the lidar is good to ±30 mm 3σ, and
-/// braking at 3 m/s² bends 0.4 s of ranges by under 2 cm. Leaf returns in a
+/// braking at 3 m/s² bends 0.4 s of ranges by about 2.5 cm RMS. Leaf returns in a
 /// crown, a beam grazing an edge, rain or dust land at a new depth every scan
 /// (0.5-2.5 m apart), lie on no line, and measure nothing.
 pub const CLOSING_FIT_RMS_M: f32 = 0.08;
