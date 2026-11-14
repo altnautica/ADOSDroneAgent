@@ -246,6 +246,15 @@ impl Pilot {
         self.fc_failsafe = false;
         self.failsafe_cause = None;
         if self.owner() == Owner::Tuning {
+            // The setup engine flies its own modes. A return, land or brake it
+            // did not command is still the FC's failsafe: recorded here so
+            // leaving the wizard cannot fly over it.
+            if self.fc.armed {
+                let operator =
+                    self.mode_is_ours(mode, now_ms) || self.mode_is_clients(mode, now_ms);
+                self.fc_failsafe = !operator && fam.is_failsafe_mode(mode);
+                self.failsafe_cause = self.fc_failsafe.then(|| self.fc_mode_cause());
+            }
             return;
         }
         if fam.is_autotune(mode) {

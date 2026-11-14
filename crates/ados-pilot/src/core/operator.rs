@@ -85,6 +85,7 @@ impl Pilot {
 
     /// Leave the setup engine's `tuning` owner. Airborne: fly as `pilot` from a
     /// hold here (back in GUIDED); on the ground: idle or whatever came before.
+    /// During an FC failsafe the FC keeps flying it (`fc_mode`).
     pub fn exit_tuning(&mut self, now_ms: u64) {
         if self.owner() != Owner::Tuning {
             return;
@@ -100,7 +101,7 @@ impl Pilot {
                     mode,
                     crate::modes::plane::LOITER | crate::modes::plane::QLAND
                 );
-        if self.fc.armed && !self.fc.landed() && returning {
+        if self.fc.armed && !self.fc.landed() && (returning || self.fc_failsafe) {
             self.set_owner(Owner::FcMode, "tuning-end");
         } else if self.fc.armed && !self.fc.landed() {
             if !self.in_guided() {

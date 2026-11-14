@@ -221,3 +221,32 @@ fn a_paused_mission_does_not_read_paused_during_an_fc_failsafe() {
     assert_eq!(s.mission.unwrap().state, "returning");
     assert_eq!(err(&w.action("resume")), Some("failsafe"));
 }
+
+/// An FC failsafe during the setup wizard is recorded under `tuning`, and
+/// leaving the wizard does not fly over it: the FC keeps its mode, and Take
+/// control and Pause are refused with `failsafe`.
+#[test]
+fn an_fc_failsafe_during_the_setup_wizard_is_kept_after_it() {
+    for mode in [copter::RTL, copter::LAND, copter::BRAKE, copter::AUTO_RTL] {
+        let mut w = World::new();
+        w.airborne(copter::GUIDED);
+        w.p.auth.enter_tuning().unwrap();
+        w.run(100);
+        w.mode = mode;
+        w.run(100);
+        assert!(w.p.state(w.now).fc_failsafe, "mode {mode}");
+        w.sent.clear();
+        w.p.exit_tuning(w.now);
+        w.run(100);
+        assert_eq!(w.p.owner(), Owner::FcMode, "mode {mode}");
+        assert_eq!(
+            err(&w.action("take_control")),
+            Some("failsafe"),
+            "mode {mode}"
+        );
+        assert_eq!(err(&w.action("pause")), Some("failsafe"), "mode {mode}");
+        w.run(300);
+        assert_eq!(w.mode, mode, "the FC keeps flying its failsafe");
+        assert_eq!(w.set_modes(copter::GUIDED), 0, "mode {mode}");
+    }
+}
