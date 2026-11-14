@@ -339,6 +339,15 @@ enum ArItem {
         cy: Option<f64>,
         pts: Vec<[f64; 2]>,
     },
+    Fsearch {
+        k: String,
+        pts: Vec<[f64; 2]>,
+    },
+    Fvantage {
+        k: String,
+        x: f64,
+        y: f64,
+    },
     Edge {
         k: String,
         of: String,
@@ -366,7 +375,7 @@ fn the_golden_frame_round_trips() {
         })
         .collect();
     for t in [
-        "wp", "leg", "home", "fpv", "fpath", "fgoal", "orbit", "edge",
+        "wp", "leg", "home", "fpv", "fpath", "fgoal", "orbit", "fsearch", "fvantage", "edge",
     ] {
         assert!(kinds.contains(t), "golden frame lacks {t}");
     }
@@ -387,6 +396,16 @@ fn a_built_frame_parses_as_the_golden_schema() {
             radius_m: 8.0,
             cw: false,
         }),
+    });
+    s.recovery = Some(RecoveryIn {
+        area: Some(SearchArea {
+            center_ne: [25.0, 0.0],
+            semi_major_m: 3.0,
+            semi_minor_m: 1.0,
+            heading_deg: 30.0,
+        }),
+        vantage_ne: Some([15.0, 3.0]),
+        predicted_ne: vec![[20.0, 0.0], [25.0, 0.0]],
     });
     let f = build(&s, &main_cam(), &demand(&["ar_route", "ar_motion"]));
     let typed: ArFrame = serde_json::from_value(f).unwrap();

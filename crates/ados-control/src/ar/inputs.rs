@@ -119,6 +119,7 @@ pub fn scene_from(
             .unwrap_or(0.0),
         armed: state.get("armed").and_then(Value::as_bool).unwrap_or(false),
         motion: motion_from(owner.as_deref(), pilot, follow),
+        recovery: recovery_from(follow),
         owner,
         home,
         mission,
@@ -184,6 +185,37 @@ pub(super) fn motion_from(
             .unwrap_or("clear")
             .to_owned(),
         orbit,
+    })
+}
+
+/// The follow phases that search for a lost subject.
+const RECOVERY_PHASES: [&str; 3] = ["predicting", "repositioning", "searching"];
+
+/// The search ellipse, vantage and predicted path while follow-me recovers a
+/// lost subject; `None` in any other phase.
+pub(super) fn recovery_from(follow: Option<&Value>) -> Option<RecoveryIn> {
+    let fs = follow?;
+    let phase = fs.get("phase").and_then(Value::as_str)?;
+    if !RECOVERY_PHASES.contains(&phase) {
+        return None;
+    }
+    let ne = |v: &Value| arr(v).filter(|p| p.len() >= 2).map(|p| [p[0], p[1]]);
+    let area = fs.get("search_area").and_then(|a| {
+        Some(SearchArea {
+            center_ne: ne(a.get("center_ne")?)?,
+            semi_major_m: f(a, "semi_major_m")?,
+            semi_minor_m: f(a, "semi_minor_m")?,
+            heading_deg: f(a, "heading_deg").unwrap_or(0.0),
+        })
+    });
+    Some(RecoveryIn {
+        area,
+        vantage_ne: fs.get("vantage_ne").and_then(ne),
+        predicted_ne: fs
+            .get("predicted_path_ne")
+            .and_then(Value::as_array)
+            .map(|pts| pts.iter().filter_map(ne).collect())
+            .unwrap_or_default(),
     })
 }
 

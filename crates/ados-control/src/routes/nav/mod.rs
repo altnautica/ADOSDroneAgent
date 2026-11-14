@@ -4,7 +4,7 @@
 //!   `{kind: pose|scan|nav|follow|map|pilot|obstacles|ar|depth|surfaces, ts_ms, data}`,
 //!   each kind at most 20 Hz,
 //!   latest wins, plus `{kind: "follow_event", ts_ms, topic, data}` for
-//!   `follow.reacquired` and `follow.lost`.
+//!   `follow.reacquired`, `follow.lost` and `follow.stopped`.
 //! * `GET /api/v1/nav/status[?view=<camera_id>:<layer,…>]`: the latest of
 //!   each kind as `{ts_ms, age_ms, data}`, `null` for a kind nothing has
 //!   published, plus `view_demand` (the union of the live view leases).

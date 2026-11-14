@@ -130,6 +130,16 @@ fn every_routed_topic_is_subscribed() {
     }
 }
 
+#[test]
+fn follow_stopped_reaches_the_operator() {
+    assert!(EXPORT_TOPICS.contains(&"follow.stopped"));
+    assert_eq!(route("follow.stopped", FOLLOW_ME_ID), Routed::FollowEvent);
+    assert_eq!(
+        route("follow.stopped", "com.example.other"),
+        Routed::Ignored
+    );
+}
+
 // -- status ----------------------------------------------------------------
 
 #[test]
@@ -155,10 +165,10 @@ async fn the_status_route_serves_the_hub() {
         TOPIC_FOLLOW_STATE,
         FOLLOW_ME_ID,
         7,
-        json!({"phase": "coasting"}),
+        json!({"phase": "predicting"}),
     );
     let Json(body) = get_nav_status(State(state), Query(NavStatusQuery::default())).await;
-    assert_eq!(body["follow"]["data"]["phase"], "coasting");
+    assert_eq!(body["follow"]["data"]["phase"], "predicting");
     assert_eq!(body["scan"], Value::Null);
 }
 

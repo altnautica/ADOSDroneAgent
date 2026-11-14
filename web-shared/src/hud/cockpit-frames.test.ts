@@ -36,12 +36,15 @@ describe("parseArFrame on the golden fixture", () => {
       "fpath",
       "fgoal",
       "orbit",
+      "fsearch",
+      "fvantage",
+      "fpath:predicted",
       "edge:home",
     ]);
     const next = cam.items[0];
     expect(next).toMatchObject({ t: "wp", seq: 4, role: "next", distM: 120, etaS: 42, gx: 0.52, gy: 0.63 });
     expect(cam.items[6]).toMatchObject({ t: "fpath", state: "detour" });
-    expect(cam.items[9]).toMatchObject({ t: "edge", of: "home", ang: 2.6, distM: 35 });
+    expect(cam.items[12]).toMatchObject({ t: "edge", of: "home", ang: 2.6, distM: 35 });
   });
 
   it("carries the mission copy", () => {

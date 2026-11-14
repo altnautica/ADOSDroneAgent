@@ -142,6 +142,59 @@ fn a_goto_beside_an_idle_orbit_follow_draws_no_orbit() {
     assert!(fi.orbit.is_none(), "{:?}", fi.orbit);
 }
 
+/// The `ar_motion` items over the primary for the snapshot and a follow state.
+fn follow_items(follow: &Value) -> Vec<Value> {
+    let (cams, _) = cameras_from(&roster(), None, 0.0);
+    let s = scene_from(&snapshot(), 7, None, Some(follow));
+    let layers = std::collections::BTreeSet::from(["ar_motion".to_owned()]);
+    let f = scene::build(
+        &s,
+        &cams,
+        &std::collections::BTreeMap::from([("main".to_owned(), layers)]),
+    );
+    f["cameras"]["main"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// A searching follow draws the search ellipse on the ground, the pilot's
+/// vantage and the subject's predicted path; once following again, none.
+#[test]
+fn a_searching_follow_draws_the_search_area_and_the_vantage() {
+    let mut follow = json!({"active": true, "phase": "searching",
+        "search_area": {"center_ne": [25.0, 0.0], "semi_major_m": 3.0,
+                        "semi_minor_m": 1.0, "heading_deg": 0.0},
+        "vantage_ne": [15.0, 3.0], "predicted_path_ne": [[20.0, 0.0], [25.0, 0.0]]});
+    let it = follow_items(&follow);
+    let area = it
+        .iter()
+        .find(|i| i["t"] == "fsearch" && i["k"] == "fsearch")
+        .unwrap_or_else(|| panic!("no fsearch: {it:?}"));
+    assert_eq!(area["pts"].as_array().unwrap().len(), 24);
+    let vantage = it
+        .iter()
+        .find(|i| i["t"] == "fvantage" && i["k"] == "fvantage")
+        .unwrap_or_else(|| panic!("no fvantage: {it:?}"));
+    // On the ground 15 m ahead and 3 m right of a camera 10 m up: right of
+    // centre, below the horizon.
+    assert!(vantage["x"].as_f64().unwrap() > 0.5);
+    assert!(vantage["y"].as_f64().unwrap() > 0.5);
+    let path = it
+        .iter()
+        .find(|i| i["t"] == "fpath" && i["k"] == "fpath:predicted")
+        .unwrap_or_else(|| panic!("no predicted path: {it:?}"));
+    assert_eq!(path["pts"].as_array().unwrap().len(), 2);
+
+    follow["phase"] = json!("following");
+    let it = follow_items(&follow);
+    assert!(
+        it.iter()
+            .all(|i| i["t"] != "fsearch" && i["t"] != "fvantage" && i["t"] != "fpath"),
+        "{it:?}"
+    );
+}
+
 #[test]
 fn empty_demand_builds_nothing() {
     let mut b = Builder::new(10.0);

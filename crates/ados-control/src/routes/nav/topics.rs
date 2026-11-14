@@ -20,9 +20,10 @@ pub const TOPIC_NAV_STATE: &str = "nav.state";
 pub const TOPIC_FOLLOW_STATE: &str = "follow.state";
 pub const TOPIC_FOLLOW_REACQUIRED: &str = "follow.reacquired";
 pub const TOPIC_FOLLOW_LOST: &str = "follow.lost";
+pub const TOPIC_FOLLOW_STOPPED: &str = "follow.stopped";
 
 /// Every topic the hub subscribes to on the export socket.
-pub const EXPORT_TOPICS: [&str; 9] = [
+pub const EXPORT_TOPICS: [&str; 10] = [
     TOPIC_POSE,
     TOPIC_SCAN,
     TOPIC_LIDAR,
@@ -32,6 +33,7 @@ pub const EXPORT_TOPICS: [&str; 9] = [
     TOPIC_FOLLOW_STATE,
     TOPIC_FOLLOW_REACQUIRED,
     TOPIC_FOLLOW_LOST,
+    TOPIC_FOLLOW_STOPPED,
 ];
 
 /// Where one exported event goes.
@@ -55,7 +57,9 @@ pub fn route(topic: &str, publisher: &str) -> Routed {
             WORLD_ENGINE_ID
         }
         TOPIC_NAV_STATE => VISION_NAV_ID,
-        TOPIC_FOLLOW_STATE | TOPIC_FOLLOW_REACQUIRED | TOPIC_FOLLOW_LOST => FOLLOW_ME_ID,
+        TOPIC_FOLLOW_STATE | TOPIC_FOLLOW_REACQUIRED | TOPIC_FOLLOW_LOST | TOPIC_FOLLOW_STOPPED => {
+            FOLLOW_ME_ID
+        }
         _ => return Routed::Ignored,
     };
     if publisher != owner {

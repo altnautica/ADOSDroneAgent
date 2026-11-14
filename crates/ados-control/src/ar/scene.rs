@@ -9,7 +9,8 @@
 //!   next waypoint or home that is off-frame or behind the camera;
 //! * layer `ar_motion`: `fpv` (where the vehicle will be in 3 s), and while a
 //!   follow skill or a pilot go-to flies `fpath` (vehicle → plan → goal),
-//!   `fgoal` and `orbit`.
+//!   `fgoal` and `orbit`; while a follow recovers a lost subject, `fsearch`,
+//!   `fvantage` and the predicted `fpath` (see [`recovery`]).
 //!
 //! The route is drawn while the mission is `active` or `paused`, and as a
 //! preview while it is `loaded` and the vehicle is disarmed or flown by the
@@ -22,6 +23,10 @@ use serde_json::{json, Value};
 
 use super::geo::{waypoint_ned, Home};
 use super::project::{on_frame, Aim, Camera, Pose, View};
+
+#[path = "scene_recovery.rs"]
+mod recovery;
+pub use recovery::{RecoveryIn, SearchArea};
 
 /// How far ahead the flight-path vector looks, seconds.
 const FPV_HORIZON_S: f64 = 3.0;
@@ -89,6 +94,8 @@ pub struct SceneIn {
     pub home: Option<Home>,
     pub mission: Option<MissionIn>,
     pub motion: Option<MotionIn>,
+    /// The follow recovery geometry while follow-me searches for its subject.
+    pub recovery: Option<RecoveryIn>,
 }
 
 /// One camera to draw over.
@@ -146,6 +153,20 @@ fn pt(p: [f64; 2]) -> Value {
 
 fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// A NED path clipped to the camera, as image points.
+fn polyline(view: &View, path: &[[f64; 3]]) -> Vec<Value> {
+    let mut pts: Vec<Value> = Vec::new();
+    for w in path.windows(2) {
+        if let Some(s) = view.segment(w[0], w[1]) {
+            if pts.is_empty() {
+                pts.push(pt(s[0]));
+            }
+            pts.push(pt(s[1]));
+        }
+    }
+    pts
 }
 
 /// Whether the route is drawn for this mission state and vehicle.
@@ -250,6 +271,9 @@ fn camera_items(
         if let Some(motion) = scene.motion.as_ref() {
             motion_items(pose, motion, &view, &mut items);
         }
+        if let Some(rec) = scene.recovery.as_ref() {
+            recovery::recovery_items(rec, &view, ground_d, &mut items);
+        }
     }
     items
 }
@@ -320,24 +344,14 @@ fn motion_items(pose: &Pose, motion: &MotionIn, view: &View, items: &mut Vec<Val
     if let Some(g) = motion.goal {
         path.push([g[0], g[1], d]);
     }
-    if path.len() >= 2 {
-        let mut pts: Vec<Value> = Vec::new();
-        for w in path.windows(2) {
-            if let Some(s) = view.segment(w[0], w[1]) {
-                if pts.is_empty() {
-                    pts.push(pt(s[0]));
-                }
-                pts.push(pt(s[1]));
-            }
-        }
-        if pts.len() >= 2 {
-            let state = if motion.avoid_state.is_empty() {
-                "clear"
-            } else {
-                motion.avoid_state.as_str()
-            };
-            items.push(json!({"t": "fpath", "k": "fpath", "state": state, "pts": pts}));
-        }
+    let pts = polyline(view, &path);
+    if pts.len() >= 2 {
+        let state = if motion.avoid_state.is_empty() {
+            "clear"
+        } else {
+            motion.avoid_state.as_str()
+        };
+        items.push(json!({"t": "fpath", "k": "fpath", "state": state, "pts": pts}));
     }
     if let Some(q) = motion.goal.and_then(|g| view.project([g[0], g[1], d])) {
         items.push(json!({"t": "fgoal", "k": "fgoal", "x": r3(q[0]), "y": r3(q[1])}));
