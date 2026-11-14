@@ -1,7 +1,7 @@
 //! A `vantage` skill goal: plan toward the point that sees the lost
 //! subject's predicted area, and tell the lease holder how it goes.
 
-use ados_protocol::pilot::{AvoidState, Goal, GoalStatus, VantageState};
+use ados_protocol::pilot::{AvoidMode, AvoidState, Goal, GoalStatus, VantageState};
 
 use crate::core::{Out, Pilot};
 use crate::geo::{self, V2};
@@ -30,10 +30,17 @@ impl Pilot {
             )));
             return;
         };
-        // Stale scans: the map no longer shows what is there, so no point is
-        // chosen over it; the vehicle holds and the holder hears no vantage.
-        if self.obstacle_data_stale(now_ms) {
-            self.plan = planner::Plan::hold(AvoidState::Stale);
+        // No fresh scan, for any reason (never seen, stale, avoidance off):
+        // the obstacle map does not show what hides the subject, and an
+        // empty map would claim a full view from anywhere. The vehicle holds
+        // and the holder hears no vantage, with no coverage.
+        if !self.obstacles.scan_fresh(now_ms) {
+            let state = match self.obstacle_data_state(now_ms) {
+                Some(s) => s,
+                None if self.settings.pilot.avoid == AvoidMode::Off => AvoidState::Off,
+                None => AvoidState::Stale,
+            };
+            self.plan = planner::Plan::hold(state);
             self.out.push(Out::GoalStatus(GoalStatus::new(
                 lease_id,
                 VantageState::NoVantage,

@@ -1093,7 +1093,11 @@ fn a_vantage_goal_holds_at_the_hard_stop() {
     let s = w.p.state(w.now);
     assert_eq!(s.hold_reason.as_deref(), Some("obstacle-close"));
     let sp = w.last_setpoint().unwrap();
-    assert!(sp.vx < 0.05 && sp.vy.abs() < 0.05, "{sp:?}");
+    let max = crate::core::control::PUSH_MAX_MPS + 1e-3;
+    assert!(
+        (-max..0.05).contains(&sp.vx) && sp.vy.abs() < 0.05,
+        "only the push back out: {sp:?}"
+    );
 }
 
 /// No point inside the search bound sees the prediction behind a wall:

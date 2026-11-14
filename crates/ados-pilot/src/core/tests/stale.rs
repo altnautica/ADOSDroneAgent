@@ -232,6 +232,45 @@ fn stale_scans_hold_a_vantage_goal() {
     let st = w.goal_status.last().unwrap();
     assert_eq!(st.state, VantageState::NoVantage);
     assert_eq!(st.vantage_ne, None);
+    assert_eq!(st.coverage, 0.0);
+}
+
+/// The vantage goal's last status and the vehicle's horizontal setpoint
+/// speed after holding it with no scan ever seen.
+fn vantage_without_scans(mut w: World) -> World {
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    w.hold_vantage(id, [7.0, 0.0], [0.0, 0.0], 1000);
+    w
+}
+
+fn assert_no_vantage_held(w: &World) {
+    use ados_protocol::pilot::VantageState;
+    let st = w.goal_status.last().expect("a goal status");
+    assert_eq!(st.state, VantageState::NoVantage, "{st:?}");
+    assert_eq!(st.vantage_ne, None);
+    assert_eq!(st.coverage, 0.0, "coverage from an empty map");
+    assert_eq!(hold_reason(w).as_deref(), Some("no-vantage"));
+    assert!(sp_speed(w) < 1e-3, "flown: {}", sp_speed(w));
+}
+
+/// No lidar fitted: the empty map would see the subject from anywhere, so
+/// the goal holds as no vantage instead of reading arrived.
+#[test]
+fn no_lidar_holds_a_vantage_goal_as_no_vantage() {
+    let w = vantage_without_scans(no_lidar());
+    assert_eq!(avoid_state(&w), "unavailable");
+    assert_no_vantage_held(&w);
+}
+
+/// Avoidance off and no scan: the same, reported as off.
+#[test]
+fn avoid_off_without_scans_holds_a_vantage_goal_as_no_vantage() {
+    let mut w = no_lidar();
+    w.p.settings.pilot.avoid = AvoidMode::Off;
+    let w = vantage_without_scans(w);
+    assert_eq!(avoid_state(&w), "off");
+    assert_no_vantage_held(&w);
 }
 
 #[test]

@@ -6,11 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.112.1] - 2026-11-14
+
 ### Added
 
 - Pilot: a `vantage` skill goal. The skill sends where a lost subject is predicted to be (`goal.vantage`: the predicted point, its covariance, a sigma scale, a standoff, the search bound around an anchor, and optional `hypotheses_ne` such as where the subject stopped or turned back). At every replan the pilot picks a reachable point, clear of obstacles by the margin, inside the bound and inside the geofence (`pilot.max_dist_m` from home), that sees the most of the uncertainty ellipse and the hypotheses: beside a trunk, past a wall corner, in line with a doorway. A prediction inside an obstacle is moved to the free space beside it, and one beyond the obstacle grid gets a point toward it. The vehicle flies the path there facing the prediction (or the goal's own yaw), with the brake, the geofence and the speed cap acting as on any goal, and holds when no point qualifies.
 - Pilot: `goal.status` to the lease holder at every replan of a vantage goal: `enroute`, `arrived` (within 1 m of the point and below 0.3 m/s) or `no-vantage`, with the point, its coverage and the occluder's position and width. The plugin host forwards it as the host event `flight.goal.status` to the holder only, under `flight.motion`.
-- The flight-state chip on the cockpit, the kiosk, the dashboard and the terminal UI reads "No clear view" while a vantage goal holds because no reachable point sees the subject's predicted area (hold reason `no-vantage`). Flying a vantage goal reads "Avoiding" only while its path bends round an obstacle.
+- The flight-state chip on the cockpit, the kiosk, the dashboard and the terminal UI reads "No clear view" while a vantage goal holds because no reachable point sees the subject's predicted area (hold reason `no-vantage`). Flying a vantage goal reads "Avoiding" only while its path bends round an obstacle or the brake slows it near one, as on any goal.
+- Pilot: a vantage goal holds and its `goal.status` reads `no-vantage` with no coverage whenever the lidar scans are not fresh, whatever the reason: stale scans, no lidar fitted (`avoid_state` `unavailable`) or avoidance off with no scan. An obstacle map with nothing in it would otherwise claim a full view from anywhere and report `arrived`.
+- Pilot: an occluder's width is the longest occupied run through where the line of sight first hits it, so a wall seen at a slant reports as wide (a wall or a corner), not as a thin trunk.
 
 ## [0.112.0] - 2026-11-14
 
@@ -39,6 +43,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: a vehicle with avoidance on and no lidar expected (no scan seen this boot) has no obstacle sensor, which is not the same as a lost one. It reports `avoid_state` `unavailable`, sticks, skill goals and swarm goals fly with no obstacle brake and no hold, a Fly Here is refused with `obstacle_data_unavailable` (a ground station's reposition is not started), and the readiness item `lidar` warns "No lidar: obstacle avoidance unavailable", so every surface shows it before arming. The first scan turns avoidance on. A lidar that is expected but stale makes `lidar` a failing block, so a lidar lost on the ground refuses the arm and the launch instead of holding after take-off.
 - Breaking: `ados-protocol`'s `AvoidState` has `Stale` and `Unavailable` variants (`"stale"` and `"unavailable"` on the wire) and is now `#[non_exhaustive]`, so later states stay additive; a `match` on it outside the crate needs a catch-all arm.
 - The cockpit and dashboard flight-state chip, the follow controls, the skill picker, the AR motion path and the TUI Pilot block show stale obstacle data as "Obstacle data stale" and a missing obstacle sensor as "No obstacle sensor", both in the warning colour, and the stale hold reason as "Holding: no fresh obstacle data". The two Fly Here refusals have their own text.
+
 ## [0.110.2] - 2026-11-14
 
 ### Changed
