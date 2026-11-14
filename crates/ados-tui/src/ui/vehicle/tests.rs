@@ -146,8 +146,8 @@ fn nav_status() -> Value {
     json!({
         "pose": {"ts_ms": 1, "age_ms": 20, "data": {"health": "good"}},
         "follow": {"ts_ms": 1, "age_ms": 40, "data": {
-            "phase": "coasting", "track_id": 12, "range_m": 10.2, "range_sigma_m": 0.6,
-            "reacquire_mode": "smart", "coast_remaining_s": 1.4}},
+            "phase": "predicting", "track_id": 12, "range_m": 10.2, "range_sigma_m": 0.6,
+            "reacquire_mode": "smart", "reacquire_remaining_s": 1.4}},
         "nav": {"ts_ms": 1, "age_ms": 30, "data": {
             "mode": "external_nav", "active_set": 1, "extnav_health": "good",
             "odom_rate_hz": 30.0, "obstacle_rate_hz": 10.0, "min_obstacle_m": 3.0, "gps_fix": 0}},
@@ -165,7 +165,7 @@ fn the_autonomy_block_shows_follow_nav_lidar_and_map_as_words() {
     let text = draw(&mut app, 120, 40);
     for want in [
         "Autonomy",
-        "Coasting #12 1.4 s",
+        "Predicting #12 1.4 s",
         "10.2 m ± 0.6 m",
         "Reacquire Smart",
         "Set 1 · Ext nav Good",
@@ -175,6 +175,61 @@ fn the_autonomy_block_shows_follow_nav_lidar_and_map_as_words() {
         "210/614 MB (34%) · voxel 10 cm",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+}
+
+fn follow_status(data: Value) -> Value {
+    json!({"follow": {"ts_ms": 1, "age_ms": 40, "data": data}})
+}
+
+#[test]
+fn the_follow_line_shows_recovery_and_the_prompt() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        follow_status(json!({"phase": "holding-await-operator",
+            "hold_reason": "search-exhausted", "track_id": 7})),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("Waiting for you #7"), "{text}");
+    assert!(
+        text.contains("Target lost: holding, waiting for instructions"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_searching_follow_shows_the_time_left_the_step_and_the_occluder() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        follow_status(json!({"phase": "searching", "track_id": 7,
+            "reacquire_remaining_s": 9.46, "search_step": 1,
+            "occluder": {"ne": [2.0, 1.0], "kind": "narrow"}})),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("Searching #7 9.5 s"), "{text}");
+    assert!(
+        text.contains("Search    step 2 · Behind a trunk or column"),
+        "{text}"
+    );
+    assert!(!text.contains("Target lost"), "{text}");
+}
+
+#[test]
+fn every_prompt_case_matches_the_shared_fixture() {
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../../../web-shared/src/hud/fixtures/follow-prompt-cases.json"
+    ))
+    .expect("follow prompt cases are JSON");
+    for c in cases.as_array().expect("a case list") {
+        let got = crate::model::autonomy::follow_prompt_title(&c["state"]);
+        let want = c["expect"]
+            .get("titleKey")
+            .map(|_| "Target lost: holding, waiting for instructions");
+        assert_eq!(got.as_deref(), want, "{}", c["name"]);
     }
 }
 

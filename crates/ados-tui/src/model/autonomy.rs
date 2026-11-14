@@ -12,6 +12,7 @@ use serde_json::Value;
 use super::flight_state::stale_after_ms;
 use super::route_check::RouteCheck;
 use super::sensor_health::SensorHealth;
+use super::spec_text::spec_text;
 
 pub mod detection;
 mod eta;
@@ -79,13 +80,30 @@ pub struct Follow {
     pub range_m: Option<f64>,
     pub range_sigma_m: Option<f64>,
     pub reacquire_mode: Option<String>,
-    pub coast_remaining_s: Option<f64>,
+    /// Seconds left of the recovery's search budget.
+    pub reacquire_remaining_s: Option<f64>,
+    /// The 0-based widening step while searching.
+    pub search_step: Option<i64>,
+    /// What hides the subject: `narrow` (a trunk, a column) or `wide` (a
+    /// wall, a corner).
+    pub occluder_kind: Option<String>,
+    /// The waiting prompt's title while follow holds for the operator.
+    pub prompt_title: Option<String>,
     /// Height above ground the follow skill flies on (`rng` or `baro`).
     pub agl_m: Option<f64>,
     pub agl_source: Option<String>,
     /// The kind's age at the agent when read; `None` when it reports none.
     pub age_ms: Option<u64>,
     pub stale: bool,
+}
+
+/// The waiting prompt's title for a `follow.state` payload: the spec's
+/// `follow.prompt.await_title` while follow-me holds for the operator
+/// (`holding-await-operator`), else `None`. The title rule of the shared
+/// `followPrompt` (`web-shared/src/hud/follow-prompt.ts`).
+pub fn follow_prompt_title(state: &Value) -> Option<String> {
+    (state.get("phase").and_then(Value::as_str) == Some("holding-await-operator"))
+        .then(|| spec_text("follow.prompt.await_title", &[]))
 }
 
 /// The navigation source (vision-nav `nav.state`).
@@ -278,7 +296,12 @@ impl Autonomy {
             range_m: f(d, "range_m"),
             range_sigma_m: f(d, "range_sigma_m"),
             reacquire_mode: s(d, "reacquire_mode"),
-            coast_remaining_s: f(d, "coast_remaining_s"),
+            reacquire_remaining_s: f(d, "reacquire_remaining_s"),
+            search_step: i(d, "search_step"),
+            occluder_kind: d
+                .get("occluder")
+                .and_then(|o| one_of(o, "kind", &["narrow", "wide"])),
+            prompt_title: follow_prompt_title(d),
             agl_m: f(d, "agl_m"),
             agl_source: one_of(d, "agl_source", &["rng", "baro"]),
             age_ms,

@@ -95,22 +95,29 @@ fn spec_or_dash(key: &str) -> String {
     }
 }
 
-/// A follow phase's glyph and colour: following in the `track` role,
-/// coasting in the `coast` role, searching and holding as cautions, lost as
-/// a fault. Each phase has its own glyph, so the word never rides on colour.
+/// A follow phase's glyph and colour, in the shared HUD's role
+/// (`PHASE_TONE`, `web-shared/src/hud/follow-chrome.ts`): following in the
+/// `track` role; predicting, repositioning and searching in the `coast` role;
+/// holding as a caution; holding for the operator as a fault. Each phase has
+/// its own glyph, so the word never rides on colour.
 fn phase_mark(core: &Core, phase: &str) -> (&'static str, Color) {
     let t = &core.theme;
     let ascii = core.sym.name == "ascii";
     let pick = |glyph: &'static str, plain: &'static str| if ascii { plain } else { glyph };
     match phase {
         "following" => (pick("◆", "*"), t.track()),
-        "coasting" => (pick("◇", "o"), t.coast()),
-        "searching" | "acquiring" => (pick("◌", "?"), t.warning()),
+        "acquiring" => (pick("◌", "?"), t.warning()),
         "holding" => (pick("‖", "="), t.warning()),
-        "lost" => (pick("✕", "x"), t.error()),
+        "predicting" => (pick("◇", "o"), t.coast()),
+        "repositioning" => (pick("↗", ">"), t.coast()),
+        "searching" => (pick("◎", "@"), t.coast()),
+        "holding-await-operator" => (pick("✕", "x"), t.error()),
         _ => (core.sym.info, t.fg()),
     }
 }
+
+/// The phases a lost target is recovered in, against the search budget.
+const RECOVERY_PHASES: [&str; 3] = ["predicting", "repositioning", "searching"];
 
 /// The GPS fix as the nav-source spec words it (`nav_source.fix.*`; no GPS
 /// and no fix are both "No fix"). Fix types the spec has no word for
@@ -148,8 +155,8 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
         if let Some(id) = follow.track_id {
             word.push_str(&format!(" #{id}"));
         }
-        if phase == "coasting" {
-            if let Some(s) = follow.coast_remaining_s {
+        if RECOVERY_PHASES.contains(&phase.as_str()) {
+            if let Some(s) = follow.reacquire_remaining_s {
                 word.push_str(&format!(" {s:.1} s"));
             }
         }
@@ -164,11 +171,28 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             _ => "–".to_string(),
         };
         let phase_span = Span::styled(format!("{glyph} {word}"), Style::default().fg(color));
-        for line in [
-            kv(t, "Follow", LABEL, phase_span),
-            kv_text(t, "Range", LABEL, range),
-            kv_text(t, "Reacquire", LABEL, reacquire),
-        ] {
+        let mut rows = vec![kv(t, "Follow", LABEL, phase_span)];
+        // The waiting prompt sits right under the phase, so a short terminal
+        // keeps it, and without a label, so the whole title fits the column.
+        if let Some(title) = &follow.prompt_title {
+            rows.push(kv(t, "", 0, tone_span(core, Tone::Fault, title.clone())));
+        }
+        let search: Vec<String> = [
+            follow.search_step.map(|n| format!("step {}", n + 1)),
+            follow
+                .occluder_kind
+                .as_ref()
+                .map(|k| spec_text(&format!("follow.occluder.{k}"), &[])),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !search.is_empty() {
+            rows.push(kv_text(t, "Search", LABEL, search.join(" · ")));
+        }
+        rows.push(kv_text(t, "Range", LABEL, range));
+        rows.push(kv_text(t, "Reacquire", LABEL, reacquire));
+        for line in rows {
             out.push(mark_stale(t, line, follow.stale));
         }
     }
@@ -323,15 +347,28 @@ mod phase_tests {
     use crate::ui::tests::test_app;
 
     #[test]
-    fn each_follow_phase_has_its_own_glyph_and_role_colour() {
+    fn each_follow_phase_has_its_own_glyph_and_the_shared_role_colour() {
         let app = test_app();
         let (core, t) = (&app.core, &app.core.theme);
-        let following = phase_mark(core, "following");
-        let coasting = phase_mark(core, "coasting");
-        assert_eq!(following.1, t.track());
-        assert_eq!(coasting.1, t.coast());
-        assert_ne!(following.0, coasting.0);
-        assert_eq!(phase_mark(core, "lost").1, t.error());
+        let phases = [
+            "idle",
+            "acquiring",
+            "following",
+            "holding",
+            "predicting",
+            "repositioning",
+            "searching",
+            "holding-await-operator",
+        ];
+        let mut glyphs: Vec<_> = phases.iter().map(|p| phase_mark(core, p).0).collect();
+        glyphs.sort_unstable();
+        glyphs.dedup();
+        assert_eq!(glyphs.len(), phases.len(), "{glyphs:?}");
+        assert_eq!(phase_mark(core, "following").1, t.track());
+        for p in ["predicting", "repositioning", "searching"] {
+            assert_eq!(phase_mark(core, p).1, t.coast(), "{p}");
+        }
         assert_eq!(phase_mark(core, "holding").1, t.warning());
+        assert_eq!(phase_mark(core, "holding-await-operator").1, t.error());
     }
 }

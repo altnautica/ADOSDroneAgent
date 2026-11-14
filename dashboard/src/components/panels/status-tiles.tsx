@@ -1,10 +1,11 @@
 import { ChevronDown } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import { CountdownCard } from "@/components/panels/countdown-card";
 import { PlaceCard } from "@/components/panels/place-card";
+import { Button } from "@/components/ui/button";
 import { BATTERY_POLL_MS, useBatteryHealth } from "@/hooks/use-battery-health";
 import { useConfig } from "@/hooks/use-config";
 import { navPilot, useFlightChip } from "@/hooks/use-flight-chip";
@@ -20,11 +21,23 @@ import { useVehicleTelemetry, VEHICLE_TELEMETRY_POLL_MS } from "@/hooks/use-vehi
 import { liveData } from "@/lib/freshness";
 import { chipTextColor } from "@/lib/chip-color";
 import { countdownCard } from "@/lib/countdown-card";
-import { batteryFixAlertId, freshNavFrames, homePill, homeStatusLines, poseAgeText, type StatusFull } from "@/lib/home-status";
+import {
+  batteryFixAlertId,
+  freshNavFrames,
+  homeFollow,
+  homePill,
+  homeStatusLines,
+  poseAgeText,
+  sendFollowAction,
+  type HomeFollow,
+  type HomeFollowAction,
+  type StatusFull,
+} from "@/lib/home-status";
 import { sendPilotAction } from "@/lib/pilot-action";
 import { placeCard } from "@/lib/place-card";
 import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
+import { toastFromError } from "@/shared/api/toast";
 import { severityClasses } from "@/shared/format";
 import { BATTERY_FAILSAFE_FIX_KEY, BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
 import { specText } from "@/shared/hud/spec-text";
@@ -34,6 +47,7 @@ import { rerunStep } from "@/shared/setup-wizard/client";
 const STATUS_FULL_POLL_MS = 5_000;
 const AGL_LABEL = specText("agl.source.rangefinder");
 const RESERVE_TITLE = specText("cockpit.battery.reserve");
+const FOLLOW_LABEL = specText("follow.chip");
 
 function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
   const Icon = tile.icon;
@@ -91,10 +105,56 @@ const PILL_TONE = {
   critical: "border-destructive/60 text-destructive",
 } as const;
 
+/** The follow phase word, and while follow holds for the operator the
+ *  waiting prompt with the actions this card offers: resume and stop, written
+ *  to the follow-me config. */
+function FollowStatus({ follow }: { follow: HomeFollow }) {
+  const [busy, setBusy] = useState(false);
+  async function run(a: HomeFollowAction) {
+    setBusy(true);
+    try {
+      await sendFollowAction(a, follow.resumeSeq);
+    } catch (err) {
+      toastFromError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="flex flex-col gap-1" data-testid="follow-status">
+      <span className="font-mono" style={{ color: chipTextColor(`var(--hud-${follow.tone})`) }}>
+        {FOLLOW_LABEL} {follow.word}
+      </span>
+      {follow.prompt ? (
+        <div role="alert" className="flex flex-col gap-1.5 rounded-md border border-destructive/60 p-2" data-testid="follow-prompt">
+          <span className="font-medium text-destructive">{follow.prompt}</span>
+          {follow.body ? <span className="text-muted-foreground">{follow.body}</span> : null}
+          {follow.actions.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {follow.actions.map((a) => (
+                <Button
+                  key={a}
+                  size="sm"
+                  variant={a === "stop" ? "destructive" : "default"}
+                  disabled={busy}
+                  onClick={() => void run(a)}
+                >
+                  {specText(`follow.prompt.action.${a}`)}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** The countdown card (the pilot's banner, a low-battery return, a mission
  *  stall, each with its actions), the place card (the place-class picker, the
  *  Confined badge and the route check), the cockpit's status pill and its
- *  alert list, plus the link-loss, AGL, sticks and time-to-reserve lines. */
+ *  alert list, plus the link-loss, AGL, sticks, time-to-reserve and follow
+ *  lines, with the follow prompt's resume and stop. */
 function VehicleStatus() {
   const nav = useNavStatus();
   const heartbeat = useHeartbeat();
@@ -125,6 +185,7 @@ function VehicleStatus() {
   const pill = homePill({ ...inputs, nav: fresh.nav, armSources: { pilot: fresh.pilot, telemetry: liveTelemetry } });
   const fixAlertId = batteryFixAlertId({ pilot: fresh.pilot, telemetry: liveTelemetry });
   const poseAge = poseAgeText(fresh.nav);
+  const follow = homeFollow(fresh.follow);
   const lines = homeStatusLines({
     ...inputs,
     pilot: fresh.pilot,
@@ -189,6 +250,7 @@ function VehicleStatus() {
           <span title={RESERVE_TITLE}>{lines.timeToReserve}</span>
         ) : null}
       </div>
+      {follow ? <FollowStatus follow={follow} /> : null}
     </div>
   );
 }

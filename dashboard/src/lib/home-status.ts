@@ -1,22 +1,29 @@
-// The Home status card's read-only facts, from the same shared rules and the
-// same inputs the cockpit uses: the status pill and its alert list
+// The Home status card's facts, from the same shared rules and the same
+// inputs the cockpit uses: the status pill and its alert list
 // (`status-pill`), the link-loss line, the bottom-row AGL with its source
-// mark, who has the sticks, and the battery's time to reserve.
+// mark, who has the sticks, the battery's time to reserve, and the follow
+// phase with its waiting prompt (`follow-prompt`).
 //
 // The pill's link items come from vehicle liveness (`useVehicleLiveness`),
 // not from whether the agent answered. On the ground it also lists the
 // failing pre-flight checks (`@/shared/hud/preflight`). The Home card has no
 // video of its own, so it raises no frozen-video item. The lines read the
 // pilot and follow frames only while fresh (`freshNavFrames`).
+//
+// The card is read-mostly: its only actions are the waiting prompt's resume
+// and stop, written to the follow-me config (`sendFollowAction`).
 
 import type { NavStatusBody, NavStatusEntry } from "@/hooks/use-nav-status";
+import { apiFetch } from "@/shared/api-fetch";
 import { BATTERY_FAILSAFE_ID, batteryFailsafeFixable } from "@/shared/hud/battery-failsafe-fix";
 import { aglMarkText, bottomRowAgl } from "@/shared/hud/chip-inputs";
 import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
 import { linkLossLine } from "@/shared/hud/link-loss";
 import { resolveNavSource, type NavSourceResult } from "@/shared/hud/nav-source";
-import { parseFollowState, parseNavState, type NavState } from "@/shared/hud/nav-types";
+import { PHASE_TONE, type PhaseTone } from "@/shared/hud/follow-chrome";
+import { followPrompt, type FollowPromptAction } from "@/shared/hud/follow-prompt";
+import { parseFollowState, parseNavState, type FollowPhase, type FollowState, type NavState } from "@/shared/hud/nav-types";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
 import { specText } from "@/shared/hud/spec-text";
@@ -130,8 +137,6 @@ export function homePill(i: HomeStatusInputs): PillSummary {
   );
 }
 
-type FollowAgl = { aglM: number | null; aglSource: "rng" | "baro" | null };
-
 /** The pilot and follow frames of the last nav-status body while each is
  *  fresh at `nowMs` (received at `receivedAtMs` minus its age at the agent),
  *  else null: a dead pilot's kept frame never reads as current. */
@@ -139,13 +144,64 @@ export function freshNavFrames(
   body: NavStatusBody | undefined,
   receivedAtMs: number,
   nowMs: number,
-): { pilot: PilotState | null; follow: FollowAgl | null; nav: NavState | null } {
+): { pilot: PilotState | null; follow: FollowState | null; nav: NavState | null } {
   const fresh = (e: NavStatusEntry | null | undefined): e is NavStatusEntry => !!e && pilotFresh(receivedAtMs - (e.age_ms ?? 0), nowMs);
   return {
     pilot: fresh(body?.pilot) ? parsePilotState(body.pilot.data) : null,
     follow: fresh(body?.follow) ? parseFollowState(body.follow.data) : null,
     nav: fresh(body?.nav) ? parseNavState(body.nav.data) : null,
   };
+}
+
+/** The plugin whose per-drone config the follow actions write. */
+export const FOLLOW_PLUGIN_ID = "com.altnautica.follow-me";
+
+/** The waiting prompt's actions the Home card offers: the rest need the
+ *  cockpit (picking a target) or the sticks' owner (return home, land). */
+export type HomeFollowAction = Extract<FollowPromptAction, "resume" | "stop">;
+
+/** The phases a lost target is recovered in, against the search budget. */
+const RECOVERY_PHASES: Readonly<Partial<Record<FollowPhase, true>>> = { predicting: true, repositioning: true, searching: true };
+
+export interface HomeFollow {
+  /** The phase word and track (`Searching #7`), plus the seconds left of the
+   *  search budget while recovering (`Searching #7 9.5 s`). */
+  word: string;
+  tone: PhaseTone;
+  /** The waiting prompt's title and reason, while follow holds for the
+   *  operator; else null. */
+  prompt: string | null;
+  body: string | null;
+  actions: HomeFollowAction[];
+  /** The resume sequence the follow reports; a resume writes one past it. */
+  resumeSeq: number;
+}
+
+/** The follow line of a fresh follow frame; null while follow is off or
+ *  unheard. */
+export function homeFollow(f: FollowState | null): HomeFollow | null {
+  if (!f || f.phase === "idle") return null;
+  let word = specText(`follow.phase.${f.phase}`);
+  if (f.trackId != null) word += ` #${f.trackId}`;
+  if (RECOVERY_PHASES[f.phase] && f.reacquireRemainingS != null) word += ` ${f.reacquireRemainingS.toFixed(1)} s`;
+  const prompt = followPrompt(f);
+  return {
+    word,
+    tone: PHASE_TONE[f.phase],
+    prompt: prompt ? specText(prompt.titleKey) : null,
+    body: prompt ? specText(prompt.bodyKey) : null,
+    actions: prompt ? prompt.actions.filter((a): a is HomeFollowAction => a === "resume" || a === "stop") : [],
+    resumeSeq: f.operatorResumeSeq,
+  };
+}
+
+/** Send a prompt action through the follow-me config route: resume writes
+ *  `operator_resume_seq` one past `resumeSeq`, stop writes `active = false`. */
+export function sendFollowAction(action: HomeFollowAction, resumeSeq: number): Promise<unknown> {
+  return apiFetch(`/api/plugins/${encodeURIComponent(FOLLOW_PLUGIN_ID)}/config`, {
+    method: "PUT",
+    body: action === "resume" ? { key: "operator_resume_seq", value: resumeSeq + 1 } : { key: "active", value: false },
+  });
 }
 
 export interface HomeStatusLines {

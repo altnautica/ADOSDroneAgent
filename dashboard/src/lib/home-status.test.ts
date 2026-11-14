@@ -1,13 +1,27 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { vehicleLiveness } from "@/hooks/use-vehicle-liveness";
-import { batteryFixAlertId, freshNavFrames, homeNavSource, homePill, homeStatusLines, pillArmed, poseAgeText, type HomeStatusInputs } from "@/lib/home-status";
+import {
+  batteryFixAlertId,
+  FOLLOW_PLUGIN_ID,
+  freshNavFrames,
+  homeFollow,
+  homeNavSource,
+  homePill,
+  homeStatusLines,
+  pillArmed,
+  poseAgeText,
+  sendFollowAction,
+  type HomeStatusInputs,
+} from "@/lib/home-status";
 import { specText } from "@/shared/hud/spec-text";
 import { parsePilotState } from "@/shared/hud/cockpit-frames";
+import promptCases from "@/shared/hud/fixtures/follow-prompt-cases.json";
 import storageCases from "@/shared/hud/fixtures/storage-cases.json";
+import { parseFollowState } from "@/shared/hud/nav-types";
 import { INITIAL_LIVENESS, nextLiveness } from "@/shared/hud/vehicle-live";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
@@ -248,5 +262,82 @@ describe("the battery failsafe fix on the pill", () => {
     const src = readFileSync(path.resolve(__dirname, "../components/panels/status-tiles.tsx"), "utf8");
     expect(src).toContain('to="/settings/aircraft-setup"');
     expect(src).toContain("rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step)");
+  });
+});
+
+describe("home follow line", () => {
+  const follow = (raw: Record<string, unknown>) => homeFollow(parseFollowState(raw));
+
+  it("shows the waiting prompt title when follow holds for the operator", () => {
+    const f = follow({
+      active: true,
+      phase: "holding-await-operator",
+      hold_reason: "search-exhausted",
+      reacquire_mode: "smart",
+      track_id: 7,
+      operator_resume_seq: 4,
+    });
+    expect(f).toEqual({
+      word: "Waiting for you #7",
+      tone: "crit",
+      prompt: "Target lost: holding, waiting for instructions",
+      body: "The search found no match for the subject.",
+      actions: ["resume", "stop"],
+      resumeSeq: 4,
+    });
+  });
+
+  it("adds the seconds left of the search while recovering", () => {
+    for (const [phase, word] of [
+      ["predicting", "Predicting #3 9.5 s"],
+      ["repositioning", "Moving to look #3 9.5 s"],
+      ["searching", "Searching #3 9.5 s"],
+    ] as const) {
+      const f = follow({ active: true, phase, track_id: 3, reacquire_remaining_s: 9.46, search_step: 1 });
+      expect(f).toMatchObject({ word, tone: "coast", prompt: null, body: null, actions: [] });
+    }
+    expect(follow({ active: true, phase: "following", track_id: 3, reacquire_remaining_s: 9.46 })?.word).toBe("Following #3");
+  });
+
+  it("has no line while follow is off or unheard", () => {
+    expect(homeFollow(null)).toBeNull();
+    expect(follow({ active: false })).toBeNull();
+  });
+
+  for (const c of promptCases) {
+    it(`shared prompt case: ${c.name}`, () => {
+      const f = follow(c.state);
+      expect(f?.prompt ?? null).toBe(c.expect ? "Target lost: holding, waiting for instructions" : null);
+      // Read-mostly: of the prompt's actions only resume and stop are offered here.
+      const want = (c.expect?.actions ?? []).filter((a) => a === "resume" || a === "stop");
+      expect(f?.actions ?? []).toEqual(want);
+    });
+  }
+
+  it("reads the fresh follow frame with its recovery fields", () => {
+    const body = { follow: { age_ms: 0, data: { active: true, phase: "searching", reacquire_remaining_s: 4, track_id: 2 } } };
+    expect(homeFollow(freshNavFrames(body, 1_000, 1_000).follow)?.word).toBe("Searching #2 4.0 s");
+  });
+});
+
+describe("follow actions from the Home card", () => {
+  const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>();
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("resume writes the next resume sequence and stop turns follow off, through the plugin config", async () => {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await sendFollowAction("resume", 4);
+    await sendFollowAction("stop", 4);
+    const url = `/api/plugins/${FOLLOW_PLUGIN_ID}/config`;
+    expect(FOLLOW_PLUGIN_ID).toBe("com.altnautica.follow-me");
+    expect(fetchMock.mock.calls.map(([u, init]) => [u, init?.method, JSON.parse(String(init?.body))])).toEqual([
+      [url, "PUT", { key: "operator_resume_seq", value: 5 }],
+      [url, "PUT", { key: "active", value: false }],
+    ]);
   });
 });
