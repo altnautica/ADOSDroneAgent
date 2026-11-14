@@ -411,3 +411,86 @@ fn a_built_frame_parses_as_the_golden_schema() {
     let typed: ArFrame = serde_json::from_value(f).unwrap();
     assert!(!typed.cameras["main"].items.is_empty());
 }
+
+/// Level and 10 m up at the origin, nose north, a 90° camera.
+fn level_view() -> View {
+    View::new(
+        &Camera {
+            w: 1280.0,
+            h: 720.0,
+            hfov: 90f64.to_radians(),
+            aim: Aim::Body {
+                tilt_down: 0.0,
+                yaw: 0.0,
+            },
+        },
+        &Pose {
+            ned: [0.0, 0.0, -10.0],
+            roll: 0.0,
+            pitch: 0.0,
+            yaw: 0.0,
+        },
+    )
+}
+
+/// The `fsearch` polygon for a round search area of radius `r` at `center`.
+fn search_polygon(view: &View, center: [f64; 2], r: f64) -> Option<Vec<[f64; 2]>> {
+    let rec = RecoveryIn {
+        area: Some(SearchArea {
+            center_ne: center,
+            semi_major_m: r,
+            semi_minor_m: r,
+            heading_deg: 0.0,
+        }),
+        ..RecoveryIn::default()
+    };
+    let mut it = Vec::new();
+    recovery::recovery_items(&rec, view, 0.0, &mut it);
+    let area = it.iter().find(|i| i["t"] == "fsearch")?;
+    Some(
+        area["pts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| [p[0].as_f64().unwrap(), p[1].as_f64().unwrap()])
+            .collect(),
+    )
+}
+
+/// Even-odd point-in-polygon.
+fn inside(poly: &[[f64; 2]], p: [f64; 2]) -> bool {
+    let mut c = false;
+    for (i, a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        if (a[1] > p[1]) != (b[1] > p[1])
+            && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
+        {
+            c = !c;
+        }
+    }
+    c
+}
+
+/// A camera over the middle of the search area: the outline is clipped at
+/// the near plane edge by edge, so the fill still covers the ground just
+/// ahead of the camera instead of a chord across the far rim.
+#[test]
+fn a_search_area_around_the_camera_is_clipped_at_the_near_plane() {
+    let v = level_view();
+    let poly = search_polygon(&v, [0.0, 0.0], 30.0).expect("the area ahead is drawn");
+    let near_ground = v.project([3.0, 0.0, 0.0]).unwrap();
+    let mid_ground = v.project([15.0, 5.0, 0.0]).unwrap();
+    let beyond_rim = v.project([40.0, 0.0, 0.0]).unwrap();
+    assert!(inside(&poly, near_ground), "{poly:?}");
+    assert!(inside(&poly, mid_ground), "{poly:?}");
+    assert!(!inside(&poly, beyond_rim), "{poly:?}");
+}
+
+/// A search area wholly behind the camera draws nothing; one wholly ahead
+/// keeps every outline point.
+#[test]
+fn a_search_area_behind_the_camera_draws_nothing() {
+    let v = level_view();
+    assert!(search_polygon(&v, [-50.0, 0.0], 10.0).is_none());
+    assert_eq!(search_polygon(&v, [50.0, 0.0], 10.0).unwrap().len(), 24);
+}
