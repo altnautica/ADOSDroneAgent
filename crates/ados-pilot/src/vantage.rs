@@ -92,7 +92,7 @@ pub fn snap_free(grid: &Grid, p: V2, margin: f32, max_m: f32) -> V2 {
     best.0
 }
 
-/// The first obstacle on `from → to` and its width across the line of sight.
+/// The first obstacle on `from → to` and its width along its surface.
 pub fn occluder_between(obs: &Obstacles, from: V2, to: V2) -> Option<Occluder> {
     let d = geo::dist(from, to);
     if d < 1e-3 {
@@ -101,25 +101,27 @@ pub fn occluder_between(obs: &Obstacles, from: V2, to: V2) -> Option<Occluder> {
     let dir = geo::scale(geo::sub(to, from), 1.0 / d);
     let hit = obs.grid.march(from, dir, d - 0.3)?;
     let ne = geo::add(from, geo::scale(dir, hit));
-    // Width: the occupied run across the line of sight through the hit,
-    // 0.1 m steps each side, a little behind the hit's front face.
-    let perp = [-dir[1], dir[0]];
-    let base = geo::add(ne, geo::scale(dir, 0.15));
-    let occupied = |s: f32| {
-        obs.grid
-            .clearance(geo::add(base, geo::scale(perp, s)))
-            .is_some_and(|c| c < 0.15)
-    };
-    let side = |sgn: f32| {
+    // Width: the longest occupied run through the hit, 0.1 m steps each
+    // side, over directions 22.5° apart, from a little behind the hit's
+    // front face (or the hit itself when that is already past a thin wall).
+    // A wall seen at a slant is as wide as it is long, not as thin as its
+    // run across the line of sight.
+    let occupied = |p: V2| obs.grid.clearance(p).is_some_and(|c| c < 0.15);
+    let behind = geo::add(ne, geo::scale(dir, 0.15));
+    let base = if occupied(behind) { behind } else { ne };
+    let run = |u: V2| {
         (1..=60)
-            .take_while(|k| occupied(sgn * *k as f32 * 0.1))
+            .take_while(|k| occupied(geo::add(base, geo::scale(u, *k as f32 * 0.1))))
             .count() as f32
             * 0.1
     };
-    Some(Occluder {
-        ne,
-        width_m: side(1.0) + side(-1.0) + 0.1,
-    })
+    let width_m = (0..8)
+        .map(|k| {
+            let (s, c) = (k as f32 * std::f32::consts::FRAC_PI_8).sin_cos();
+            run([c, s]) + run([-c, -s]) + 0.1
+        })
+        .fold(0.0f32, f32::max);
+    Some(Occluder { ne, width_m })
 }
 
 /// The centre of the candidate ring: the prediction, or, when it lies off
