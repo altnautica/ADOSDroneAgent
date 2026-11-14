@@ -1,6 +1,7 @@
 import { ChevronDown } from "lucide-react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 
 import { BATTERY_POLL_MS, useBatteryHealth } from "@/hooks/use-battery-health";
 import { navPilot, useFlightChip } from "@/hooks/use-flight-chip";
@@ -15,11 +16,13 @@ import { useVehicleLiveness } from "@/hooks/use-vehicle-liveness";
 import { useVehicleTelemetry, VEHICLE_TELEMETRY_POLL_MS } from "@/hooks/use-vehicle-telemetry";
 import { liveData } from "@/lib/freshness";
 import { chipTextColor } from "@/lib/chip-color";
-import { freshNavFrames, homePill, homeStatusLines, poseAgeText, type StatusFull } from "@/lib/home-status";
+import { batteryFixAlertId, freshNavFrames, homePill, homeStatusLines, poseAgeText, type StatusFull } from "@/lib/home-status";
 import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
 import { severityClasses } from "@/shared/format";
+import { BATTERY_FAILSAFE_FIX_KEY, BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
 import { specText } from "@/shared/hud/spec-text";
+import { rerunStep } from "@/shared/setup-wizard/client";
 
 const STATUS_FULL_POLL_MS = 5_000;
 const AGL_LABEL = specText("agl.source.rangefinder");
@@ -110,6 +113,7 @@ function VehicleStatus() {
   const fresh = freshNavFrames(nav.data, nav.dataUpdatedAt, now);
   const liveTelemetry = liveData(tel, VEHICLE_TELEMETRY_POLL_MS, now) ?? null;
   const pill = homePill({ ...inputs, nav: fresh.nav, armSources: { pilot: fresh.pilot, telemetry: liveTelemetry } });
+  const fixAlertId = batteryFixAlertId({ pilot: fresh.pilot, telemetry: liveTelemetry });
   const poseAge = poseAgeText(fresh.nav);
   const lines = homeStatusLines({
     ...inputs,
@@ -139,6 +143,19 @@ function VehicleStatus() {
                 <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", a.severity === "critical" ? "bg-destructive" : "bg-warn")} />
                 <span className="text-muted-foreground">{specText(`cockpit.status.source.${a.source}`)}</span>
                 <span>{a.text}</span>
+                {a.id === fixAlertId ? (
+                  <Link
+                    to="/settings/aircraft-setup"
+                    onClick={() => {
+                      // The setup page's stream shows the step's result.
+                      rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step).catch(() => undefined);
+                    }}
+                    data-testid="status-fix-battery-failsafe"
+                    className="font-semibold underline max-md:inline-flex max-md:min-h-11 max-md:items-center"
+                  >
+                    {specText(BATTERY_FAILSAFE_FIX_KEY)}
+                  </Link>
+                ) : null}
               </li>
             ))}
           </ul>

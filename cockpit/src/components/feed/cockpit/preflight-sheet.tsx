@@ -11,7 +11,9 @@ import { CircleAlert, CircleCheck, CircleX } from "lucide-react";
 
 import { Sheet } from "@/components/ui/sheet";
 import { usePreflightItems } from "@/hooks/use-preflight-items";
+import { fixBatteryFailsafe } from "@/lib/aircraft-setup";
 import { checklistPassable } from "@/lib/cockpit-flow";
+import { BATTERY_FAILSAFE_FIX_KEY } from "@/shared/hud/battery-failsafe-fix";
 import { specText } from "@/shared/hud/spec-text";
 import { usePreflightStore } from "@/stores/preflight-store";
 
@@ -48,6 +50,19 @@ export function PreflightSheet() {
               <CircleX className="h-[1.1rem] w-[1.1rem] shrink-0 text-err" aria-label={specText("setup.result.fail")} />
             )}
             <span>{i.label}</span>
+            {i.fix === "battery_failsafe" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  dismiss();
+                  fixBatteryFailsafe();
+                }}
+                data-testid="preflight-fix-battery-failsafe"
+                className="ml-auto min-h-[40px] shrink-0 rounded-md border border-primary px-[0.6rem] text-[0.8rem] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+              >
+                {specText(BATTERY_FAILSAFE_FIX_KEY)}
+              </button>
+            ) : null}
           </li>
         ))}
       </ul>

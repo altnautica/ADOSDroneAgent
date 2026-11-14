@@ -155,6 +155,8 @@ export interface ChecklistItem {
   id: string;
   label: string;
   state: "pass" | "warn" | "fail";
+  /** The item offers the battery failsafe fix (`batteryFailsafeFixable`). */
+  fix?: "battery_failsafe";
 }
 
 /** Whether the checklist can be passed: no failing item. */

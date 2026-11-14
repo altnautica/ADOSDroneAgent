@@ -10,6 +10,8 @@
 // the ground. Open or Later both mark the uid offered, in localStorage
 // `ados-cockpit-setup-offered` (the kiosk keeps it in its persistent profile).
 
+import { BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
+import { rerunStep } from "@/shared/setup-wizard/client";
 import { setupNeeded } from "@/shared/setup-wizard/parse";
 import type { SetupStatus } from "@/shared/setup-wizard/types";
 import { useNavStore } from "@/stores/nav-store";
@@ -22,6 +24,15 @@ export function openAircraftSetup(): void {
   const nav = useNavStore.getState();
   if (nav.detailStack[nav.detailStack.length - 1] === AIRCRAFT_SETUP_SCREEN_ID) return;
   nav.openDetail(AIRCRAFT_SETUP_SCREEN_ID);
+}
+
+/** The battery failsafe fix: open Aircraft setup and run the ground
+ *  wizard's ADOS profile step, which lists the failsafe profile and writes
+ *  nothing until the operator applies it there. The screen's setup stream
+ *  shows the step's result; a refused run reads on that step as before. */
+export function fixBatteryFailsafe(): void {
+  openAircraftSetup();
+  rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step).catch(() => undefined);
 }
 
 export const SETUP_OFFERED_KEY = "ados-cockpit-setup-offered";

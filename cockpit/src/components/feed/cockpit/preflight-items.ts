@@ -1,9 +1,11 @@
 // The pilot's part of the pre-flight checklist. A pilot state that went stale
 // says nothing about now: every item it listed reads not reported and fails,
 // and a stale state that listed none still adds one failing item, so the
-// first arm never passes on a frozen frame.
+// first arm never passes on a frozen frame. A fresh battery failsafe item
+// whose action does nothing carries the one-tap fix while disarmed.
 
 import type { ChecklistItem } from "@/lib/cockpit-flow";
+import { batteryFailsafeFixable } from "@/shared/hud/battery-failsafe-fix";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { specText } from "@/shared/hud/spec-text";
@@ -15,7 +17,9 @@ export function pilotReadinessItems(pilot: Stamped<PilotState> | null, nowMs: nu
   const items: ChecklistItem[] = pilot.data.readiness.map((r) => {
     const label = r.msg || r.id;
     if (!fresh) return { id: `pilot:${r.id}`, label: specText("flow.preflight.not_reported", { item: label }), state: "fail" };
-    return { id: `pilot:${r.id}`, label, state: r.ok ? "pass" : r.severity === "block" ? "fail" : "warn" };
+    const item: ChecklistItem = { id: `pilot:${r.id}`, label, state: r.ok ? "pass" : r.severity === "block" ? "fail" : "warn" };
+    if (batteryFailsafeFixable(r, pilot.data.armed)) item.fix = "battery_failsafe";
+    return item;
   });
   if (!fresh && items.length === 0) {
     items.push({

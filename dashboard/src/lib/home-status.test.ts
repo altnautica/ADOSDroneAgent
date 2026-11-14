@@ -4,7 +4,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { vehicleLiveness } from "@/hooks/use-vehicle-liveness";
-import { freshNavFrames, homeNavSource, homePill, homeStatusLines, pillArmed, poseAgeText, type HomeStatusInputs } from "@/lib/home-status";
+import { batteryFixAlertId, freshNavFrames, homeNavSource, homePill, homeStatusLines, pillArmed, poseAgeText, type HomeStatusInputs } from "@/lib/home-status";
+import { specText } from "@/shared/hud/spec-text";
 import { parsePilotState } from "@/shared/hud/cockpit-frames";
 import storageCases from "@/shared/hud/fixtures/storage-cases.json";
 import { INITIAL_LIVENESS, nextLiveness } from "@/shared/hud/vehicle-live";
@@ -223,5 +224,29 @@ describe("home status card", () => {
     const nav = freshNavFrames(body, 1_000, 1_000).nav;
     expect(poseAgeText(nav)).toBe("Pose age 42 ms");
     expect(poseAgeText(null)).toBeNull();
+  });
+});
+
+describe("the battery failsafe fix on the pill", () => {
+  const pilotWith = (key: string, armed: boolean) =>
+    parsePilotState({ ...raw, armed, readiness: [{ id: "battery_failsafe", ok: false, severity: "warn", msg: specText(key) }] });
+
+  it("lists the item and marks its alert for the fix while disarmed", () => {
+    const pilot = pilotWith("readiness.battery_failsafe.critical_none", false);
+    const pill = homePill({ ...base, pilot });
+    expect(pill.alerts.map((a) => a.id)).toContain("pilot:battery_failsafe");
+    expect(batteryFixAlertId({ pilot, telemetry: groundTel })).toBe("pilot:battery_failsafe");
+  });
+
+  it("offers no fix while armed or on unset levels", () => {
+    expect(batteryFixAlertId({ pilot: pilotWith("readiness.battery_failsafe.none", true), telemetry: groundTel })).toBeNull();
+    expect(batteryFixAlertId({ pilot: pilotWith("readiness.battery_failsafe.levels_unset", false), telemetry: groundTel })).toBeNull();
+    expect(batteryFixAlertId({ pilot: null, telemetry: groundTel })).toBeNull();
+  });
+
+  it("links the fix to Aircraft setup and runs the ADOS profile step", () => {
+    const src = readFileSync(path.resolve(__dirname, "../components/panels/status-tiles.tsx"), "utf8");
+    expect(src).toContain('to="/settings/aircraft-setup"');
+    expect(src).toContain("rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step)");
   });
 });

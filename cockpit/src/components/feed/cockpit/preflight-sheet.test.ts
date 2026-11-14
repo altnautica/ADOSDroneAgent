@@ -95,3 +95,37 @@ describe("the Menu's pre-flight tally", () => {
     expect(preflightTally([{ id: "a", label: "", state: "pass" }])).toEqual({ passed: 1, total: 1, state: "pass" });
   });
 });
+
+describe("the battery failsafe item", () => {
+  afterEach(() => serverPilot(null));
+
+  const NONE = specText("readiness.battery_failsafe.none");
+  const LOW_NONE = specText("readiness.battery_failsafe.low_none");
+  const pilotWith = (msg: string, severity: "block" | "warn", armed: boolean) =>
+    parsePilotState({ ...demoPilotData(0), armed, readiness: [{ id: "battery_failsafe", ok: false, severity, msg }] })!;
+
+  it("fails a blocking item and warns otherwise, offering the fix while disarmed", () => {
+    expect(pilotReadinessItems({ data: pilotWith(NONE, "block", false), at: NOW - 200 }, NOW)).toEqual([
+      { id: "pilot:battery_failsafe", label: NONE, state: "fail", fix: "battery_failsafe" },
+    ]);
+    expect(pilotReadinessItems({ data: pilotWith(LOW_NONE, "warn", false), at: NOW - 200 }, NOW)).toEqual([
+      { id: "pilot:battery_failsafe", label: LOW_NONE, state: "warn", fix: "battery_failsafe" },
+    ]);
+  });
+
+  it("offers no fix while armed, on unset levels or on a stale frame", () => {
+    expect(pilotReadinessItems({ data: pilotWith(NONE, "block", true), at: NOW - 200 }, NOW)[0].fix).toBeUndefined();
+    const levels = specText("readiness.battery_failsafe.levels_unset");
+    expect(pilotReadinessItems({ data: pilotWith(levels, "warn", false), at: NOW - 200 }, NOW)[0].fix).toBeUndefined();
+    expect(pilotReadinessItems({ data: pilotWith(NONE, "block", false), at: NOW - 2500 }, NOW)[0].fix).toBeUndefined();
+  });
+
+  it("renders the item's label with its state and the fix action on the checklist", () => {
+    serverPilot({ data: pilotWith(LOW_NONE, "warn", false), at: Date.now() - 200 });
+    const html = renderToStaticMarkup(createElement(PreflightSheet));
+    expect(html).toMatch(new RegExp(`aria-label="Warning">(?:(?!</li>).)*<span>${LOW_NONE.replace(/[()]/g, "\\$&")}</span>`));
+    expect(html).toContain('data-testid="preflight-fix-battery-failsafe"');
+    expect(html).toContain(specText("readiness.battery_failsafe.fix"));
+    expect(html).toMatch(/preflight-fix-battery-failsafe"[^>]*min-h-\[40px\]/);
+  });
+});

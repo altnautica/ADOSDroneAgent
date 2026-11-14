@@ -10,6 +10,7 @@
 // pilot and follow frames only while fresh (`freshNavFrames`).
 
 import type { NavStatusBody, NavStatusEntry } from "@/hooks/use-nav-status";
+import { BATTERY_FAILSAFE_ID, batteryFailsafeFixable } from "@/shared/hud/battery-failsafe-fix";
 import { aglMarkText, bottomRowAgl } from "@/shared/hud/chip-inputs";
 import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
@@ -84,6 +85,15 @@ export function homeNavSource(i: Pick<HomeStatusInputs, "telemetry" | "live" | "
 /** `Pose age {ms} ms` from the fresh vision-nav state, or null without one. */
 export function poseAgeText(nav: NavState | null | undefined): string | null {
   return nav?.poseAgeMs != null ? specText("nav_source.pose_age", { ms: Math.round(nav.poseAgeMs) }) : null;
+}
+
+/** The pill alert id that carries the battery failsafe fix (a link to
+ *  Aircraft setup that runs the ADOS profile step), or null: the fresh
+ *  pilot's battery failsafe item failing because an action does nothing, on
+ *  a vehicle known to be disarmed. */
+export function batteryFixAlertId(i: Pick<HomeStatusInputs, "pilot" | "telemetry" | "armSources">): string | null {
+  const item = i.pilot?.readiness.find((r) => r.id === BATTERY_FAILSAFE_ID);
+  return item && batteryFailsafeFixable(item, pillArmed(i.armSources ?? i)) ? `pilot:${BATTERY_FAILSAFE_ID}` : null;
 }
 
 /** The pill and its alert list, from the cockpit's inputs. The dashboard
