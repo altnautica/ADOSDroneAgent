@@ -13,6 +13,10 @@ mod requests;
 mod state;
 mod take;
 mod touchdown;
+mod trace;
+
+pub(crate) use trace::limit;
+pub use trace::{ShadowCmd, SHADOW_MAX_AGE_MS};
 
 use std::collections::HashMap;
 
@@ -149,6 +153,11 @@ pub struct Pilot {
     sticks_ms: u64,
     params_ms: u64,
     setpoint: Option<[f32; 3]>,
+    /// This tick's command of a skill goal or a goto ([`trace`]); `None`
+    /// on a tick that flew none.
+    command: Option<trace::Tick>,
+    /// The shadow planner's latest command and its source.
+    shadow: Option<(&'static str, ShadowCmd)>,
     plan_hold: Option<[f32; 3]>,
     /// Where a skill goal or goto holds while the obstacle data is stale,
     /// from the tick it went stale; cleared on any tick that does not keep it.
@@ -224,6 +233,8 @@ impl Pilot {
             sticks_ms: 0,
             params_ms: 0,
             setpoint: None,
+            command: None,
+            shadow: None,
             plan_hold: None,
             stale_hold: None,
             nav_set: nav_cap::BOOT_SOURCE_SET,

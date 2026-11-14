@@ -292,6 +292,41 @@ fn sensors_serialise_with_the_contract_shape() {
 }
 
 #[test]
+fn command_and_shadow_are_omitted_until_set_and_round_trip() {
+    use crate::pilot::{PilotCommand, ShadowCommand, FRAME_FC_LOCAL_NED};
+    let mut s = crate::pilot::PilotState::default();
+    let v = serde_json::to_value(&s).unwrap();
+    assert!(
+        v.get("command").is_none() && v.get("shadow").is_none(),
+        "{v}"
+    );
+    let mut c = PilotCommand::new(1_700_000_000_123);
+    c.goal_ned = Some([20.0, 0.0, -5.0]);
+    c.target_ne = Some([4.0, 1.0]);
+    c.ask_vel_ne = [6.0, 0.0];
+    c.cmd_vel_ne = [1.2, 0.0];
+    c.sp_vel_ned = [1.2, 0.0, 0.0];
+    c.v_cap_mps = 6.0;
+    c.limits = vec!["obstacle".into(), "obstacle_closing".into()];
+    s.command = Some(c);
+    let mut sh = ShadowCommand::new("trajectory", 1_700_000_000_100);
+    sh.vel_ne = [3.0, 0.5];
+    sh.path_ne = vec![[0.0, 0.0], [3.0, 0.5]];
+    s.shadow = Some(sh);
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["command"]["frame"], FRAME_FC_LOCAL_NED);
+    assert_eq!(v["command"]["cmd_vel_ne"], serde_json::json!([1.2, 0.0]));
+    assert_eq!(
+        v["command"]["limits"],
+        serde_json::json!(["obstacle", "obstacle_closing"])
+    );
+    assert_eq!(v["shadow"]["source"], "trajectory");
+    assert_eq!(v["shadow"]["live"], false);
+    let back: crate::pilot::PilotState = serde_json::from_value(v).unwrap();
+    assert_eq!(back, s);
+}
+
+#[test]
 fn a_vantage_goal_decodes_with_its_spec_and_hypotheses() {
     let frame = serde_json::json!({
         "op": "goal", "lease_id": 4,

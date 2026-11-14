@@ -414,8 +414,9 @@ async fn run(path: PathBuf, mut rx: mpsc::Receiver<Vec<u8>>) {
     }
 }
 
-/// The `state` body trimmed to fit one aux frame: the plan polyline goes
-/// first, then the readiness items that pass, then every readiness item.
+/// The `state` body trimmed to fit one aux frame: the onboard diagnostics
+/// (`command`, `shadow`) never go down; then the plan polyline goes first,
+/// then the readiness items that pass, then every readiness item.
 pub fn downlink_body(state: &rmpv::Value) -> Option<Vec<u8>> {
     let max = ados_protocol::aux_mux::AUX_MAX_PAYLOAD - 1;
     let rmpv::Value::Map(map) = state else {
@@ -427,7 +428,11 @@ pub fn downlink_body(state: &rmpv::Value) -> Option<Vec<u8>> {
             .ok()
             .map(|_| out)
     };
-    let mut m = map.clone();
+    let mut m: Vec<(rmpv::Value, rmpv::Value)> = map
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), Some("command" | "shadow")))
+        .cloned()
+        .collect();
     let mut out = encode(&m)?;
     let set = |m: &mut Vec<(rmpv::Value, rmpv::Value)>,
                key: &str,

@@ -8,7 +8,8 @@ use super::{
     geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_NO_VANTAGE,
     HOLD_OBSTACLE_CLOSE, HOLD_OBSTACLE_STALE,
 };
-use crate::core::Pilot;
+use crate::core::trace::Tick;
+use crate::core::{limit, Pilot};
 use crate::fc::MASK_POS_VEL_YAW;
 use crate::geo::{self, V2};
 use crate::model::HOLD_CAPTURE_MPS;
@@ -34,6 +35,8 @@ impl Pilot {
                 self.cap_flown([0.0, 0.0], now_ms);
             }
             self.setpoint = Some(hold);
+            let pull = geo::scale(geo::sub([hold[0], hold[1]], [pos[0], pos[1]]), FC_POS_GAIN);
+            self.command = Some(Tick::hold(now_ms, pull, [0.0; 3], 0));
             let m = self
                 .tx()
                 .setpoint(MASK_POS_VEL_YAW, hold, [0.0; 3], yaw, 0.0);
@@ -117,35 +120,78 @@ impl Pilot {
                 self.cap_flown(push, now_ms);
             }
             self.setpoint = Some(hold);
+            let pull = geo::scale(geo::sub([hold[0], hold[1]], pos_ne), FC_POS_GAIN);
+            let mut extra = if close { limit::HARD_STOP } else { 0 };
+            if geo::norm(push) > 1e-3 {
+                extra |= limit::PUSH;
+            }
+            self.command = Some(Tick::hold(
+                now_ms,
+                geo::add([vel[0], vel[1]], pull),
+                vel,
+                extra,
+            ));
             let m = self.tx().setpoint(MASK_POS_VEL_YAW, hold, vel, yaw, 0.0);
             self.mav(m);
             return;
         };
         self.hold_reason = None;
         self.plan_hold = None;
-        let v_cap = max_speed.min(self.limits_now(now_ms).v_h).max(0.5);
+        let v_h = self.limits_now(now_ms).v_h;
+        let v_cap = max_speed.min(v_h).max(0.5);
         let to = geo::sub(target, pos_ne);
         // A vantage goal carries no feed-forward: it flies its path.
         let detour = self.plan.state == AvoidState::Detour
             || goal.as_ref().is_some_and(|g| g.kind == GoalKind::Vantage);
-        let vel = match (&goal, detour) {
-            (Some(g), false) => geo::clamp_len([g.vn, g.ve], v_cap),
-            _ => geo::clamp_len(geo::scale(to, 1.0), v_cap),
+        let ff = match (&goal, detour) {
+            (Some(g), false) => [g.vn, g.ve],
+            _ => to,
         };
+        let vel = geo::clamp_len(ff, v_cap);
         let yaw_cmd = goal_yaw.unwrap_or_else(|| match subject {
             Some(s) => geo::bearing_of(geo::sub(s, pos_ne)),
             None if geo::norm(to) > 1.0 => geo::bearing_of(to),
             None => yaw,
         });
         let ask = geo::add(vel, geo::scale(to, FC_POS_GAIN));
-        let fence = |v: V2| geofence(pos_ne, home, max_dist, v);
+        // Every limit that changes what was asked, for the published command.
+        let mut limits = if geo::norm(ff) > v_cap + 1e-3 {
+            limit::SPEED
+        } else {
+            0
+        };
+        let fenced = |v: V2, limits: &mut u16| {
+            let f = geofence(pos_ne, home, max_dist, v);
+            if geo::dist(f, v) > 1e-3 {
+                *limits |= limit::GEOFENCE;
+            }
+            f
+        };
         let (sp_ne, vel) = if self.speed_capped(now_ms) {
             // Capped, a distant position setpoint would let the FC's position
             // loop pull past the cap, so the velocity is flown from the
             // vehicle's own position. The ramp runs first and the brake and
             // the fence after it, so their cut flies at once.
-            let want = self.cap_ramp(geo::clamp_len(ask, v_cap), now_ms);
-            let v = fence(self.goal_brake(pos_ne, want, v_cap, now_ms).unwrap_or(want));
+            let held = geo::clamp_len(ask, v_cap);
+            let want = self.cap_ramp(held, now_ms);
+            if geo::norm(ask) > v_cap + 1e-3 {
+                limits |= if v_cap >= v_h - 1e-3 {
+                    limit::NAV_CAP
+                } else {
+                    limit::SPEED
+                };
+            }
+            if geo::dist(want, held) > 1e-3 {
+                limits |= limit::NAV_CAP;
+            }
+            let braked = match self.goal_brake(pos_ne, want, v_cap, now_ms) {
+                Some((v, by)) => {
+                    limits |= by;
+                    v
+                }
+                None => want,
+            };
+            let v = fenced(braked, &mut limits);
             self.cap_flown(v, now_ms);
             (pos_ne, v)
         } else {
@@ -153,8 +199,17 @@ impl Pilot {
             match self.goal_brake(pos_ne, ask, v_cap, now_ms) {
                 // At the vehicle's own position the FC's position loop adds
                 // nothing: it flies the braked velocity.
-                Some(v) => (pos_ne, fence(v)),
-                None => (inside_fence(target, home, max_dist), fence(vel)),
+                Some((v, by)) => {
+                    limits |= by;
+                    (pos_ne, fenced(v, &mut limits))
+                }
+                None => {
+                    let t = inside_fence(target, home, max_dist);
+                    if geo::dist(t, target) > 1e-3 {
+                        limits |= limit::GEOFENCE;
+                    }
+                    (t, fenced(vel, &mut limits))
+                }
             }
         };
         let (goal_d, vd) = clamp_d(
@@ -167,6 +222,15 @@ impl Pilot {
         );
         let sp = [sp_ne[0], sp_ne[1], goal_d];
         self.setpoint = Some(sp);
+        self.command = Some(Tick {
+            at_ms: now_ms,
+            target_ne: Some(target),
+            ask: geo::add(ff, geo::scale(to, FC_POS_GAIN)),
+            cmd: geo::add(vel, geo::scale(geo::sub(sp_ne, pos_ne), FC_POS_GAIN)),
+            sp_vel: [vel[0], vel[1], vd],
+            v_cap,
+            limits,
+        });
         let m = self
             .tx()
             .setpoint(MASK_POS_VEL_YAW, sp, [vel[0], vel[1], vd], yaw_cmd, 0.0);

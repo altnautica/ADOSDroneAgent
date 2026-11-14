@@ -2,6 +2,7 @@
 //! applies before a setpoint goes out.
 
 use super::{BRAKE_LAG_S, BRAKE_RANGE_M, BRAKE_SECTORS, HARD_STOP_FRAC};
+use crate::core::limit;
 use crate::geo::{self, V2};
 
 /// What the brake keeps clear: the obstacle margin and the vehicle's own
@@ -43,6 +44,11 @@ pub struct Braked {
     /// An obstacle is inside the hard-stop distance (`HARD_STOP_FRAC`·margin):
     /// only motion away from it is left.
     pub close: bool,
+    /// Which terms changed the velocity, as [`limit`] bits: `HARD_STOP`,
+    /// `OBSTACLE` (with `OBSTACLE_CLOSING` when the scans' own closing speed
+    /// set that cap), `SEEN_SPACE`, `CLEARANCE` and `PUSH`. 0 when nothing
+    /// did.
+    pub by: u16,
 }
 
 /// Cap speed toward obstacles at `sqrt(2·a·max(0, d − margin))`, keeping the
@@ -92,6 +98,8 @@ pub fn brake_limit(
     let stop_at = HARD_STOP_FRAC * margin;
     // Per sector: (unit direction toward the point, cap on speed along it).
     let mut caps: [Option<(V2, f32)>; BRAKE_SECTORS] = [None; BRAKE_SECTORS];
+    // Per sector: what set its cap ([`limit`] bits).
+    let mut tags = [0u16; BRAKE_SECTORS];
     // Per sector: (unit direction, distance) of the nearest obstacle point.
     let mut near: [Option<(V2, f32)>; BRAKE_SECTORS] = [None; BRAKE_SECTORS];
     let mut away = [0.0, 0.0];
@@ -122,6 +130,13 @@ pub fn brake_limit(
             % BRAKE_SECTORS;
         if caps[sector].is_none_or(|(_, c)| cap < c) {
             caps[sector] = Some((dir, cap));
+            tags[sector] = match obstacle {
+                true if scan > geo::dot(vel, dir).max(0.0) + 1e-3 => {
+                    limit::OBSTACLE | limit::OBSTACLE_CLOSING
+                }
+                true => limit::OBSTACLE,
+                false => limit::SEEN_SPACE,
+            };
         }
         if obstacle && near[sector].is_none_or(|(_, n)| d < n) {
             near[sector] = Some((dir, d));
@@ -138,12 +153,32 @@ pub fn brake_limit(
     } else {
         nearest_within(v, &caps)
     };
+    let mut by = if close {
+        limit::HARD_STOP
+    } else {
+        // The caps `v` broke that the answer sits on.
+        caps.iter()
+            .zip(tags)
+            .filter_map(|(c, tag)| c.map(|(dir, cap)| (dir, cap, tag)))
+            .filter(|&(dir, cap, _)| {
+                geo::dot(dir, v) > cap + 1e-4 && geo::dot(dir, out) >= cap - 1e-3
+            })
+            .fold(0, |by, (_, _, tag)| by | tag)
+    };
     let (v_conf, push) = confined(&near, geom);
+    if geo::norm(out) > v_conf + 1e-3 {
+        by |= limit::CLEARANCE;
+    }
+    if geo::norm(push) >= PUSH_REPORT_MPS {
+        by |= limit::PUSH;
+    }
     let out = with_push(out, v_conf, push);
+    let cut = geo::norm(out) < geo::norm(v) - 1e-3 || geo::norm(push) >= PUSH_REPORT_MPS;
     Braked {
         v: out,
-        cut: geo::norm(out) < geo::norm(v) - 1e-3 || geo::norm(push) >= PUSH_REPORT_MPS,
+        cut,
         close,
+        by: if cut || close { by } else { 0 },
     }
 }
 

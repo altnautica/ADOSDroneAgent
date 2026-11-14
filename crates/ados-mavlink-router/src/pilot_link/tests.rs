@@ -483,3 +483,33 @@ fn a_reposition_during_an_fc_failsafe_is_rejected() {
     link.on_state(&pilot_state("fc_mode", true, false, "multirotor"));
     assert_eq!(ack_of(&link, r).1, MavResult::MAV_RESULT_ACCEPTED);
 }
+
+/// The pilot's per-tick command and the shadow planner's command are onboard
+/// diagnostics: the radio downlink never carries them, so they cost no aux
+/// frame space and never push the plan polyline out.
+#[test]
+fn the_downlink_drops_the_command_and_shadow_diagnostics() {
+    let mut state = pilot_state("skill", true, false, "multirotor");
+    if let rmpv::Value::Map(m) = &mut state {
+        for key in ["command", "shadow"] {
+            let body = rmpv::Value::Map(vec![(
+                rmpv::Value::from("t_ms"),
+                rmpv::Value::from(1_700_000_000_000u64),
+            )]);
+            m.push((rmpv::Value::from(key), body));
+        }
+    }
+    let body = downlink_body(&state).expect("fits one frame");
+    let back = rmpv::decode::read_value(&mut body.as_slice()).unwrap();
+    let keys: Vec<&str> = back
+        .as_map()
+        .unwrap()
+        .iter()
+        .filter_map(|(k, _)| k.as_str())
+        .collect();
+    assert!(keys.contains(&"owner"), "{keys:?}");
+    assert!(
+        !keys.contains(&"command") && !keys.contains(&"shadow"),
+        "{keys:?}"
+    );
+}

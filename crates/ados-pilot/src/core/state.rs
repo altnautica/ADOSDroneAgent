@@ -89,12 +89,7 @@ impl Pilot {
             .map(wire);
         let planning = matches!(owner, Owner::Skill | Owner::Goto);
         // The commanded goal: a skill's lease goal, else the goto target.
-        let commanded = self
-            .auth
-            .lease()
-            .and_then(|l| l.goal.as_ref())
-            .map(|g| [g.n, g.e, g.d])
-            .or(self.goto);
+        let commanded = self.commanded_goal();
         // A blocked or stale plan holds with no goal or path of its own; the
         // frame keeps the commanded goal and the straight way to it, so the
         // surfaces draw them in the plan's colour rather than dropping them.
@@ -259,6 +254,8 @@ impl Pilot {
                 now_ms,
             )
         });
+        s.command = self.command_frame();
+        s.shadow = self.shadow_frame(now_ms);
         s
     }
 
