@@ -106,9 +106,15 @@ describe("0.5 follow phases", () => {
   it("coasting and lost are gone", () => {
     expect(PHASES).not.toContain("coasting" as never);
     expect(PHASES).not.toContain("lost" as never);
-    expect(parseFollowState({ active: true, phase: "coasting" })?.phase).toBe("acquiring");
     expect(S["follow.phase.coasting"]).toBeUndefined();
     expect(S["follow.phase.lost"]).toBeUndefined();
+  });
+
+  it("reads an older follow's coasting as predicting and lost as holding, never following", () => {
+    const coasting = parseFollowState({ active: true, phase: "coasting", commanding: true });
+    expect(coasting?.phase).toBe("predicting");
+    expect(parseFollowState({ active: true, phase: "lost", commanding: false })?.phase).toBe("holding");
+    expect(followPrompt(coasting!)).toBeNull();
   });
 
   it("names every hold reason, vantage state and occluder the follow emits", () => {
