@@ -70,6 +70,23 @@ impl Pilot {
         l
     }
 
+    /// The limits for stick flight under `axes`. A cap switching on
+    /// mid-flight starts the stick model from the capped speed, so only
+    /// speeding up is ramped; slowing down (a STOP, a hold, a smaller stick)
+    /// is never held to the cap's acceleration and uses the profile's, as on
+    /// GNSS.
+    pub(super) fn stick_limits(&mut self, axes: [f32; 4], now_ms: u64) -> Limits {
+        let mut lim = self.limits_now(now_ms);
+        if self.nav_capped(now_ms) {
+            self.mr.shaper.v = geo::clamp_len(self.mr.shaper.v, lim.v_h);
+            let most = axes[0].hypot(axes[1]).min(1.0) * lim.v_h;
+            if most < geo::norm(self.mr.shaper.v) {
+                lim.a_h = limits(self.settings.pilot.profile).a_h;
+            }
+        }
+        lim
+    }
+
     /// The horizontal velocity to ask for under the cap: `v` held to the
     /// capped speed, reached at no more than the capped acceleration from the
     /// velocity flown last tick (after a gap, the measured velocity), itself

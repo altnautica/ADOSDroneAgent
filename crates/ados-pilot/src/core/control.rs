@@ -332,18 +332,7 @@ impl Pilot {
     }
 
     fn fly_sticks(&mut self, axes: [f32; 4], pos: [f32; 3], yaw: f32, dt: f32, now_ms: u64) {
-        let mut lim = self.limits_now(now_ms);
-        if self.nav_capped(now_ms) {
-            // A cap switching on mid-flight: the stick model starts from the
-            // capped speed, so only speeding up is ramped.
-            self.mr.shaper.v = geo::clamp_len(self.mr.shaper.v, lim.v_h);
-            // Slowing down (a STOP, a hold, a smaller stick) is never held to
-            // the cap's acceleration: it uses the profile's, as on GNSS.
-            let most = axes[0].hypot(axes[1]).min(1.0) * lim.v_h;
-            if most < geo::norm(self.mr.shaper.v) {
-                lim.a_h = crate::model::limits(self.settings.pilot.profile).a_h;
-            }
-        }
+        let lim = self.stick_limits(axes, now_ms);
         let agl = self.agl(now_ms);
         let mut axes = axes;
         if self.landing {

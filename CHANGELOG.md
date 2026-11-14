@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.110.2] - 2026-11-14
+
+### Changed
+
+- Pilot: the stick-flight limits under the GNSS-denied cap live beside the cap itself; no change in behaviour.
+
 ## [0.110.1] - 2026-11-14
 
 ### Added

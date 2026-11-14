@@ -316,7 +316,10 @@ fn a_stop_under_the_cap_slows_at_the_profiles_acceleration() {
     let v = capped_stop(&mut w);
     assert!(v[0] > CAP - 0.2, "at the cap before the stop: {v:?}");
     let profile = crate::model::limits(w.p.settings.pilot.profile).a_h;
-    assert!(profile > ACCEL, "the test needs a profile faster than the cap");
+    assert!(
+        profile > ACCEL,
+        "the test needs a profile faster than the cap"
+    );
     let decel = v
         .windows(2)
         // The last step to the position hold drops to zero at once.
