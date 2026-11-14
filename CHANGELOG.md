@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.111.1] - 2026-11-14
+
+### Changed
+
+- Breaking: in the pilot frame (the nav `pilot` kind and the `pilot.v1` state message, now contract version 3) `fc_mode` and `fc_mode_name` are `null` until the pilot hears the flight controller's heartbeat, as `armed` and `landed` already were. Before, they read mode 0 and "STABILIZE" with no flight controller heard. In `ados-protocol`, `PilotState::fc_mode` is `Option<u32>` and `fc_mode_name` is `Option<String>`. The cockpit, the kiosk, the dashboard and the terminal UI show an unknown mode as "—", and the pilot's owner label reads "FC" without a mode.
+
+### Fixed
+
+- Pilot: while the flight controller is in its own failsafe, a mission the pilot had paused no longer reads `paused` in the pilot frame, so the chip shows the failsafe return or landing instead of "Mission paused" with a Resume button that could only be refused. The cockpit and the kiosk disable Resume and Take control with the failsafe reason while the pilot reports `fc_failsafe`, as Pause already was.
+- Pilot: Copter's AUTO_RTL ("Auto DO_LAND_START or RTL") and BRAKE ("Brake or Land") entered with no operator command count as a flight-controller failsafe, as RTL, SmartRTL and LAND do. Before, an AUTO_RTL failsafe read as an FC mission, where Take control and a stick deflection switched to GUIDED. The operator's own AUTO_RTL or BRAKE is not a failsafe.
+- Pilot: Take control no longer overrides a flight-controller failsafe. While the pilot reports `fc_failsafe` (the flight controller flies an RTL, SmartRTL or land nobody commanded: an RC switch, or a radio, battery or EKF failsafe), `take_control` is refused with `failsafe` and nothing asks the flight controller for GUIDED. Before, it was accepted, the flight controller was put in GUIDED and the pilot flew until the flight controller re-asserted its failsafe. Resume (which would switch to AUTO) and a launch or take-off while still armed on the ground after a failsafe landing are refused the same way. The operator's own mode change (the Mode sheet, Hand to FC) ends the failsafe state, and Take control works after it. Every surface shows the existing `failsafe` refusal text.
+
 ## [0.111.0] - 2026-11-14
 
 ### Changed
@@ -23,15 +35,10 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.110.2] - 2026-11-14
 
-### Fixed
-
-- Pilot: Take control no longer overrides a flight-controller failsafe. While the pilot reports `fc_failsafe` (the flight controller flies an RTL, SmartRTL or land nobody commanded: an RC switch, or a radio, battery or EKF failsafe), `take_control` is refused with `failsafe` and nothing asks the flight controller for GUIDED. Before, it was accepted, the flight controller was put in GUIDED and the pilot flew until the flight controller re-asserted its failsafe. Resume (which would switch to AUTO) and a launch or take-off while still armed on the ground after a failsafe landing are refused the same way. The operator's own mode change (the Mode sheet, Hand to FC) ends the failsafe state, and Take control works after it. Every surface shows the existing `failsafe` refusal text.
-
-## [0.110.2] - 2026-11-14
-
 ### Changed
 
 - Pilot: the stick-flight limits under the GNSS-denied cap live beside the cap itself; no change in behaviour.
+
 ## [0.110.1] - 2026-11-14
 
 ### Added
@@ -43,6 +50,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: a STOP, a hold or a smaller stick under the GNSS-denied speed cap slows the vehicle at the profile's acceleration (3 m/s² on Normal, 6 on Sport), not at the cap's 1.5 m/s². Only speeding up is held to the cap's acceleration.
 - Pilot: the pilot frame carries `speed_cap` only while the pilot flies setpoints under it: armed and airborne in GUIDED, with the pilot, a skill, a goto or the swarm flying, a heard FC, and not in fixed-wing forward flight. The chip no longer reads "GNSS-denied" during an FC RTH, an FC mission, on the ground or with the FC unheard.
 - The chip prints the cap with at most one decimal, the same on every surface (1.5 reads "1.5 m/s max", not "2").
+
 ## [0.110.0] - 2026-11-14
 
 ### Changed
@@ -144,6 +152,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Pilot: after a Land touchdown, Take control followed by a lift of under 1 m kept the touchdown hold, so Pause was refused and the link-loss and low-battery failsafes did not fire. Any sign of flight now ends the hold: the operator's Take control, an arm or disarm, a take-off, the FC's landed state leaving ON_GROUND, or a climb of 0.3 m seen by the rangefinder or the local position. The failsafes (link loss, low battery, controller loss) and the link-loss countdown follow the FC's own landed state and never wait on the hold, which only refuses Pause, goto, resume and a VTOL transition.
+
 ## [0.109.121] - 2026-11-13
 
 ### Fixed
@@ -567,6 +576,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - Pause is refused with a reason while the flight controller runs its own failsafe return or landing; return home, land and the emergency stop are unaffected.
 - Command results with the MAVLink prefix and the unknown landed state now read in the cockpit's own words.
+
 ## [0.109.76] - 2026-11-10
 
 ### Changed
@@ -1277,7 +1287,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - Ground station CRSF lane: in control modes `ados` and `fc_manual` the operator's pad no longer flies over ELRS. The lane sends a neutral set (sticks and throttle centred, aux channels idle) at its frame rate, so the ELRS link and the receiver stay up as the backup lane and the FC sees no RC failsafe; a live programmatic injection still flies under inject authority. Control mode `elrs` keeps the previous behaviour. With no ground-station input state file the mode defaults to `ados`. The lane reports `channel_source: "neutral"` while it sends the neutral set.
 
-||||||| Stash base
 ## [0.108.17] - 2026-11-07
 
 ### Fixed
