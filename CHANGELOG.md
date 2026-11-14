@@ -8,8 +8,9 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Pilot: a `vantage` skill goal. The skill sends where a lost subject is predicted to be (`goal.vantage`: the predicted point, its covariance, a sigma scale, a standoff, the search bound around an anchor, and optional `hypotheses_ne` such as where the subject stopped or turned back). At every replan the pilot picks a reachable point, clear of obstacles by the margin and inside the bound, that sees the most of the uncertainty ellipse and the hypotheses: beside a trunk, past a wall corner, in line with a doorway. A prediction inside an obstacle is moved to the free space beside it, and one beyond the obstacle grid gets a point toward it. The vehicle flies the path there facing the prediction (or the goal's own yaw), with the brake, the geofence and the speed cap acting as on any goal, and holds when no point qualifies.
+- Pilot: a `vantage` skill goal. The skill sends where a lost subject is predicted to be (`goal.vantage`: the predicted point, its covariance, a sigma scale, a standoff, the search bound around an anchor, and optional `hypotheses_ne` such as where the subject stopped or turned back). At every replan the pilot picks a reachable point, clear of obstacles by the margin, inside the bound and inside the geofence (`pilot.max_dist_m` from home), that sees the most of the uncertainty ellipse and the hypotheses: beside a trunk, past a wall corner, in line with a doorway. A prediction inside an obstacle is moved to the free space beside it, and one beyond the obstacle grid gets a point toward it. The vehicle flies the path there facing the prediction (or the goal's own yaw), with the brake, the geofence and the speed cap acting as on any goal, and holds when no point qualifies.
 - Pilot: `goal.status` to the lease holder at every replan of a vantage goal: `enroute`, `arrived` (within 1 m of the point and below 0.3 m/s) or `no-vantage`, with the point, its coverage and the occluder's position and width. The plugin host forwards it as the host event `flight.goal.status` to the holder only, under `flight.motion`.
+- The flight-state chip on the cockpit, the kiosk, the dashboard and the terminal UI reads "No clear view" while a vantage goal holds because no reachable point sees the subject's predicted area (hold reason `no-vantage`). Flying a vantage goal reads "Avoiding" only while its path bends round an obstacle.
 
 ## [0.112.0] - 2026-11-14
 
@@ -43,6 +44,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Pilot: the stick-flight limits under the GNSS-denied cap live beside the cap itself; no change in behaviour.
+
 ## [0.110.1] - 2026-11-14
 
 ### Added
@@ -54,6 +56,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: a STOP, a hold or a smaller stick under the GNSS-denied speed cap slows the vehicle at the profile's acceleration (3 m/s² on Normal, 6 on Sport), not at the cap's 1.5 m/s². Only speeding up is held to the cap's acceleration.
 - Pilot: the pilot frame carries `speed_cap` only while the pilot flies setpoints under it: armed and airborne in GUIDED, with the pilot, a skill, a goto or the swarm flying, a heard FC, and not in fixed-wing forward flight. The chip no longer reads "GNSS-denied" during an FC RTH, an FC mission, on the ground or with the FC unheard.
 - The chip prints the cap with at most one decimal, the same on every surface (1.5 reads "1.5 m/s max", not "2").
+
 ## [0.110.0] - 2026-11-14
 
 ### Changed

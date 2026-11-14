@@ -146,42 +146,78 @@ pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
     Plan::hold(AvoidState::Blocked)
 }
 
-/// A* over 8 neighbours; step cost `len + 0.5 / max(clearance, 0.25)`; cells
-/// under `margin` clearance are blocked except near the start.
-pub fn astar(grid: &Grid, from: V2, to: V2, margin: f32) -> Option<Vec<V2>> {
-    let (si, sj) = grid.cell(from)?;
-    let (gi, gj) = grid.cell(to)?;
-    let idx = |i: usize, j: usize| i * GRID_N + j;
-    let h = |i: usize, j: usize| {
-        let di = i.abs_diff(gi) as f32;
-        let dj = j.abs_diff(gj) as f32;
-        (di.max(dj) + (std::f32::consts::SQRT_2 - 1.0) * di.min(dj)) * CELL_M
-    };
-    let mut g = vec![f32::INFINITY; GRID_N * GRID_N];
-    let mut parent = vec![u32::MAX; GRID_N * GRID_N];
-    let mut open = BinaryHeap::new();
-    g[idx(si, sj)] = 0.0;
-    open.push(Reverse((ordered(h(si, sj)), si as u16, sj as u16)));
-    let mut expansions = 0;
-    while let Some(Reverse((_, i, j))) = open.pop() {
-        let (i, j) = (i as usize, j as usize);
-        if (i, j) == (gi, gj) {
-            let mut path = vec![to];
-            let mut k = idx(i, j);
-            while parent[k] != u32::MAX {
-                k = parent[k] as usize;
-                path.push(grid.center_of(k / GRID_N, k % GRID_N));
-            }
-            path.pop();
-            path.push(from);
-            path.reverse();
-            return Some(path);
-        }
-        expansions += 1;
-        if expansions > MAX_EXPANSIONS {
+/// Costs and parents of a search over the grid from one point.
+pub struct Flood {
+    from: V2,
+    g: Vec<f32>,
+    parent: Vec<u32>,
+}
+
+impl Flood {
+    /// The route from the search's start to `to`, if the search reached the
+    /// cell holding it.
+    pub fn path(&self, grid: &Grid, to: V2) -> Option<Vec<V2>> {
+        let (i, j) = grid.cell(to)?;
+        let mut k = i * GRID_N + j;
+        if !self.g[k].is_finite() {
             return None;
         }
-        let gi0 = g[idx(i, j)];
+        let mut path = vec![to];
+        while self.parent[k] != u32::MAX {
+            k = self.parent[k] as usize;
+            path.push(grid.center_of(k / GRID_N, k % GRID_N));
+        }
+        path.pop();
+        path.push(self.from);
+        path.reverse();
+        Some(path)
+    }
+}
+
+/// Best-first search over 8 neighbours from `from`; step cost
+/// `len + 0.5 / max(clearance, 0.25)`; cells under `margin` clearance are
+/// blocked except near the start. With a `goal` it is A* and stops there;
+/// without one it floods every reachable cell. `None` when `from` is off
+/// the grid, or a goal was given and not reached within `max_expansions`.
+fn search(
+    grid: &Grid,
+    from: V2,
+    goal: Option<(usize, usize)>,
+    margin: f32,
+    max_expansions: usize,
+) -> Option<Flood> {
+    let (si, sj) = grid.cell(from)?;
+    let idx = |i: usize, j: usize| i * GRID_N + j;
+    let h = |i: usize, j: usize| {
+        goal.map_or(0.0, |(gi, gj)| {
+            let di = i.abs_diff(gi) as f32;
+            let dj = j.abs_diff(gj) as f32;
+            (di.max(dj) + (std::f32::consts::SQRT_2 - 1.0) * di.min(dj)) * CELL_M
+        })
+    };
+    let mut f = Flood {
+        from,
+        g: vec![f32::INFINITY; GRID_N * GRID_N],
+        parent: vec![u32::MAX; GRID_N * GRID_N],
+    };
+    let mut open = BinaryHeap::new();
+    f.g[idx(si, sj)] = 0.0;
+    open.push(Reverse((ordered(h(si, sj)), si as u16, sj as u16)));
+    let mut expansions = 0;
+    while let Some(Reverse((key, i, j))) = open.pop() {
+        let (i, j) = (i as usize, j as usize);
+        let gi0 = f.g[idx(i, j)];
+        // A cell pushed again at a lower cost was already expanded.
+        if key > ordered(gi0 + h(i, j)) {
+            continue;
+        }
+        if Some((i, j)) == goal {
+            return Some(f);
+        }
+        expansions += 1;
+        if expansions > max_expansions {
+            break;
+        }
         for (di, dj) in [
             (-1i32, 0i32),
             (1, 0),
@@ -209,14 +245,26 @@ pub fn astar(grid: &Grid, from: V2, to: V2, margin: f32) -> Option<Vec<V2>> {
             };
             let cost = gi0 + len + 0.5 / c.max(0.25);
             let k = idx(ni, nj);
-            if cost < g[k] {
-                g[k] = cost;
-                parent[k] = idx(i, j) as u32;
+            if cost < f.g[k] {
+                f.g[k] = cost;
+                f.parent[k] = idx(i, j) as u32;
                 open.push(Reverse((ordered(cost + h(ni, nj)), ni as u16, nj as u16)));
             }
         }
     }
-    None
+    goal.is_none().then_some(f)
+}
+
+/// A* from `from` to `to`, with the step costs of the search above.
+pub fn astar(grid: &Grid, from: V2, to: V2, margin: f32) -> Option<Vec<V2>> {
+    let goal = grid.cell(to)?;
+    search(grid, from, Some(goal), margin, MAX_EXPANSIONS)?.path(grid, to)
+}
+
+/// Every cell reachable from `from` at `margin`, in one search: routes to
+/// many candidate points cost one flood instead of one A* each.
+pub fn flood(grid: &Grid, from: V2, margin: f32) -> Option<Flood> {
+    search(grid, from, None, margin, GRID_N * GRID_N)
 }
 
 fn ordered(v: f32) -> u32 {

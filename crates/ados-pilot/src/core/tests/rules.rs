@@ -1001,7 +1001,11 @@ fn a_vantage_goal_faces_the_predicted_subject() {
     let id = w.lease();
     w.hold_vantage(id, [0.0, 7.0], [0.0, 0.0], 600);
     let sp = w.last_setpoint().expect("a setpoint");
-    assert!((sp.yaw - std::f32::consts::FRAC_PI_2).abs() < 0.05, "yaw {}", sp.yaw);
+    assert!(
+        (sp.yaw - std::f32::consts::FRAC_PI_2).abs() < 0.05,
+        "yaw {}",
+        sp.yaw
+    );
     assert!(sp.vx.hypot(sp.vy) < 0.1, "no feed-forward: {sp:?}");
 }
 
@@ -1030,4 +1034,142 @@ fn only_a_vantage_goal_publishes_goal_status() {
         w.run(200);
     }
     assert!(w.goal_status.is_empty());
+}
+
+/// Feed `scan` every tick for `ms`, re-sending a vantage goal for a
+/// subject predicted at `pred` every 200 ms.
+fn vantage_with_scan(
+    w: &mut World,
+    lease_id: u64,
+    pred: [f32; 2],
+    scan: &serde_json::Value,
+    ms: u64,
+) {
+    let end = w.now + ms;
+    while w.now < end {
+        w.vantage_goal(lease_id, pred, [0.0, 0.0]);
+        for _ in 0..10 {
+            w.p.on_feed("plugin.world-engine.scan", scan, w.now);
+            w.run(20);
+        }
+    }
+}
+
+/// A trunk hides the prediction; the vantage beside it is reached by a
+/// straight, free way, which is clear flight: the frame says `clear` (no
+/// surface reads "Avoiding") and draws the straight line to the point.
+#[test]
+fn a_vantage_goal_on_a_free_straight_way_reads_clear() {
+    use super::safety::trunk_scan;
+    use ados_protocol::pilot::{AvoidState, VantageState};
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    vantage_with_scan(&mut w, id, [7.0, 0.0], &trunk_scan(4.0), 1000);
+    let st = w.goal_status.last().unwrap();
+    assert_eq!(st.state, VantageState::Enroute);
+    let v = st.vantage_ne.expect("a vantage beside the trunk");
+    assert!(v[1].abs() > 1.0, "{v:?}");
+    let s = w.p.state(w.now);
+    assert_eq!(s.avoid_state, AvoidState::Clear);
+    assert_eq!(s.hold_reason, None);
+    assert_eq!(s.plan_ned.len(), 2, "{:?}", s.plan_ned);
+    let end = s.plan_ned[1];
+    let near = |a: f64, b: f32| (a - f64::from(b)).abs() < 0.05;
+    assert!(near(end[0], v[0]) && near(end[1], v[1]), "{end:?} {v:?}");
+}
+
+/// The hard stop acts on a vantage goal as on any goal: an obstacle inside
+/// the stop distance holds the vehicle.
+#[test]
+fn a_vantage_goal_holds_at_the_hard_stop() {
+    use super::safety::wall_scan;
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    vantage_with_scan(&mut w, id, [10.0, 0.0], &wall_scan(0.8), 1000);
+    let s = w.p.state(w.now);
+    assert_eq!(s.hold_reason.as_deref(), Some("obstacle-close"));
+    let sp = w.last_setpoint().unwrap();
+    assert!(sp.vx.hypot(sp.vy) < 0.05, "{sp:?}");
+}
+
+/// No point inside the search bound sees the prediction behind a wall:
+/// the vehicle holds, and the frame names why (`no-vantage`) rather than
+/// claiming an obstacle blocks it, and draws no goal.
+#[test]
+fn a_vantage_goal_with_no_view_holds_as_no_vantage_not_blocked() {
+    use super::safety::wall_scan;
+    use ados_protocol::pilot::{AvoidState, Goal, GoalKind, VantageSpec, VantageState};
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    let end = w.now + 1000;
+    while w.now < end {
+        let mut goal = Goal::new(GoalKind::Vantage, [0.0, 0.0, -5.0], 2.0);
+        // Subject 10 m north behind a wall 4 m ahead; the search may not
+        // leave 0.5 m of where the recovery started.
+        goal.vantage = Some(VantageSpec::new(
+            [10.0, 0.0],
+            [0.5, 0.0, 0.5],
+            1.0,
+            5.0,
+            0.5,
+            [0.0, 0.0],
+        ));
+        w.req(Request::Goal { lease_id: id, goal });
+        for _ in 0..10 {
+            w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+            w.run(20);
+        }
+    }
+    assert_eq!(w.goal_status.last().unwrap().state, VantageState::NoVantage);
+    let s = w.p.state(w.now);
+    assert_eq!(s.hold_reason.as_deref(), Some("no-vantage"));
+    assert_eq!(s.avoid_state, AvoidState::Clear);
+    assert_eq!(s.goal_ned, None);
+    assert!(w.last_setpoint().unwrap().vx.abs() < 0.05, "holds");
+}
+
+/// The link-loss failsafe counts a skill as flying: ten seconds after the
+/// last ground heartbeat it flies the action (RTH) and the lease ends.
+#[test]
+fn link_loss_during_a_skill_lease_flies_the_action_and_revokes() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.req(Request::Hb { src: "mc".into() });
+    let id = w.lease();
+    let end = w.now + 10_200;
+    while w.now < end && w.mode == copter::GUIDED {
+        w.goal(id, 5.0, 0.0);
+        w.run(200);
+    }
+    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.p.owner(), Owner::FcMode);
+    assert!(w.p.auth.lease().is_none(), "the lease ended");
+    assert!(w.revoked.iter().any(|(l, _)| *l == id), "{:?}", w.revoked);
+}
+
+/// Low battery under a skill lease: a 10 s countdown, then RTH, and the
+/// lease ends.
+#[test]
+fn low_battery_rth_revokes_a_skill_lease_after_the_countdown() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    w.p.fc.battery_pct = Some(15.0);
+    let start = w.now;
+    while w.now < start + 9_000 {
+        w.goal(id, 5.0, 0.0);
+        w.run(200);
+    }
+    assert_eq!(w.mode, copter::GUIDED, "still counting down");
+    assert_eq!(w.p.owner(), Owner::Skill);
+    while w.now < start + 11_000 && w.mode == copter::GUIDED {
+        w.goal(id, 5.0, 0.0);
+        w.run(200);
+    }
+    assert_eq!(w.mode, copter::RTL);
+    assert!(w.p.auth.lease().is_none(), "the lease ended");
+    assert!(w.revoked.iter().any(|(l, _)| *l == id), "{:?}", w.revoked);
 }

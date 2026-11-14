@@ -7,7 +7,7 @@ use ados_protocol::pilot::VantageSpec;
 
 use crate::geo::{self, V2};
 use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
-use crate::planner::astar;
+use crate::planner;
 
 /// Wider than this along the blocking surface is a wall or a corner, else a
 /// trunk or a column.
@@ -15,9 +15,9 @@ pub const NARROW_OCCLUDER_M: f32 = 1.5;
 /// Ring candidates are this many degrees apart.
 const RING_STEP_DEG: f32 = 15.0;
 /// A prediction inside an obstacle moves at most this far to free space.
-const SNAP_MAX_M: f32 = 2.0;
+pub const SNAP_MAX_M: f32 = 2.0;
 /// Free space a snapped prediction keeps.
-const SNAP_MARGIN_M: f32 = 0.3;
+pub const SNAP_MARGIN_M: f32 = 0.3;
 /// Seconds of flight one unit of lost coverage is worth.
 const COVERAGE_WEIGHT_S: f32 = 4.0;
 
@@ -84,10 +84,7 @@ pub fn snap_free(grid: &Grid, p: V2, margin: f32, max_m: f32) -> V2 {
         for j in -n..=n {
             let q = [p[0] + i as f32 * CELL_M, p[1] + j as f32 * CELL_M];
             let d = geo::dist(p, q);
-            if d <= max_m
-                && d < best.1
-                && grid.clearance(q).unwrap_or(f32::INFINITY) >= margin
-            {
+            if d <= max_m && d < best.1 && grid.clearance(q).unwrap_or(f32::INFINITY) >= margin {
                 best = (q, d);
             }
         }
@@ -136,8 +133,17 @@ fn ring_centre(grid: &Grid, from: V2, pred: V2, standoff: f32) -> V2 {
     geo::add(from, geo::scale(geo::sub(pred, from), inside.min(d) / d))
 }
 
-/// Choose the vantage point for `s` from the vehicle at `from`.
-pub fn choose(obs: &Obstacles, s: &VantageSpec, from: V2, margin: f32, max_speed: f32) -> VantageChoice {
+/// Choose the vantage point for `s` from the vehicle at `from`. A point
+/// further than `fence.1` from `fence.0` (home and the geofence radius) is
+/// refused like one outside the search bound.
+pub fn choose(
+    obs: &Obstacles,
+    s: &VantageSpec,
+    from: V2,
+    fence: Option<(V2, f32)>,
+    margin: f32,
+    max_speed: f32,
+) -> VantageChoice {
     let grid = &obs.grid;
     let pred = snap_free(grid, s.predicted_ne, SNAP_MARGIN_M, SNAP_MAX_M);
     let mut samples = ellipse_samples(&VantageSpec {
@@ -161,9 +167,9 @@ pub fn choose(obs: &Obstacles, s: &VantageSpec, from: V2, margin: f32, max_speed
     }
     let v = max_speed.max(0.5);
     let centre = ring_centre(grid, from, pred, s.standoff_m);
-    // Every free ring point in the bound that sees something, with a lower
-    // bound on its cost (the straight line); A* runs only while a candidate
-    // could still beat the best found.
+    // Every free ring point in the bound that sees more than the vehicle
+    // sees now, with a lower bound on its cost (the straight line). A bound
+    // that is not a number refuses every point.
     let mut cands: Vec<(f32, V2, f32)> = Vec::new();
     for dr in [0.0f32, 2.0, -2.0] {
         let r = (s.standoff_m + dr).max(2.0);
@@ -171,7 +177,9 @@ pub fn choose(obs: &Obstacles, s: &VantageSpec, from: V2, margin: f32, max_speed
         while deg < 360.0 {
             let p = geo::add(centre, geo::scale(geo::bearing_unit(deg.to_radians()), r));
             deg += RING_STEP_DEG;
-            if geo::dist(p, s.anchor_ne) > s.max_radius_m {
+            let in_bound = geo::dist(p, s.anchor_ne) <= s.max_radius_m;
+            let in_fence = fence.is_none_or(|(home, r)| geo::dist(p, home) <= r);
+            if !(in_bound && in_fence) {
                 continue;
             }
             match grid.clearance(p) {
@@ -179,7 +187,7 @@ pub fn choose(obs: &Obstacles, s: &VantageSpec, from: V2, margin: f32, max_speed
                 _ => continue,
             }
             let cov = coverage(obs, p, &samples);
-            if cov <= 0.0 {
+            if cov <= here {
                 continue;
             }
             let lb = geo::dist(from, p) / v + COVERAGE_WEIGHT_S * (1.0 - cov);
@@ -188,17 +196,24 @@ pub fn choose(obs: &Obstacles, s: &VantageSpec, from: V2, margin: f32, max_speed
     }
     cands.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut best: Option<(f32, V2, f32, Vec<V2>)> = None;
-    for (lb, p, cov) in cands {
-        if best.as_ref().is_some_and(|b| lb >= b.0) {
-            break;
-        }
-        let Some(path) = astar(grid, from, p, margin) else {
-            continue;
-        };
-        let len: f32 = path.windows(2).map(|w| geo::dist(w[0], w[1])).sum();
-        let cost = len / v + COVERAGE_WEIGHT_S * (1.0 - cov);
-        if best.as_ref().is_none_or(|b| cost < b.0) {
-            best = Some((cost, p, cov, path));
+    // One flood from the vehicle routes to every candidate; a path is
+    // rebuilt only while a candidate could still beat the best found.
+    if let Some(flood) = (!cands.is_empty())
+        .then(|| planner::flood(grid, from, margin))
+        .flatten()
+    {
+        for (lb, p, cov) in cands {
+            if best.as_ref().is_some_and(|b| lb >= b.0) {
+                break;
+            }
+            let Some(path) = flood.path(grid, p) else {
+                continue;
+            };
+            let len: f32 = path.windows(2).map(|w| geo::dist(w[0], w[1])).sum();
+            let cost = len / v + COVERAGE_WEIGHT_S * (1.0 - cov);
+            if best.as_ref().is_none_or(|b| cost < b.0) {
+                best = Some((cost, p, cov, path));
+            }
         }
     }
     match best {
@@ -207,6 +222,14 @@ pub fn choose(obs: &Obstacles, s: &VantageSpec, from: V2, margin: f32, max_speed
             coverage: cov,
             occluder,
             path,
+        },
+        // Nowhere reachable sees more: the vehicle stays where it sees part
+        // of the area.
+        None if here > 0.0 => VantageChoice {
+            point: Some(from),
+            coverage: here,
+            occluder,
+            path: vec![from],
         },
         None => VantageChoice {
             point: None,

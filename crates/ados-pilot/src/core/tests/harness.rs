@@ -394,7 +394,14 @@ impl World {
     /// the search bounded 12 m around `anchor`.
     pub fn vantage_goal(&mut self, lease_id: u64, pred: [f32; 2], anchor: [f32; 2]) {
         let mut goal = Goal::new(GoalKind::Vantage, [0.0, 0.0, -5.0], 2.0);
-        goal.vantage = Some(VantageSpec::new(pred, [0.5, 0.0, 0.5], 1.0, 5.0, 12.0, anchor));
+        goal.vantage = Some(VantageSpec::new(
+            pred,
+            [0.5, 0.0, 0.5],
+            1.0,
+            5.0,
+            12.0,
+            anchor,
+        ));
         self.req(Request::Goal { lease_id, goal });
     }
 

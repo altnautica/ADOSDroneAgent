@@ -218,9 +218,12 @@ class _FlightClient:
         return await self._ipc.flight_lease_release(lease_id)
 
     async def goal_send(self, lease_id: int | str, goal: dict) -> dict:
-        """Send one goal (``kind`` follow/orbit/position, ``n, e, d``, velocities,
-        ``max_speed_mps``, optional ``yaw``, ``subject_ne``, ``candidates`` and
-        ``margin_m``). A lease with no goal for one second is revoked. Requires
+        """Send one goal (``kind`` follow/orbit/position/vantage, ``n, e, d``,
+        velocities, ``max_speed_mps``, optional ``yaw``, ``subject_ne``,
+        ``candidates``, ``margin_m`` and, for ``vantage``, ``vantage``: the
+        predicted subject point, its covariance and the search bound). A
+        vantage goal reports progress as ``flight.goal.status`` events to the
+        holder. A lease with no goal for one second is revoked. Requires
         ``flight.motion``."""
         return await self._ipc.flight_goal_send(lease_id, goal)
 

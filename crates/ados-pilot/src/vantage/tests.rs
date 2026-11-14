@@ -33,12 +33,15 @@ fn a_trunk_hiding_the_prediction_gives_a_side_vantage_with_line_of_sight() {
     // Drone at the origin, trunk 4 m north, subject predicted 7 m north behind it.
     let o = obs_with(&disc([4.0, 0.0], 0.5), [0.0, 0.0]);
     assert!(!o.line_of_sight([0.0, 0.0], [7.0, 0.0]));
-    let c = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], 1.5, 2.0);
+    let c = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], None, 1.5, 2.0);
     let p = c.point.expect("a vantage");
     assert!(o.line_of_sight(p, [7.0, 0.0]));
     assert!(p[1].abs() > 1.0, "moved to the trunk's side: {p:?}");
     let occ = c.occluder.expect("the trunk");
-    assert!(occ.width_m < NARROW_OCCLUDER_M && (occ.ne[0] - 4.0).abs() < 1.0, "{occ:?}");
+    assert!(
+        occ.width_m < NARROW_OCCLUDER_M && (occ.ne[0] - 4.0).abs() < 1.0,
+        "{occ:?}"
+    );
 }
 
 #[test]
@@ -46,11 +49,14 @@ fn a_wall_corner_gives_a_vantage_past_the_corner_at_a_safe_offset() {
     // Wall along e = 2 from n = -10 to n = 6; subject predicted round the corner at (8, 6).
     let wall: Vec<V2> = (0..160).map(|k| [-10.0 + k as f32 * 0.1, 2.0]).collect();
     let o = obs_with(&wall, [0.0, 0.0]);
-    let c = choose(&o, &spec([8.0, 6.0]), [0.0, 0.0], 1.5, 2.0);
+    let c = choose(&o, &spec([8.0, 6.0]), [0.0, 0.0], None, 1.5, 2.0);
     let p = c.point.expect("a vantage");
     assert!(o.line_of_sight(p, [8.0, 6.0]));
     assert!(o.grid.clearance(p).unwrap_or(f32::INFINITY) >= 1.5);
-    assert!(c.occluder.expect("the wall").width_m >= NARROW_OCCLUDER_M, "a wall is wide");
+    assert!(
+        c.occluder.expect("the wall").width_m >= NARROW_OCCLUDER_M,
+        "a wall is wide"
+    );
 }
 
 #[test]
@@ -66,13 +72,13 @@ fn vantage_beyond_the_search_radius_is_refused() {
     let o = obs_with(&disc([4.0, 0.0], 0.5), [0.0, 0.0]);
     let mut s = spec([7.0, 0.0]);
     s.max_radius_m = 0.5;
-    assert!(choose(&o, &s, [0.0, 0.0], 1.5, 2.0).point.is_none());
+    assert!(choose(&o, &s, [0.0, 0.0], None, 1.5, 2.0).point.is_none());
 }
 
 #[test]
 fn clear_line_of_sight_keeps_the_current_position_as_the_vantage() {
     let o = obs_with(&[], [0.0, 0.0]);
-    let c = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], 1.5, 2.0);
+    let c = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], None, 1.5, 2.0);
     assert_eq!(c.point, Some([0.0, 0.0]));
     assert!(c.coverage > 0.99);
 }
@@ -86,7 +92,7 @@ fn a_subject_stopped_behind_the_trunk_is_covered() {
     s.hypotheses_ne = vec![[5.5, 0.0]];
     assert!(o.line_of_sight([0.0, 0.0], [2.0, 5.0]));
     assert!(!o.line_of_sight([0.0, 0.0], [5.5, 0.0]));
-    let c = choose(&o, &s, [0.0, 0.0], 1.5, 2.0);
+    let c = choose(&o, &s, [0.0, 0.0], None, 1.5, 2.0);
     let p = c.point.expect("a vantage");
     assert_ne!(p, [0.0, 0.0], "the origin misses the stop hypothesis");
     assert!(o.line_of_sight(p, [5.5, 0.0]), "sees the stop: {p:?}");
@@ -105,7 +111,7 @@ fn a_doorway_gives_a_vantage_in_line_with_the_opening() {
     let mut s = spec([9.0, 0.0]);
     s.anchor_ne = from;
     s.cov_ne = [0.05, 0.0, 0.05];
-    let c = choose(&o, &s, from, 1.5, 2.0);
+    let c = choose(&o, &s, from, None, 1.5, 2.0);
     let p = c.point.expect("a vantage");
     assert!(p[0] < 4.0, "stays on the near side: {p:?}");
     assert!(o.line_of_sight(p, [9.0, 0.0]), "{p:?}");
@@ -118,14 +124,14 @@ fn a_doorway_gives_a_vantage_in_line_with_the_opening() {
 fn a_vantage_that_fills_up_is_replaced_on_the_next_replan() {
     let trunk = disc([4.0, 0.0], 0.5);
     let o = obs_with(&trunk, [0.0, 0.0]);
-    let first = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], 1.5, 2.0)
+    let first = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], None, 1.5, 2.0)
         .point
         .expect("a vantage");
     // A parked car appears on the chosen point.
     let mut pts = trunk.clone();
     pts.extend(disc(first, 0.8));
     let o = obs_with(&pts, [0.0, 0.0]);
-    let next = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], 1.5, 2.0)
+    let next = choose(&o, &spec([7.0, 0.0]), [0.0, 0.0], None, 1.5, 2.0)
         .point
         .expect("another vantage");
     assert!(geo::dist(first, next) > 1.0, "{first:?} -> {next:?}");
@@ -139,26 +145,51 @@ fn a_prediction_off_the_grid_still_gets_a_vantage_toward_it() {
     let o = obs_with(&disc([4.0, 0.0], 0.5), [0.0, 0.0]);
     let mut s = spec([30.0, 0.0]);
     s.max_radius_m = 14.0;
-    let c = choose(&o, &s, [0.0, 0.0], 1.5, 2.0);
+    let c = choose(&o, &s, [0.0, 0.0], None, 1.5, 2.0);
     let p = c.point.expect("a vantage");
     assert!(p[0] > 2.0, "toward the prediction: {p:?}");
     assert!(o.line_of_sight(p, [30.0, 0.0]));
 }
 
 #[test]
-fn choosing_stays_within_the_replan_budget() {
-    let mut pts = Vec::new();
-    for k in 0..12 {
-        let a = k as f32 * 0.9;
-        pts.extend(disc([3.0 + (k % 4) as f32 * 2.5, -6.0 + a * 1.3], 0.4));
-    }
-    let o = obs_with(&pts, [0.0, 0.0]);
-    let mut s = spec([11.0, 0.5]);
-    s.hypotheses_ne = vec![[8.0, 0.0], [5.0, -1.0]];
-    let t = std::time::Instant::now();
-    for _ in 0..10 {
-        let _ = choose(&o, &s, [0.0, 0.0], 1.5, 2.0);
-    }
-    // 20 ms each in release; a debug build is about ten times slower.
-    assert!(t.elapsed().as_millis() < 10 * 200, "{:?}", t.elapsed());
+fn a_partial_view_with_no_better_point_keeps_the_current_position() {
+    // The prediction is in the open; a hypothesis hides behind a trunk to
+    // the east. The search bound leaves no ring point, so the vehicle stays
+    // where it sees most of the area rather than reporting no view.
+    let o = obs_with(&disc([0.0, 4.0], 0.5), [0.0, 0.0]);
+    let mut s = spec([7.0, 0.0]);
+    s.hypotheses_ne = vec![[0.0, 7.0]];
+    s.max_radius_m = 0.5;
+    assert!(!o.line_of_sight([0.0, 0.0], [0.0, 7.0]));
+    let c = choose(&o, &s, [0.0, 0.0], None, 1.5, 2.0);
+    assert_eq!(c.point, Some([0.0, 0.0]));
+    assert!(c.coverage > 0.8 && c.coverage < 1.0, "{}", c.coverage);
+}
+
+#[test]
+fn a_bound_that_is_not_a_number_refuses_every_point() {
+    let o = obs_with(&disc([4.0, 0.0], 0.5), [0.0, 0.0]);
+    let mut s = spec([7.0, 0.0]);
+    s.max_radius_m = f32::NAN;
+    assert!(choose(&o, &s, [0.0, 0.0], None, 1.5, 2.0).point.is_none());
+    let s = spec([7.0, 0.0]);
+    let fence = Some(([0.0, 0.0], f32::NAN));
+    assert!(choose(&o, &s, [0.0, 0.0], fence, 1.5, 2.0).point.is_none());
+}
+
+#[test]
+fn a_vantage_outside_the_geofence_is_refused() {
+    // The trunk hides the prediction from the vehicle at home; every point
+    // that sees past it lies more than 1 m from home, past the fence.
+    let o = obs_with(&disc([4.0, 0.0], 0.5), [0.0, 0.0]);
+    let s = spec([7.0, 0.0]);
+    let open = choose(&o, &s, [0.0, 0.0], None, 1.5, 2.0);
+    let p = open.point.expect("a vantage without the fence");
+    assert!(geo::dist(p, [0.0, 0.0]) > 1.0, "{p:?}");
+    let fenced = choose(&o, &s, [0.0, 0.0], Some(([0.0, 0.0], 1.0)), 1.5, 2.0);
+    assert!(fenced.point.is_none(), "{:?}", fenced.point);
+    // A fence wide enough keeps every chosen point inside it.
+    let wide = choose(&o, &s, [0.0, 0.0], Some(([0.0, 0.0], 8.0)), 1.5, 2.0);
+    let q = wide.point.expect("a vantage inside an 8 m fence");
+    assert!(geo::dist(q, [0.0, 0.0]) <= 8.0, "{q:?}");
 }

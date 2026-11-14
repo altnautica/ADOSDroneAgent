@@ -413,6 +413,23 @@ pub(super) fn wall_scan(d: f32) -> Value {
            "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
 }
 
+/// A planar scan of a trunk about 0.5 m wide `d` ahead (vehicle yaw 0).
+pub(super) fn trunk_scan(d: f32) -> Value {
+    let half = (0.25 / d).atan();
+    let ranges: Vec<f32> = (0..360)
+        .map(|i| {
+            let th = if i > 180 { i as f32 - 360.0 } else { i as f32 }.to_radians();
+            if th.abs() <= half {
+                d
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    json!({"frame": "body_frd", "angle_start_rad": 0.0,
+           "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
+}
+
 fn stick_with_scan(w: &mut World, axes: [f32; 4], scan: &Value, ms: u64) {
     let end = w.now + ms;
     while w.now < end {

@@ -2,8 +2,7 @@
 //! the setpoint for whoever owns motion.
 
 use ados_protocol::pilot::{
-    AvoidMode, AvoidState, ControlMode, Goal, GoalKind, GoalStatus, Owner, Sticks, VantageState,
-    VehicleClass,
+    AvoidMode, AvoidState, ControlMode, GoalKind, Owner, Sticks, VehicleClass,
 };
 
 use super::{Out, Pilot, PLAN_PERIOD_MS, STICKS_PERIOD_MS};
@@ -12,13 +11,14 @@ use crate::flows::banner;
 use crate::geo::{self, V2};
 use crate::model::{Command, StickIn};
 use crate::planner;
-use crate::vantage;
 
 mod brake;
 mod failsafes;
 mod obstacle_data;
 mod plan;
+mod vantage_goal;
 pub use brake::*;
+pub use vantage_goal::HOLD_NO_VANTAGE;
 
 /// Takeover: any axis above this for `TAKEOVER_MS`.
 const TAKEOVER_AXIS: f32 = 0.9;
@@ -34,10 +34,7 @@ const FLOOR_AGL_M: f32 = 0.5;
 const SWARM_STALE_MS: u64 = 500;
 /// Goto arrival radius.
 const GOTO_ARRIVE_M: f32 = 1.0;
-/// A vantage goal has arrived within this of its point...
-const VANTAGE_ARRIVE_M: f32 = 1.0;
-/// ...and below this ground speed.
-const VANTAGE_STILL_MPS: f32 = 0.3;
+
 /// The FC's response time the stick brake plans for. In the SITL x500 traces
 /// the measured velocity trails a cut setpoint by about 0.5 s at cruise and
 /// keeps rising for 0.6 s when the cut comes mid-acceleration (the FC first
@@ -237,57 +234,6 @@ impl Pilot {
             }
             None => self.plan = planner::plan(&self.obstacles, &goal, pos, margin),
         }
-    }
-
-    /// Plan toward the point that sees the lost subject's predicted area,
-    /// and tell the lease holder how it goes.
-    fn replan_vantage(&mut self, goal: &Goal, pos: V2, margin: f32, now_ms: u64) {
-        let Some(lease_id) = self.auth.lease().map(|l| l.id) else {
-            return;
-        };
-        let Some(spec) = &goal.vantage else {
-            self.plan = planner::Plan::hold(AvoidState::Blocked);
-            self.out.push(Out::GoalStatus(GoalStatus::new(
-                lease_id,
-                VantageState::NoVantage,
-                0.0,
-            )));
-            return;
-        };
-        let v_cap = goal.max_speed_mps.min(self.limits_now(now_ms).v_h).max(0.5);
-        let c = vantage::choose(&self.obstacles, spec, pos, margin, v_cap);
-        let mut status = GoalStatus::new(lease_id, VantageState::NoVantage, c.coverage);
-        status.occluder_ne = c.occluder.map(|o| o.ne);
-        status.occluder_width_m = c.occluder.map(|o| o.width_m);
-        match c.point {
-            Some(p) => {
-                let speed = self
-                    .fc
-                    .fresh_local(now_ms)
-                    .map_or(f32::INFINITY, |l| l.vn.hypot(l.ve));
-                status.vantage_ne = Some(p);
-                status.state =
-                    if geo::dist(pos, p) < VANTAGE_ARRIVE_M && speed < VANTAGE_STILL_MPS {
-                        VantageState::Arrived
-                    } else {
-                        VantageState::Enroute
-                    };
-                let minc = c
-                    .path
-                    .iter()
-                    .filter_map(|q| self.obstacles.grid.clearance(*q))
-                    .fold(f32::INFINITY, f32::min);
-                self.plan = planner::Plan {
-                    state: AvoidState::Detour,
-                    target: Some(planner::along(&c.path, planner::LOOKAHEAD_M)),
-                    goal: Some(p),
-                    path: planner::decimate(&c.path, 16),
-                    min_clearance: minc.is_finite().then_some(minc),
-                };
-            }
-            None => self.plan = planner::Plan::hold(AvoidState::Blocked),
-        }
-        self.out.push(Out::GoalStatus(status));
     }
 
     /// Produce this tick's command for the owner.

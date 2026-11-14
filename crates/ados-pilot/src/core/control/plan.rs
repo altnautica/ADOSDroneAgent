@@ -5,8 +5,8 @@
 use ados_protocol::pilot::{AvoidMode, AvoidState, GoalKind, Owner};
 
 use super::{
-    geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_OBSTACLE_CLOSE,
-    HOLD_OBSTACLE_STALE,
+    geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_NO_VANTAGE,
+    HOLD_OBSTACLE_CLOSE, HOLD_OBSTACLE_STALE,
 };
 use crate::core::Pilot;
 use crate::fc::MASK_POS_VEL_YAW;
@@ -81,9 +81,12 @@ impl Pilot {
         }
         let target = if close { None } else { self.plan.target };
         let Some(target) = target else {
+            let vantage = goal.as_ref().is_some_and(|g| g.kind == GoalKind::Vantage);
             self.hold_reason = Some(
                 if close {
                     HOLD_OBSTACLE_CLOSE
+                } else if vantage {
+                    HOLD_NO_VANTAGE
                 } else {
                     "blocked"
                 }

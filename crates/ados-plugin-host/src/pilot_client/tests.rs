@@ -199,8 +199,10 @@ async fn goal_status_reaches_only_the_holder() {
     // A status for a lease nobody holds goes nowhere.
     client.on_message(
         "goal.status",
-        rmpv::ext::to_value(serde_json::json!({"lease_id": 8, "state": "enroute", "coverage": 0.5}))
-            .unwrap(),
+        rmpv::ext::to_value(
+            serde_json::json!({"lease_id": 8, "state": "enroute", "coverage": 0.5}),
+        )
+        .unwrap(),
     );
     client.on_message(
         "goal.status",

@@ -364,3 +364,35 @@ fn the_cap_is_shown_only_while_the_pilot_flies_under_it() {
     run_ext_nav(&mut w, 1000);
     assert!(w.p.state(w.now).speed_cap.is_none(), "FC mission");
 }
+
+/// A vantage goal asking for 8 m/s flies to its point under the
+/// GNSS-denied cap like any other goal.
+#[test]
+fn a_vantage_goal_is_held_to_the_cap() {
+    use ados_protocol::pilot::{Goal, GoalKind, Request, VantageSpec};
+    let mut w = ext_nav_world();
+    let id = w.lease();
+    let from = w.sent.len();
+    let scan = super::safety::trunk_scan(4.0);
+    for _ in 0..15 {
+        ext_nav(&mut w);
+        let mut goal = Goal::new(GoalKind::Vantage, [0.0, 0.0, -5.0], 8.0);
+        goal.vantage = Some(VantageSpec::new(
+            [7.0, 0.0],
+            [0.5, 0.0, 0.5],
+            1.0,
+            5.0,
+            12.0,
+            [0.0, 0.0],
+        ));
+        w.req(Request::Goal { lease_id: id, goal });
+        for _ in 0..10 {
+            w.p.on_feed("plugin.world-engine.scan", &scan, w.now);
+            w.run(20);
+        }
+    }
+    assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Skill);
+    let v = speeds(&w, from);
+    assert!(v.iter().any(|s| *s > 0.5), "it flies: {v:?}");
+    assert!(v.iter().all(|s| *s <= CAP + 1e-3), "{v:?}");
+}
