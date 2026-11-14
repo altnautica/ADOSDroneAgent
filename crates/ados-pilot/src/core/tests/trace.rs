@@ -134,10 +134,12 @@ fn a_blocked_goto_publishes_a_hold() {
     assert_eq!(cmd["hold_reasons"], json!(["blocked"]), "{cmd}");
     assert_eq!(pair(&cmd["target_ne"]), [20.0, 0.0], "{cmd}");
     assert_eq!(cmd["goal_ned"], json!([20.0, 0.0, -5.0]));
-    // Asked: the pull toward the goto target from where the vehicle is.
+    // Asked: a goto's velocity toward its target plus the pull toward it,
+    // from where the vehicle is.
     let ask = pair(&cmd["ask_vel_ne"]);
-    let pull = geo::sub([20.0, 0.0], [w.pos[0], w.pos[1]]);
-    assert!(geo::dist(ask, pull) < 1e-2, "asked {ask:?}, pull {pull:?}");
+    let to = geo::sub([20.0, 0.0], [w.pos[0], w.pos[1]]);
+    let want = geo::scale(to, 2.0);
+    assert!(geo::dist(ask, want) < 1e-2, "asked {ask:?}, want {want:?}");
     assert!(cmd["v_cap_mps"].as_f64().unwrap() > 0.0, "{cmd}");
     // Flown: the hold, far below what was asked.
     let flown = pair(&cmd["cmd_vel_ne"]);
@@ -151,14 +153,17 @@ fn a_blocked_follow_keeps_what_it_asked() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);
     let id = w.lease();
-    w.req(Request::Goal {
-        lease_id: id,
-        goal: follow_goal([20.0, 0.0, -5.0], [3.0, 0.0]),
-    });
     let end = w.now + 1500;
     while w.now < end {
-        w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
-        w.run(20);
+        // Each goal renews the lease.
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: follow_goal([20.0, 0.0, -5.0], [3.0, 0.0]),
+        });
+        for _ in 0..10 {
+            w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+            w.run(20);
+        }
     }
     let v = frame(&w);
     let cmd = &v["command"];
@@ -237,11 +242,11 @@ fn a_short_hold_reaches_the_next_frame() {
         goal: follow_goal([20.0, 0.0, -5.0], [0.0, 0.0]),
     });
     w.run(500);
-    while w.now % 100 != 0 {
+    while !w.now.is_multiple_of(100) {
         w.run(20);
     }
-    // One tick behind a wall, then open space again.
-    w.p.on_feed("plugin.world-engine.scan", &wall_scan(2.0), w.now);
+    // One tick with a wall inside the hard-stop distance, then open space.
+    w.p.on_feed("plugin.world-engine.scan", &wall_scan(0.8), w.now);
     w.run(20);
     assert!(
         frame(&w)["hold_reason"].is_string(),

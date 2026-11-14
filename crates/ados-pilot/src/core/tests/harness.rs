@@ -240,7 +240,7 @@ impl World {
             self.feed();
             self.p.tick(self.now);
             self.collect();
-            if self.now % 100 == 0 {
+            if self.now.is_multiple_of(100) {
                 self.p.state_published();
             }
         }
