@@ -146,10 +146,9 @@ pub fn choose(
 ) -> VantageChoice {
     let grid = &obs.grid;
     let pred = snap_free(grid, s.predicted_ne, SNAP_MARGIN_M, SNAP_MAX_M);
-    let mut samples = ellipse_samples(&VantageSpec {
-        predicted_ne: pred,
-        ..s.clone()
-    });
+    let mut snapped = s.clone();
+    snapped.predicted_ne = pred;
+    let mut samples = ellipse_samples(&snapped);
     samples.extend(
         s.hypotheses_ne
             .iter()
