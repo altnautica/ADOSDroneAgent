@@ -156,6 +156,43 @@ describe("FollowAwaitPrompt", () => {
     expect(useNavStreamStore.getState().designated).toBeNull();
   });
 
+  it("never takes focus on its own: with focus elsewhere its keys reach the window", async () => {
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    outside.focus();
+    setFollow(AWAITING);
+    const prompt = (await mount("medium"))!;
+    expect(document.activeElement).toBe(outside);
+    expect(prompt.contains(document.activeElement)).toBe(false);
+    const onWindow = vi.fn();
+    window.addEventListener("keydown", onWindow);
+    for (const key of ["r", "h", "x"]) {
+      await act(async () => {
+        (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      });
+    }
+    expect(onWindow).toHaveBeenCalledTimes(3);
+    expect(onWindow.mock.calls.every(([e]) => !(e as KeyboardEvent).defaultPrevented)).toBe(true);
+    expect(putPluginConfig).not.toHaveBeenCalled();
+    expect(useConfirmStore.getState().pending).toBeNull();
+    window.removeEventListener("keydown", onWindow);
+    outside.remove();
+  });
+
+  it("never takes focus on its own, even with nothing else focused", async () => {
+    setFollow(AWAITING);
+    const prompt = (await mount("medium"))!;
+    expect(prompt.contains(document.activeElement)).toBe(false);
+    const onWindow = vi.fn();
+    window.addEventListener("keydown", onWindow);
+    await act(async () => {
+      (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "r", bubbles: true }));
+    });
+    expect(onWindow).toHaveBeenCalledTimes(1);
+    expect(putPluginConfig).not.toHaveBeenCalled();
+    window.removeEventListener("keydown", onWindow);
+  });
+
   it("once focused, H and L open the confirm and never fire at once", async () => {
     setFollow(AWAITING);
     const prompt = (await mount("medium"))!;

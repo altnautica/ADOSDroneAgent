@@ -2,13 +2,14 @@
 // point for the operator (`holding-await-operator`), a banner under the follow
 // strip names why and offers the actions `followPrompt` allows: search again,
 // pick a target, return home, land, stop following. Modal-free, so the video
-// and the columns stay live. It takes focus when it appears (unless a text
-// field has it) and answers R, P, H, L and X while focused. Return home and
-// land request the same built-in as the left column, so its gate and its
-// hold-to-confirm apply to a tap and a key alike. The touch targets grow with
-// the width class, so the kiosk's are the largest.
+// and the columns stay live. It never takes focus on its own: R, P, H, L and
+// X answer only once the operator has put focus in it (a click, Tab, the
+// controller's UI navigation), and a key pressed anywhere else goes on to its
+// usual owner. Return home and land request the same built-in as the left
+// column, so its gate and its hold-to-confirm apply to a tap and a key alike.
+// The touch targets grow with the width class, so the kiosk's are the largest.
 
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useRef, type KeyboardEvent } from "react";
 
 import { useNow } from "@/hooks/use-now";
 import { skillContextNow } from "@/hooks/use-skill-context";
@@ -33,11 +34,6 @@ function startPick(): void {
   toast.info(specText("follow.prompt.action.redesignate"));
 }
 
-function editableFocused(): boolean {
-  const el = document.activeElement;
-  return el instanceof HTMLElement && (el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT");
-}
-
 export function FollowAwaitPrompt({ widthClass }: { widthClass: WidthClass }) {
   const follow = useNavStreamStore((s) => s.follow);
   const glove = useSettingsStore((s) => s.glove);
@@ -47,12 +43,6 @@ export function FollowAwaitPrompt({ widthClass }: { widthClass: WidthClass }) {
   const fresh = follow && now - follow.at <= FOLLOW_FRESH_MS ? follow.data : null;
   const prompt = fresh ? followPrompt(fresh) : null;
   const seq = fresh?.operatorResumeSeq ?? 0;
-  const shown = prompt !== null;
-
-  useEffect(() => {
-    if (shown && !editableFocused()) ref.current?.focus();
-  }, [shown]);
-
   if (!prompt) return null;
 
   /** The left column's path: gate, then the hold-to-confirm sheet. The sheet

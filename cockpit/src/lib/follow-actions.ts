@@ -7,11 +7,12 @@
 // injected, so the dispatcher is pure and every route is unit-tested.
 //
 // Keys: R search again, P pick, H home, L land, X stop. They answer only while
-// the prompt has focus and only without a modifier: the built-ins own the
-// Shift chords (Shift+R return home, Shift+L land, Shift+X kill) and a plugin
-// may bind a bare letter globally (a camera pod's `R` record, `L` laser), so
-// the prompt never takes a key from the window. H and L open the confirm like
-// a tap; neither fires on its own.
+// the operator has put focus in the prompt, which never takes it on its own,
+// and only without a modifier: the built-ins own the Shift chords (Shift+R
+// return home, Shift+L land, Shift+X kill) and a plugin may bind a bare letter
+// globally (a camera pod's `R` record, `L` laser), which keeps working while
+// the prompt is up. H and L open the confirm like a tap; neither fires on its
+// own.
 
 import type { ActionResult } from "@/lib/pilot-link";
 import type { FollowPromptAction } from "@/shared/hud/follow-prompt";
