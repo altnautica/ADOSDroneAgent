@@ -54,7 +54,13 @@ impl VehicleTab {
             agent_unreachable: core.stale(),
             arm_unknown: armed.is_none(),
             preflight_failing: &[],
-            nav_source: Some(nav_source::resolve(tel, auto.and_then(|a| a.nav.as_ref()))),
+            nav_source: Some(nav_source::resolve(
+                tel,
+                auto.and_then(|a| a.nav.as_ref()),
+                pilot
+                    .filter(|p| !p.stale)
+                    .and_then(|p| p.position_unverified.as_ref()),
+            )),
         })
     }
 

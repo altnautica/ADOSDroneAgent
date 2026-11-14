@@ -77,6 +77,7 @@ export function navSourceInput(
   nav: NavState | null,
   lastCommandedSet: 1 | 2 | 3 | null,
   params: Record<string, number> | null,
+  positionUnverified: NavSourceInput["positionUnverified"] = null,
 ): NavSourceInput {
   const ekf = telemetry?.ekf;
   const gps = telemetry?.gps;
@@ -93,6 +94,7 @@ export function navSourceInput(
     nav,
     lastCommandedSet,
     params: params && Object.keys(params).length > 0 ? params : null,
+    positionUnverified,
   };
 }
 

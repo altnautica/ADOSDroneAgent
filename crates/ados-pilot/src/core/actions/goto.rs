@@ -39,6 +39,10 @@ impl Pilot {
         if self.fc_failsafe {
             return Err("failsafe".into());
         }
+        // An unverified position: a goto would fly on the estimate.
+        if self.position_unverified(now_ms).is_some() {
+            return Err("position_unverified".into());
+        }
         // Avoid is on and the obstacles are unknown: nothing new is flown
         // until the scans are fresh. With no obstacle sensor at all, Fly
         // Here cannot avoid anything, so it is refused (`avoid = off` flies it).

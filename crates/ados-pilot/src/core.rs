@@ -8,6 +8,7 @@ mod control;
 mod events;
 mod nav_cap;
 mod operator;
+mod position_check;
 mod requests;
 mod state;
 mod take;
@@ -149,6 +150,10 @@ pub struct Pilot {
     nav_set: u8,
     /// The last capped horizontal velocity flown and its time ([`nav_cap`]).
     cap_vel: Option<(V2, u64)>,
+    /// The FC's flow against the EKF's velocity ([`position_check`]).
+    flow_check: position_check::FlowCheck,
+    /// vision-nav's last `nav.state` ([`position_check`]).
+    extnav: Option<position_check::ExtNav>,
     last_tick_ms: Option<u64>,
     controller_lost_shown: bool,
     /// Setup engine verdict: `None` unknown (no item), `Some(None)` complete,
@@ -212,6 +217,8 @@ impl Pilot {
             stale_hold: None,
             nav_set: nav_cap::BOOT_SOURCE_SET,
             cap_vel: None,
+            flow_check: Default::default(),
+            extnav: None,
             last_tick_ms: None,
             controller_lost_shown: false,
             setup_needed: None,

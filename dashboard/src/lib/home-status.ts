@@ -65,7 +65,7 @@ export function pillArmed(i: Pick<HomeStatusInputs, "pilot" | "telemetry">): boo
 
 /** The nav source from the live EKF report, GPS and the fresh vision-nav
  *  state (the cockpit chip's inputs, without a commanded set or params). */
-export function homeNavSource(i: Pick<HomeStatusInputs, "telemetry" | "live" | "nav">): NavSourceResult {
+export function homeNavSource(i: Pick<HomeStatusInputs, "telemetry" | "live" | "nav" | "pilot">): NavSourceResult {
   const ekf = i.telemetry?.ekf;
   const gps = i.telemetry?.gps;
   return resolveNavSource({
@@ -77,6 +77,7 @@ export function homeNavSource(i: Pick<HomeStatusInputs, "telemetry" | "live" | "
     nav: i.nav ?? null,
     lastCommandedSet: null,
     params: null,
+    positionUnverified: i.pilot?.positionUnverified ?? null,
   });
 }
 

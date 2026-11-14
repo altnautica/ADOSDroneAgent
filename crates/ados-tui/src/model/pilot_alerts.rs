@@ -386,6 +386,7 @@ mod tests {
             .map(|n| NavPill {
                 kind: NavKind::from_name(n["kind"].as_str().unwrap_or_default()).expect("a kind"),
                 tone: NavTone::from_name(n["tone"].as_str().unwrap_or_default()).expect("a tone"),
+                unverified: None,
             });
         let preflight = i["preflight_failing"]
             .as_array()

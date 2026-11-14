@@ -369,6 +369,10 @@ impl Pilot {
         if self.fc_failsafe {
             return Err("failsafe".into());
         }
+        // The FC's mission flies on the same unverified estimate.
+        if self.position_unverified(now_ms).is_some() {
+            return Err("position_unverified".into());
+        }
         if !self.mission_resumable() {
             return Err("nothing_paused".into());
         }

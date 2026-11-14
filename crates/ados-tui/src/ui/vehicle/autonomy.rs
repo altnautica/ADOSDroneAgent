@@ -174,12 +174,34 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
     }
     if let Some(nav) = &a.nav {
         let health = nav.extnav_health.as_deref().unwrap_or("unknown");
+        // The pilot's own verdict first, else vision-nav's reason on a
+        // degraded or lost pose: a crit word, never a calm "degraded".
+        let unverified = a
+            .pilot
+            .as_ref()
+            .filter(|p| !p.stale)
+            .and_then(|p| p.position_unverified.as_ref())
+            .map(|p| p.detail.as_deref().unwrap_or(&p.reason))
+            .or(nav
+                .health_reason
+                .as_deref()
+                .filter(|_| matches!(health, "degraded" | "lost")))
+            .map(crate::model::nav_source::unverified_word);
+        let quality = unverified.map_or_else(
+            || spec_or_dash(&format!("nav_source.q.{health}")),
+            |k| spec_text(k, &[]),
+        );
+        let tone = if unverified.is_some() {
+            crate::model::autonomy::Tone::Fault
+        } else {
+            health_tone(health)
+        };
         let word = format!(
             "{} {} · {} {}",
             spec_text("nav_source.set", &[]),
             opt(nav.active_set, |s| s.to_string()),
             spec_text("nav_source.ext_nav", &[]),
-            spec_or_dash(&format!("nav_source.q.{health}")),
+            quality,
         );
         let odometry = format!(
             "{} · {} {}",
@@ -188,7 +210,7 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             nav.gps_fix.map_or_else(|| "–".to_string(), fix_word),
         );
         let mut rows = vec![
-            kv(t, "Nav", LABEL, tone_span(core, health_tone(health), word)),
+            kv(t, "Nav", LABEL, tone_span(core, tone, word)),
             kv_text(t, "Odometry", LABEL, odometry),
         ];
         if let Some(ms) = nav.pose_age_ms {

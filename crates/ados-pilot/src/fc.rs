@@ -13,6 +13,9 @@ use ados_protocol::pilot::VehicleClass;
 
 use crate::fc_profile::Firmware;
 
+mod ekf;
+pub use ekf::EkfPosition;
+
 /// Velocity plus yaw rate (C2 "moving").
 pub const MASK_VELOCITY: u16 = 1479;
 /// Position plus velocity plus yaw (C2 "holding", follow goals).
@@ -43,6 +46,16 @@ pub struct Attitude {
     pub yaw_rate: f32,
 }
 
+/// One OPTICAL_FLOW from the FC: the rotation-compensated flow rate (rad/s;
+/// ArduPilot sends rad/s in the `flow_comp_m_*` fields), its quality (0 =
+/// none) and the range it used (m, negative while unknown).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Flow {
+    pub comp: [f32; 2],
+    pub quality: u8,
+    pub ground_m: f32,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct LocalPos {
     pub n: f32,
@@ -51,44 +64,6 @@ pub struct LocalPos {
     pub vn: f32,
     pub ve: f32,
     pub vd: f32,
-}
-
-/// The FC's EKF_STATUS_REPORT, as far as the position item reads it.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct EkfPosition {
-    /// `EKF_POS_HORIZ_ABS`: the EKF has an absolute horizontal position.
-    pub horiz_abs: bool,
-    /// `EKF_PRED_POS_HORIZ_ABS`: a predicted absolute horizontal position.
-    pub pred_horiz_abs: bool,
-    /// `EKF_POS_HORIZ_REL`: a horizontal position relative to the start.
-    pub horiz_rel: bool,
-    /// `EKF_PRED_POS_HORIZ_REL`: a predicted relative horizontal position.
-    pub pred_horiz_rel: bool,
-    /// `EKF_CONST_POS_MODE`: the EKF holds a constant position (no aiding).
-    pub const_pos_mode: bool,
-    /// The horizontal position innovation test ratio (1.0 rejects).
-    pub horiz_variance: f32,
-}
-
-impl EkfPosition {
-    /// ArduCopter's own position test (`ArduCopter/system.cpp`, Copter-4.6.2
-    /// lines 239-294; `ekf_check.cpp:53` takes relative or absolute):
-    /// disarmed it accepts a predicted absolute or, with a relative source
-    /// enabled, a predicted relative position; armed it needs an absolute or
-    /// enabled relative position outside constant-position mode.
-    /// `relative_enabled` stands for `optflow.enabled() ||
-    /// visual_odom.enabled()` (`FLOW_TYPE` or `VISO_TYPE` non-zero).
-    pub fn has_position(&self, armed: bool, relative_enabled: bool) -> bool {
-        let (abs, rel) = if armed {
-            (
-                self.horiz_abs && !self.const_pos_mode,
-                self.horiz_rel && !self.const_pos_mode,
-            )
-        } else {
-            (self.horiz_abs || self.pred_horiz_abs, self.pred_horiz_rel)
-        };
-        abs || (relative_enabled && rel)
-    }
 }
 
 /// Everything decoded from FC traffic.
@@ -123,6 +98,8 @@ pub struct FcState {
     pub range_track: crate::sensor_health::RangeTrack,
     /// The FC's own EKF_STATUS_REPORT, `None` until one arrives.
     pub ekf: Option<Stamped<EkfPosition>>,
+    /// The FC's OPTICAL_FLOW.
+    pub flow: Option<Stamped<Flow>>,
 }
 
 impl FcState {
@@ -180,6 +157,12 @@ impl FcState {
             // are not what the EKF fuses, so only the FC's count.
             MavMessage::OPTICAL_FLOW(f) if self.from_fc(sysid, compid) => {
                 self.flow_track.on_msg(f.quality, now_ms);
+                let v = Flow {
+                    comp: [f.flow_comp_m_x, f.flow_comp_m_y],
+                    quality: f.quality,
+                    ground_m: f.ground_distance,
+                };
+                self.flow = Some(Stamped { v, at_ms: now_ms });
             }
             MavMessage::DISTANCE_SENSOR(d) if self.from_fc(sysid, compid) => {
                 use ados_protocol::mavlink::ardupilotmega::MavSensorOrientation as O;

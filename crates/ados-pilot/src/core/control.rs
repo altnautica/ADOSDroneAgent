@@ -5,6 +5,7 @@ use ados_protocol::pilot::{
     AvoidMode, AvoidState, ControlMode, GoalKind, Owner, Sticks, VehicleClass,
 };
 
+use super::position_check::HOLD_POSITION_UNVERIFIED;
 use super::{Out, Pilot, PLAN_PERIOD_MS, STICKS_PERIOD_MS};
 use crate::fc::{heartbeat, MASK_POS_VEL_YAW, MASK_VELOCITY};
 use crate::flows::banner;
@@ -14,6 +15,7 @@ use crate::planner;
 
 mod brake;
 mod failsafes;
+mod goal_brake;
 mod obstacle_data;
 mod plan;
 mod vantage_goal;
@@ -93,6 +95,7 @@ impl Pilot {
         let raw = self.raw_axes();
         self.stick_transitions(axes, raw, now_ms);
         self.failsafes(now_ms);
+        self.enforce_position_check(now_ms);
         self.low_battery(now_ms);
         // Fresh scans after a stale spell (or the first scans of a lidar not
         // seen before) replan at once: a goal waits for no planning period.
@@ -296,7 +299,15 @@ impl Pilot {
     }
 
     fn fly_sticks(&mut self, axes: [f32; 4], pos: [f32; 3], yaw: f32, dt: f32, now_ms: u64) {
-        let lim = self.stick_limits(axes, now_ms);
+        let mut lim = self.stick_limits(axes, now_ms);
+        // An unverified position: the sticks fly slowly, and a hold is a
+        // zero-velocity brake, never a position hold on the estimate.
+        let unverified = self.position_unverified(now_ms).is_some();
+        if unverified {
+            use super::position_check::UNVERIFIED_MAX_MPS;
+            lim.v_h = lim.v_h.min(UNVERIFIED_MAX_MPS);
+            self.mr.shaper.v = geo::clamp_len(self.mr.shaper.v, lim.v_h);
+        }
         let agl = self.agl(now_ms);
         // Unknown obstacles: the sticks ask nothing (a landing still
         // descends), and with no scans there is nothing to push away from.
@@ -387,6 +398,8 @@ impl Pilot {
             Some(HOLD_OBSTACLE_STALE)
         } else if braked.is_some_and(|b| b.close) {
             Some(HOLD_OBSTACLE_CLOSE)
+        } else if unverified {
+            Some(HOLD_POSITION_UNVERIFIED)
         } else {
             None
         };
@@ -394,7 +407,7 @@ impl Pilot {
             Some(r) => self.hold_reason = Some(r.into()),
             None if matches!(
                 self.hold_reason.as_deref(),
-                Some(HOLD_OBSTACLE_CLOSE | HOLD_OBSTACLE_STALE)
+                Some(HOLD_OBSTACLE_CLOSE | HOLD_OBSTACLE_STALE | HOLD_POSITION_UNVERIFIED)
             ) =>
             {
                 self.hold_reason = None;
@@ -403,6 +416,10 @@ impl Pilot {
         }
         let tx = self.tx();
         let m = match cmd {
+            Command::Hold { .. } if unverified => {
+                self.fc_hold = None;
+                tx.setpoint(MASK_VELOCITY, [0.0; 3], [0.0; 3], 0.0, 0.0)
+            }
             Command::Hold { pos, yaw } => {
                 self.setpoint = Some(pos);
                 // Outside `ados` no operator steers this hold (the axes are
@@ -426,59 +443,6 @@ impl Pilot {
             }
         };
         self.mav(m);
-    }
-
-    fn brake_limit(&self, pos: [f32; 3], v: V2, now_ms: u64) -> V2 {
-        if self.settings.pilot.avoid == AvoidMode::Off || self.obstacle_data_unavailable(now_ms) {
-            return v;
-        }
-        let lim = self.limits_now(now_ms);
-        let vel = self
-            .fc
-            .fresh_local(now_ms)
-            .map_or([0.0; 2], |l| [l.vn, l.ve]);
-        brake_limit(
-            &self.obstacles,
-            [pos[0], pos[1]],
-            vel,
-            v,
-            lim.a_h,
-            self.margin(),
-            now_ms,
-        )
-        .v
-    }
-
-    /// The brake for a goal setpoint (skill or goto). With a position
-    /// setpoint the FC flies the feed-forward plus its position loop's pull
-    /// toward the target (`ask`), which the planner's `clear` never bounds by
-    /// the stopping distance. So `ask`, and the velocity the vehicle flies
-    /// now, are held to the stick brake's caps ([`brake_limit`]: seen space,
-    /// obstacles, FC lag). When either breaks one, the braked `ask` within
-    /// `v_cap` is returned, to fly from where the vehicle is; `None` leaves
-    /// the planned setpoint.
-    fn goal_brake(&mut self, pos: V2, ask: V2, v_cap: f32, now_ms: u64) -> Option<V2> {
-        if self.settings.pilot.avoid == AvoidMode::Off || self.obstacle_data_unavailable(now_ms) {
-            return None;
-        }
-        let a_h = self.limits_now(now_ms).a_h;
-        let margin = self.margin();
-        let vel = self
-            .fc
-            .fresh_local(now_ms)
-            .map_or([0.0; 2], |l| [l.vn, l.ve]);
-        let asked = brake_limit(&self.obstacles, pos, vel, ask, a_h, margin, now_ms);
-        let flying = brake_limit(&self.obstacles, pos, vel, vel, a_h, margin, now_ms);
-        if !asked.cut && !flying.cut {
-            return None;
-        }
-        let v = geo::clamp_len(asked.v, v_cap);
-        self.brake_avoid = if progress(ask, v) < STOPPED_MPS {
-            AvoidState::Blocked
-        } else {
-            AvoidState::Detour
-        };
-        Some(v)
     }
 }
 

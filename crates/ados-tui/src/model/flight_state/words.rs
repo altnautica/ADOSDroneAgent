@@ -93,6 +93,14 @@ pub(super) fn fill(template: &str, f: &ChipFacts) -> String {
             "eta" => fmt_eta(f.eta_s),
             "fc_mode_name_upper" => f.fc_mode_name.as_deref().unwrap_or("—").to_uppercase(),
             "step" => launch_step_name(f.launch_step.as_deref()),
+            "position_unverified_label" => match f.position_unverified.as_deref() {
+                None => String::new(),
+                Some(k) => SPEC
+                    .position_unverified_labels
+                    .get(k)
+                    .cloned()
+                    .unwrap_or_else(|| word_label(k)),
+            },
             _ => return None,
         })
     });

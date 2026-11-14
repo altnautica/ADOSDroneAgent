@@ -1,3 +1,4 @@
+use super::super::flight_state::AR_ETA_MAX_AGE_MS;
 use super::*;
 use serde_json::json;
 

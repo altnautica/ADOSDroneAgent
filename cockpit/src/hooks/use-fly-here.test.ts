@@ -50,6 +50,7 @@ describe("the map long-press", () => {
       armed: null,
       landed: null,
       fcFailsafe: false,
+      positionUnverified: null,
     } as unknown as PilotState;
     useNavStreamStore.setState({ pilot: { data: noFc, at: Date.now() } });
     useCockpitUiStore.setState({ sheet: null });

@@ -45,6 +45,7 @@ describe("ekf-sources", () => {
       nav: null,
       lastCommandedSet: 2,
       params: { EK3_SRC2_POSXY: 6 },
+      positionUnverified: null,
     });
     const dead = navSourceInput(t, false, null, null, {});
     expect(dead.ekf).toBeNull();

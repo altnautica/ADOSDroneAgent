@@ -122,6 +122,7 @@ class MockNavStream {
         mode: "external_nav",
         activeSet: 1,
         extnavHealth: "good",
+        healthReason: null,
         odomRateHz: 10,
         lastResetCounter: 0,
         obstacleRateHz: 10,

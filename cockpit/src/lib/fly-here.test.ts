@@ -26,7 +26,7 @@ import { specText } from "@/shared/hud/spec-text";
 import type { VehicleState } from "@/lib/types";
 
 const pilot = (over: Partial<PilotState>): PilotState =>
-  ({ controlMode: "ados", surfaceOps: ["goto"], armed: true, landed: false, ...over }) as unknown as PilotState;
+  ({ controlMode: "ados", surfaceOps: ["goto"], armed: true, landed: false, positionUnverified: null, ...over }) as unknown as PilotState;
 
 describe("fly here", () => {
   it("warns from the spec that the hold takes over a running mission or skill", () => {

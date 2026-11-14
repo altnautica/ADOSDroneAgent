@@ -9,10 +9,14 @@
 
 use serde_json::Value;
 
-use super::flight_state::{stale_after_ms, AR_ETA_MAX_AGE_MS, PILOT_OWNERS};
+use super::flight_state::{stale_after_ms, PILOT_OWNERS};
 use super::sensor_health::SensorHealth;
 
 pub mod detection;
+mod eta;
+mod tone;
+use eta::next_waypoint_eta_s;
+pub use tone::{health_tone, Tone};
 
 /// The path the Vehicle tab polls.
 pub const NAV_STATUS_PATH: &str = "/api/v1/nav/status";
@@ -87,6 +91,8 @@ pub struct NavSource {
     pub mode: Option<String>,
     pub active_set: Option<i64>,
     pub extnav_health: Option<String>,
+    /// Why the pose is degraded or lost (`health_reason`), when named.
+    pub health_reason: Option<String>,
     pub odom_rate_hz: Option<f64>,
     pub obstacle_rate_hz: Option<f64>,
     pub min_obstacle_m: Option<f64>,
@@ -94,6 +100,14 @@ pub struct NavSource {
     /// How old vision-nav's pose was when it reported (ms).
     pub pose_age_ms: Option<f64>,
     pub stale: bool,
+}
+
+/// The pilot's `position_unverified`: its reason (`flow_disagrees`,
+/// `extnav_lost`, `extnav_degraded`) and vision-nav's own reason, if any.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PositionUnverified {
+    pub reason: String,
+    pub detail: Option<String>,
 }
 
 /// The latest lidar scan's nearest return.
@@ -178,6 +192,9 @@ pub struct Pilot {
     /// The horizontal speed cap (m/s) the pilot applies to every setpoint it
     /// flies (`speed_cap.v_h_mps`, e.g. while GNSS-denied); `None` without one.
     pub speed_cap_mps: Option<f64>,
+    /// The pilot does not trust the horizontal position; `None` while it
+    /// does (or an older agent says nothing).
+    pub position_unverified: Option<PositionUnverified>,
     /// The pilot operations a surface may offer now (`goto`, ...).
     pub surface_ops: Vec<String>,
     /// The arm and landed state; `None` while unknown (the FC is unheard),
@@ -222,6 +239,7 @@ impl Autonomy {
             mode: s(d, "mode"),
             active_set: i(d, "active_set"),
             extnav_health: s(d, "extnav_health"),
+            health_reason: s(d, "health_reason"),
             odom_rate_hz: f(d, "odom_rate_hz"),
             obstacle_rate_hz: f(d, "obstacle_rate_hz"),
             min_obstacle_m: f(d, "min_obstacle_m"),
@@ -412,6 +430,12 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             .filter(|c| c.get("reason").and_then(Value::as_str).is_some())
             .and_then(|c| c.get("v_h_mps"))
             .and_then(Value::as_f64),
+        position_unverified: d.get("position_unverified").and_then(|p| {
+            Some(PositionUnverified {
+                reason: p.get("reason")?.as_str()?.to_string(),
+                detail: s(p, "detail"),
+            })
+        }),
         surface_ops: d
             .get("surface_ops")
             .and_then(Value::as_array)
@@ -437,46 +461,6 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             .map(str::to_string),
         age_ms,
         stale,
-    }
-}
-
-/// The ETA of the next waypoint in an `ar` frame `age_ms` old, from whichever
-/// camera carries it; `None` once the frame is older than
-/// [`AR_ETA_MAX_AGE_MS`] or names no next waypoint.
-fn next_waypoint_eta_s(data: &Value, age_ms: Option<u64>) -> Option<f64> {
-    if age_ms.is_none_or(|a| a > AR_ETA_MAX_AGE_MS) {
-        return None;
-    }
-    data.get("cameras")?
-        .as_object()?
-        .values()
-        .filter_map(|c| c.get("items").and_then(Value::as_array))
-        .flatten()
-        .find(|it| {
-            it.get("t").and_then(Value::as_str) == Some("wp")
-                && it.get("role").and_then(Value::as_str) == Some("next")
-                && f(it, "eta_s").is_some()
-        })
-        .and_then(|it| f(it, "eta_s"))
-}
-
-/// How a state word reads: good, a caution, a fault, or neutral. The panel
-/// pairs each with a symbol and a colour, and always prints the word.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Good,
-    Caution,
-    Fault,
-    Neutral,
-}
-
-/// The tone of an external-nav health word.
-pub fn health_tone(health: &str) -> Tone {
-    match health {
-        "good" => Tone::Good,
-        "degraded" => Tone::Caution,
-        "lost" => Tone::Fault,
-        _ => Tone::Neutral,
     }
 }
 

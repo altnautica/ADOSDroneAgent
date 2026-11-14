@@ -5,6 +5,7 @@
 import { useEffect } from "react";
 
 import { useNow } from "@/hooks/use-now";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { loadEkfSourceParams, navSourceInput } from "@/lib/ekf-sources";
 import { resolveNavSource, type NavSourceResult } from "@/shared/hud/nav-source";
 import type { NavState } from "@/shared/hud/nav-types";
@@ -33,6 +34,7 @@ export function useNavSource(loadParams: boolean): {
   const fcConnected = useStatusStore((s) => s.status?.fc_connected === true);
   const nav = useNavStreamStore((s) => s.nav);
   const lastCommandedSet = useNavStreamStore((s) => s.lastCommandedSet);
+  const pilot = useNavStreamStore((s) => s.pilot);
   const params = useNavStreamStore((s) => s.ekfParams);
   const now = useNow(nav ? 1000 : null);
 
@@ -44,5 +46,7 @@ export function useNavSource(loadParams: boolean): {
   }, [loadParams, fcConnected]);
 
   const freshNav = freshNavState(nav, now);
-  return { result: resolveNavSource(navSourceInput(telemetry, live, freshNav, lastCommandedSet, params)), freshNav, params };
+  const positionUnverified = pilot && pilotFresh(pilot.at, now) ? pilot.data.positionUnverified : null;
+  const input = navSourceInput(telemetry, live, freshNav, lastCommandedSet, params, positionUnverified);
+  return { result: resolveNavSource(input), freshNav, params };
 }

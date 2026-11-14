@@ -5,6 +5,7 @@ mod handoff;
 mod harness;
 mod mission;
 mod nav_cap;
+mod position_check;
 mod rules;
 mod safety;
 mod sensors;

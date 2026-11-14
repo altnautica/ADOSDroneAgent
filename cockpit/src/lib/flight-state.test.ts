@@ -34,6 +34,7 @@ const base: ChipFacts = {
   launchStep: null,
   fcFailsafe: false,
   speedCapMps: null,
+  positionUnverified: null,
   ageMs: 100,
 };
 
@@ -84,6 +85,13 @@ describe("flight-state chip (flight-state.json rules)", () => {
   it("puts Avoiding and Blocked on the secondary line", () => {
     expect(flightStateChip({ ...base, avoidState: "detour" }).secondary[0].text).toBe("Avoiding");
     expect(flightStateChip({ ...base, avoidState: "blocked" }).secondary[0].text).toBe("Blocked");
+  });
+
+  it("never reads a slide as a calm hold: an unverified position is red with its reason", () => {
+    const c = flightStateChip({ ...base, positionUnverified: "flow_disagrees", holdReason: "position-unverified" });
+    expect(c.ruleId).toBe("position_unverified");
+    expect(c.text).toBe("Position unverified · Flow disagrees");
+    expect(c.secondary.map((l) => l.text)).toContain("Holding · position unverified");
   });
 });
 

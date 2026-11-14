@@ -75,6 +75,9 @@ impl Pilot {
         if self.fc_failsafe {
             return Err("failsafe".into());
         }
+        if self.position_unverified(now_ms).is_some() {
+            return Err("position_unverified".into());
+        }
         if l.step == LaunchStep::Checks || !self.fc.armed {
             self.ready_to_arm(now_ms)?;
         }

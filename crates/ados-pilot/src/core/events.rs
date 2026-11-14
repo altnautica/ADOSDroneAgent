@@ -27,6 +27,9 @@ const EXTRA_PARAMS: &[&str] = &[
     "EK3_SRC1_POSXY",
     "EK3_SRC2_POSXY",
     "EK3_SRC3_POSXY",
+    // Visual odometry enabled: with it the EKF's relative position counts for
+    // the `position` readiness item, as with `FLOW_TYPE`.
+    "VISO_TYPE",
 ];
 /// Re-request missing parameters this often.
 const PARAM_RETRY_MS: u64 = 15_000;
@@ -98,6 +101,9 @@ impl Pilot {
                 if let Some(set) = set {
                     self.nav_set = set;
                 }
+                if let Some(n) = super::position_check::ExtNav::parse(payload, now_ms) {
+                    self.extnav = Some(n);
+                }
             }
             CLIENT_MODE_TOPIC => {
                 if let Some(c) = ClientMode::parse(payload) {
@@ -113,6 +119,12 @@ impl Pilot {
         let was_armed = self.fc.armed;
         let first = self.fc.heartbeat_ms == 0;
         let changed = self.fc.update(sysid, compid, msg, now_ms);
+        if matches!(msg, MavMessage::OPTICAL_FLOW(_))
+            && sysid == self.fc.sysid
+            && compid == self.fc.compid
+        {
+            self.on_flow(now_ms);
+        }
         if let MavMessage::COMMAND_ACK(a) = msg {
             if sysid == self.fc.sysid && compid == self.fc.compid {
                 if a.command == MavCmd::MAV_CMD_DO_REPOSITION

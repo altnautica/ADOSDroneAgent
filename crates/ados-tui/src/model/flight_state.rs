@@ -105,6 +105,7 @@ struct Spec {
     fc_mode_classes: FcModeClasses,
     secondary: Secondary,
     hold_reason_labels: BTreeMap<String, String>,
+    position_unverified_labels: BTreeMap<String, String>,
     stale_after_ms: u64,
     mode_sheet: ModeSheet,
 }
@@ -170,6 +171,9 @@ pub struct ChipFacts {
     pub launch_step: Option<String>,
     /// The FC flies a failsafe RTL or land of its own.
     pub fc_failsafe: bool,
+    /// The pilot's position-unverified label key (its `detail` when the spec
+    /// labels it, else its `reason`); `None` while the position is trusted.
+    pub position_unverified: Option<String>,
     /// Age of the pilot state in ms.
     pub age_ms: u64,
 }
@@ -254,6 +258,7 @@ fn matches(when: &Map<String, Value>, f: &ChipFacts) -> bool {
         "control_mode" => is(want, f.control_mode.as_deref()),
         "sequence_running" => is_bool(want, f.launch_step.is_some()),
         "fc_failsafe" => is_bool(want, f.fc_failsafe),
+        "position_unverified" => is_bool(want, f.position_unverified.is_some()),
         // A condition this cockpit does not know never matches.
         _ => false,
     })
@@ -441,6 +446,10 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         avoid_state: p.avoid_state.clone(),
         launch_step: p.launch_step.clone(),
         fc_failsafe: p.fc_failsafe,
+        position_unverified: p.position_unverified.as_ref().map(|u| match &u.detail {
+            Some(d) if SPEC.position_unverified_labels.contains_key(d) => d.clone(),
+            _ => u.reason.clone(),
+        }),
         age_ms,
         owner,
     })

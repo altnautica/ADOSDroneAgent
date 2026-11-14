@@ -193,6 +193,50 @@ impl SpeedCap {
     }
 }
 
+/// The pilot does not trust the EKF's horizontal position: the vision-nav
+/// external position is degraded or lost, or the flight controller's optical
+/// flow says the vehicle moves when the estimate says otherwise. While set,
+/// no hold is a position hold and nothing new is flown on the estimate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PositionUnverified {
+    /// `flow_disagrees` (the pilot's own flow-against-estimate check),
+    /// `extnav_lost` or `extnav_degraded`.
+    pub reason: String,
+    /// vision-nav's `health_reason` (`corridor_unmeasured`, `flow_disagrees`,
+    /// `ekf_flow_disagree`, …) when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Horizontal speed over ground from the optical flow, m/s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_mps: Option<f32>,
+    /// Horizontal speed of the EKF estimate, m/s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_mps: Option<f32>,
+}
+
+impl PositionUnverified {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            detail: None,
+            flow_mps: None,
+            estimate_mps: None,
+        }
+    }
+
+    pub fn with_detail(mut self, detail: Option<String>) -> Self {
+        self.detail = detail;
+        self
+    }
+
+    pub fn with_speeds(mut self, flow_mps: f32, estimate_mps: f32) -> Self {
+        self.flow_mps = Some(flow_mps);
+        self.estimate_mps = Some(estimate_mps);
+        self
+    }
+}
+
 /// The nav-stream `pilot` kind with the handover, launch and banner fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -274,6 +318,9 @@ pub struct PilotState {
     /// FC link is down.
     #[serde(default)]
     pub sensors: Option<super::SensorHealth>,
+    /// The horizontal position is not trusted, omitted while it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_unverified: Option<PositionUnverified>,
 }
 
 /// One camera's obstacle (or depth) grid: 32×18 cells, row-major, row 0 at

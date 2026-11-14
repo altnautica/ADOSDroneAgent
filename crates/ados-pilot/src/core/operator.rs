@@ -34,6 +34,16 @@ impl Pilot {
         if let Some(item) = self.mission_inferred() {
             items.push(item);
         }
+        // Only while unverified, and its own id: Take control (which brakes)
+        // stays allowed; arming, a launch and every goal are refused.
+        if let Some(p) = self.position_unverified(now_ms) {
+            items.push(ados_protocol::pilot::Readiness {
+                id: "position_check".into(),
+                ok: false,
+                severity: ados_protocol::pilot::Severity::Block,
+                msg: super::position_check::readiness_msg(&p),
+            });
+        }
         items
     }
 

@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.114.0] - 2026-11-15
+
+### Added
+
+- Pilot: a horizontal position nobody can vouch for is no longer flown or shown as a calm hold. The pilot frame carries an optional `position_unverified` (`reason`: `flow_disagrees`, `extnav_lost`, `extnav_degraded` or `extnav_stale`; `detail`: vision-nav's `health_reason`; `flow_mps` and `estimate_mps` for a flow disagreement), omitted while the position is trusted, so older ground stations are unaffected. In `ados-protocol` this is `PilotState::position_unverified: Option<PositionUnverified>` (`#[non_exhaustive]`). It is set when the active EKF source set takes its horizontal position from external navigation and vision-nav reports that position lost, or degraded for a named reason (`corridor_unmeasured`, `flow_disagrees`, `ekf_flow_disagree`, `heading_unconfirmed`, or a lost IMU feed); a `degraded` with no reason, as in a corridor flown on working flow, is still flown. It stays set as `extnav_stale` when vision-nav stops reporting on a source set whose `EK3_SRCn_POSXY` is external navigation: silence never clears it. It is also set when the flight controller's own optical flow (at any quality above 0, rate times range) and the EKF velocity disagree by more than 1.5 m over 3 s (clearing under 0.75 m). In a featureless mine drift the external position froze while the vehicle flew on at 5–6 m/s and the EKF followed it; the flow saw the motion the whole time.
+- While the position is unverified: a hold is a zero-velocity brake instead of a position hold on the estimate; stick flight is held to 1 m/s; a skill loses its lease (`position_unverified`) and a goto or swarm goal ends, both braking with hold reason `position-unverified`; a new goto, lease, swarm goal, launch or mission resume is refused with `position_unverified` ("Position unverified (nav); fly manually or land"); and a blocking `position_check` readiness item, "Position check (nav)" ("Position unverified (nav): flow 5.3 m/s, estimate 0.3 m/s", or the external position's state and reason), refuses arming. STOP, Land, RTH, kill and Take control stay available.
+- Every surface reads it red: the flight-state chip shows "Position unverified · <reason>" (new `flight-state.json` rule and `position_unverified_labels`, which word vision-nav's reasons, `heading_unconfirmed` and the `imu_feed_*` reasons included), after the flight controller's RTH, Landing and Transition chips so a return or landing still reads as one, and with Take control while the flight controller flies its own mode. The `position_check` readiness line words vision-nav's reason from the same labels, never the raw key. The hold reason reads "Holding · position unverified", and the nav-source chip turns crit with FLOW DISAGREES, CORRIDOR or UNVERIFIED, from the pilot's report or from vision-nav's `nav.state` `health_reason` on a degraded or lost pose. Fly here is not offered while the position is unverified, neither through the pilot nor as a reposition to a flight controller in GUIDED. Shared nav-chip golden cases are in `web-shared/src/hud/fixtures/nav-source-cases.json`. Cockpit, kiosk, dashboard and terminal UI.
+
+### Fixed
+
+- Pilot: the pilot asks the flight controller for `VISO_TYPE`, so a visual-odometry-only vehicle's relative EKF position passes the `position` readiness item instead of blocking.
+
 ## [0.113.2] - 2026-11-15
 
 ### Changed
@@ -57,7 +69,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 - An MJPEG frame without Huffman tables decodes: the standard tables (JPEG Annex K.3) are inserted before the scan, as other UVC stacks do. A frame cut short (no end-of-image marker) is refused and counted as corrupt.
 - A camera whose frames arrive but never decode for 3 s ends its capture with a decode error, which reads `error` in camera-state, not missing, so USB recovery no longer rebinds a working camera.
 - Two identical USB cameras no longer resolve to one video node: each leg's own source node wins, and a fingerprint that matches more than one free device names no node, so recovery never targets the other camera.
-
 ## [0.112.1] - 2026-11-14
 
 ### Added

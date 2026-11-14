@@ -4,13 +4,15 @@
 import { describe, expect, it } from "vitest";
 
 import { gpsFixWord, navSourceTextEn, resolveNavSource, sourceValueKey, type NavSourceInput } from "./nav-source";
-import type { NavState } from "./nav-types";
+import navSourceCases from "./fixtures/nav-source-cases.json";
+import { parseNavState, type NavState } from "./nav-types";
 
 function nav(over: Partial<NavState>): NavState {
   return {
     mode: "external_nav",
     activeSet: null,
     extnavHealth: null,
+    healthReason: null,
     odomRateHz: null,
     lastResetCounter: null,
     obstacleRateHz: null,
@@ -130,4 +132,36 @@ describe("resolveNavSource", () => {
     expect(sourceValueKey(6)).toBe("6");
     expect(sourceValueKey(undefined)).toBe("unknown");
   });
+});
+
+// The shared cases every port of the chip (TUI, Android) is tested against.
+describe("nav-source golden cases (fixtures/nav-source-cases.json)", () => {
+  type Case = {
+    name: string;
+    input: {
+      ekf_flags: number;
+      ekf_age_ms?: number;
+      params?: Record<string, number>;
+      gps?: { fix_type: number; satellites?: number; hdop?: number };
+      nav?: Record<string, unknown>;
+      position_unverified?: { reason: string; detail?: string };
+    };
+    expected: { label: string; word: string | null; tone: string };
+  };
+  for (const c of navSourceCases as Case[]) {
+    it(c.name, () => {
+      const i = c.input;
+      const r = resolveNavSource({
+        ekf: { flags: i.ekf_flags, ageMs: i.ekf_age_ms ?? 100 },
+        gps: i.gps ? { fixType: i.gps.fix_type, satellites: i.gps.satellites, hdop: i.gps.hdop } : null,
+        nav: i.nav ? parseNavState(i.nav) : null,
+        lastCommandedSet: null,
+        params: i.params ?? null,
+        positionUnverified: i.position_unverified
+          ? { reason: i.position_unverified.reason, detail: i.position_unverified.detail ?? null }
+          : null,
+      });
+      expect({ ...navSourceTextEn(r), tone: r.tone }).toEqual(c.expected);
+    });
+  }
 });

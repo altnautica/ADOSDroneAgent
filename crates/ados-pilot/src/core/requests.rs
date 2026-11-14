@@ -120,6 +120,10 @@ impl Pilot {
         if self.fc_failsafe {
             return refuse("failsafe", None);
         }
+        // A skill's goals fly on the estimate.
+        if self.position_unverified(now_ms).is_some() {
+            return refuse("position_unverified", None);
+        }
         if self.touchdown.floor_d.is_some() {
             return refuse("landed", None);
         }
@@ -151,6 +155,9 @@ impl Pilot {
         if !self.fc.armed || self.landed() || self.fc_failsafe {
             return;
         }
+        if self.position_unverified(now_ms).is_some() {
+            return;
+        }
         // A tuning flight keeps the vehicle; with unknown obstacles, or no
         // obstacle sensor while avoid is on, no new goto is flown.
         if matches!(self.owner(), Owner::Tuning) || self.obstacle_data_state(now_ms).is_some() {
@@ -167,6 +174,9 @@ impl Pilot {
 
     fn on_swarm(&mut self, g: SwarmGoal) {
         if !self.fc.armed || !self.in_guided() || self.obstacle_data_stale(g.at_ms) {
+            return;
+        }
+        if self.position_unverified(g.at_ms).is_some() {
             return;
         }
         match self.owner() {

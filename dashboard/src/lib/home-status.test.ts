@@ -208,7 +208,14 @@ describe("home status card", () => {
     const pilot = parsePilotState({ ...raw, readiness: [], statustext: [] });
     const pill = homePill({ ...base, pilot, telemetry: { ...groundTel, ekf: { flags: 0, age_ms: 100 } } });
     expect(pill.alerts.map((a) => [a.id, a.source])).toContainEqual(["nav_source_degraded", "nav_source"]);
-    expect(homeNavSource({ telemetry: groundTel, live: true, nav: null }).kind).toBe("stale");
+    expect(homeNavSource({ telemetry: groundTel, live: true, nav: null, pilot: null }).kind).toBe("stale");
+  });
+
+  it("turns the nav source crit while the pilot reports an unverified position", () => {
+    const pilot = parsePilotState({ ...raw, position_unverified: { reason: "flow_disagrees" } });
+    const tel = { ...groundTel, ekf: { flags: 2 + 8, age_ms: 100 } };
+    expect(homeNavSource({ telemetry: tel, live: true, nav: null, pilot })).toMatchObject({ tone: "crit", quality: "flowDisagrees" });
+    expect(homeNavSource({ telemetry: tel, live: true, nav: null, pilot: null }).tone).not.toBe("crit");
   });
 
   it("reads the pose age from the fresh nav frame", () => {

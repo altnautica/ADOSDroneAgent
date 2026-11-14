@@ -306,3 +306,29 @@ fn an_ekf_with_no_position_of_any_kind_blocks_even_with_flow_enabled() {
     assert!(!ok, "{msg}");
     assert_eq!(sev, Severity::Block);
 }
+
+/// The pilot asks the FC for `VISO_TYPE`, so a visual-odometry-only source
+/// set (no `FLOW_TYPE`) with a relative position passes the `position` item.
+#[test]
+fn a_visual_odometry_only_ekf_is_asked_for_and_passes() {
+    let mut w = World::new();
+    w.run(200);
+    let asked = w.sent.iter().any(|m| {
+        matches!(m, MavMessage::PARAM_REQUEST_READ(r)
+            if r.param_id.to_str().unwrap_or("").trim_end_matches('\0') == "VISO_TYPE")
+    });
+    assert!(asked, "VISO_TYPE is never requested");
+    for (n, v) in [
+        ("EK3_SRC1_POSXY", 6.0),
+        ("EK3_SRC1_VELXY", 6.0),
+        ("VISO_TYPE", 1.0),
+    ] {
+        w.p.fc.params.insert(n.into(), v);
+    }
+    let rel = EkfStatusFlags::EKF_ATTITUDE
+        | EkfStatusFlags::EKF_VELOCITY_HORIZ
+        | EkfStatusFlags::EKF_POS_HORIZ_REL
+        | EkfStatusFlags::EKF_PRED_POS_HORIZ_REL;
+    run_with_ekf(&mut w, &ekf(rel, 0.1), 600);
+    assert!(position_item(&w).0, "{:?}", position_item(&w));
+}
