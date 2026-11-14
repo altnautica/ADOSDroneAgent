@@ -6,7 +6,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.111.1] - 2026-11-14
+## [0.112.0] - 2026-11-14
 
 ### Changed
 
@@ -14,7 +14,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Pilot: a flight-controller failsafe during the setup wizard is now recorded. Before, the pilot ignored every mode change while the wizard held control, so `fc_failsafe` never set, and leaving the wizard put the flight controller back in GUIDED over its own return, land or brake. Now the flight controller keeps flying its failsafe after the wizard, and Take control and Pause are refused with `failsafe`.
+- Pilot: a flight-controller failsafe during the setup wizard is now recorded. Before, the pilot ignored every mode change while the wizard held control, so `fc_failsafe` never set, and leaving the wizard put the flight controller back in GUIDED over its own return, land or brake. Now the flight controller keeps flying its failsafe after the wizard, and Take control and Pause are refused with `failsafe`. The wizard's own landing legs and its abort return are reported to the pilot as commanded modes, so they never read as a failsafe.
+- The flight-state chip reads Copter AUTO_RTL as "RTH" and BRAKE as "Landing", with no Take control button, as for RTL and LAND.
 - Pilot: while the flight controller is in its own failsafe, a mission the pilot had paused no longer reads `paused` in the pilot frame, so the chip shows the failsafe return or landing instead of "Mission paused" with a Resume button that could only be refused. The cockpit and the kiosk disable Resume and Take control with the failsafe reason while the pilot reports `fc_failsafe`, as Pause already was.
 - Pilot: Copter's AUTO_RTL ("Auto DO_LAND_START or RTL") and BRAKE ("Brake or Land") entered with no operator command count as a flight-controller failsafe, as RTL, SmartRTL and LAND do. Before, an AUTO_RTL failsafe read as an FC mission, where Take control and a stick deflection switched to GUIDED. The operator's own AUTO_RTL or BRAKE is not a failsafe.
 - Pilot: Take control no longer overrides a flight-controller failsafe. While the pilot reports `fc_failsafe` (the flight controller flies an RTL, SmartRTL or land nobody commanded: an RC switch, or a radio, battery or EKF failsafe), `take_control` is refused with `failsafe` and nothing asks the flight controller for GUIDED. Before, it was accepted, the flight controller was put in GUIDED and the pilot flew until the flight controller re-asserted its failsafe. Resume (which would switch to AUTO) and a launch or take-off while still armed on the ground after a failsafe landing are refused the same way. The operator's own mode change (the Mode sheet, Hand to FC) ends the failsafe state, and Take control works after it. Every surface shows the existing `failsafe` refusal text.

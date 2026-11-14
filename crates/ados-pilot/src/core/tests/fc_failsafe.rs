@@ -4,6 +4,7 @@
 //! AUTO, and the FC keeps flying its failsafe. The operator's own mode
 //! change ends the failsafe state, and Take control works after it.
 
+use ados_protocol::mavlink::ardupilotmega::MavType;
 use ados_protocol::pilot::{Owner, CLIENT_MODE_TOPIC};
 use serde_json::json;
 
@@ -249,4 +250,47 @@ fn an_fc_failsafe_during_the_setup_wizard_is_kept_after_it() {
         assert_eq!(w.mode, mode, "the FC keeps flying its failsafe");
         assert_eq!(w.set_modes(copter::GUIDED), 0, "mode {mode}");
     }
+}
+
+/// The wizard's own landing leg: the setup engine asked the FC for LAND, so
+/// it is no failsafe, and Pause is not refused with `failsafe`.
+#[test]
+fn a_wizard_landing_leg_is_not_an_fc_failsafe() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.p.auth.enter_tuning().unwrap();
+    w.run(100);
+    w.p.note_setup_mode(copter::LAND, w.now);
+    w.mode = copter::LAND;
+    w.run(100);
+    assert!(!w.p.state(w.now).fc_failsafe);
+    w.p.exit_tuning(w.now);
+    w.run(100);
+    assert!(!w.p.state(w.now).fc_failsafe);
+    assert_ne!(err(&w.action("pause")), Some("failsafe"));
+}
+
+/// The Plane wizard's abort RTL is the wizard's own: after it, Take control
+/// is available. (`fc_manual`: the harness Plane has no flight profile, which
+/// `ados` readiness would refuse first.)
+#[test]
+fn the_plane_wizard_abort_rtl_leaves_take_control_available() {
+    use crate::modes::plane;
+    let mut w = World::new();
+    w.mavtype = MavType::MAV_TYPE_FIXED_WING;
+    w.airborne(plane::GUIDED);
+    assert!(ok(&w.action("control_mode:fc_manual")));
+    w.run(100);
+    w.p.auth.enter_tuning().unwrap();
+    w.run(100);
+    w.p.note_setup_mode(plane::RTL, w.now);
+    w.mode = plane::RTL;
+    w.run(100);
+    assert!(!w.p.state(w.now).fc_failsafe);
+    w.p.exit_tuning(w.now);
+    w.run(100);
+    assert_eq!(w.p.owner(), Owner::FcMode);
+    assert!(!w.p.state(w.now).fc_failsafe);
+    let r = w.action("take_control");
+    assert!(ok(&r), "{r:?}");
 }

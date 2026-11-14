@@ -111,6 +111,9 @@ async fn run(
                     (ob.take_msgs(), ob.take_effects(), e.frames(now), e.setup_needed(now), step)
                 };
                 for m in msgs {
+                    if let Some(mode) = commanded_mode(&m) {
+                        handle.setup_mode(mode).await;
+                    }
                     if tx.try_send(m).is_err() {
                         tracing::warn!("fc_setup_fc_queue_full");
                     }
@@ -139,6 +142,17 @@ async fn run(
                 }
             }
         }
+    }
+}
+
+/// The custom mode a DO_SET_MODE asks the FC for.
+fn commanded_mode(m: &ados_protocol::mavlink::ardupilotmega::MavMessage) -> Option<u32> {
+    use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage};
+    match m {
+        MavMessage::COMMAND_LONG(c) if c.command == MavCmd::MAV_CMD_DO_SET_MODE => {
+            Some(c.param2 as u32)
+        }
+        _ => None,
     }
 }
 
@@ -196,5 +210,22 @@ impl SetupHandler for SetupService {
                 .request(&op, &json, now);
             rmpv::ext::to_value(&reply).unwrap_or(rmpv::Value::Nil)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commanded_mode;
+    use crate::setup::out::Outbox;
+
+    /// The wizard's own mode commands are reported to the pilot core.
+    #[test]
+    fn a_wizard_set_mode_names_its_mode() {
+        let mut ob = Outbox::default();
+        ob.set_mode(9, 0);
+        ob.arm(true);
+        let msgs = ob.take_msgs();
+        assert_eq!(commanded_mode(&msgs[0]), Some(9));
+        assert_eq!(commanded_mode(&msgs[1]), None);
     }
 }

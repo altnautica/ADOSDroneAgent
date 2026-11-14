@@ -54,6 +54,8 @@ pub enum CoreCmd {
     SetupNeeded(Option<String>),
     /// The setup engine's active step id, `None` without a run.
     SetupStep(Option<&'static str>),
+    /// The setup engine is about to ask the FC for this custom mode.
+    SetupMode(u32),
 }
 
 /// Handle the setup engine uses to take and give back the `tuning` owner.
@@ -95,6 +97,12 @@ impl PilotHandle {
 
     pub async fn setup_step(&self, step: Option<&'static str>) {
         let _ = self.cmd.send(CoreCmd::SetupStep(step)).await;
+    }
+
+    /// Note a mode the setup engine commands, before its DO_SET_MODE goes
+    /// out, so the FC's change to it reads as the operator's, not a failsafe.
+    pub async fn setup_mode(&self, mode: u32) {
+        let _ = self.cmd.send(CoreCmd::SetupMode(mode)).await;
     }
 }
 
@@ -277,6 +285,7 @@ impl Core {
                     Some(CoreCmd::SetRcAdosPosition(n)) => self.pilot.set_rc_ados_position(n),
                     Some(CoreCmd::SetupNeeded(msg)) => self.pilot.setup_needed = Some(msg),
                     Some(CoreCmd::SetupStep(step)) => self.pilot.setup_step = step,
+                    Some(CoreCmd::SetupMode(mode)) => self.pilot.note_setup_mode(mode, now()),
                     None => {}
                 },
             }

@@ -83,6 +83,12 @@ impl Pilot {
         });
     }
 
+    /// The setup engine asks the FC for `mode` on its own link: its change
+    /// to it is the operator's, never an FC failsafe.
+    pub fn note_setup_mode(&mut self, mode: u32, now_ms: u64) {
+        self.own_mode = Some((mode, now_ms));
+    }
+
     /// Leave the setup engine's `tuning` owner. Airborne: fly as `pilot` from a
     /// hold here (back in GUIDED); on the ground: idle or whatever came before.
     /// During an FC failsafe the FC keeps flying it (`fc_mode`).
