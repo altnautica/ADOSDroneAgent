@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 from ados.hal.camera import (
     HardwareRole,
@@ -42,7 +43,7 @@ from ados.hal.camera import (
 from ados.services.video.camera_mgr import CameraManager
 
 
-def _build_result() -> dict:
+def _build_result() -> dict[str, Any]:
     """Discover cameras, auto-assign roles, and shape the JSON payload.
 
     Runs a throwaway :class:`CameraManager` exactly the way the in-process

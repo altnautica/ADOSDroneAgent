@@ -6,6 +6,7 @@ import platform
 import re
 import subprocess
 from dataclasses import dataclass
+from typing import Any
 
 from ados.core.logging import get_logger
 
@@ -22,7 +23,7 @@ class ModemInfo:
     connection_state: str
     ip_address: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "operator": self.operator,

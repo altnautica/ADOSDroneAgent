@@ -11,6 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 from ados.core.logging import get_logger
 from ados.hal.v4l2_formats import best_mode, capabilities, probe_formats, v4l2_driver
@@ -73,16 +74,16 @@ class CameraInfo:
     capabilities: list[str] = field(default_factory=list)
     # What a V4L2 node offers, one entry per format and size
     # (``ados.hal.v4l2_formats``); empty when not enumerated.
-    formats: list[dict] = field(default_factory=list)
+    formats: list[dict[str, Any]] = field(default_factory=list)
     hardware_role: HardwareRole = HardwareRole.CAMERA
     # Physical fingerprint the camera roster reconciles a declared leg against
     # when the device node has been renamed by a hot-plug/reboot: a USB camera
     # carries ``{"usb": "vid:pid[:serial]"}``, a CSI camera carries
     # ``{"csi_sensor": <name>, "csi_port": <index>}``. Empty when the fingerprint
     # could not be read (best-effort; the roster then keys on the device path).
-    match: dict = field(default_factory=dict)
+    match: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "type": self.type.value,
@@ -107,7 +108,7 @@ def _read_sysfs(path: str) -> str | None:
     return value or None
 
 
-def _usb_match(device_path: str) -> dict:
+def _usb_match(device_path: str) -> dict[str, Any]:
     """Best-effort USB fingerprint for a ``/dev/videoN`` node.
 
     Resolves the video node's sysfs device link, then walks up the device tree

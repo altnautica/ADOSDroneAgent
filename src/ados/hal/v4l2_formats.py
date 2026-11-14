@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from typing import Any
 
 # Bounded so a wedged node cannot eat the discovery budget the video
 # orchestrator gives the whole enumeration.
@@ -37,12 +38,12 @@ def fourcc_name(code: str) -> str:
     return "mjpeg" if name == "mjpg" else name
 
 
-def parse_list_formats_ext(text: str) -> list[dict]:
+def parse_list_formats_ext(text: str) -> list[dict[str, Any]]:
     """Parse ``v4l2-ctl --list-formats-ext`` output into format entries."""
-    entries: list[dict] = []
+    entries: list[dict[str, Any]] = []
     fourcc: str | None = None
     sized = False
-    current: dict | None = None
+    current: dict[str, Any] | None = None
     for line in text.splitlines():
         m = _FORMAT_RE.match(line)
         if m:
@@ -69,7 +70,7 @@ def parse_list_formats_ext(text: str) -> list[dict]:
     return entries
 
 
-def probe_formats(device_path: str) -> list[dict]:
+def probe_formats(device_path: str) -> list[dict[str, Any]]:
     """The format entries ``device_path`` offers; empty when it cannot be read."""
     try:
         result = subprocess.run(
@@ -83,7 +84,7 @@ def probe_formats(device_path: str) -> list[dict]:
     return parse_list_formats_ext(result.stdout or "")
 
 
-def capabilities(formats: list[dict]) -> list[str]:
+def capabilities(formats: list[dict[str, Any]]) -> list[str]:
     """The distinct fourcc names of ``formats``, in the driver's order."""
     seen: list[str] = []
     for entry in formats:
@@ -92,7 +93,7 @@ def capabilities(formats: list[dict]) -> list[str]:
     return seen
 
 
-def best_mode(formats: list[dict]) -> tuple[int, int, float]:
+def best_mode(formats: list[dict[str, Any]]) -> tuple[int, int, float]:
     """The largest offered size and its highest rate, ``(0, 0, 0.0)`` if none."""
     best = (0, 0, 0.0)
     for entry in formats:
