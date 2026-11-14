@@ -104,7 +104,7 @@ export interface LayoutOptions {
   revealKeys?: ReadonlySet<string>;
   /** The on-screen frame rect (box smoothing); defaults to `item.rect`. */
   displayRect?: (item: DrawItem) => FrameRect | null;
-  /** Followed-box history for the COASTING ghost path. */
+  /** Followed-box history for the PREDICTING ghost path. */
   ghost?: readonly GhostSample[];
 }
 
@@ -116,10 +116,10 @@ const BRACKETED: Record<TargetKind, boolean> = {
   ACQUIRING: true,
   FOLLOWING: true,
   HOLDING: true,
-  COASTING: true,
+  PREDICTING: true,
   SEARCHING: false,
   SEARCHING_OFFFRAME: false,
-  LOST: true,
+  AWAIT_OPERATOR: true,
   GT: false,
 };
 
@@ -333,7 +333,7 @@ export function layoutTargets(resolved: ResolvedTargets, o: LayoutOptions): Glyp
       g.ring = searchRing(box);
       anchor = { x: g.ring.cx - g.ring.r, y: g.ring.cy - g.ring.r, w: 2 * g.ring.r, h: 2 * g.ring.r };
     }
-    if (box && item.kind === "COASTING" && o.ghost && o.ghost.length > 0) {
+    if (box && item.kind === "PREDICTING" && o.ghost && o.ghost.length > 0) {
       const sx = resolved.frameW > 0 ? rr.width / resolved.frameW : 0;
       const sy = resolved.frameH > 0 ? rr.height / resolved.frameH : 0;
       g.ghost = o.ghost.map((p) => ({ x: rr.left + p.x * sx, y: rr.top + p.y * sy }));

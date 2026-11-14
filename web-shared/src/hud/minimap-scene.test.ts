@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { EMPTY_OCCUPANCY } from "./local-frame";
-import { buildLocalScene, clampZoom, localPlan, stepZoom, viewCentre, RECENTRE_AFTER_MS } from "./local-scene";
+import { buildLocalScene, clampZoom, followSceneTarget, localPlan, stepZoom, viewCentre, RECENTRE_AFTER_MS } from "./local-scene";
+import { parseFollowState } from "./nav-types";
 import { activePosxySource, nextNoFixSince, resolveMinimapMode, MINIMAP_NO_FIX_HOLD_MS } from "./minimap-mode";
 import { parseCssColor, recolourOccupancy, withAlpha } from "./occupancy-bitmap";
 
@@ -58,7 +59,16 @@ describe("local scene", () => {
       plan: null,
     });
     expect(scene.drone).toEqual({ sx: 50, sy: 40, yawDeg: 45 });
-    expect(scene.target).toEqual({ sx: 60, sy: 20, tickX: 60, tickY: 10, dashed: true });
+    expect(scene.target).toEqual({
+      sx: 60,
+      sy: 20,
+      tickX: 60,
+      tickY: 10,
+      dashed: true,
+      searchArea: null,
+      vantage: null,
+      predictedPath: [],
+    });
     expect(scene.scan).toEqual([[50, 30]]);
     expect(scene.origin).toEqual({ sx: 50, sy: 40 });
     expect(scene.dim).toBe(true);
@@ -109,6 +119,44 @@ describe("local scene", () => {
       blocked: true,
     });
     expect(localPlan({ planNed: [], goalNed: [2, 2, -5], avoidState: "detour" })?.blocked).toBe(false);
+  });
+
+  it("projects the search area, the vantage and the predicted path while recovering", () => {
+    const f = parseFollowState({
+      phase: "searching",
+      target_ned: [2, 1],
+      target_vel_ned: [0, 0],
+      search_area: { center_ne: [2, 1], semi_major_m: 3, semi_minor_m: 1, heading_deg: 0 },
+      vantage_ne: [-1, 2],
+      predicted_path_ne: [[2, 1], [3, 1]],
+    })!;
+    const target = followSceneTarget(f);
+    expect(target?.dashed).toBe(true);
+    const s = buildLocalScene({
+      width: 100,
+      height: 80,
+      view: { centreX: 0, centreY: 0, pxPerM: 10, cx: 50, cy: 40 },
+      occupancy: EMPTY_OCCUPANCY,
+      occupancyStale: false,
+      trail: [],
+      scanPoints: null,
+      target,
+      drone: null,
+      plan: null,
+    });
+    // A north-pointing major axis turns the x radius up the screen.
+    expect(s.target?.searchArea).toEqual({ sx: 60, sy: 20, rxPx: 30, ryPx: 10, rotationRad: -Math.PI / 2 });
+    expect(s.target?.vantage).toEqual({ sx: 70, sy: 50 });
+    expect(s.target?.predictedPath).toEqual([[60, 20], [60, 10]]);
+  });
+
+  it("dashes the target only while recovering and hides it while waiting", () => {
+    const at = (phase: string) => followSceneTarget(parseFollowState({ phase, target_ned: [1, 1] })!);
+    for (const p of ["predicting", "repositioning", "searching"]) expect(at(p)?.dashed, p).toBe(true);
+    for (const p of ["acquiring", "following", "holding"]) expect(at(p)?.dashed, p).toBe(false);
+    expect(at("following")?.searchArea).toBeNull();
+    expect(at("idle")).toBeNull();
+    expect(at("holding-await-operator")).toBeNull();
   });
 });
 

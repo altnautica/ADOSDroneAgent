@@ -122,6 +122,56 @@ describe("layoutAr on the golden frame", () => {
     expect(at(null, blockedPath).color).toBe("#EF4444");
   });
 
+  it("draws the follow search area, the vantage and the subject's predicted path", () => {
+    const parsed = parseArFrame({
+      ts_ms: 1,
+      cameras: {
+        main: {
+          frame_w: 1280,
+          frame_h: 720,
+          items: [
+            { t: "fpath", k: "fpath", state: "clear", pts: [[0.5, 0.9], [0.5, 0.7]] },
+            { t: "fpath", k: "fpath:predicted", state: "clear", pts: [[0.4, 0.6], [0.45, 0.6]] },
+            { t: "fgoal", k: "fgoal", x: 0.5, y: 0.7 },
+            { t: "fsearch", k: "fsearch", pts: [[0.4, 0.6], [0.5, 0.55], [0.6, 0.6], [0.5, 0.65]] },
+            { t: "fsearch", k: "fsearch:short", pts: [[0.4, 0.6], [0.5, 0.55]] },
+            { t: "fvantage", k: "fvantage", x: 0.3, y: 0.8 },
+            { t: "fvantage", k: "fvantage:bad", x: null, y: 0.8 },
+          ],
+        },
+      },
+    })!;
+    const c = parsed.cameras.main;
+    expect(c.items.map((i) => i.k)).toEqual(["fpath", "fpath:predicted", "fgoal", "fsearch", "fvantage"]);
+    const b = new DrawOpBuffer();
+    layoutAr(c, rect, opts({ avoid: "blocked" }), b);
+    const ops = b.ops.slice(0, b.n);
+    const area = ops.find((o) => o.k === "fsearch")!;
+    expect(area).toMatchObject({ kind: "poly", closed: true, color: "#22D3EE", alpha: 0.4, n: 4 });
+    expect([area.pts[0], area.pts[1]]).toEqual([0.4 * 1280, 60 + 0.6 * 720]);
+    expect(ops.find((o) => o.k === "fvantage")).toMatchObject({ kind: "circle", x: 0.3 * 1280, y: 60 + 0.8 * 720 });
+    // The subject's path is never painted with the vehicle's avoid state.
+    expect(ops.find((o) => o.k === "fpath:predicted")!.color).toBe("#22D3EE");
+    expect(ops.find((o) => o.k === "fpath")!.color).toBe("#EF4444");
+    expect(ops.some((o) => o.k.startsWith("fpath:predicted#d"))).toBe(false);
+    // The motion flag hides them.
+    expect(keys({ groups: { route: true, motion: false } }, c)).toEqual([]);
+  });
+
+  it("takes the goal's state from the vehicle path, not the predicted one", () => {
+    const c: ArCamera = {
+      ...cam,
+      items: [
+        { t: "fpath", k: "fpath:predicted", state: "clear", pts: [[0.4, 0.6], [0.45, 0.6]] },
+        { t: "fpath", k: "fpath", state: "blocked", pts: [[0.5, 0.9], [0.5, 0.7]] },
+        { t: "fgoal", k: "fgoal", x: 0.5, y: 0.7 },
+      ],
+    };
+    const b = new DrawOpBuffer();
+    layoutAr(c, rect, opts({ avoid: null }), b);
+    expect(b.ops.slice(0, b.n).find((o) => o.k === "fgoal")!.color).toBe("#EF4444");
+  });
+
   it("keeps edge arrows inside the rect inset", () => {
     for (const ang of [0, 1, 2.6, Math.PI, -1.2]) {
       const c: ArCamera = { ...cam, items: [{ t: "edge", k: "edge:home", of: "home", seq: null, ang, distM: 35 }] };
