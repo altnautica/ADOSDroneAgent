@@ -317,6 +317,32 @@ fn full_ground_copter_flow() {
     assert_eq!(e2.wizard_state(G), WizardState::Done);
 }
 
+/// Run `ados_profile` on its own and apply it; the battery actions written.
+fn apply_profile(params: std::collections::BTreeMap<String, f32>) -> (f32, f32) {
+    let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, params);
+    assert_eq!(s.e.run_step(G, "ados_profile", s.now)["ok"], json!(true));
+    s.wait_step("ados_profile", StepState::WaitingUser);
+    s.act(G, "ados_profile", "apply", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 10_000);
+    (s.param("BATT_FS_LOW_ACT"), s.param("BATT_FS_CRT_ACT"))
+}
+
+#[test]
+fn ados_profile_sets_land_on_a_copter_without_gnss() {
+    // GNSS: low = RTL, critical = Land.
+    let mut p = ap_copter_params();
+    p.insert("EK3_SRC1_POSXY".into(), 3.0);
+    assert_eq!(apply_profile(p), (2.0, 1.0));
+    // External nav as the position source: Land for both, since RTL climbs.
+    let mut p = ap_copter_params();
+    p.insert("EK3_SRC1_POSXY".into(), 6.0);
+    assert_eq!(apply_profile(p), (1.0, 1.0));
+    // GPS disabled.
+    let mut p = ap_copter_params();
+    p.insert("GPS1_TYPE".into(), 0.0);
+    assert_eq!(apply_profile(p), (1.0, 1.0));
+}
+
 #[test]
 fn active_step_names_the_running_step() {
     let mut s = Sim::copter();

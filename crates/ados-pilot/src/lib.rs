@@ -14,6 +14,7 @@
 //! router's state socket (mission state).
 
 pub mod authority;
+pub mod batt_failsafe;
 pub mod config;
 pub mod core;
 pub mod events;

@@ -167,14 +167,29 @@ impl Pilot {
         self.params_ms = now_ms;
         let Some(fw) = self.fc.firmware else { return };
         let class = self.fc.vehicle_class();
-        // The flow and rangefinder rules read ArduPilot parameters only.
-        let sensors = (fw == crate::fc_profile::Firmware::Ardupilot)
+        // The flow, rangefinder and battery-failsafe rules read ArduPilot
+        // parameters only.
+        let ardupilot = fw == crate::fc_profile::Firmware::Ardupilot;
+        let sensors = ardupilot
             .then(crate::fc_sensor_profile::param_names)
             .unwrap_or_default();
-        let names: Vec<&str> = crate::fc_profile::all_names(fw, class)
+        let batt = if ardupilot {
+            crate::batt_failsafe::PARAMS
+        } else {
+            &[]
+        };
+        let batt_legacy = if ardupilot {
+            crate::batt_failsafe::LEGACY_PARAMS
+        } else {
+            &[]
+        };
+        let mut names: Vec<&str> = crate::fc_profile::all_names(fw, class)
             .chain(EXTRA_PARAMS.iter().copied())
+            .chain(batt.iter().chain(batt_legacy).copied())
             .chain(sensors.iter().map(String::as_str))
             .collect();
+        names.sort_unstable();
+        names.dedup();
         for n in names {
             if !self.fc.params.contains_key(n) {
                 let m = self.tx().param_request(n);

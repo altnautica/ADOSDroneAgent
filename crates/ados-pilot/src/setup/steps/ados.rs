@@ -1,11 +1,13 @@
 //! `ados_profile`: the FC parameter profile ADOS Pilot depends on (one table
-//! with the pilot's readiness check), and `ados_intro`: "Meet ADOS Pilot",
-//! where the operator chooses the control mode.
+//! with the pilot's readiness check; the battery actions follow
+//! [`crate::batt_failsafe::recommended`], Land for both on a multirotor that
+//! navigates without GNSS), and `ados_intro`: "Meet ADOS Pilot", where the
+//! operator chooses the control mode.
 
 use ados_protocol::pilot::VehicleClass;
 use serde_json::{json, Map, Value};
 
-use crate::fc_profile::{fc_profile, Firmware};
+use crate::fc_profile::{fc_profile, Firmware, ProfileParam};
 use crate::setup::fcstate::{Class, Fw};
 use crate::setup::out::Effect;
 use crate::setup::schema::{obj, Action};
@@ -41,11 +43,12 @@ impl Step for AdosProfile {
     fn begin(&mut self, cx: &mut Cx) {
         self.core = StepCore::default();
         self.writing = false;
+        let class = vehicle_class(cx.adapter.class);
         let rows: Vec<Value> = firmware(cx.adapter.fw)
-            .map(|f| fc_profile(f, vehicle_class(cx.adapter.class)))
+            .map(|f| fc_profile(f, class))
             .unwrap_or(&[])
             .iter()
-            .map(|r| json!({"name": r.name, "value": r.value}))
+            .map(|r| json!({"name": r.name, "value": row_value(cx, r)}))
             .collect();
         self.core.args.insert("params".into(), Value::Array(rows));
         self.core.wait_user(vec![Action::primary("apply")]);
@@ -88,8 +91,9 @@ impl Step for AdosProfile {
                 .find(|n| cx.params.has(n));
             match name {
                 Some(n) => {
-                    cx.params.set(n, row.value);
-                    self.applied.push(json!({"name": n, "value": row.value}));
+                    let v = row_value(cx, row);
+                    cx.params.set(n, v);
+                    self.applied.push(json!({"name": n, "value": v}));
                 }
                 None => self.absent.push(json!(row.name)),
             }
@@ -98,6 +102,13 @@ impl Step for AdosProfile {
         self.core.running();
         Ok(())
     }
+}
+
+/// The value to write for a profile row. The FC's active EKF source set is
+/// unknown here, so the boot set (1) stands for it.
+fn row_value(cx: &Cx, row: &ProfileParam) -> f32 {
+    let free = crate::batt_failsafe::gnss_free(|n| cx.params.get(n), 1);
+    crate::batt_failsafe::profile_value(row.name, row.value, vehicle_class(cx.adapter.class), free)
 }
 
 #[derive(Default)]
