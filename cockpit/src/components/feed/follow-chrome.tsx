@@ -5,12 +5,15 @@
 // holds while follow-me reports a non-idle phase, or while a target is
 // designated with the follow skill installed; outside it only the chip shows,
 // and only while a target is designated. The re-acquired toast fires from the
-// nav stream's `follow.reacquired` events whatever the mode.
+// nav stream's `follow.reacquired` events whatever the mode. While follow-me
+// holds for the operator, the waiting prompt drops from the strip in the range
+// panel's place.
 
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { FollowRail } from "@/components/feed/follow-rail";
+import { FollowAwaitPrompt } from "@/components/feed/follow-await-prompt";
 import { FollowRangePanel } from "@/components/feed/follow-range-panel";
 import { WhatsLockedChip } from "@/components/feed/whats-locked-chip";
 import { useFollowSkill } from "@/hooks/use-follow-skill";
@@ -21,6 +24,7 @@ import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
 import type { RosterCamera } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
+import { FOLLOW_FRESH_MS } from "@/shared/hud/target-state";
 import { useFeedStore } from "@/stores/feed-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
@@ -53,6 +57,7 @@ export function FollowStrip({
   const pip = pipCameraId ? (cameras.find((c) => c.id === pipCameraId) ?? null) : null;
   const swapLabel = main && pip ? `${cameraLabel(main).toUpperCase()} ⇄ ${cameraLabel(pip).toUpperCase()}` : null;
   const m = followPanelModel(follow?.data ?? null, followAgeMs);
+  const awaiting = follow?.data.phase === "holding-await-operator" && followAgeMs <= FOLLOW_FRESH_MS;
 
   return (
     <div className="pointer-events-none relative flex h-full w-full items-center justify-center gap-[8px]" data-zone="follow_strip">
@@ -84,7 +89,11 @@ export function FollowStrip({
           />
         </div>
       ) : null}
-      {following && panelOpen ? (
+      {awaiting ? (
+        <div className="pointer-events-none absolute left-1/2 top-[calc(100%+8px)] z-10 -translate-x-1/2">
+          <FollowAwaitPrompt widthClass={widthClass} />
+        </div>
+      ) : following && panelOpen ? (
         <div className="pointer-events-auto absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2">
           <FollowRangePanel follow={follow?.data ?? null} ageMs={followAgeMs} widthClass={widthClass === "compact" ? "medium" : widthClass} />
         </div>

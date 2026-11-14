@@ -3,7 +3,8 @@
 // the ±2σ interval bar, the target geometry, and the range cues with the
 // pipeline latency and the re-acquire mode; height above ground is the bottom
 // row's alone. Rows by width class: one merged line at compact, two rows at
-// medium, four above.
+// medium, four above; while the subject is sought, the recovery line (seconds
+// left, the vantage state, what hides the subject) sits under the range.
 
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
@@ -58,6 +59,7 @@ export function FollowRangePanel({
         </span>
         <span className={cn("text-[11px] font-semibold tracking-hud-tag", PHASE_CLASS[m.phaseTone])}>{m.phase}</span>
       </div>
+      {m.recovery ? <div className="text-[12px] text-hud-coast">{m.recovery}</div> : null}
       <div className="flex items-center gap-[8px]">
         <svg width={160} height={10} className="shrink-0" aria-hidden>
           <rect x={0} y={3} width={160} height={4} rx={2} fill="var(--hud-hair)" />

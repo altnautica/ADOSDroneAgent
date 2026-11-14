@@ -6,7 +6,7 @@
 //
 // Frames: `{kind: "pose"|"scan"|"nav"|"follow"|"map", ts_ms, data}` carry the
 // source payload verbatim; `{kind: "follow_event", topic, data}` carries a
-// discrete `follow.reacquired` / `follow.lost`; `{kind: "keepalive"}` only
+// discrete `follow.reacquired` / `follow.lost` / `follow.stopped`; `{kind: "keepalive"}` only
 // proves the socket is alive. A node with nothing publishing simply leaves the
 // store empty, and every surface reading it shows its absent state.
 //

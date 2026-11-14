@@ -28,16 +28,20 @@ describe("whatsLocked", () => {
   it("a fresh follow phase wins over the lock words", () => {
     expect(whatsLocked({ ...base, follow: follow({ phase: "following" }) }).word).toBe("Following");
     expect(whatsLocked({ ...base, follow: follow({ phase: "acquiring" }) }).word).toBe("Acquiring");
-    expect(whatsLocked({ ...base, follow: follow({ phase: "coasting", coast_remaining_s: 1.43 }) })).toMatchObject({
-      word: "Coasting 1.4 s",
+    expect(whatsLocked({ ...base, follow: follow({ phase: "predicting", reacquire_remaining_s: 18.4 }) })).toMatchObject({
+      word: "Predicting 19 s",
       tone: "coast",
     });
-    expect(whatsLocked({ ...base, follow: follow({ phase: "searching" }) }).tone).toBe("coast");
+    expect(whatsLocked({ ...base, follow: follow({ phase: "repositioning", reacquire_remaining_s: 12 }) }).word).toBe("Moving to look 12 s");
+    expect(whatsLocked({ ...base, follow: follow({ phase: "searching" }) })).toMatchObject({ word: "Searching", tone: "coast" });
     expect(whatsLocked({ ...base, follow: follow({ phase: "holding", hold_reason: "HOLD_NO_RANGE" }) })).toMatchObject({
       word: "Holding · No range",
       tone: "warn",
     });
-    expect(whatsLocked({ ...base, follow: follow({ phase: "lost" }) })).toMatchObject({ word: "Lost", tone: "crit" });
+    expect(whatsLocked({ ...base, follow: follow({ phase: "holding-await-operator", hold_reason: "search-exhausted" }) })).toMatchObject({
+      word: "Waiting for you",
+      tone: "crit",
+    });
   });
 
   it("ignores a stale or idle follow report", () => {
@@ -46,7 +50,7 @@ describe("whatsLocked", () => {
   });
 
   it("shows a re-acquire for 4 s", () => {
-    const event = { topic: "follow.reacquired" as const, trackId: 12, similarity: 0.862, gapS: 1.8 };
+    const event = { topic: "follow.reacquired" as const, trackId: 12, similarity: 0.862, gapS: 1.8, mahalanobis: null, phase: "searching" as const };
     expect(whatsLocked({ ...base, event, eventAgeMs: 100 }).word).toBe("Re-acquired · 0.86");
     expect(whatsLocked({ ...base, event, eventAgeMs: REACQUIRED_WORD_MS + 1 }).word).toBe("Locked");
   });

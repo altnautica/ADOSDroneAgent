@@ -102,7 +102,9 @@ const EMPTY = {
  * The store change one frame makes. Pure, so the reducer rules are testable:
  * a pose extends the SLAM trail; a `follow.reacquired` moves the designation
  * to the re-acquired track on the same camera (follow-me already designated
- * it on the agent); a `follow.lost` clears the designation.
+ * it on the agent); a `follow.lost` that holds for the operator keeps the
+ * designation (searching again seeks the same subject; picking a target
+ * replaces it), and any other `follow.lost` or a `follow.stopped` clears it.
  */
 export function reduceNavFrame(
   s: Pick<NavStreamState, "trail" | "designated">,
@@ -131,6 +133,7 @@ export function reduceNavFrame(
         const designated = s.designated ? { ...s.designated, trackId: ev.trackId } : s.designated;
         return { event: { data: ev, at }, designated };
       }
+      if (ev.topic === "follow.lost" && ev.awaitingOperator) return { event: { data: ev, at } };
       return { event: { data: ev, at }, designated: null };
     }
   }

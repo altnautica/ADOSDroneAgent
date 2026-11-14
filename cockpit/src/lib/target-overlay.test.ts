@@ -79,9 +79,9 @@ describe("nextGhost", () => {
     expect(g).toEqual([{ t: 1000, x: 120, y: 130 }]);
   });
 
-  it("keeps the path unchanged while coasting", () => {
+  it("keeps the path unchanged while the lock is lost", () => {
     const prev = [{ t: 1000, x: 120, y: 130 }];
-    expect(nextGhost(prev, resolved(item("COASTING", { x: 0, y: 0, w: 1, h: 1 })), 1100)).toBe(prev);
+    expect(nextGhost(prev, resolved(item("PREDICTING", { x: 0, y: 0, w: 1, h: 1 })), 1100)).toBe(prev);
   });
 });
 

@@ -27,16 +27,25 @@ describe("reduceNavFrame", () => {
   });
 
   it("moves the designation to a re-acquired track on the same camera", () => {
-    const ev = { topic: "follow.reacquired" as const, trackId: 15, similarity: 0.86, gapS: 1.8 };
+    const ev = { topic: "follow.reacquired" as const, trackId: 15, similarity: 0.86, gapS: 1.8, mahalanobis: 0.9, phase: "searching" as const };
     const r = reduceNavFrame({ trail: [], designated }, { kind: "follow_event", data: ev }, 5);
     expect(r.designated).toEqual({ ...designated, trackId: 15 });
     expect(r.event).toEqual({ data: ev, at: 5 });
     expect(reduceNavFrame({ trail: [], designated: null }, { kind: "follow_event", data: ev }, 5).designated).toBeNull();
   });
 
-  it("clears the designation on follow.lost", () => {
-    const ev = { topic: "follow.lost" as const, trackId: 12, reason: "timeout" };
-    expect(reduceNavFrame({ trail: [], designated }, { kind: "follow_event", data: ev }, 5).designated).toBeNull();
+  it("keeps the designation while follow-me holds for the operator", () => {
+    const ev = { topic: "follow.lost" as const, trackId: 12, reason: "search_exhausted", awaitingOperator: true, holdNe: [7.9, 2.4] as [number, number] };
+    const r = reduceNavFrame({ trail: [], designated }, { kind: "follow_event", data: ev }, 5);
+    expect(r.event).toEqual({ data: ev, at: 5 });
+    expect("designated" in r).toBe(false);
+  });
+
+  it("clears the designation on any other follow.lost and on follow.stopped", () => {
+    const lost = { topic: "follow.lost" as const, trackId: 12, reason: "lock_lost", awaitingOperator: false, holdNe: null };
+    expect(reduceNavFrame({ trail: [], designated }, { kind: "follow_event", data: lost }, 5).designated).toBeNull();
+    const stopped = { topic: "follow.stopped" as const, reason: "operator" };
+    expect(reduceNavFrame({ trail: [], designated }, { kind: "follow_event", data: stopped }, 5).designated).toBeNull();
   });
 });
 

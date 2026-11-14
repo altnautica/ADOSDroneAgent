@@ -1,10 +1,13 @@
 // The what's-locked chip (13-hud-v2 §8.4): who is designated, the one state
 // word that matters now, and the live confidence. The first matching rule
 // wins: a stale feed, then a fresh follow phase, then a re-acquire within the
-// last 4 s, then the tracker's own lock words. Pure.
+// last 4 s, then the tracker's own lock words. A recovering follow (predicting,
+// moving to look, searching) carries the seconds left of its search budget;
+// holding for the operator reads `Waiting for you`. Pure.
 
 import { classWord, FOLLOW_FRESH_MS, holdReasonWord, type DesignatedRef, type TargetDetection } from "@/shared/hud/target-state";
 import type { FollowEvent, FollowState } from "@/shared/hud/nav-types";
+import { specText } from "@/shared/hud/spec-text";
 
 /** How long the chip keeps the re-acquired word. */
 export const REACQUIRED_WORD_MS = 4000;
@@ -48,16 +51,19 @@ export function whatsLocked(i: WhatsLockedInput): WhatsLocked {
         return out("Following", "track");
       case "acquiring":
         return out("Acquiring", "track");
-      case "coasting":
-        return out(`Coasting ${(f.coastRemainingS ?? 0).toFixed(1)} s`, "coast");
-      case "searching":
-        return out("Searching", "coast");
+      case "predicting":
+      case "repositioning":
+      case "searching": {
+        const word = specText(`follow.phase.${f.phase}`);
+        const left = f.reacquireRemainingS;
+        return out(left !== null ? `${word} ${Math.max(0, Math.ceil(left))} s` : word, "coast");
+      }
       case "holding": {
         const reason = holdReasonWord(f.holdReason);
         return out(reason ? `Holding · ${reason.charAt(0)}${reason.slice(1).toLowerCase()}` : "Holding", "warn");
       }
-      case "lost":
-        return out("Lost", "crit");
+      case "holding-await-operator":
+        return out(specText("follow.phase.holding-await-operator"), "crit");
     }
   }
 

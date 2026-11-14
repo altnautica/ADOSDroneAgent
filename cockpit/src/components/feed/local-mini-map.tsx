@@ -3,8 +3,9 @@
 // tiles (`/api/v1/map/live`, map_server greys recoloured in the HUD ink),
 // the SLAM trail from pose frames (dashed while degraded, broken where lost),
 // the scan in the map frame, the origin, the pilot's planned path and goal
-// (dashed, red while blocked), the follow target (dashed while
-// coasting or searching, with a 1 s velocity tick) and the drone from the
+// (dashed, red while blocked), the follow target (with a 1 s velocity tick;
+// dashed while it is sought, with its search ellipse, the predicted path and
+// the vantage point) and the drone from the
 // FC's LOCAL_POSITION_NED. Drag pans (the view recentres on the drone 10 s
 // later), the wheel and the +/− buttons zoom. A long-press or a right-click
 // picks a point for Fly Here, converted to lat/lon through the FC's EKF
@@ -213,6 +214,37 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
               fill="none"
               strokeWidth={2}
             >
+              {scene.target.searchArea ? (
+                <ellipse
+                  data-testid="local-minimap-search"
+                  cx={0}
+                  cy={0}
+                  rx={scene.target.searchArea.rxPx}
+                  ry={scene.target.searchArea.ryPx}
+                  transform={`translate(${scene.target.searchArea.sx} ${scene.target.searchArea.sy}) rotate(${(scene.target.searchArea.rotationRad * 180) / Math.PI})`}
+                  fill="currentColor"
+                  fillOpacity={0.15}
+                  strokeWidth={1}
+                  strokeDasharray="4 3"
+                />
+              ) : null}
+              {scene.target.predictedPath.length >= 2 ? (
+                <polyline
+                  points={scene.target.predictedPath.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ")}
+                  strokeWidth={1.5}
+                  strokeDasharray="2 3"
+                />
+              ) : null}
+              {scene.target.vantage ? (
+                <rect
+                  data-testid="local-minimap-vantage"
+                  x={scene.target.vantage.sx - 4}
+                  y={scene.target.vantage.sy - 4}
+                  width={8}
+                  height={8}
+                  transform={`rotate(45 ${scene.target.vantage.sx} ${scene.target.vantage.sy})`}
+                />
+              ) : null}
               {scene.target.tickX !== null && scene.target.tickY !== null ? (
                 <line x1={scene.target.sx} y1={scene.target.sy} x2={scene.target.tickX} y2={scene.target.tickY} />
               ) : null}

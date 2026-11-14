@@ -1,8 +1,9 @@
 // The follow controls (L3), a row in the follow strip under the top bar:
 // FOLLOW / the tracking close chip, the FOLLOW | ORBIT pattern with the avoidance chip,
-// the STRICT | SMART re-acquire toggle, the FRONT ⇄ BELLY camera swap and
-// REC. Hold, return home and land are the left column's alone; the rail never
-// repeats them. Kill is not here; it stays guarded in the top bar.
+// the STRICT | SMART re-acquire toggle, the recovery settings (when unsure:
+// FOLLOW | HOLD; the predictive search switch), the FRONT ⇄ BELLY camera swap
+// and REC. Hold, return home and land are the left column's alone; the rail
+// never repeats them. Kill is not here; it stays guarded in the top bar.
 
 import { useState, type ReactNode } from "react";
 import { ArrowLeftRight, Circle, Crosshair, Ellipsis, Square, X } from "lucide-react";
@@ -12,11 +13,13 @@ import { SettingToggle } from "@/components/feed/reacquire-toggle";
 import { Menu, type MenuItem } from "@/components/ui/menu";
 import type { FollowSkill } from "@/hooks/use-follow-skill";
 import { usePilot } from "@/hooks/use-pilot";
+import { useSkillParam } from "@/hooks/use-skill-setting";
 import { startNodeRecording, startRecording, stopNodeRecording, stopRecording } from "@/lib/api";
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { avoidChip, followButton, railButtonPx, railLayout, RAIL_GAP_PX, type RailButton } from "@/lib/follow-rail";
 import { FLIGHT_PX } from "@/lib/flight-layout";
 import { executeSkill, requestSkill, useSkillBusy } from "@/lib/skill-runner";
+import type { Skill } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
 import { specText } from "@/shared/hud/spec-text";
@@ -68,6 +71,28 @@ function RailSlot({
   );
 }
 
+/** The predictive search switch (`predictive_search`), written through the
+ *  plugin config and settled by its echo like every rail setting. */
+function PredictiveToggle({ skill, fallback }: { skill: Skill; fallback: boolean }) {
+  const p = useSkillParam(skill, "predictive_search", fallback);
+  const on = p.value === true;
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={() => p.set(!on)}
+      className={cn(
+        "h-[44px] shrink-0 rounded-md border border-hud-hair bg-white/5 px-[8px] font-mono text-[11px] font-semibold uppercase tracking-[0.06em]",
+        on ? "bg-hud-track/25 text-hud-ink" : "text-hud-ink-2 hover:bg-hud-hair",
+        p.pending && "outline-dashed outline-1 -outline-offset-2 outline-hud-ink",
+      )}
+    >
+      {specText("follow.setting.predictive_search")}
+    </button>
+  );
+}
+
 export function FollowRail({
   widthClass,
   safeHeightPx,
@@ -94,12 +119,16 @@ export function FollowRail({
 
   const modeSetting = follow?.skill.settings?.find((s) => s.key === "reacquire_mode") ?? null;
   const patternSetting = follow?.skill.settings?.find((s) => s.key === "follow_mode") ?? null;
+  const uncertainSetting = follow?.skill.settings?.find((s) => s.key === "uncertain_mode") ?? null;
+  const predictiveParam = follow?.skill.params?.find((p) => p.key === "predictive_search" && p.kind === "boolean") ?? null;
   const avoid = avoidChip(usePilot()?.data.avoidState ?? null);
   const layout = railLayout({
     width: widthClass,
     followInstalled: follow !== null,
     hasPattern: patternSetting !== null,
     hasModeSetting: modeSetting !== null,
+    hasUncertainSetting: uncertainSetting !== null,
+    hasPredictiveSetting: predictiveParam !== null,
     canSwap: swapLabel !== null,
     safeHeightPx,
   });
@@ -158,6 +187,14 @@ export function FollowRail({
       case "mode":
         return follow && modeSetting ? (
           <SettingToggle key={b} skill={follow.skill} setting={modeSetting} className="h-[44px] shrink-0 bg-white/5" />
+        ) : null;
+      case "uncertain":
+        return follow && uncertainSetting ? (
+          <SettingToggle key={b} skill={follow.skill} setting={uncertainSetting} className="h-[44px] shrink-0 bg-white/5" />
+        ) : null;
+      case "predictive":
+        return follow && predictiveParam ? (
+          <PredictiveToggle key={b} skill={follow.skill} fallback={predictiveParam.defaultValue !== false} />
         ) : null;
       case "pattern":
         return follow && patternSetting ? (

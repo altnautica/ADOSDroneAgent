@@ -1,11 +1,18 @@
 // A toggle skill's two-value quick setting as a segmented control (follow-me's
-// STRICT | SMART). A written value awaiting the plugin's echo carries a 1 px
-// dashed outline (13-hud-v2 §8.2 #2); a tap is the whole confirm.
+// STRICT | SMART re-acquire, FOLLOW | HOLD when unsure). A written value
+// awaiting the plugin's echo carries a 1 px dashed outline (13-hud-v2 §8.2
+// #2); a tap is the whole confirm.
 
 import { specText } from "@/shared/hud/spec-text";
 import { useSkillSetting } from "@/hooks/use-skill-setting";
 import type { Skill, SkillSetting } from "@/lib/skills";
 import { cn } from "@/lib/utils";
+
+/** The spec label of the follow-me settings this control knows by key. */
+const LABEL_KEY: Readonly<Record<string, string>> = {
+  reacquire_mode: "target.reacquire_mode",
+  uncertain_mode: "follow.setting.uncertain_mode",
+};
 
 export function SettingToggle({
   skill,
@@ -22,7 +29,7 @@ export function SettingToggle({
   return (
     <div
       role="radiogroup"
-      aria-label={setting.key === "reacquire_mode" ? specText("target.reacquire_mode") : setting.key}
+      aria-label={LABEL_KEY[setting.key] ? specText(LABEL_KEY[setting.key]) : setting.key}
       className={cn("flex overflow-hidden rounded-md border border-hud-hair", vertical ? "flex-col" : "flex-row", className)}
     >
       {setting.values.map((v) => {

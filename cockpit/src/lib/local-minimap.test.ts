@@ -67,7 +67,7 @@ describe("localDrone", () => {
 
 describe("localTarget", () => {
   it("places the follow target with a velocity tick", () => {
-    expect(localTarget({ data: follow({}), ageMs: 0 })).toEqual({
+    expect(localTarget({ data: follow({}), ageMs: 0 })).toMatchObject({
       north: 10,
       east: 20,
       velNorth: 1,
@@ -75,12 +75,21 @@ describe("localTarget", () => {
       dashed: false,
     });
   });
-  it("dashes while coasting or searching", () => {
-    expect(localTarget({ data: follow({ phase: "coasting" }), ageMs: 0 })?.dashed).toBe(true);
-    expect(localTarget({ data: follow({ phase: "searching" }), ageMs: 0 })?.dashed).toBe(true);
+  it("dashes with the search area, vantage and predicted path while the subject is sought", () => {
+    const area = { centerNe: [12, -3] as [number, number], semiMajorM: 3.2, semiMinorM: 1.4, headingDeg: 41 };
+    const path: Array<[number, number]> = [[10, -2], [10.6, -2.4]];
+    for (const phase of ["predicting", "repositioning", "searching"] as const) {
+      const t = localTarget({ data: follow({ phase, searchArea: area, vantageNe: [8, 2.5], predictedPathNe: path }), ageMs: 0 });
+      expect(t).toMatchObject({ dashed: true, searchArea: area, vantageNe: [8, 2.5], predictedPath: path });
+    }
+    expect(localTarget({ data: follow({ searchArea: area, vantageNe: [8, 2.5] }), ageMs: 0 })).toMatchObject({
+      dashed: false,
+      searchArea: null,
+      vantageNe: null,
+    });
   });
-  it("hides a lost, idle, positionless or stale target", () => {
-    expect(localTarget({ data: follow({ phase: "lost" }), ageMs: 0 })).toBeNull();
+  it("hides a target held for the operator, idle, positionless or stale", () => {
+    expect(localTarget({ data: follow({ phase: "holding-await-operator" }), ageMs: 0 })).toBeNull();
     expect(localTarget({ data: follow({ phase: "idle" }), ageMs: 0 })).toBeNull();
     expect(localTarget({ data: follow({ targetNed: null }), ageMs: 0 })).toBeNull();
     expect(localTarget({ data: follow({}), ageMs: 10_000 })).toBeNull();

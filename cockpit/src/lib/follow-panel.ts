@@ -1,9 +1,11 @@
 // The range panel's content (13-hud-v2 §8.1) from the latest `follow.state`:
-// the big range and phase word, the ±2σ interval bar, the geometry line, and
-// the range cues with the pipeline latency and the re-acquire mode. Height
-// above ground is the bottom row's alone: one AGL on screen. Every value
-// reads `—` once the report is older than 2 s, and the phase word then reads
-// STALE. Pure, so the panel is a thin view.
+// the big range and phase word, the recovery line while the subject is sought
+// (seconds left of the search budget, the vantage state, what hides the
+// subject), the ±2σ interval bar, the geometry line, and the range cues with
+// the pipeline latency and the re-acquire mode. Height above ground is the
+// bottom row's alone: one AGL on screen. Every value reads `—` once the report
+// is older than 2 s, and the phase word then reads STALE. Pure, so the panel
+// is a thin view.
 
 import {
   bearing3,
@@ -14,7 +16,7 @@ import {
   type IntervalBar,
   type PhaseTone,
 } from "@/shared/hud/follow-chrome";
-import type { FollowState } from "@/shared/hud/nav-types";
+import { isRecoveryPhase, type FollowState } from "@/shared/hud/nav-types";
 import { FOLLOW_FRESH_MS, formatRange, rangeInterval } from "@/shared/hud/target-state";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -35,6 +37,8 @@ export interface FollowPanelModel {
   latencyWarn: boolean;
   /** The reacquire mode's word (`follow.mode.*`), or null. */
   mode: string | null;
+  /** `18 s · On the way · Behind a trunk or column` while recovering, else null. */
+  recovery: string | null;
 }
 
 export function followPanelModel(f: FollowState | null, ageMs: number): FollowPanelModel {
@@ -65,7 +69,17 @@ export function followPanelModel(f: FollowState | null, ageMs: number): FollowPa
     latency: specText("follow.latency", { v: v?.pipelineLatencyMs != null ? `${Math.round(v.pipelineLatencyMs)} ms` : DASH }),
     latencyWarn: (v?.pipelineLatencyMs ?? 0) > LATENCY_WARN_MS,
     mode: v?.reacquireMode === "smart" || v?.reacquireMode === "strict" ? specText(`follow.mode.${v.reacquireMode}`) : null,
+    recovery: v && isRecoveryPhase(v.phase) ? recoveryLine(v) : null,
   };
+}
+
+function recoveryLine(v: FollowState): string | null {
+  const parts = [
+    v.reacquireRemainingS !== null ? `${Math.max(0, Math.ceil(v.reacquireRemainingS))} s` : null,
+    v.vantageState ? specText(`follow.vantage.${v.vantageState}`) : null,
+    v.occluder ? specText(`follow.occluder.${v.occluder.kind}`) : null,
+  ].filter((p): p is string => p !== null);
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /** The compact single line: `10.2 m ±0.6`. */

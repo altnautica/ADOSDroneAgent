@@ -20,9 +20,9 @@ describe("parseNavFrame", () => {
       kind: "nav",
       data: { mode: "external_nav", activeSet: 1, extnavHealth: "good" },
     });
-    expect(parseNavFrame({ kind: "follow", data: { phase: "coasting", coast_remaining_s: 1.4 } })).toMatchObject({
+    expect(parseNavFrame({ kind: "follow", data: { phase: "searching", reacquire_remaining_s: 18.4, search_step: 1 } })).toMatchObject({
       kind: "follow",
-      data: { phase: "coasting", coastRemainingS: 1.4 },
+      data: { phase: "searching", reacquireRemainingS: 18.4, searchStep: 1 },
     });
     expect(parseNavFrame({ kind: "map", data: {} })?.kind).toBe("map");
   });
@@ -30,10 +30,17 @@ describe("parseNavFrame", () => {
   it("parses discrete follow events from the frame's topic", () => {
     expect(
       parseNavFrame({ kind: "follow_event", topic: "follow.reacquired", data: { track_id: 15, similarity: 0.86, gap_s: 1.8 } }),
-    ).toEqual({ kind: "follow_event", data: { topic: "follow.reacquired", trackId: 15, similarity: 0.86, gapS: 1.8 } });
+    ).toEqual({
+      kind: "follow_event",
+      data: { topic: "follow.reacquired", trackId: 15, similarity: 0.86, gapS: 1.8, mahalanobis: null, phase: null },
+    });
     expect(parseNavFrame({ kind: "follow_event", topic: "follow.lost", data: {} })).toEqual({
       kind: "follow_event",
-      data: { topic: "follow.lost", trackId: null, reason: "lock_lost" },
+      data: { topic: "follow.lost", trackId: null, reason: "lock_lost", awaitingOperator: false, holdNe: null },
+    });
+    expect(parseNavFrame({ kind: "follow_event", topic: "follow.stopped", data: { reason: "operator" } })).toEqual({
+      kind: "follow_event",
+      data: { topic: "follow.stopped", reason: "operator" },
     });
     expect(parseNavFrame({ kind: "follow_event", topic: "follow.reacquired", data: {} })).toBeNull();
     expect(parseNavFrame({ kind: "follow_event", topic: "other", data: {} })).toBeNull();

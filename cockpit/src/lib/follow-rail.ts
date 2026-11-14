@@ -1,18 +1,18 @@
 // The following-mode chrome's pure rules (13-hud-v2 §8.2, §8.4, §11): which
 // right-rail buttons a width class shows and how big they are, the follow
 // button's word, a plugin setting's pending/echo state (STRICT | SMART,
-// FOLLOW | ORBIT, a slider value), the pilot's avoidance chip, the active
-// skill's chip detail (`ORBIT 8 m`), the rail's bottom clearance over the
-// radar, and the re-acquired toast text. DOM-free, so every rule is
-// unit-tested.
+// FOLLOW | ORBIT, the recovery settings, a slider value), the pilot's
+// avoidance chip, the active skill's chip detail (`ORBIT 8 m`), the rail's
+// bottom clearance over the radar, and the re-acquired toast text. DOM-free,
+// so every rule is unit-tested.
 
 import { BOTTOM_CHROME_CLEARANCE_PX, GLOVE_TOUCH_SCALE, type WidthClass } from "@/lib/cockpit-layout";
 import { specText } from "@/shared/hud/spec-text";
 import type { ParamValue } from "@/lib/skills";
 import type { AvoidState } from "@/shared/hud/cockpit-frames";
-import type { FollowEvent, FollowPhase } from "@/shared/hud/nav-types";
+import type { FollowEvent, FollowPhase, OccluderKind } from "@/shared/hud/nav-types";
 
-export type RailButton = "follow" | "pattern" | "mode" | "camSwap" | "rec";
+export type RailButton = "follow" | "pattern" | "mode" | "uncertain" | "predictive" | "camSwap" | "rec";
 
 /** A setting write with no echo after this reverts with a warning (§8.2 #2). */
 export const SETTING_ECHO_TIMEOUT_MS = 3000;
@@ -40,6 +40,10 @@ export interface RailInput {
   hasPattern: boolean;
   /** The follow skill carries the re-acquire setting. */
   hasModeSetting: boolean;
+  /** The follow skill carries the when-unsure setting (`uncertain_mode`, FOLLOW | HOLD). */
+  hasUncertainSetting: boolean;
+  /** The follow skill carries the predictive search switch (`predictive_search`). */
+  hasPredictiveSetting: boolean;
   /** A second concurrent leg is in the PiP to swap with. */
   canSwap: boolean;
   /** The Feed region's height, for the compact fold. */
@@ -61,6 +65,8 @@ export function railLayout(i: RailInput): RailLayout {
   if (i.followInstalled) top.push("follow");
   if (i.followInstalled && i.hasPattern) top.push("pattern");
   if (i.followInstalled && i.hasModeSetting) top.push("mode");
+  if (i.followInstalled && i.hasUncertainSetting) top.push("uncertain");
+  if (i.followInstalled && i.hasPredictiveSetting) top.push("predictive");
   const extra: RailButton[] = [];
   if (i.canSwap) extra.push("camSwap");
   extra.push("rec");
@@ -143,8 +149,10 @@ export function avoidChip(state: AvoidState | null): { text: string; tone: "ok" 
   }
 }
 
-/** `Re-acquired #15 · 0.86 · 1.8 s gap` for a `follow.reacquired` event. */
-export function reacquiredToastText(ev: FollowEvent): string | null {
+/** `Re-acquired #15 · 0.86 · 1.8 s gap` for a `follow.reacquired` event, with
+ *  what hid the subject (`· Behind a trunk or column`) when the search knew. */
+export function reacquiredToastText(ev: FollowEvent, occluder: OccluderKind | null = null): string | null {
   if (ev.topic !== "follow.reacquired") return null;
-  return `Re-acquired #${ev.trackId} · ${ev.similarity.toFixed(2)} · ${ev.gapS.toFixed(1)} s gap`;
+  const text = `Re-acquired #${ev.trackId} · ${ev.similarity.toFixed(2)} · ${ev.gapS.toFixed(1)} s gap`;
+  return occluder ? `${text} · ${specText(`follow.occluder.${occluder}`)}` : text;
 }

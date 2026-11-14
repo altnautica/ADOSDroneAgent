@@ -4,13 +4,14 @@
 // clock (`demoScene`), so every surface tells the same story at once: a
 // mission leg (the pilot reports the flight controller's mission as owner,
 // follow-me is idle), then a follow-me cycle (the pilot reports the follow-me
-// skill as owner) whose phase steps acquiring → following → coasting →
-// searching → re-acquired → lost every 4 s on the demo detection stream's
-// track 12. Throughout, the vehicle circles the origin in the local frame with
+// skill as owner) whose phase steps acquiring → following → predicting →
+// moving to look → searching → re-acquired → holding for the operator, every
+// 4 s, on the demo detection stream's track 12. Throughout, the vehicle
+// circles the origin in the local frame with
 // a matching SLAM pose and a planar scan of a 6 m room; vision-nav reports
 // external nav; the map status climbs. Loaded only when `isDemoMode()`.
 
-import type { FollowPhase } from "@/shared/hud/nav-types";
+import { isRecoveryPhase, type FollowPhase } from "@/shared/hud/nav-types";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 const TICK_MS = 100;
@@ -21,7 +22,10 @@ const FRAME_W = 640;
 const FRAME_H = 480;
 const TRACK_ID = 12;
 
-const PHASES = ["acquiring", "following", "coasting", "searching", "following", "lost"] as const;
+const PHASES = ["acquiring", "following", "predicting", "repositioning", "searching", "following", "holding-await-operator"] as const;
+/** The demo recovery's search budget (s); predicting, repositioning and
+ *  searching spend it. */
+const SEARCH_BUDGET_S = 25;
 /** One follow-me cycle; the mission leg before it lasts as long. */
 const FOLLOW_CYCLE_MS = PHASES.length * PHASE_MS;
 export const DEMO_CYCLE_MS = 2 * FOLLOW_CYCLE_MS;
@@ -89,11 +93,17 @@ class MockNavStream {
       if (index === 0) {
         store.designate({ cameraId: CAMERA_ID, trackId: TRACK_ID, bbox: { x: 0, y: 0, width: 0, height: 0 } });
       }
-      if (index === 4) {
-        store.ingest({ kind: "follow_event", data: { topic: "follow.reacquired", trackId: TRACK_ID, similarity: 0.86, gapS: 1.8 } });
-      }
       if (index === 5) {
-        store.ingest({ kind: "follow_event", data: { topic: "follow.lost", trackId: TRACK_ID, reason: "reacquire_timeout" } });
+        store.ingest({
+          kind: "follow_event",
+          data: { topic: "follow.reacquired", trackId: TRACK_ID, similarity: 0.86, gapS: 13.8, mahalanobis: 1.2, phase: "searching" },
+        });
+      }
+      if (index === 6) {
+        store.ingest({
+          kind: "follow_event",
+          data: { topic: "follow.lost", trackId: TRACK_ID, reason: "search_exhausted", awaitingOperator: true, holdNe: null },
+        });
       }
       this.lastPhase = index;
     }
@@ -107,6 +117,13 @@ class MockNavStream {
     const s = Math.sin(yaw);
     const range = 9 + 2 * Math.sin(t * 0.3);
     const inPhase = demo.scene === "follow" ? demo.inPhaseS : 0;
+    const recovering = isRecoveryPhase(phase);
+    const predicted: [number, number] = [x + range * Math.cos(yaw), y + range * Math.sin(yaw)];
+    // The vantage point: a third of the way from the drone to the prediction.
+    const vantage: [number, number] | null =
+      phase === "repositioning" || phase === "searching"
+        ? [x + (predicted[0] - x) / 3 + 2 * s, y + (predicted[1] - y) / 3 - 2 * c]
+        : null;
 
     store.ingest({
       kind: "pose",
@@ -134,7 +151,7 @@ class MockNavStream {
     store.ingest({
       kind: "follow",
       data: {
-        active: phase !== "lost" && phase !== "idle",
+        active: phase !== "idle",
         phase,
         trackId: TRACK_ID,
         confidence: 0.9,
@@ -148,17 +165,33 @@ class MockNavStream {
         aglM: 4.1,
         aglSource: "rng",
         reacquireMode: "smart",
-        coastRemainingS: phase === "coasting" ? Math.max(0, 4 - inPhase) : null,
+        reacquireRemainingS: recovering ? Math.max(0, SEARCH_BUDGET_S - (index - 2) * (PHASE_MS / 1000) - inPhase) : null,
+        searchBudgetS: recovering ? SEARCH_BUDGET_S : null,
+        searchStep: phase === "searching" ? Math.min(2, Math.floor(inPhase / 1.5)) : null,
+        searchArea: recovering
+          ? { centerNe: predicted, semiMajorM: 2 + inPhase, semiMinorM: 1 + inPhase / 3, headingDeg: (yaw * 180) / Math.PI }
+          : null,
+        predictedPathNe: recovering
+          ? [0, 1, 2, 3].map((k): [number, number] => [predicted[0] + 0.7 * k * c, predicted[1] + 0.7 * k * s])
+          : null,
+        vantageNe: vantage,
+        vantageState: phase === "repositioning" ? "enroute" : phase === "searching" ? "arrived" : null,
+        occluder: phase === "searching" ? { ne: [predicted[0] - c, predicted[1] - s], kind: "narrow" } : null,
+        holdNe: phase === "holding-await-operator" ? [x, y] : null,
+        uncertainMode: "follow",
+        predictiveSearch: true,
+        operatorResumeSeq: 0,
+        outpaced: false,
+        speedLimitMps: null,
         pipelineLatencyMs: 85,
-        holdReason: null,
+        holdReason: phase === "holding-await-operator" ? "search-exhausted" : null,
         bearingDeg: ((yaw * 180) / Math.PI + 30 + 360) % 360,
         depressionDeg: 22,
-        targetNed: [x + range * Math.cos(yaw), y + range * Math.sin(yaw)],
+        targetNed: predicted,
         targetVelNed: [1.4 * c, 1.4 * s],
-        predictedBbox:
-          phase === "coasting" || phase === "searching"
-            ? { cameraId: CAMERA_ID, frameW: FRAME_W, frameH: FRAME_H, x: 300 + 40 * inPhase, y: 180, w: 60, h: 150 }
-            : null,
+        predictedBbox: recovering
+          ? { cameraId: CAMERA_ID, frameW: FRAME_W, frameH: FRAME_H, x: 300 + 40 * inPhase, y: 180, w: 60, h: 150 }
+          : null,
       },
     });
     store.ingest({

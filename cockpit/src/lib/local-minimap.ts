@@ -15,6 +15,7 @@ import {
 } from "@/shared/hud/local-frame";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import {
+  followSceneTarget,
   localPlan,
   viewCentre,
   type LocalSceneDrone,
@@ -85,18 +86,12 @@ export function localDrone(
   return null;
 }
 
-/** The follow target in the local frame; dashed while coasting or searching. */
+/** The follow target in the local frame: dashed, with its search area,
+ *  vantage point and predicted path, while the lock is lost and the subject is
+ *  sought; hidden while idle, holding for the operator or stale. */
 export function localTarget(follow: { data: FollowState; ageMs: number } | null): LocalSceneTarget | null {
   if (!follow || follow.ageMs > TARGET_FRESH_MS) return null;
-  const f = follow.data;
-  if (!f.targetNed || f.phase === "idle" || f.phase === "lost") return null;
-  return {
-    north: f.targetNed[0],
-    east: f.targetNed[1],
-    velNorth: f.targetVelNed?.[0] ?? null,
-    velEast: f.targetVelNed?.[1] ?? null,
-    dashed: f.phase === "coasting" || f.phase === "searching",
-  };
+  return followSceneTarget(follow.data);
 }
 
 export interface LocalSceneSources {

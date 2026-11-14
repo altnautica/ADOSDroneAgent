@@ -13,7 +13,15 @@ import {
   settingDisplay,
 } from "@/lib/follow-rail";
 
-const rail = { followInstalled: true, hasPattern: false, hasModeSetting: true, canSwap: true, safeHeightPx: 600 };
+const rail = {
+  followInstalled: true,
+  hasPattern: false,
+  hasModeSetting: true,
+  hasUncertainSetting: false,
+  hasPredictiveSetting: false,
+  canSwap: true,
+  safeHeightPx: 600,
+};
 
 describe("railLayout", () => {
   it("shows the follow group and the camera buttons at every class", () => {
@@ -41,6 +49,20 @@ describe("railLayout", () => {
     expect(railLayout({ ...rail, width: "medium", followInstalled: false, canSwap: false }).buttons).toEqual(["rec"]);
     expect(railLayout({ ...rail, width: "medium", hasModeSetting: false }).buttons).toEqual(["follow", "camSwap", "rec"]);
   });
+
+  it("adds the recovery settings to the follow group when the skill carries them", () => {
+    expect(railLayout({ ...rail, width: "medium", hasUncertainSetting: true, hasPredictiveSetting: true }).buttons).toEqual([
+      "follow",
+      "mode",
+      "uncertain",
+      "predictive",
+      "camSwap",
+      "rec",
+    ]);
+    expect(
+      railLayout({ ...rail, width: "medium", followInstalled: false, hasUncertainSetting: true, hasPredictiveSetting: true }).buttons,
+    ).toEqual(["camSwap", "rec"]);
+  });
 });
 
 describe("rail sizes", () => {
@@ -61,7 +83,8 @@ describe("followButton", () => {
     expect(followButton(false, "idle", true)).toBe("follow");
     expect(followButton(false, null, false)).toBeNull();
     expect(followButton(true, "idle", false)).toBe("tracking");
-    expect(followButton(false, "coasting", false)).toBe("tracking");
+    expect(followButton(false, "searching", false)).toBe("tracking");
+    expect(followButton(false, "holding-await-operator", false)).toBe("tracking");
   });
 });
 
@@ -97,9 +120,15 @@ describe("avoidChip", () => {
 
 describe("reacquiredToastText", () => {
   it("matches the T12 vector", () => {
-    expect(reacquiredToastText({ topic: "follow.reacquired", trackId: 15, similarity: 0.862, gapS: 1.8 })).toBe(
-      "Re-acquired #15 · 0.86 · 1.8 s gap",
-    );
-    expect(reacquiredToastText({ topic: "follow.lost", trackId: 15, reason: "timeout" })).toBeNull();
+    const reacquired = { topic: "follow.reacquired" as const, trackId: 15, similarity: 0.862, gapS: 1.8, mahalanobis: null, phase: null };
+    expect(reacquiredToastText(reacquired)).toBe("Re-acquired #15 · 0.86 · 1.8 s gap");
+    const lost = { topic: "follow.lost" as const, trackId: 15, reason: "search_exhausted", awaitingOperator: true, holdNe: null };
+    expect(reacquiredToastText(lost)).toBeNull();
+  });
+
+  it("names what hid the subject when the search knew", () => {
+    const reacquired = { topic: "follow.reacquired" as const, trackId: 15, similarity: 0.862, gapS: 4.2, mahalanobis: 1.1, phase: "searching" as const };
+    expect(reacquiredToastText(reacquired, "narrow")).toBe("Re-acquired #15 · 0.86 · 4.2 s gap · Behind a trunk or column");
+    expect(reacquiredToastText(reacquired, "wide")).toBe("Re-acquired #15 · 0.86 · 4.2 s gap · Behind a wall or corner");
   });
 });

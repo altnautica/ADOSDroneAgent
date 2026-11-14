@@ -59,7 +59,7 @@ export function nextLastFollowRect(
 }
 
 /** Ghost-path samples: the FOLLOWING box's bottom-centre over the last second,
- *  kept unchanged while coasting so the path ends where the subject was. */
+ *  kept unchanged while the lock is lost so the path ends where the subject was. */
 export function nextGhost(prev: readonly GhostSample[], resolved: ResolvedTargets, now: number): GhostSample[] {
   const following = resolved.items.find((i) => i.kind === "FOLLOWING" && i.rect);
   if (!following?.rect) return prev as GhostSample[];

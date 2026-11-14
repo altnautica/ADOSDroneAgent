@@ -11,6 +11,7 @@ import { putPluginConfig } from "@/lib/api";
 import { SETTING_ECHO_TIMEOUT_MS, settingDisplay, type SettingDisplay } from "@/lib/follow-rail";
 import type { ParamValue, Skill, SkillSetting } from "@/lib/skills";
 import { toast, toastFromError } from "@/shared/api/toast";
+import type { FollowState } from "@/shared/hud/nav-types";
 import { FOLLOW_FRESH_MS } from "@/shared/hud/target-state";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -23,6 +24,19 @@ export function notRespondingText(skill: Skill): string {
   return `${skill.label} did not respond`;
 }
 
+function navFollowEcho(f: FollowState, key: string): ParamValue | null {
+  switch (key) {
+    case "reacquire_mode":
+      return f.reacquireMode;
+    case "uncertain_mode":
+      return f.uncertainMode;
+    case "predictive_search":
+      return f.predictiveSearch;
+    default:
+      return null;
+  }
+}
+
 export function useSkillParam(skill: Skill, key: string, fallback: ParamValue | null): SkillParamControl {
   const reportedEcho = useExtensionsStore((s) => s.reported[skill.id]?.echo?.[key] ?? null);
   const configured = useExtensionsStore((s) => s.config?.[skill.extension?.pluginId ?? ""]?.[key] ?? null);
@@ -30,8 +44,10 @@ export function useSkillParam(skill: Skill, key: string, fallback: ParamValue | 
   const [req, setReq] = useState<{ value: ParamValue; at: number } | null>(null);
   const now = useNow(req ? 250 : follow ? 1000 : null);
 
-  // follow-me also echoes its re-acquire mode on the nav stream's follow kind.
-  const navEcho = key === "reacquire_mode" && follow && now - follow.at <= FOLLOW_FRESH_MS ? follow.data.reacquireMode : null;
+  // follow-me also echoes its re-acquire mode and recovery settings on the
+  // nav stream's follow kind.
+  const fresh = follow && now - follow.at <= FOLLOW_FRESH_MS ? follow.data : null;
+  const navEcho = fresh ? navFollowEcho(fresh, key) : null;
   const d = settingDisplay({
     echo: reportedEcho ?? navEcho,
     fallback: configured ?? fallback,
