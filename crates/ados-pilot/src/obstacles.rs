@@ -76,6 +76,10 @@ pub fn scan_returns(payload: &Value) -> usize {
                 .count()
         })
 }
+/// Sectors either side a surface new to a sector may have come from in one
+/// scan: a post 2 m abeam at 3 m/s sweeps 7° (more than a 5° sector) per
+/// 10 Hz scan.
+pub const HANDOVER_SECTORS: usize = 2;
 
 /// The 5° sector (of `n`) of a bearing, radians clockwise from north.
 fn sector_of(bearing: f32, n: usize) -> usize {
@@ -300,7 +304,12 @@ impl Obstacles {
     }
 
     /// Each world sector's closing speed after this scan; a gap over
-    /// [`SCAN_MAX_AGE_MS`] since the last scan starts every sector afresh.
+    /// [`SCAN_MAX_AGE_MS`] since the last scan starts every sector afresh. A
+    /// return in a sector that had none last scan continues the track of a
+    /// sector up to [`HANDOVER_SECTORS`] away whose last range it follows
+    /// ([`closing::RangeTrack::continues`]): an obstacle off the flight line
+    /// sweeps across sectors as the vehicle passes it, and its closing speed
+    /// must not restart at each one.
     fn update_closing(&mut self, yaw: f32, now_ms: u64) {
         const N: usize = ados_protocol::pilot::SECTORS;
         let mut nearest = [f32::INFINITY; N];
@@ -315,12 +324,31 @@ impl Obstacles {
             self.tracks = vec![closing::RangeTrack::default(); N];
             self.closing = vec![0.0; N];
         }
-        for ((track, c), r) in self.tracks.iter_mut().zip(&mut self.closing).zip(nearest) {
+        let tracks = &self.tracks;
+        let handover: [Option<closing::RangeTrack>; N] = std::array::from_fn(|s| {
+            if gap || !nearest[s].is_finite() || !tracks[s].is_empty() {
+                return None;
+            }
+            (1..=HANDOVER_SECTORS)
+                .flat_map(|k| [(s + N - k) % N, (s + k) % N])
+                .filter_map(|j| Some((tracks[j].continues(now_ms, nearest[s])?, j)))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, j)| tracks[j])
+        });
+        for (((track, c), r), from) in self
+            .tracks
+            .iter_mut()
+            .zip(&mut self.closing)
+            .zip(nearest)
+            .zip(&handover)
+        {
             if gap {
                 track.clear();
             }
-            track.push(now_ms, r);
-            *c = track.closing();
+            if let Some(from) = from {
+                track.adopt(from);
+            }
+            *c = track.push(now_ms, r);
         }
     }
 

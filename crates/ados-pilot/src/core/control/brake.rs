@@ -261,13 +261,21 @@ pub fn confined(near: &[Option<(V2, f32)>], geom: BrakeGeom) -> (f32, V2) {
     (v_conf, geo::clamp_len(push, PUSH_MAX_MPS))
 }
 
+/// Room the brake keeps beyond the margin for a creep it cannot see, metres:
+/// a vehicle drifting at under the stopped speed reads as still to the
+/// estimate, and its range rate lies inside the lidar's noise, so the scans
+/// measure no closing either; over [`BRAKE_LAG_S`] it covers up to this.
+pub const CREEP_SLACK_M: f32 = super::STOPPED_MPS * BRAKE_LAG_S;
+
 /// The speed toward a point `d` away (beyond `margin`) that still stops in
 /// time when the FC answers a cut after [`BRAKE_LAG_S`]: the vehicle covers
-/// `v·T` before braking at `a`, so `v·T + v²/2a ≤ d − margin`; and while it
-/// still closes at `closing` (measured) it covers `closing·T` first.
+/// `v·T` before braking at `a`, so `v·T + v²/2a ≤ d − margin` less
+/// [`CREEP_SLACK_M`]; and while it still closes at `closing` (measured) it
+/// covers `closing·T` first. A slow creep therefore ends that much outside
+/// the margin, not on it.
 pub fn stop_cap(d: f32, closing: f32, a: f32, margin: f32) -> f32 {
     let t = BRAKE_LAG_S;
-    let room = (d - margin).max(0.0);
+    let room = (d - margin - CREEP_SLACK_M).max(0.0);
     let reacting = -a * t + ((a * t).powi(2) + 2.0 * a * room).sqrt();
     let coasting = (2.0 * a * (room - closing * t).max(0.0)).sqrt();
     reacting.min(coasting)

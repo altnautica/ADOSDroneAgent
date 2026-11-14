@@ -1,6 +1,7 @@
 //! Behaviour tests for the pilot rules, against a scripted flight controller.
 
 mod battery;
+mod closing;
 mod confined;
 mod confined_flight;
 mod confined_route;

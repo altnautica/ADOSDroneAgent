@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use super::harness::World;
 use crate::config::DEFAULT_BODY_RADIUS_M;
 use crate::core::control::{
-    brake_limit, stop_cap, BrakeGeom, BRAKE_LAG_S, CONFINED_SPEED_PER_M, HOLD_OBSTACLE_CLOSE,
-    PUSH_MAX_MPS,
+    brake_limit, stop_cap, BrakeGeom, Braked, BRAKE_LAG_S, CONFINED_SPEED_PER_M, CREEP_SLACK_M,
+    HOLD_OBSTACLE_CLOSE, PUSH_MAX_MPS,
 };
 use crate::core::Reply;
 use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
@@ -51,11 +51,16 @@ fn stop_cap_stops_before_the_margin_after_the_lag() {
     for d in [2.0f32, 4.0, 8.0, 15.0] {
         let v = cap(d);
         let stop = v * BRAKE_LAG_S + v * v / (2.0 * 3.0);
-        assert!((stop - (d - 1.5)).abs() < 1e-3, "d {d}: stops in {stop}");
+        assert!(
+            (stop - (d - 1.5 - CREEP_SLACK_M)).abs() < 1e-3,
+            "d {d}: stops in {stop}"
+        );
     }
     assert_eq!(cap(1.0), 0.0);
+    assert_eq!(cap(1.5 + CREEP_SLACK_M), 0.0);
     // Still closing at 4 m/s, 5 m out: it covers 3.2 m before braking.
-    assert!((stop_cap(5.0, 4.0, 3.0, 1.5) - (6.0f32 * 0.3).sqrt()).abs() < 1e-4);
+    let room = 5.0 - 1.5 - CREEP_SLACK_M - 3.2;
+    assert!((stop_cap(5.0, 4.0, 3.0, 1.5) - (6.0f32 * room).sqrt()).abs() < 1e-4);
 }
 
 #[test]
@@ -357,14 +362,16 @@ fn hover_ask_after(crown: impl Fn(u64, usize) -> f32) -> Braked {
 fn jittering_leaf_returns_are_not_a_closing_obstacle() {
     // Leaf returns inside a crown (a beam grazing a trunk's edge, rain, dust)
     // land at a random depth every scan: a hovering vehicle closes on none of
-    // them. Each scan draws every crown beam somewhere in 2.0-2.6 m; the goal
-    // ahead must be braked no harder than for the same crowns seen steadily at
-    // their nearest range.
+    // them. Each scan draws every crown beam somewhere in 0.6 m beyond the
+    // nearest range (2.0 m plus the brake's creep slack); the goal ahead must
+    // be braked no harder than for the same crowns seen steadily at their
+    // nearest range.
+    let near = 2.0 + CREEP_SLACK_M;
     let jitter = |k: u64, i: usize| {
         let h = (k.wrapping_mul(2_654_435_761) ^ (i as u64).wrapping_mul(40_503)) % 1000;
-        2.0 + 0.6 * h as f32 / 1000.0
+        near + 0.6 * h as f32 / 1000.0
     };
-    let steady = hover_ask_after(|_, _| 2.0).v[0];
+    let steady = hover_ask_after(|_, _| near).v[0];
     let leafy = hover_ask_after(jitter).v[0];
     assert!(
         steady > 0.3,
@@ -507,30 +514,36 @@ fn a_wall_approached_through_range_noise_still_brakes_a_lagging_estimate() {
 
 /// The recorded full-stick approach of a column, every scan replayed into one
 /// obstacle model as it arrived, with a velocity estimate trailing the real
-/// motion (30 % of the recorded one: delayed external navigation). The brake
-/// must allow no more toward the column than it does knowing the simulator's
-/// true velocity, the scans' closing speed standing in for the estimate, and
-/// it must still stop the stick before the column.
+/// motion (50 % and 30 % of the recorded one: delayed external navigation).
+/// The brake must allow no more toward the column than it does knowing the
+/// simulator's true velocity (within 0.05 m/s), the scans' closing speed
+/// standing in for the estimate, and it must still stop the stick before the
+/// column.
 #[test]
 fn replayed_column_approach_brakes_a_lagging_estimate_as_the_true_speed() {
     let fx: Value = serde_json::from_str(include_str!("fixtures/column_full_stick.json")).unwrap();
-    let mut o = Obstacles::new();
-    let mut stopped = false;
-    for f in fx["frames"].as_array().unwrap() {
-        let (pos, ask, now) = ingest_frame(&mut o, f);
-        let lagging = geo::scale(v2_of(&f["vel_ne"]), 0.3);
-        let dir = geo::scale(ask, 1.0 / geo::norm(ask));
-        let allowed = geo::dot(brake_limit(&o, pos, lagging, ask, 3.0, 1.5, now).v, dir);
-        let known = brake_limit(&o, pos, v2_of(&f["truth_vel_ne"]), ask, 3.0, 1.5, now);
-        let known = geo::dot(known.v, dir);
+    for scale in [0.5, 0.3] {
+        let mut o = Obstacles::new();
+        let mut stopped = false;
+        for f in fx["frames"].as_array().unwrap() {
+            let (pos, ask, now) = ingest_frame(&mut o, f);
+            let lagging = geo::scale(v2_of(&f["vel_ne"]), scale);
+            let dir = geo::scale(ask, 1.0 / geo::norm(ask));
+            let allowed = geo::dot(brake_limit(&o, pos, lagging, ask, 3.0, 1.5, now).v, dir);
+            let known = brake_limit(&o, pos, v2_of(&f["truth_vel_ne"]), ask, 3.0, 1.5, now);
+            let known = geo::dot(known.v, dir);
+            assert!(
+                allowed <= known + 0.05,
+                "x{scale}, {} ms: allows {allowed:.2} m/s toward the column, {known:.2} knowing the true speed",
+                f["t_ms"]
+            );
+            stopped |= allowed < 0.1;
+        }
         assert!(
-            allowed <= known + 0.3,
-            "{} ms: allows {allowed:.2} m/s toward the column, {known:.2} knowing the true speed",
-            f["t_ms"]
+            stopped,
+            "x{scale}: the stick was never stopped short of the column"
         );
-        stopped |= allowed < 0.1;
     }
-    assert!(stopped, "the stick was never stopped short of the column");
 }
 
 #[test]
