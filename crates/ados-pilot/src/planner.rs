@@ -104,7 +104,10 @@ pub fn candidates(goal: &Goal, from: V2) -> Vec<(V2, f32)> {
     out
 }
 
-/// Plan one goal from `from`.
+/// Plan one goal from `from`. A detour candidate off the grid (a subject
+/// more than half the grid away) is routed toward through the grid's edge
+/// ([`Flood::exit_toward`]): the grid knows nothing beyond it, so the way
+/// out that leaves the least straight distance still to go is flown.
 pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
     let grid = &obs.grid;
     let target = [goal.n, goal.e];
@@ -119,6 +122,8 @@ pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
         };
     }
     let subject = goal.subject_ne;
+    // One flood serves every candidate off the grid.
+    let mut flooded: Option<Option<Flood>> = None;
     for (cand, _) in candidates(goal, from) {
         if clearance(grid, cand) < margin {
             continue;
@@ -128,7 +133,15 @@ pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
                 continue;
             }
         }
-        if let Some(path) = astar(grid, from, cand, margin) {
+        let path = if grid.cell(cand).is_some() {
+            astar(grid, from, cand, margin)
+        } else {
+            flooded
+                .get_or_insert_with(|| flood(grid, from, margin))
+                .as_ref()
+                .and_then(|f| f.exit_toward(grid, cand))
+        };
+        if let Some(path) = path {
             let wp = along(&path, LOOKAHEAD_M);
             let minc = path
                 .iter()
@@ -170,6 +183,27 @@ impl Flood {
         path.pop();
         path.push(self.from);
         path.reverse();
+        Some(path)
+    }
+
+    /// The route to `to`, off the grid, through the edge cell the search
+    /// reached where the route's cost plus the straight distance on to `to`
+    /// is least, with `to` as its last point. `None` when no edge cell was
+    /// reached nearer `to` than the start.
+    pub fn exit_toward(&self, grid: &Grid, to: V2) -> Option<Vec<V2>> {
+        let last = GRID_N - 1;
+        let start = geo::dist(self.from, to);
+        let edge = (0..GRID_N).flat_map(|k| [(0, k), (last, k), (k, 0), (k, last)]);
+        let (_, exit) = edge
+            .filter_map(|(i, j)| {
+                let g = self.g[i * GRID_N + j];
+                let c = grid.center_of(i, j);
+                let rest = geo::dist(c, to);
+                (g.is_finite() && rest < start).then_some((g + rest, c))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))?;
+        let mut path = self.path(grid, exit)?;
+        path.push(to);
         Some(path)
     }
 }

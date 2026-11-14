@@ -99,6 +99,42 @@ fn candidate_without_line_of_sight_is_rejected() {
 }
 
 #[test]
+fn a_subject_beyond_the_grid_is_followed_around_what_blocks_the_way() {
+    // The subject 26 m north and the follow goal 6 m short of it, both off
+    // the 32 m grid, with a 6 m row of trunks across the way 5 m ahead: the
+    // vehicle routes around the row toward the goal instead of holding.
+    let row: Vec<V2> = (-30..=30).map(|k| [5.0, k as f32 * 0.1]).collect();
+    let o = obs_with(&row, [0.0, 0.0]);
+    let goal = follow_goal(20.0, 0.0, [26.0, 0.0], 6.0, 180.0);
+    let p = plan(&o, &goal, [0.0, 0.0], 1.5);
+    assert_eq!(p.state, AvoidState::Detour, "{p:?}");
+    let cand = p.goal.unwrap();
+    assert!(o.grid.cell(cand).is_none(), "aims at {cand:?} on the grid");
+    assert_eq!(p.path.last(), Some(&cand));
+    // Every route point past the start keeps the margin, and the way out of
+    // the grid is nearer the candidate than the vehicle is.
+    let route = &p.path[1..p.path.len() - 1];
+    assert!(
+        route.iter().all(|q| clearance(&o.grid, *q) >= 1.5),
+        "{route:?}"
+    );
+    let exit = route.last().unwrap();
+    assert!(
+        geo::dist(*exit, cand) < geo::dist([0.0, 0.0], cand) - 10.0,
+        "{exit:?}"
+    );
+    assert!(geo::dist(p.target.unwrap(), [0.0, 0.0]) <= LOOKAHEAD_M + 0.3);
+    // Walled in on every side, the same goal still holds.
+    let ring: Vec<V2> = (0..360)
+        .map(|k| geo::scale(geo::bearing_unit((k as f32).to_radians()), 2.0))
+        .collect();
+    let o = obs_with(&ring, [0.0, 0.0]);
+    let p = plan(&o, &goal, [0.0, 0.0], 0.8);
+    assert_eq!(p.state, AvoidState::Blocked);
+    assert_eq!(p.target, None);
+}
+
+#[test]
 fn along_walks_the_polyline() {
     let p = along(&[[0.0, 0.0], [1.0, 0.0], [1.0, 3.0]], 2.0);
     assert!((p[0] - 1.0).abs() < 1e-5 && (p[1] - 1.0).abs() < 1e-5);

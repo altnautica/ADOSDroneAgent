@@ -4,7 +4,7 @@
 use std::f32::consts::TAU;
 
 use ados_protocol::mavlink::ardupilotmega::MavType;
-use ados_protocol::pilot::{AvoidState, Goal, GoalKind, Owner, Request};
+use ados_protocol::pilot::{AvoidState, Candidates, Goal, GoalKind, Owner, Request};
 use serde_json::{json, Value};
 
 use super::harness::World;
@@ -1014,6 +1014,60 @@ fn goal_brake_keeps_open_goals_and_caps_them_to_seen_space() {
         "flies {ask:?}, seen space allows {seen:.2}"
     );
     assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Detour);
+}
+
+/// A row of trunks `d` ahead, `half` metres either side of the nose (vehicle
+/// yaw 0).
+fn row_scan(d: f32, half: f32) -> Value {
+    let ranges: Vec<f32> = (0..360)
+        .map(|i| {
+            let th = if i > 180 { i as f32 - 360.0 } else { i as f32 }.to_radians();
+            if th.abs() < 1.5 && (d * th.tan()).abs() <= half {
+                d / th.cos()
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    json!({"frame": "body_frd", "angle_start_rad": 0.0,
+           "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
+}
+
+#[test]
+fn a_follow_far_behind_routes_around_clutter_toward_its_subject() {
+    // The subject 26 m ahead and the follow goal 6 m short of it, both beyond
+    // the planner's 32 m grid, its detour ring with them; a row of trunks
+    // 5 m ahead blocks the straight way. The vehicle detours toward the goal
+    // instead of holding blocked, so a follow that fell behind can close up.
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.pos = [0.0, 0.0, -5.0];
+    w.agl = Some(5.0);
+    let id = w.lease();
+    let mut goal = follow_goal([20.0, 0.0, -5.0], [0.0, 0.0]);
+    goal.subject_ne = Some([26.0, 0.0]);
+    goal.candidates = Some(Candidates {
+        ring_center_ne: [26.0, 0.0],
+        radius_m: 6.0,
+        angle_deg: 180.0,
+        angle_span_deg: 90.0,
+    });
+    // The skill re-sends its goal well inside the lease's goal timeout.
+    for _ in 0..8 {
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: goal.clone(),
+        });
+        scan_for(&mut w, &row_scan(5.0, 3.0), 200);
+    }
+    let s = w.p.state(w.now);
+    assert_eq!(s.owner, Owner::Skill);
+    assert_eq!(s.hold_reason, None);
+    assert_eq!(s.avoid_state, AvoidState::Detour);
+    let ask = fc_ask(&w, [0.0, 0.0]);
+    assert!(geo::norm(ask) > 0.5, "asks {ask:?} with a goal 20 m ahead");
+    let end = s.plan_ned.last().copied().unwrap_or_default();
+    assert!(end[0] > 16.0, "the plan ends at {end:?}, short of the goal");
 }
 
 #[test]
