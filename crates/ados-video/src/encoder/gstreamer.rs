@@ -124,9 +124,15 @@ pub(super) fn build_gstreamer_command(
         // `do-timestamp` stamps each read with the pipeline clock and
         // `rawvideoparse` keeps an upstream stamp, so a frame carries the time
         // the feed wrote it (its capture cadence), not frame count over
-        // `framerate`. A framebus leg never takes the OMX arm, which refuses it.
+        // `framerate`. The OMX arm is the exception: `omxh264videoenc` refuses
+        // to negotiate behind `do-timestamp=true` (see above), so there the
+        // frames are stamped by count at the bus rate, which the feed already
+        // paces to the capture cadence. Its NV12 caps carry no `framerate`,
+        // matching the capture-direct OMX arm; the rate flows from
+        // `rawvideoparse`.
+        let stamp = if use_omx { "" } else { " do-timestamp=true" };
         format!(
-            "filesrc location={} do-timestamp=true ! rawvideoparse width={} height={} format={} \
+            "filesrc location={}{stamp} ! rawvideoparse width={} height={} format={} \
              framerate={}/1 ! videoconvert ! {flip}videoscale ! \
              video/x-raw,format=NV12,width={},height={} ! \
              queue max-size-buffers=4 leaky=downstream ! {encoder}",

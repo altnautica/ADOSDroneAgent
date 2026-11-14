@@ -235,6 +235,14 @@ impl Pilot {
             && self.fc.vehicle_class() != VehicleClass::Fixedwing
             && !self.fc.vtol_forward();
         s.speed_cap = applies.then(|| self.nav_cap(now_ms)).flatten();
+        s.sensors = fc_linked.then(|| {
+            crate::sensor_health::snapshot(
+                &self.fc.flow_track,
+                &self.fc.range_track,
+                &self.lidar,
+                now_ms,
+            )
+        });
         s
     }
 

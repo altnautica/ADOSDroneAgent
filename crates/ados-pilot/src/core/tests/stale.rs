@@ -329,10 +329,7 @@ fn lidar_item(w: &World) -> Option<(bool, bool)> {
 
 /// A world whose vehicle has no lidar fitted: no scan ever arrives.
 fn no_lidar() -> World {
-    let mut w = World::new();
-    w.lidar = false;
-    w.p.obstacles = crate::obstacles::Obstacles::new();
-    w
+    World::without_lidar()
 }
 
 #[test]
@@ -376,9 +373,10 @@ fn a_vehicle_with_no_lidar_flies_its_sticks_with_avoidance_unavailable() {
     });
     w.run(200);
     assert_eq!(w.p.owner(), Owner::Pilot, "a goto started with no lidar");
-    // A lidar that comes up: avoidance is on, Fly Here works.
+    // A lidar that comes up: once its scan rate is measured (a 2 s window),
+    // avoidance is on and Fly Here works.
     w.lidar = true;
-    w.run(200);
+    w.run(2500);
     assert_eq!(lidar_item(&w), Some((true, true)));
     assert_eq!(avoid_state(&w), "clear");
     assert_eq!(err(&w.action_args("goto", point)), None);
@@ -415,4 +413,21 @@ fn a_lidar_seen_then_silent_holds_as_stale_not_unavailable() {
     assert_eq!(avoid_state(&w), "stale");
     assert_eq!(hold_reason(&w).as_deref(), Some(STALE));
     assert_eq!(lidar_item(&w), Some((false, true)));
+}
+
+#[test]
+fn a_lidar_the_capture_service_reports_is_expected_before_its_first_scan() {
+    let mut w = no_lidar();
+    w.p.on_feed(
+        "plugin.world-engine.lidar",
+        &json!({"v": 1, "device": "/dev/ttyUSB0", "connected": true, "health": "good",
+                "health_code": 0, "rate_hz": 0.0, "scans": 0, "dropped_scans": 0, "reconnects": 0}),
+        w.now,
+    );
+    w.run(200);
+    assert_eq!(
+        avoid_state(&w),
+        "stale",
+        "a reported lidar read as none fitted"
+    );
 }

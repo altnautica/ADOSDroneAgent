@@ -89,6 +89,10 @@ pub struct Pilot {
     pub fc: FcState,
     pub auth: Authority,
     pub obstacles: Obstacles,
+    /// The scanning lidar's scan arrivals and driver status.
+    pub lidar: crate::sensor_health::LidarTrack,
+    /// The FC IMU feeding the lidar pose (`map_status.imu_feed`).
+    pub nav_imu: crate::nav_imu::NavImuTrack,
     mr: Multirotor,
     fw: Fixedwing,
     /// The brake's verdict this tick (stick flight, or a braked goal).
@@ -166,6 +170,8 @@ impl Pilot {
             fc: FcState::default(),
             auth: Authority::default(),
             obstacles: Obstacles::new(),
+            lidar: Default::default(),
+            nav_imu: Default::default(),
             mr: Multirotor::default(),
             fw: Fixedwing::default(),
             plan: Plan::hold(ados_protocol::pilot::AvoidState::Clear),

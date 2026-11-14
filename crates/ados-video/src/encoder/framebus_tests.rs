@@ -372,15 +372,6 @@ fn the_forced_software_fallback_leaves_the_vpu() {
 }
 
 #[test]
-fn a_framebus_source_never_takes_the_v4l2src_omx_path() {
-    let p = framebus_params(EncoderKind::Ffmpeg, Some(FrameFormat::Nv12));
-    let cmd =
-        build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &allwinner_omx()).unwrap();
-    assert_eq!(cmd[0], "ffmpeg", "{cmd:?}");
-    assert!(has_pair(&cmd, "-pix_fmt", "nv12"), "{cmd:?}");
-}
-
-#[test]
 fn a_framebus_source_without_a_format_is_refused() {
     let p = framebus_params(EncoderKind::Ffmpeg, None);
     assert_eq!(
@@ -402,3 +393,6 @@ fn framebus_detection_and_input_locator() {
     assert_eq!(input_locator(SRC), fifo());
     assert_eq!(input_locator("/dev/video0"), "/dev/video0");
 }
+
+#[path = "framebus_omx_tests.rs"]
+mod omx;

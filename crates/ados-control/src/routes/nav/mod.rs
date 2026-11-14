@@ -29,20 +29,24 @@
 //! `navigation` telemetry channel (see [`pose_age`]).
 
 mod hub;
+pub(crate) mod lidar_watch;
 mod mission;
 pub(crate) mod pose_age;
 mod stream;
 mod tiles;
+mod topics;
 mod view;
 
 #[cfg(test)]
 mod tests;
 
-pub use hub::{
-    route, NavHub, NavKind, Routed, DEPTH_CAMERA_STALE_MS, EXPORT_TOPICS, FOLLOW_ME_ID, KIND_COUNT,
-    VISION_NAV_ID, WORLD_ENGINE_ID,
-};
+pub use hub::{NavHub, NavKind, DEPTH_CAMERA_STALE_MS, KIND_COUNT};
+pub use lidar_watch::{LidarStatus, LidarView};
 pub use mission::{get_mission, mission_body};
+pub use topics::{
+    route, Routed, EXPORT_TOPICS, FOLLOW_ME_ID, TOPIC_LIDAR, TOPIC_SCAN, VISION_NAV_ID,
+    WORLD_ENGINE_ID,
+};
 pub use view::{ViewDemand, ViewLease, VIEW_LAYERS, VIEW_LEASE_TTL};
 
 use ados_protocol::pairing_posture::CallerClass;

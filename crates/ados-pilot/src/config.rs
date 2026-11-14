@@ -75,6 +75,32 @@ pub struct PilotSection {
     pub gnss_denied_max_speed_mps: f32,
     /// Horizontal acceleration cap (m/s²) under the same condition.
     pub gnss_denied_max_accel_mps2: f32,
+    /// The declared flow and rangefinder mount, checked against the FC's
+    /// parameters.
+    pub fc_sensors: FcSensors,
+}
+
+/// `pilot.fc_sensors`: where the flow module and the downward rangefinder sit,
+/// body FRD metres from the CG. Every part is optional.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FcSensors {
+    pub flow: Option<FlowMount>,
+    pub rangefinder: Option<RangefinderMount>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FlowMount {
+    pub pos_m: Option<[f64; 3]>,
+    /// The flow sensor's yaw against the body, centidegrees (FLOW_ORIENT_YAW).
+    pub orient_yaw_cdeg: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RangefinderMount {
+    pub pos_m: Option<[f64; 3]>,
 }
 
 impl Default for PilotSection {
@@ -91,6 +117,7 @@ impl Default for PilotSection {
             link_loss_action: LinkLossAction::Rth,
             gnss_denied_max_speed_mps: 2.0,
             gnss_denied_max_accel_mps2: 1.5,
+            fc_sensors: FcSensors::default(),
         }
     }
 }
@@ -179,5 +206,21 @@ mod tests {
         assert_eq!(s.control.rc_ados_position, 4);
         assert_eq!(s.pilot.avoid, AvoidMode::Off);
         assert!(std::fs::read_to_string(&p).unwrap().contains("name: test"));
+    }
+
+    #[test]
+    fn the_declared_sensor_mount_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.yaml");
+        std::fs::write(
+            &p,
+            "pilot:\n  fc_sensors:\n    flow:\n      pos_m: [0.05, 0.0, 0.02]\n      orient_yaw_cdeg: 9000\n",
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        let flow = s.pilot.fc_sensors.flow.expect("flow mount");
+        assert_eq!(flow.pos_m, Some([0.05, 0.0, 0.02]));
+        assert_eq!(flow.orient_yaw_cdeg, Some(9000));
+        assert_eq!(s.pilot.fc_sensors.rangefinder, None);
     }
 }

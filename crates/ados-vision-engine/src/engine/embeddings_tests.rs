@@ -1,5 +1,7 @@
 use super::*;
-use ados_protocol::framebus::{BoundingBox, DetectionHead, ModelKind};
+use ados_protocol::framebus::{
+    BoundingBox, Detection, DetectionHead, ModelKind, VISION_DETECTION_VERSION,
+};
 
 const W: u32 = 32;
 const H: u32 = 32;
@@ -89,6 +91,8 @@ fn desc() -> FrameDescriptor {
         slot: 0,
         shm_name: String::new(),
         byte_len: W * H * 3,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     }
 }
 
@@ -195,6 +199,9 @@ fn strip_removes_only_the_embedding_attributes() {
 
     let mut batch = DetectionBatch {
         v: VISION_DETECTION_VERSION,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "det".into(),
         camera_id: "cam".into(),
         frame_id: 1,

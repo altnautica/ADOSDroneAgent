@@ -312,6 +312,8 @@ impl RingWriter {
             slot,
             seq,
             byte_len: data.len() as u32,
+            hfov_deg: None,
+            mount_pitch_deg: None,
         })
     }
 

@@ -1,18 +1,29 @@
 //! Camera USB-recovery self-heal (force re-enumeration of an absent/wedged camera).
 //!
-//! When an *expected* primary camera is reported missing and stays missing for a
+//! When an *expected* camera is reported missing and stays missing for a
 //! confirm window, the agent forces a USB re-enumeration so a camera that failed
-//! its cold-boot port-enable (the kernel tries once and gives up) comes back
-//! without a human reseating the cable. Three cases, topology-resolved:
+//! its cold-boot port-enable (the kernel tries once and gives up), dropped off
+//! the bus in a brown-out, or wedged under its reader comes back without a human
+//! reseating the cable. Three cases, topology-resolved:
 //!
-//!   (a) the camera device is still in `/sys` but the pipeline reports missing
-//!       (wedged) → unbind/rebind the camera leaf only. Clean, no sibling effect.
+//!   (a) the camera device is still in `/sys` but reads missing (wedged: the
+//!       pipeline's discovery cannot open it, or the vision engine reports it
+//!       silent) → unbind/rebind the camera leaf only. Clean, no sibling effect.
 //!   (b) the camera is gone and sits on a hub it SHARES with the radio/FC (the
 //!       Pi 4B internal hub) → default detect + alert (`needs_hub_reset`); an
 //!       opt-in, boot-time-only hub reset is allowed ONLY when the guard proves
 //!       no protected device hangs off that hub.
 //!   (c) the camera is gone but its hub exposes per-port power (an external hub)
 //!       → re-enable just the camera's port. Clean.
+//!
+//! Every local camera the video pipeline lists in `camera-state.json` is
+//! watched — the primary, a camera the vision engine captures, and each
+//! secondary (belly) leg — each in its own episode with its own trigger, retry
+//! machine and location record. USB actions are rationed bus-wide: at most one
+//! per tick, and none within the cooldown of the last one on any camera, so a
+//! brown-out that drops two cameras off one hub gets one re-enumeration at a
+//! time instead of two racing each other; the camera whose last action is
+//! oldest goes first, so none is starved.
 //!
 //! Reuses the `usb_rehome` trigger + bounded retry/cooldown machine + the
 //! fail-closed topology guard. The reconciler decides + records; the supervisor
@@ -22,26 +33,25 @@
 //!
 //! Module layout:
 //! - `config`: `CameraRecoveryConfig` + parsing + `camera_expected` resolution.
-//! - `os`: the camera-state / last-good sidecar IO, the protected-set builder,
-//!   and the sysfs unbind/rebind + port-cycle executor (`execute_camera_recovery`).
-//! - this module root: the recovery action/plan types and the `CameraUsbRecovery`
-//!   reconciler FSM (the trigger + retry machine + topology guard).
+//! - `targets`: the cameras read off the camera-state sidecar.
+//! - `episode`: one camera's trigger + retry machine + topology guard.
+//! - `os`: the OS seam (`CameraOs`) and its Linux implementation, the
+//!   protected-set builder, and the sysfs executor (`execute_camera_recovery`).
+//! - this module root: the plan types and the `CameraUsbRecovery` reconciler
+//!   that runs every camera's episode under the shared action gate.
 
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use ados_protocol::logd::emitter::EventEmitter;
 
-use super::machine::{RehomeMachine, RehomeTrigger};
-
-#[cfg(target_os = "linux")]
-use super::machine::RehomeStep;
-#[cfg(target_os = "linux")]
-use super::topo::{self, GuardVerdict, UsbTopo};
-
 pub mod config;
 #[cfg(target_os = "linux")]
-mod linux_ops;
+mod episode;
 pub mod os;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod targets;
 
 pub use config::{camera_expected, read_config_from, CameraRecoveryConfig};
 pub use os::execute_camera_recovery;
@@ -70,58 +80,35 @@ pub enum CameraRecoveryAction {
 /// The plan returned to the supervisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraRecoveryPlan {
+    /// The roster id of the camera the action recovers.
+    pub camera_id: String,
     pub action: CameraRecoveryAction,
     pub attempt: u32,
 }
 
-/// The camera USB-recovery reconciler. Owns the trigger + retry machine; the
-/// supervisor drives it from the monitor pass.
+/// The camera USB-recovery reconciler. Owns one episode per watched camera;
+/// the supervisor drives it from the monitor pass.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct CameraUsbRecovery {
-    trigger: RehomeTrigger,
-    /// The debounce the trigger was built with; rebuilt when config changes.
+    #[cfg(target_os = "linux")]
+    episodes: BTreeMap<String, episode::Episode>,
+    /// The debounce the triggers were built with; rebuilt when config changes.
     hold: Duration,
-    machine: RehomeMachine,
     last_tick: Option<Instant>,
-    /// Set once an attempt is refused (guard) or only an alert is possible, so we
-    /// hold instead of spinning. Cleared when the camera verifies healthy.
-    held: bool,
+    /// When the last USB action on any camera was authorized.
+    last_action: Option<Instant>,
     events: EventEmitter,
-    // Sidecar fields.
-    state: String,
-    case: String,
-    camera_present: bool,
-    expected: bool,
-    bind_id: String,
-    hub: String,
-    port: Option<u32>,
-    ppps: bool,
-    /// The camera shares its hub (with no per-port power) with the high-draw WFB
-    /// radio — a power-contention brown-out risk. Surfaced in the sidecar; the
-    /// diagnostic event is emitted once per false→true transition.
-    power_contention: bool,
-    contention_peer: String,
 }
 
 impl CameraUsbRecovery {
     pub fn new(events: EventEmitter) -> Self {
         CameraUsbRecovery {
-            trigger: RehomeTrigger::with_hold(Duration::from_secs(config::DEFAULT_DEBOUNCE_S)),
+            #[cfg(target_os = "linux")]
+            episodes: BTreeMap::new(),
             hold: Duration::from_secs(config::DEFAULT_DEBOUNCE_S),
-            machine: RehomeMachine::new(),
             last_tick: None,
-            held: false,
+            last_action: None,
             events,
-            state: "idle".to_string(),
-            case: String::new(),
-            camera_present: false,
-            expected: false,
-            bind_id: String::new(),
-            hub: String::new(),
-            port: None,
-            ppps: false,
-            power_contention: false,
-            contention_peer: String::new(),
         }
     }
 
@@ -133,16 +120,26 @@ impl CameraUsbRecovery {
         }
     }
 
-    /// One reconcile decision. Reads the camera-state sidecar, runs the trigger +
-    /// retry machine + topology guard, mirrors state to the recovery sidecar, and
-    /// returns a plan only when an attempt is authorized.
+    /// One reconcile decision against the live system.
     #[cfg(target_os = "linux")]
     pub async fn decide(&mut self) -> Option<CameraRecoveryPlan> {
-        let cfg = config::read_config();
+        self.decide_with(&os::LinuxOs, Instant::now()).await
+    }
+
+    /// One reconcile decision. Reads the camera-state sidecar, runs each
+    /// camera's trigger + retry machine + topology guard under the shared
+    /// action gate, mirrors state to the recovery sidecar, and returns a plan
+    /// only when an attempt is authorized.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn decide_with<O: os::CameraOs>(
+        &mut self,
+        os: &O,
+        now: Instant,
+    ) -> Option<CameraRecoveryPlan> {
+        let cfg = os.config();
         if !cfg.enabled {
             return None;
         }
-        let now = Instant::now();
         if !self.due(cfg.tick_interval, now) {
             return None;
         }
@@ -150,248 +147,87 @@ impl CameraUsbRecovery {
 
         // Honor a changed debounce (rare; a reset on change is fine).
         if self.hold != cfg.debounce {
-            self.trigger = RehomeTrigger::with_hold(cfg.debounce);
             self.hold = cfg.debounce;
+            for ep in self.episodes.values_mut() {
+                ep.set_hold(cfg.debounce);
+            }
         }
 
-        // No fresh camera-state → not a running video drone (e.g. ground station):
-        // stay idle, write no sidecar.
-        let sig = os::read_camera_signals().await?;
-        if !sig.fresh {
+        // No fresh camera-state → not a running video drone (e.g. ground
+        // station): stay idle, write no sidecar.
+        let doc = os.camera_state().await?;
+        if !targets::fresh(&doc, os.now_unix()) {
             return None;
         }
+        let targets = targets::targets_from(&doc);
+        self.episodes
+            .retain(|id, _| targets.iter().any(|t| &t.id == id));
 
-        let last_good = os::read_last_good().await;
-        let expected = config::camera_expected(&cfg.expected, last_good.is_some());
-        self.expected = expected;
+        // Fair order through the gate: the camera acted on longest ago first.
+        let mut order: Vec<&targets::Target> = targets.iter().collect();
+        order.sort_by_key(|t| self.episodes.get(&t.id).and_then(|e| e.last_action));
 
-        let ready = sig.state == "ready";
-        let missing = sig.state == "missing";
-
-        if ready {
-            // Persist where the camera lives so the boot (absent) case can target
-            // it; reset the trigger; let the machine clear the episode.
-            self.held = false;
-            self.camera_present = true;
-            if let Some(path) = &sig.primary_path {
-                self.persist_last_good(path).await;
-                self.check_power_contention(path).await;
+        let mut plan = None;
+        for target in order {
+            let gate_open = plan.is_none()
+                && self
+                    .last_action
+                    .is_none_or(|at| now.saturating_duration_since(at) >= cfg.cooldown);
+            let ep = self
+                .episodes
+                .entry(target.id.clone())
+                .or_insert_with(|| episode::Episode::new(target, cfg.debounce));
+            if let Some(p) = ep
+                .tick(os, &cfg, target, now, gate_open, &self.events)
+                .await
+            {
+                self.last_action = Some(now);
+                plan = Some(p);
             }
         }
 
-        let cond = expected && missing;
-        let verified_healthy = ready;
-        let armed = self.trigger.observe(cond, now);
-
-        let step = self.machine.step(
-            armed,
-            verified_healthy,
-            cfg.cooldown,
-            cfg.healthy_reset,
-            now,
-        );
-
-        let plan = match step {
-            RehomeStep::Recovered => {
-                self.held = false;
-                self.state = "idle".to_string();
-                self.emit("success", &cfg, 0);
-                None
-            }
-            RehomeStep::Cooldown { .. } => {
-                // Still failing, still trying. Announce once per episode at the
-                // point the old code parked, so a camera that has not come back
-                // is loud without the vehicle having given up on it.
-                if self.state != "retrying" {
-                    self.emit("retrying", &cfg, self.machine.attempts());
-                }
-                self.state = "retrying".to_string();
-                None
-            }
-            RehomeStep::Idle => {
-                if verified_healthy {
-                    self.state = "idle".to_string();
-                } else if cond {
-                    // Armed window not yet elapsed.
-                    self.state = "monitoring".to_string();
-                }
-                None
-            }
-            RehomeStep::Attempt { index } => {
-                if self.held {
-                    self.machine.refund_attempt();
-                    None
-                } else {
-                    self.authorize_attempt(&cfg, &last_good, sig.primary_path.as_deref(), index)
-                        .await
-                }
-            }
-        };
-
-        self.write_sidecar(self.machine.attempts(), cfg.cooldown.as_secs());
+        os.write_sidecar(&self.sidecar(&targets, cfg.cooldown.as_secs(), os.now_unix()));
         plan
     }
 
-    /// Resolve the camera's topology + pick the recovery case, running the guard.
-    /// Returns a plan when an action is authorized, else holds (alert-only) and
-    /// refunds the budget.
+    /// The recovery sidecar: every camera's episode under `cameras`, and at the
+    /// top level the one an operator should see — the first camera in a
+    /// recovery, else the primary — so a reader of the single-camera shape
+    /// still sees a recovering belly camera.
     #[cfg(target_os = "linux")]
-    async fn authorize_attempt(
-        &mut self,
-        cfg: &CameraRecoveryConfig,
-        last_good: &Option<os::LastGood>,
-        primary_path: Option<&str>,
-        index: u32,
-    ) -> Option<CameraRecoveryPlan> {
-        // Resolve the camera bind id: prefer the live device path, fall back to
-        // the persisted last-known-good record.
-        let cam_topo = match primary_path {
-            Some(p) => topo::resolve_usb_topo_for_video(p).await,
-            None => None,
+    fn sidecar(
+        &self,
+        targets: &[targets::Target],
+        cooldown_s: u64,
+        now_unix: u64,
+    ) -> serde_json::Value {
+        let listed: Vec<&episode::Episode> = targets
+            .iter()
+            .filter_map(|t| self.episodes.get(&t.id))
+            .collect();
+        let focus = listed
+            .iter()
+            .find(|e| e.state != "idle")
+            .or_else(|| listed.iter().find(|e| e.primary))
+            .or_else(|| listed.first());
+        let mut body = match focus {
+            Some(e) => serde_json::to_value(e.snapshot()).unwrap_or_default(),
+            None => serde_json::json!({"camera_usb_recovery_state": "idle"}),
         };
-        let (bind_id, present, cam_for_guard) = if let Some(t) = cam_topo {
-            (t.bind_id.clone(), true, t)
-        } else if let Some(lg) = last_good {
-            let present = os::device_present(&lg.bind_id);
-            (
-                lg.bind_id.clone(),
-                present,
-                UsbTopo {
-                    bind_id: lg.bind_id.clone(),
-                    ancestors: os::name_ancestors(&lg.bind_id),
-                },
-            )
-        } else {
-            // Expected (e.g. config=true) but never seen + not present: nothing to
-            // target. Alert only.
-            self.hold_alert("needs_hub_reset", "no_target", cfg, index);
-            return None;
-        };
-        self.bind_id = bind_id.clone();
-        self.camera_present = present;
-
-        let (hub, port) = topo::hub_and_port(&bind_id).unwrap_or_default();
-        self.hub = hub.clone();
-        self.port = if hub.is_empty() { None } else { Some(port) };
-
-        let (protected_paths, protected_usb) = os::build_protected_set().await;
-
-        if present {
-            // Case (a): leaf rebind. Provably safe iff disjoint from the protected
-            // devices (it is — the camera is a leaf, not their hub).
-            if topo::target_safe_as_leaf(&cam_for_guard, &protected_usb) {
-                self.case = "present_wedged".to_string();
-                self.state = "rebinding".to_string();
-                self.emit("rebinding", cfg, index);
-                return Some(CameraRecoveryPlan {
-                    action: CameraRecoveryAction::RebindDevice { bind_id },
-                    attempt: index,
-                });
-            }
-            self.hold_alert("guard_blocked", "is_protected", cfg, index);
-            return None;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "version".into(),
+                os::CAMERA_USB_RECOVERY_SIDECAR_VERSION.into(),
+            );
+            obj.insert("cooldown_s".into(), cooldown_s.into());
+            obj.insert(
+                "cameras".into(),
+                serde_json::to_value(listed.iter().map(|e| e.snapshot()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            );
+            obj.insert("updated_at_unix".into(), now_unix.into());
         }
-
-        // Absent. Case (c): a hub with per-port power → re-enable just the port.
-        self.ppps = !hub.is_empty() && cfg.allow_ppps && topo::ppps_capable(&hub, port);
-        if self.ppps {
-            self.case = "port_cycle".to_string();
-            self.state = "port_cycling".to_string();
-            self.emit("port_cycling", cfg, index);
-            return Some(CameraRecoveryPlan {
-                action: CameraRecoveryAction::CyclePort { hub, port },
-                attempt: index,
-            });
-        }
-
-        // Case (b): shared hub, no per-port power. Default detect + alert; an
-        // opt-in hub reset only inside the boot window AND only when the guard
-        // proves the hub carries no protected device.
-        if cfg.allow_hub_reset && os::within_boot_window(cfg.boot_reset_window) && !hub.is_empty() {
-            let hub_topo = UsbTopo {
-                bind_id: hub.clone(),
-                ancestors: os::name_ancestors(&hub),
-            };
-            if topo::guard_verdict_multi(&hub_topo, &protected_paths) == GuardVerdict::Allow {
-                self.case = "hub_reset".to_string();
-                self.state = "hub_resetting".to_string();
-                self.emit("hub_resetting", cfg, index);
-                return Some(CameraRecoveryPlan {
-                    action: CameraRecoveryAction::ResetHub { bind_id: hub },
-                    attempt: index,
-                });
-            }
-        }
-
-        // Opt-in AGGRESSIVE shared-hub reset (bench/ground): the camera is wedged
-        // on a hub it shares with the radio/FC and the hub exposes no per-port
-        // power, so the only re-enumeration is a whole-hub reset the guard refuses.
-        // An operator who set `allow_shared_hub_reset` accepts the brief radio+FC
-        // re-enumeration to recover the camera without a manual replug — but only
-        // while the FC is provably DISARMED (fail-closed on an unknown/absent armed
-        // state), so this can never fire in flight. The radio re-pairs and the FC
-        // reconnects on their own self-heal paths after the reset.
-        if cfg.allow_shared_hub_reset && !hub.is_empty() {
-            if matches!(crate::fc_state::read_fc_armed().await, Some(false)) {
-                self.case = "hub_reset".to_string();
-                self.state = "hub_resetting".to_string();
-                self.emit_reason("hub_resetting", "shared_hub_aggressive", cfg, index);
-                return Some(CameraRecoveryPlan {
-                    action: CameraRecoveryAction::ResetHub { bind_id: hub },
-                    attempt: index,
-                });
-            }
-            self.hold_alert("needs_hub_reset", "armed_or_unknown", cfg, index);
-            return None;
-        }
-        self.hold_alert("needs_hub_reset", "shared_hub", cfg, index);
-        None
-    }
-
-    /// Record an alert-only outcome: refund the attempt, hold, and emit once.
-    #[cfg(target_os = "linux")]
-    fn hold_alert(&mut self, state: &str, reason: &str, cfg: &CameraRecoveryConfig, index: u32) {
-        self.machine.refund_attempt();
-        self.held = true;
-        if self.state != state {
-            self.emit_reason(state, reason, cfg, index);
-        }
-        self.case = "absent".to_string();
-        self.state = state.to_string();
-    }
-
-    #[cfg(target_os = "linux")]
-    fn emit(&self, state: &str, cfg: &CameraRecoveryConfig, attempt: u32) {
-        self.emit_reason(state, "", cfg, attempt);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn emit_reason(&self, state: &str, reason: &str, cfg: &CameraRecoveryConfig, attempt: u32) {
-        use ados_protocol::logd::{Fields, Level, Value};
-        let mut d = Fields::new();
-        d.insert("state".to_string(), Value::from(state));
-        d.insert("bind_id".to_string(), Value::from(self.bind_id.as_str()));
-        d.insert("hub".to_string(), Value::from(self.hub.as_str()));
-        if let Some(p) = self.port {
-            d.insert("port".to_string(), Value::from(p as u64));
-        }
-        d.insert("attempt".to_string(), Value::from(attempt as u64));
-        d.insert(
-            "cooldown_s".to_string(),
-            Value::from(cfg.cooldown.as_secs()),
-        );
-        d.insert("present".to_string(), Value::from(self.camera_present));
-        if !reason.is_empty() {
-            d.insert("reason".to_string(), Value::from(reason));
-        }
-        let level = match state {
-            // `retrying` replaces the old terminal `exhausted`: still loud,
-            // because a camera that has not come back is worth an operator's
-            // attention, but no longer an announcement that we stopped trying.
-            "retrying" | "needs_hub_reset" | "guard_blocked" => Level::Warn,
-            _ => Level::Info,
-        };
-        self.events.emit(CAMERA_RECOVERY_KIND, level, d);
+        body
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -399,3 +235,6 @@ impl CameraUsbRecovery {
         None
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests;

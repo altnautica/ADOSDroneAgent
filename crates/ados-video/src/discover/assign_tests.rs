@@ -8,6 +8,7 @@ fn camera(kind: &str, path: &str, role: &str) -> DiscoveredCamera {
         width: 0,
         height: 0,
         capabilities: Vec::new(),
+        formats: Vec::new(),
         hardware_role: role.to_string(),
     }
 }

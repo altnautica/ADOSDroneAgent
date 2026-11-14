@@ -49,8 +49,12 @@ pub const MAX_SLOT_COUNT: u32 = u16::MAX as u32;
 /// Topic detections are published on, labelled by model id.
 pub const VISION_DETECTION_TOPIC: &str = "vision.detection";
 
-/// Normalized pixel format of a frame in the ring. The engine downscales and
-/// converts the camera's native format to one of these before publishing.
+/// Pixel format of a frame in the ring: the format each captured camera is
+/// configured to publish in. A network source is decoded and scaled to it by
+/// ffmpeg. A V4L2 camera is published at the size it was opened at: copied
+/// when it delivers this format itself, else decoded from MJPEG or converted
+/// from YUYV, which reaches `Rgb24`, `Nv12`, `Yuv420p` and `Gray8` only (the
+/// 4:2:0 formats in limited range). A camera that offers neither is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FrameFormat {
@@ -132,7 +136,7 @@ pub use vision::*;
 /// The small message published on `vision.frame`. It names the ring slot a
 /// consumer should read and carries the `seq` that the per-slot seqlock must
 /// still hold for the read to be valid.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrameDescriptor {
     /// Wire version, stamped on every descriptor and checked on decode. A
     /// consumer that sees a version it does not speak rejects the frame instead
@@ -171,7 +175,22 @@ pub struct FrameDescriptor {
     pub seq: u64,
     /// Length of the valid pixel bytes in the slot (`format.frame_bytes`).
     pub byte_len: u32,
+    /// Horizontal field of view of the source camera in degrees: its
+    /// `cameras[]` roster entry's `fov_deg`. `None` when the camera has no
+    /// roster entry or the entry leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hfov_deg: Option<f32>,
+    /// Mount pitch of the source camera in degrees: its `cameras[]` roster
+    /// entry's `mount_pitch_deg`, in the roster's sign (negative looks down, a
+    /// belly camera is `-90`). `None` when the camera has no roster entry or
+    /// the entry leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_pitch_deg: Option<f32>,
 }
+
+/// Equality stays total: the angles are stamped only from finite roster
+/// values, never NaN.
+impl Eq for FrameDescriptor {}
 
 impl FrameDescriptor {
     /// Encode as a msgpack map with named keys (matches the Python reader).

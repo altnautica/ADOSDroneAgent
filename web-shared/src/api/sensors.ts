@@ -15,6 +15,68 @@ export interface SensorRow {
   sigma_ns: number;
 }
 
+/** The state words of `health`, as cockpit-spec `sensor-health.json` names them. */
+export const FLOW_STATES = ["ok", "low", "lost", "absent"] as const;
+export const RANGE_STATES = ["ok", "out_of_range", "lost", "absent"] as const;
+export const LIDAR_STATES = ["ok", "degraded", "lost", "absent"] as const;
+export const CAMERA_STATES = ["live", "stale", "lost"] as const;
+
+export type FlowState = (typeof FLOW_STATES)[number];
+export type RangeState = (typeof RANGE_STATES)[number];
+export type LidarState = (typeof LIDAR_STATES)[number];
+export type CameraState = (typeof CAMERA_STATES)[number];
+export type LidarHealth = "good" | "warning" | "error";
+
+/** Body FRD metres. */
+export type PosM = [number, number, number];
+
+/** The optical flow the flight controller relays, as the pilot judges it,
+ *  with the declared mount (`pilot.fc_sensors.flow`, null when undeclared). */
+export interface FlowHealth {
+  state: FlowState;
+  quality: number | null;
+  rate_hz: number | null;
+  age_ms: number | null;
+  mount: { yaw_cdeg: number | null; pos_m: PosM } | null;
+}
+
+/** The downward rangefinder, with its declared mount. */
+export interface RangeHealth {
+  state: RangeState;
+  height_m: number | null;
+  age_ms: number | null;
+  mount: { pos_m: PosM } | null;
+}
+
+/** The scanning lidar: the measured scan rate and the driver's health. */
+export interface LidarHealthBlock {
+  state: LidarState;
+  rate_hz: number | null;
+  health: LidarHealth | null;
+  age_ms: number | null;
+}
+
+/** One camera: `id` is the roster `cameras[].id`, `leg` the video stream leg
+ *  it feeds (`main` for the primary), null when it feeds none. */
+export interface CameraHealth {
+  id: string;
+  role: string | null;
+  leg: string | null;
+  state: CameraState;
+  fps: number | null;
+  age_ms: number | null;
+}
+
+/** `health` of `GET /api/v1/sensors`, classified by cockpit-spec
+ *  `sensor-health.json`. `flow` and `range` are null without a fresh pilot
+ *  verdict (no pilot, or no flight-controller link). */
+export interface SensorHealth {
+  flow: FlowHealth | null;
+  range: RangeHealth | null;
+  lidar: LidarHealthBlock;
+  cameras: CameraHealth[];
+}
+
 export interface SensorsStatus {
   present: boolean;
   rig_id: string | null;
@@ -32,6 +94,8 @@ export interface SensorsStatus {
   fc: { connected: boolean; autopilot: string | null; highres_imu: boolean } | null;
   sensors: SensorRow[];
   gnss: { fix: string; sats: number; hdop: number | null; rtk: string } | null;
+  /** Absent from an agent older than the navigation sensor health. */
+  health?: SensorHealth;
 }
 
 export interface ClockSource {
@@ -147,6 +211,21 @@ export function putGnssBase(
 /** Upload a contract `rig.json`. Invalid documents answer 400 `E_RIG_INVALID`. */
 export function putRig(rig: unknown): Promise<{ ok: boolean; rig_id: string; calib_version: string }> {
   return apiFetch("/api/v1/sensors/rig", { method: "PUT", body: rig });
+}
+
+export const RIG_LIDAR_PATH = "/api/v1/sensors/rig/lidar";
+
+/** Add the RPLIDAR C1 template sensor (`lidar0`) to the stored rig, creating a
+ *  minimal rig when none is stored. 409 `E_RIG_LIDAR_EXISTS` when the rig
+ *  already has a lidar, `E_RIG_ID_TAKEN` when `lidar0` names another sensor,
+ *  `E_RIG_INVALID` when the stored rig does not validate. */
+export function postRigLidar(): Promise<{
+  ok: boolean;
+  rig_id: string;
+  calib_version: string;
+  sensor: Record<string, unknown>;
+}> {
+  return apiFetch(RIG_LIDAR_PATH, { method: "POST" });
 }
 
 /** Parse a picked rig file before upload; returns the document, or why it is

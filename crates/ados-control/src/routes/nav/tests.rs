@@ -6,11 +6,11 @@ use axum::http::{HeaderValue, Method};
 use serde_json::json;
 
 use super::hub::{ClientView, KIND_COUNT};
-use super::hub::{
-    TOPIC_FOLLOW_LOST, TOPIC_FOLLOW_REACQUIRED, TOPIC_FOLLOW_STATE, TOPIC_MAP_STATUS,
-    TOPIC_NAV_STATE, TOPIC_OCCUPANCY, TOPIC_POSE, TOPIC_SCAN,
-};
 use super::tiles::MAX_TILES;
+use super::topics::{
+    TOPIC_FOLLOW_LOST, TOPIC_FOLLOW_REACQUIRED, TOPIC_FOLLOW_STATE, TOPIC_MAP_STATUS,
+    TOPIC_NAV_STATE, TOPIC_OCCUPANCY, TOPIC_POSE,
+};
 use crate::mcp::route_scope;
 use crate::routes::gs_ws::WsAuth;
 
@@ -45,6 +45,8 @@ fn each_topic_is_pinned_to_its_owning_plugin() {
         Routed::Latest(NavKind::Map)
     );
     assert_eq!(route(TOPIC_OCCUPANCY, WORLD_ENGINE_ID), Routed::Tiles);
+    assert_eq!(route(TOPIC_LIDAR, WORLD_ENGINE_ID), Routed::LidarStatus);
+    assert_eq!(route(TOPIC_LIDAR, VISION_NAV_ID), Routed::Ignored);
     assert_eq!(
         route(TOPIC_NAV_STATE, VISION_NAV_ID),
         Routed::Latest(NavKind::Nav)
@@ -69,6 +71,28 @@ fn each_topic_is_pinned_to_its_owning_plugin() {
         route("plugin.world-engine.splat", WORLD_ENGINE_ID),
         Routed::Ignored
     );
+}
+
+#[test]
+fn scans_and_the_lidar_status_reach_the_lidar_view() {
+    let hub = NavHub::new();
+    assert_eq!(hub.lidar_view(), LidarView::default());
+    // Another plugin's look-alike counts for nothing.
+    hub.ingest(TOPIC_SCAN, VISION_NAV_ID, 1, json!({"ranges": []}));
+    hub.ingest(TOPIC_LIDAR, VISION_NAV_ID, 1, json!({"connected": true}));
+    assert_eq!(hub.lidar_view(), LidarView::default());
+    hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 1, json!({"ranges": []}));
+    hub.ingest(
+        TOPIC_LIDAR,
+        WORLD_ENGINE_ID,
+        1,
+        json!({"v": 1, "device": "/dev/ttyUSB0", "connected": true, "health": "good"}),
+    );
+    let v = hub.lidar_view();
+    assert!(v.age_ms.is_some_and(|a| a < 1000));
+    assert_eq!(v.status.unwrap().health.as_deref(), Some("good"));
+    // The scan still reaches the nav stream.
+    assert!(hub.latest(NavKind::Scan).is_some());
 }
 
 #[test]

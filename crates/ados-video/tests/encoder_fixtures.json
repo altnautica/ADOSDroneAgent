@@ -541,7 +541,7 @@
     "-f",
     "v4l2",
     "-input_format",
-    "yuyv",
+    "yuyv422",
     "-video_size",
     "1280x720",
     "-framerate",

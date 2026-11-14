@@ -454,6 +454,13 @@ fn golden_pilot_fixture_round_trips() {
     let v: serde_json::Value = serde_json::from_str(text).unwrap();
     let s: ados_protocol::pilot::PilotState = serde_json::from_value(v.clone()).unwrap();
     assert_eq!(serde_json::to_value(&s).unwrap(), v);
+    let sensors = s.sensors.as_ref().expect("the fixture carries sensors");
+    assert_eq!(sensors.flow.state, ados_protocol::pilot::FlowState::Low);
+    assert_eq!(sensors.range.height_m, Some(4.2));
+    assert_eq!(
+        sensors.lidar.state,
+        ados_protocol::pilot::LidarState::Degraded
+    );
     let text = include_str!("../../../../ados-control/tests/fixtures/obstacles-frame.json");
     let v: serde_json::Value = serde_json::from_str(text).unwrap();
     let o: ados_protocol::pilot::ObstaclesFrame = serde_json::from_value(v.clone()).unwrap();

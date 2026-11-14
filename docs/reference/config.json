@@ -2064,6 +2064,36 @@
       "type": "string"
     },
     {
+      "default": null,
+      "description": "Orient Yaw Cdeg",
+      "enum": null,
+      "key": "pilot.fc_sensors.flow.orient_yaw_cdeg",
+      "maximum": 18000,
+      "minimum": -17999,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Pos M",
+      "enum": null,
+      "key": "pilot.fc_sensors.flow.pos_m",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array|null"
+    },
+    {
+      "default": null,
+      "description": "Pos M",
+      "enum": null,
+      "key": "pilot.fc_sensors.rangefinder.pos_m",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array|null"
+    },
+    {
       "default": 1.5,
       "description": "Gnss Denied Max Accel Mps2",
       "enum": null,

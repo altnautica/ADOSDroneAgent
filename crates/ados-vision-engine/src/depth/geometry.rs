@@ -129,11 +129,31 @@ fn mat_t_vec(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     [dot(col(0), v), dot(col(1), v), dot(col(2), v)]
 }
 
-/// Every camera's geometry, by id, from the agent config's `cameras[]`
-/// entries. The tap camera (`main`) takes the `primary` entry's geometry when
-/// no entry is named `main`. Unparseable text gives an empty map: every camera
-/// then uses [`CameraGeometry::default`].
-pub fn geometries_from_config(text: &str) -> HashMap<String, CameraGeometry> {
+/// A camera's mount as its `cameras[]` entry states it: `fov_deg` (horizontal
+/// field of view, degrees) and `mount_pitch_deg` (degrees, negative looking
+/// down). Each is `None` when the entry leaves it out or gives a value no
+/// camera can have (non-finite, or a field of view that is not positive).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CameraMount {
+    pub fov_deg: Option<f32>,
+    pub mount_pitch_deg: Option<f32>,
+}
+
+impl CameraMount {
+    /// The projection, with [`DEFAULT_HFOV_DEG`] and a level mount standing in
+    /// for what the entry leaves out.
+    pub fn geometry(&self) -> CameraGeometry {
+        CameraGeometry {
+            hfov_deg: self.fov_deg.unwrap_or(DEFAULT_HFOV_DEG),
+            pitch_down_deg: -self.mount_pitch_deg.unwrap_or(0.0),
+        }
+    }
+}
+
+/// Every camera's mount, by id, from the agent config's `cameras[]` entries.
+/// The tap camera (`main`) takes the `primary` entry's mount when no entry is
+/// named `main`. Unparseable text gives an empty map.
+pub fn mounts_from_config(text: &str) -> HashMap<String, CameraMount> {
     #[derive(Deserialize)]
     struct Root {
         #[serde(default)]
@@ -156,23 +176,28 @@ pub fn geometries_from_config(text: &str) -> HashMap<String, CameraGeometry> {
             continue;
         };
         let Some(id) = e.id else { continue };
-        let g = CameraGeometry {
-            hfov_deg: e
-                .fov_deg
-                .filter(|f| f.is_finite() && *f > 0.0)
-                .unwrap_or(DEFAULT_HFOV_DEG),
-            pitch_down_deg: -e.mount_pitch_deg.filter(|p| p.is_finite()).unwrap_or(0.0),
+        let m = CameraMount {
+            fov_deg: e.fov_deg.filter(|f| f.is_finite() && *f > 0.0),
+            mount_pitch_deg: e.mount_pitch_deg.filter(|p| p.is_finite()),
         };
         if e.role.as_deref() == Some("primary") {
-            primary = Some(g);
+            primary = Some(m);
         }
-        out.insert(id, g);
+        out.insert(id, m);
     }
-    if let Some(g) = primary {
+    if let Some(m) = primary {
         out.entry(crate::cameras::TAP_CAMERA_ID.to_string())
-            .or_insert(g);
+            .or_insert(m);
     }
     out
+}
+
+/// Every mount's projection, by camera id.
+pub fn geometries_of(mounts: &HashMap<String, CameraMount>) -> HashMap<String, CameraGeometry> {
+    mounts
+        .iter()
+        .map(|(id, m)| (id.clone(), m.geometry()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -224,13 +249,22 @@ mod tests {
     #[test]
     fn geometry_reads_fov_and_mount_and_gives_the_tap_camera_the_primary_entry() {
         let text = "cameras:\n  - id: front\n    role: primary\n    fov_deg: 82.5\n    mount_pitch_deg: -20\n  - id: belly\n    mount_pitch_deg: -90\n  - nonsense\n";
-        let g = geometries_from_config(text);
+        let mounts = mounts_from_config(text);
+        assert_eq!(
+            mounts["front"],
+            CameraMount {
+                fov_deg: Some(82.5),
+                mount_pitch_deg: Some(-20.0)
+            }
+        );
+        assert_eq!(mounts["belly"].fov_deg, None);
+        let g = geometries_of(&mounts);
         assert_eq!(g["front"].hfov_deg, 82.5);
         assert_eq!(g["front"].pitch_down_deg, 20.0);
         assert_eq!(g["belly"].hfov_deg, DEFAULT_HFOV_DEG);
         assert_eq!(g["belly"].pitch_down_deg, 90.0);
         assert_eq!(g["main"], g["front"]);
-        assert!(geometries_from_config(": not yaml [").is_empty());
+        assert!(mounts_from_config(": not yaml [").is_empty());
     }
 
     fn att(roll: f32, pitch: f32, yaw: f32) -> Attitude {

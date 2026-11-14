@@ -112,6 +112,8 @@ mod tests {
             slot: 2,
             seq: 42,
             byte_len: (640 * 480 * 3) as u32,
+            hfov_deg: None,
+            mount_pitch_deg: None,
         }
     }
 

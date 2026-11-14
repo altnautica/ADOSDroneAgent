@@ -1305,7 +1305,9 @@ fn encoder_label_names_the_codec_element_the_command_actually_runs() {
 #[test]
 fn select_input_format_priority() {
     assert_eq!(select_input_format(Some(&usb_mjpeg())), Some("mjpeg"));
-    assert_eq!(select_input_format(Some(&usb_yuyv())), Some("yuyv"));
+    // ffmpeg's pixel-format name: `-input_format yuyv` is refused by the
+    // v4l2 demuxer, so a YUYV-only camera never opened.
+    assert_eq!(select_input_format(Some(&usb_yuyv())), Some("yuyv422"));
     assert_eq!(select_input_format(None), None);
     let unknown = CameraInfo {
         camera_type: CameraType::Usb,

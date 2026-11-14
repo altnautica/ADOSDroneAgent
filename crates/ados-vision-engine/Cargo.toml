@@ -75,6 +75,8 @@ ort = { version = "2.0.0-rc.13", optional = true, default-features = false, feat
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
 nix = { workspace = true }
+# Decodes the MJPEG a UVC camera streams into the frame-bus format.
+zune-jpeg = "0.5"
 
 [dev-dependencies]
 tempfile = "3"

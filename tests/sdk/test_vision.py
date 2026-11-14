@@ -261,6 +261,62 @@ def test_detection_batch_carries_frame_size_both_ways():
     assert DetectionBatch.from_msgpack(produced.to_msgpack()) == produced
 
 
+def test_detection_batch_camera_geometry_and_sensor_time_both_ways():
+    # The engine stamps the batch's camera roster geometry and, for a
+    # simulated frame, its simulation time; both are omitted when absent.
+    bare = {
+        "v": 3,
+        "model_id": "m",
+        "camera_id": "front",
+        "frame_id": 3,
+        "ts_ms": 9_000,
+        "detections": [],
+    }
+    batch = DetectionBatch.from_dict(bare)
+    assert batch.ts_sensor_ms is None
+    assert batch.hfov_deg is None
+    assert batch.mount_pitch_deg is None
+    raw = _unpack(batch.to_msgpack())
+    for key in ("ts_sensor_ms", "hfov_deg", "mount_pitch_deg"):
+        assert key not in raw
+
+    rust_shaped = {
+        **bare,
+        "ts_sensor_ms": 42_123,
+        "hfov_deg": 87.0,
+        "mount_pitch_deg": -15.0,
+    }
+    batch = DetectionBatch.from_dict(rust_shaped)
+    assert batch.ts_sensor_ms == 42_123
+    assert batch.hfov_deg == 87.0
+    assert batch.mount_pitch_deg == -15.0
+    assert _unpack(batch.to_msgpack()) == rust_shaped
+    assert DetectionBatch.from_msgpack(batch.to_msgpack()) == batch
+
+
+def test_frame_descriptor_camera_geometry_round_trips_and_is_omitted_when_absent():
+    d = FrameDescriptor(
+        camera_id="front",
+        frame_id=1,
+        ts_ns=5,
+        width=8,
+        height=8,
+        format=FrameFormat.RGB24,
+        shm_name="ados-vision-front",
+        slot=0,
+        seq=1,
+        byte_len=192,
+    )
+    raw = _unpack(d.to_msgpack())
+    assert "hfov_deg" not in raw and "mount_pitch_deg" not in raw
+    stamped = FrameDescriptor.from_dict(
+        {**raw, "hfov_deg": 87.0, "mount_pitch_deg": -15.0}
+    )
+    assert stamped.hfov_deg == 87.0
+    assert stamped.mount_pitch_deg == -15.0
+    assert FrameDescriptor.from_msgpack(stamped.to_msgpack()) == stamped
+
+
 def test_percept_typed_fields_round_trip():
     # A rich percept carrying a mask, keypoints, a depth, and a world position
     # survives the msgpack wire byte-for-byte.

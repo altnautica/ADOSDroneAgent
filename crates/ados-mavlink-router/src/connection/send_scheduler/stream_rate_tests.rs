@@ -40,6 +40,8 @@ fn drone_table_streams_the_autonomy_inputs() {
     assert_eq!(rate(t, 132), Some(20.0), "DISTANCE_SENSOR");
     assert_eq!(rate(t, 30), Some(50.0), "ATTITUDE");
     assert_eq!(rate(t, 24), Some(5.0), "GPS_RAW_INT");
+    assert_eq!(rate(t, 100), Some(20.0), "OPTICAL_FLOW");
+    assert_eq!(rate(t, 193), Some(5.0), "EKF_STATUS_REPORT");
     assert_eq!(rate(t, 105), None, "no capture streams outside a capture");
     // Every base stream is requested, at its base rate unless raised.
     for &(id, hz) in BASE_RATES {
@@ -68,6 +70,9 @@ fn capture_table_for_visor_always_and_drone_while_capturing() {
             "GPS_RAW_INT raised, not duplicated"
         );
         assert_eq!(rate(t, 2), Some(1.0), "SYSTEM_TIME");
+        assert_eq!(rate(t, 100), Some(20.0), "OPTICAL_FLOW");
+        assert_eq!(rate(t, 193), Some(5.0), "EKF_STATUS_REPORT");
+        assert_eq!(rate(t, 132), Some(20.0), "DISTANCE_SENSOR");
         assert_eq!(rate(t, 29), Some(10.0), "SCALED_PRESSURE");
         // Every base stream is still requested, at its base rate unless raised.
         for &(id, hz) in BASE_RATES {
@@ -75,6 +80,18 @@ fn capture_table_for_visor_always_and_drone_while_capturing() {
             assert!(got >= hz, "message {id}");
         }
     }
+}
+
+#[test]
+fn legacy_groups_include_extra3_for_the_flow_and_ekf_streams() {
+    // MAV_DATA_STREAM_EXTRA3 (12) carries OPTICAL_FLOW, DISTANCE_SENSOR and
+    // EKF_STATUS_REPORT on ArduPilot.
+    let extra3: Vec<u16> = STREAM_GROUPS
+        .iter()
+        .filter(|g| g.0 == 12)
+        .map(|g| g.1)
+        .collect();
+    assert_eq!(extra3, vec![5]);
 }
 
 #[test]
@@ -121,6 +138,7 @@ async fn link(
         ..MavlinkConfig::default()
     };
     let conn = FcConnection::new(cfg, state, params);
+    conn.latch_fc_identity(1, 1);
     let (tx, rx) = std::sync::mpsc::channel();
     conn.connected.store(true, Ordering::Relaxed);
     *conn.writer.lock().await = Some(Box::pin(CapturingWriter(tx)));

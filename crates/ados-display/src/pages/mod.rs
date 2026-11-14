@@ -49,6 +49,7 @@ pub mod radio_link;
 pub mod radios;
 pub mod reading;
 pub mod sensing_ctx;
+pub mod sensor_health;
 pub mod sensors;
 pub mod settings;
 mod status_ctx;

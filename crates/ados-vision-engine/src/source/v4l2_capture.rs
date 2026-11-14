@@ -1,115 +1,33 @@
-//! The V4L2 capture thread (Linux): open, configure, stream, hand off.
+//! The V4L2 capture thread (Linux): open, negotiate, stream, convert, hand
+//! off.
 //!
 //! Both capture APIs are driven: a single-planar node
 //! (`V4L2_BUF_TYPE_VIDEO_CAPTURE`, UVC and most bridges) and a multi-planar
 //! one (`V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE`, the Rockchip ISP and CIF). On
 //! the multi-planar API the frame must arrive in one plane (NV12, GREY,
-//! RGB3 and the Bayer formats do); a format split across planes is refused.
-//! This module holds no `unsafe`: every kernel call goes through `v4l2_sys`.
+//! RGB3, YUYV, MJPG and the Bayer formats do); a format split across planes
+//! is refused. The node streams the bus format when it offers it, else MJPEG
+//! or YUYV converted to it ([`negotiate`], [`Converter`]). Each buffer is
+//! converted straight out of its mapping, so its descriptor timing is the
+//! driver's. This module holds no `unsafe`: every kernel call goes through
+//! `v4l2_sys`.
 
 use std::io;
 use std::os::fd::RawFd;
 
 use super::controls::{drain, ControlDevice, ControlInfo};
+use super::convert::{fourcc_name, jpeg_decoder, ConvertError, Converter, FailureRun, Wire};
+use super::negotiate::{buffer_type, negotiate, FdNode, Layout};
 use super::v4l2_sys as sys;
 use super::{
-    copy_rows, exposure_ns_from_absolute, fourcc, poll_due, BufferPool, Captured, ControlQueue,
-    V4l2Settings, BUF_FLAG_ERROR, CID_ANALOGUE_GAIN, CID_EXPOSURE_ABSOLUTE, CID_EXPOSURE_AUTO,
-    CID_GAIN, DEQUEUE_TIMEOUT, DRIVER_BUFFERS, EXPOSURE_MANUAL,
+    exposure_ns_from_absolute, poll_due, BufferPool, Captured, ControlQueue, V4l2Settings,
+    BUF_FLAG_ERROR, CID_ANALOGUE_GAIN, CID_EXPOSURE_ABSOLUTE, CID_EXPOSURE_AUTO, CID_GAIN,
+    DEQUEUE_TIMEOUT, DRIVER_BUFFERS, EXPOSURE_MANUAL,
 };
-use ados_protocol::framebus::{mono_ns, FrameFormat};
+use ados_protocol::framebus::mono_ns;
 
 fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg)
-}
-
-/// Bytes per pixel row of the first plane (the stride a driver pads).
-pub(super) fn row_bytes(format: FrameFormat, width: u32) -> usize {
-    let w = width as usize;
-    match format {
-        FrameFormat::Rgb24 => w * 3,
-        FrameFormat::Gray16 | FrameFormat::BayerRggb16 => w * 2,
-        FrameFormat::Gray8 | FrameFormat::BayerRggb8 | FrameFormat::Nv12 | FrameFormat::Yuv420p => {
-            w
-        }
-    }
-}
-
-/// The negotiated layout of a capture node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Layout {
-    pub buf_type: u32,
-    pub width: u32,
-    pub height: u32,
-    pub pixelformat: u32,
-    pub stride: u32,
-}
-
-/// Which capture API a node speaks, from its capabilities.
-pub(super) fn buffer_type(caps: u32) -> Option<u32> {
-    if caps & sys::CAP_STREAMING == 0 {
-        return None;
-    }
-    if caps & sys::CAP_VIDEO_CAPTURE != 0 {
-        Some(sys::BUF_TYPE_VIDEO_CAPTURE)
-    } else if caps & sys::CAP_VIDEO_CAPTURE_MPLANE != 0 {
-        Some(sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-    } else {
-        None
-    }
-}
-
-/// The request format for `s` on `buf_type`.
-pub(super) fn format_request(buf_type: u32, s: &V4l2Settings) -> sys::Format {
-    let code = sys::fourcc_code(fourcc(s.format));
-    if buf_type == sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE {
-        sys::Format::multi(sys::PixFormatMplane {
-            width: s.width,
-            height: s.height,
-            pixelformat: code,
-            field: sys::FIELD_ANY,
-            num_planes: 1,
-            ..Default::default()
-        })
-    } else {
-        sys::Format::single(sys::PixFormat {
-            width: s.width,
-            height: s.height,
-            pixelformat: code,
-            field: sys::FIELD_ANY,
-            ..Default::default()
-        })
-    }
-}
-
-/// The layout the driver accepted, or why it cannot carry the frame.
-pub(super) fn accepted_layout(f: &sys::Format) -> io::Result<Layout> {
-    if f.buf_type() == sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE {
-        let mp = f.pix_mp();
-        if mp.num_planes != 1 {
-            return Err(invalid(format!(
-                "the format arrives in {} planes; one-plane formats only",
-                mp.num_planes
-            )));
-        }
-        let plane = mp.plane_fmt[0];
-        Ok(Layout {
-            buf_type: f.buf_type(),
-            width: mp.width,
-            height: mp.height,
-            pixelformat: mp.pixelformat,
-            stride: plane.bytesperline,
-        })
-    } else {
-        let pix = f.pix();
-        Ok(Layout {
-            buf_type: f.buf_type(),
-            width: pix.width,
-            height: pix.height,
-            pixelformat: pix.pixelformat,
-            stride: pix.bytesperline,
-        })
-    }
 }
 
 fn set_ctrl(fd: RawFd, id: u32, value: i32) -> io::Result<()> {
@@ -182,8 +100,8 @@ impl ControlDevice for FdControls {
     }
 }
 
-/// Open, configure and start streaming `s.device`.
-fn open(s: &V4l2Settings) -> io::Result<(sys::Device, Layout)> {
+/// Open, negotiate and start streaming `s.device`.
+fn open(s: &V4l2Settings) -> io::Result<(sys::Device, Layout, Wire)> {
     let (mut dev, cap) = sys::Device::open(&s.device)?;
     let fd = dev.fd();
     let caps = cap.node_caps();
@@ -193,23 +111,8 @@ fn open(s: &V4l2Settings) -> io::Result<(sys::Device, Layout)> {
             s.device
         ))
     })?;
-    let mut f = format_request(buf_type, s);
-    sys::set_format(fd, &mut f)?;
-    let layout = accepted_layout(&f)?;
-    let want = sys::fourcc_code(fourcc(s.format));
-    if (layout.width, layout.height, layout.pixelformat) != (s.width, s.height, want) {
-        return Err(invalid(format!(
-            "{} ({}) delivers {}x{} {:?} instead of {}x{} {:?}",
-            s.device,
-            sys::cstr(&cap.driver),
-            layout.width,
-            layout.height,
-            layout.pixelformat.to_le_bytes(),
-            s.width,
-            s.height,
-            fourcc(s.format)
-        )));
-    }
+    let label = format!("{} ({})", s.device, sys::cstr(&cap.driver));
+    let (layout, wire) = negotiate(&mut FdNode(fd), buf_type, s, &label)?;
     if s.fps > 0 {
         let mut parm = sys::StreamParm {
             type_: buf_type,
@@ -226,7 +129,7 @@ fn open(s: &V4l2Settings) -> io::Result<(sys::Device, Layout)> {
     }
     apply_controls(fd, s);
     dev.start(buf_type, DRIVER_BUFFERS)?;
-    Ok((dev, layout))
+    Ok((dev, layout, wire))
 }
 
 /// Stream until the consumer goes away or the device fails.
@@ -236,16 +139,35 @@ pub(super) fn run(
     tx: &tokio::sync::mpsc::Sender<io::Result<Captured>>,
     mut controls: Option<ControlQueue>,
 ) -> io::Result<()> {
-    let (mut dev, layout) = open(s)?;
+    let (mut dev, layout, wire) = open(s)?;
     let fd = dev.fd();
     let frame_bytes = s.format.frame_bytes(s.width, s.height);
-    let row = row_bytes(s.format, s.width);
+    let mut convert = Converter::new(
+        wire,
+        s.format,
+        s.width,
+        s.height,
+        layout.stride,
+        jpeg_decoder(),
+    );
     let timeout_ms = DEQUEUE_TIMEOUT.as_millis() as i32;
-    tracing::info!(device = %s.device, width = s.width, height = s.height, buf_type = layout.buf_type, "v4l2_capture_started");
+    tracing::info!(
+        device = %s.device,
+        width = s.width,
+        height = s.height,
+        buf_type = layout.buf_type,
+        pixelformat = %fourcc_name(layout.pixelformat),
+        wire = ?wire,
+        "v4l2_capture_started"
+    );
     let mut exposure = read_exposure(fd);
     let mut frames: u64 = 0;
     let mut corrupt: u32 = 0;
     let mut short_logged = false;
+    let mut decode_logged = false;
+    // Buffers that keep arriving and keep failing to convert end the capture
+    // with the reason: the device is streaming, not silent.
+    let mut failing = FailureRun::default();
     let back = pool.recycler();
     loop {
         if tx.is_closed() {
@@ -273,20 +195,45 @@ pub(super) fn run(
             continue;
         }
         let mut data = pool.take(frame_bytes);
-        let copied = buf
-            .data()
-            .is_some_and(|src| copy_rows(src, layout.stride as usize, row, &mut data));
+        // Converted straight out of the mapping, then requeued before the
+        // frame leaves the thread.
+        let converted = buf.data().map_or(Err(ConvertError::Short), |src| {
+            convert.convert(src, &mut data)
+        });
         let (sequence, flags, ts) = (buf.sequence, buf.flags, buf.timestamp);
-        // Requeue before the frame leaves the thread.
         drop(buf);
-        if !copied {
-            if !short_logged {
-                tracing::warn!(device = %s.device, frame_bytes, "v4l2_short_buffer_dropped");
-                short_logged = true;
+        if let Err(e) = converted {
+            match &e {
+                ConvertError::Short => {
+                    if !short_logged {
+                        tracing::warn!(
+                            device = %s.device,
+                            frame_bytes,
+                            "v4l2_short_buffer_dropped"
+                        );
+                        short_logged = true;
+                    }
+                }
+                ConvertError::Decode(reason) => {
+                    // A truncated or corrupt compressed frame: dropped, counted.
+                    if !decode_logged {
+                        tracing::warn!(
+                            device = %s.device,
+                            error = %reason,
+                            "v4l2_frame_decode_failed"
+                        );
+                        decode_logged = true;
+                    }
+                    corrupt = corrupt.saturating_add(1);
+                }
             }
             back.give(data);
+            if let Some(err) = failing.failed(arrival_ns, &e) {
+                return Err(err);
+            }
             continue;
         }
+        failing.converted();
         let captured = Captured {
             data,
             sequence,

@@ -39,6 +39,9 @@ fn batch_for(camera_id: &str) -> ados_protocol::framebus::DetectionBatch {
         camera_id: camera_id.to_string(),
         frame_id: 1,
         ts_ms: 0,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         frame_width: 640,
         frame_height: 480,
         detections: Vec::new(),
@@ -267,6 +270,8 @@ fn vision_deliver_routes_by_camera_id_and_wildcard() {
         slot: 0,
         seq: 1,
         byte_len: 48,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     };
     let env = Envelope {
         version: PROTOCOL_VERSION,

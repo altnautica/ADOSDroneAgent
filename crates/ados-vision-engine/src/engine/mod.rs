@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use ados_protocol::framebus::{
     Detection, DetectionBatch, FrameDescriptor, FrameFormat, ModelExecution, ModelMetadata,
-    VISION_DETECTION_VERSION,
 };
 use ados_protocol::vision_rpc::owned_model_id;
 use anyhow::{anyhow, Result};
@@ -28,6 +27,7 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use crate::backend::{BackendState, LoadedModel, VisionBackend};
 use crate::camera_control::CameraControls;
+use crate::depth::geometry::CameraMount;
 use crate::ring::{FrameTiming, RingWriter};
 mod camera_motion;
 mod crop;
@@ -35,6 +35,7 @@ mod demand;
 mod depth;
 mod embeddings;
 mod models;
+mod roster;
 mod tracking;
 
 pub use camera_motion::CameraMotionSetup;
@@ -189,6 +190,9 @@ pub struct VisionEngine {
     /// The cameras this engine is configured to capture, known before their
     /// first frame opens a ring.
     capture_ids: std::sync::Mutex<Vec<String>>,
+    /// Each configured camera's `cameras[]` mount, stamped on its frames and
+    /// detection batches.
+    camera_mounts: std::sync::Mutex<HashMap<String, CameraMount>>,
 }
 
 /// How a camera ring is sized.
@@ -297,6 +301,7 @@ impl VisionEngine {
             crop_counts: std::sync::Mutex::new(HashMap::new()),
             camera_motion: std::sync::Mutex::new(camera_motion::CameraMotion::default()),
             capture_ids: std::sync::Mutex::new(Vec::new()),
+            camera_mounts: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -413,7 +418,8 @@ impl VisionEngine {
     }
 
     /// Write one captured frame into the camera's ring and publish its
-    /// descriptor on `vision.frame`. Returns the descriptor.
+    /// descriptor, stamped with the camera's configured mount, on
+    /// `vision.frame`. Returns the descriptor.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_frame(
         &self,
@@ -426,14 +432,19 @@ impl VisionEngine {
         data: &[u8],
     ) -> Result<FrameDescriptor> {
         self.ensure_ring(camera_id, width, height, format).await?;
+        let mount = self.camera_mount(camera_id);
         let desc = {
             let mut cams = self.cameras.lock().await;
             let cr = cams
                 .get_mut(camera_id)
                 .ok_or_else(|| anyhow!("ring vanished for {camera_id}"))?;
-            cr.writer
+            let mut desc = cr
+                .writer
                 .write_frame(camera_id, frame_id, timing, width, height, format, data)
-                .map_err(|e| anyhow!("write frame for {camera_id}: {e}"))?
+                .map_err(|e| anyhow!("write frame for {camera_id}: {e}"))?;
+            desc.hfov_deg = mount.fov_deg;
+            desc.mount_pitch_deg = mount.mount_pitch_deg;
+            desc
         };
         // A send error just means no subscribers; that is fine.
         let _ = self.frame_tx.send(desc.clone());
@@ -473,28 +484,6 @@ impl VisionEngine {
     /// Whether `camera_id` has a frame ring, i.e. the engine captures it.
     pub async fn has_ring(&self, camera_id: &str) -> bool {
         self.cameras.lock().await.contains_key(camera_id)
-    }
-
-    /// Record the cameras this engine is configured to capture, so a lease on
-    /// one is taken before its source delivers (after a restart, or while its
-    /// stream is down and reopening).
-    pub fn set_capture_cameras(&self, ids: &[String]) {
-        *self
-            .capture_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ids.to_vec();
-    }
-
-    /// Whether the engine captures `camera_id`: it has a ring, or it is
-    /// configured and has not delivered a frame yet.
-    pub async fn captures(&self, camera_id: &str) -> bool {
-        let configured = self
-            .capture_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .any(|id| id == camera_id);
-        configured || self.has_ring(camera_id).await
     }
 }
 

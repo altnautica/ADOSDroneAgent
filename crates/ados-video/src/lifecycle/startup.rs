@@ -48,12 +48,23 @@ impl VideoOrchestrator {
         };
         let encoder = self.encoder_label.clone();
         let encoder_hw = encoder.as_deref().map(crate::encoder::encoder_is_hardware);
-        let snapshot = self
-            .last_cameras
-            .camera_state_snapshot()
+        let discovered = self.last_cameras.camera_state_snapshot();
+        // Each local camera's own presence, re-read on every persist (every
+        // health tick), so a captured or secondary camera that drops off the
+        // bus reads `missing` for the USB recovery to act on.
+        let presence = crate::camera_presence::assess(
+            &self.config.cameras,
+            &crate::camera_presence::DiscoveredPrimary {
+                state: discovered.state,
+                device_path: discovered.primary_path.clone(),
+            },
+            &self.presence_sources,
+        );
+        let snapshot = discovered
             .with_pipeline(outcome, reason, encoder, encoder_hw)
             .with_forced_software(self.force_software)
-            .with_framebus(self.framebus_feeds.stats());
+            .with_framebus(self.framebus_feeds.stats())
+            .with_cameras(presence);
         let path = self
             .camera_state_path
             .clone()
@@ -411,9 +422,22 @@ impl VideoOrchestrator {
             return;
         }
         if let Some(id) = self.camera_cfg.framebus_camera().map(str::to_string) {
-            // The vision engine owns this camera; there is nothing to probe.
+            // The vision engine owns this camera; there is nothing to probe for
+            // the primary. A secondary leg encoded straight off its device still
+            // needs the capture formats that device offers, so its cameras are
+            // probed and listed behind the frame-bus primary.
             tracing::info!(camera = %id, "video_streaming_from_framebus");
-            self.last_cameras = discover::DiscoveryResult::for_framebus_source(&id);
+            let mut result = discover::DiscoveryResult::for_framebus_source(&id);
+            let direct_secondary = self
+                .legs
+                .iter()
+                .any(|l| !l.is_primary && !l.is_network_pull && l.framebus_format.is_none());
+            if direct_secondary {
+                let found =
+                    discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await;
+                result.cameras.extend(found.cameras);
+            }
+            self.last_cameras = result;
             return;
         }
         let fingerprint = crate::sysfs_fingerprint::fingerprint();

@@ -12,8 +12,10 @@ import { ArrowLeftRight } from "lucide-react";
 
 import { VideoLayer } from "@/components/shell/video-layer";
 import { cameraLabel, resolveLegVideoUrls } from "@/lib/feed-legs";
+import { legCameraWord } from "@/lib/sensor-words";
 import type { RosterCamera } from "@/lib/types";
 import type { VideoTransportSnapshot } from "@/shared/video-transport";
+import { useCameraHealthStore } from "@/hooks/use-camera-health";
 import { useFeedStore } from "@/stores/feed-store";
 
 /** Inset width: a fixed share of the stage, bounded for tiny and TV screens. */
@@ -26,6 +28,9 @@ export function PipInset({ camera, streamNonce }: { camera: RosterCamera; stream
   const [video, setVideo] = useState<VideoTransportSnapshot | null>(null);
   const { whepUrl, hlsUrl } = resolveLegVideoUrls(camera);
   const label = cameraLabel(camera);
+  const health = useCameraHealthStore((s) => s.cameras);
+  // A stale or lost camera names itself in its state colour; live adds nothing.
+  const camWord = legCameraWord(health, camera, label);
   const aspect = video?.width && video.height ? video.width / video.height : DEFAULT_ASPECT;
 
   return (
@@ -48,7 +53,13 @@ export function PipInset({ camera, streamNonce }: { camera: RosterCamera; stream
         style={{ fontSize: 11 }}
       >
         <ArrowLeftRight className="h-[13px] w-[13px]" aria-hidden />
-        {label}
+        {camWord ? (
+          <span data-testid="pip-camera-state" style={{ color: camWord.hex }}>
+            {camWord.text}
+          </span>
+        ) : (
+          label
+        )}
       </button>
     </div>
   );

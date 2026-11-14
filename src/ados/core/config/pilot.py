@@ -28,6 +28,28 @@ class ControlConfig(BaseModel):
     rc_ados_position: int = Field(default=0, ge=0, le=6)
 
 
+class FlowMountConfig(BaseModel):
+    """The optical flow module's mount: body FRD metres from the CG and its
+    yaw against the body in centidegrees (``FLOW_ORIENT_YAW``)."""
+
+    pos_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    orient_yaw_cdeg: int | None = Field(default=None, ge=-17999, le=18000)
+
+
+class RangefinderMountConfig(BaseModel):
+    """The downward rangefinder's mount, body FRD metres from the CG."""
+
+    pos_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+
+
+class FcSensorsConfig(BaseModel):
+    """The declared flow and rangefinder mount the pilot checks the flight
+    controller's ``FLOW_*`` and ``RNGFND1_POS_*`` parameters against."""
+
+    flow: FlowMountConfig | None = None
+    rangefinder: RangefinderMountConfig | None = None
+
+
 class PilotConfig(BaseModel):
     """Stick profile, height reference, obstacle handling and limits."""
 
@@ -44,3 +66,5 @@ class PilotConfig(BaseModel):
     # every setpoint it flies while the EKF's horizontal position is not GNSS.
     gnss_denied_max_speed_mps: float = Field(default=2.0, ge=0.5, le=15.0)
     gnss_denied_max_accel_mps2: float = Field(default=1.5, ge=0.5, le=6.0)
+    # The declared flow and rangefinder mount; unset parts are not checked.
+    fc_sensors: FcSensorsConfig = Field(default_factory=FcSensorsConfig)

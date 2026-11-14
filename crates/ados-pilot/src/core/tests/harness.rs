@@ -92,6 +92,16 @@ impl World {
         w
     }
 
+    /// A world whose vehicle has no lidar fitted: no scan has arrived and
+    /// none will unless the test feeds its own.
+    pub fn without_lidar() -> Self {
+        let mut w = Self::new();
+        w.lidar = false;
+        w.p.obstacles = crate::obstacles::Obstacles::new();
+        w.p.lidar = crate::sensor_health::LidarTrack::default();
+        w
+    }
+
     pub fn heartbeat(&self) -> MavMessage {
         let mut base = MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED;
         if self.armed {

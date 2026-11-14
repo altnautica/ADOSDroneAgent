@@ -11,9 +11,11 @@
 //! surface's mode mapping and deadzone already applied): pitch + is forward,
 //! thr + is climb, yaw + is clockwise, roll + is right.
 
+mod sensors;
 mod state;
 mod wire;
 
+pub use sensors::*;
 pub use state::*;
 pub use wire::*;
 

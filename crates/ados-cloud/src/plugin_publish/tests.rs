@@ -38,6 +38,9 @@ fn batch_json(v: u16) -> Vec<u8> {
         camera_id: "front".into(),
         frame_id: 3,
         ts_ms: 1_700_000_000_000,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         frame_width: 640,
         frame_height: 480,
         detections: vec![Detection {

@@ -1,18 +1,17 @@
-//! `GET /api/v1/sensors` (the rig's live sensor table) and
-//! `PUT /api/v1/sensors/rig` (store a contract `rig.json`).
+//! `GET /api/v1/sensors`: the rig's live sensor table and the navigation
+//! sensor health.
 //!
 //! The table joins the stream table `ados-clock` keeps of everything on the
 //! sensor bus (`sensors.json`) with the rig document (roles, and rig sensors
 //! not yet streaming), the hub link (`sensorhub.json`), the clock sigmas
-//! (`clock.json`), the GNSS fix (`gnss.json`) and the flight-controller link
-//! (with the stream rates the router requested, `mavlink-router.json`).
+//! (`clock.json`), the GNSS fix (`gnss.json`), the flight-controller link
+//! (with the stream rates the router requested, `mavlink-router.json`) and the
+//! scans the nav hub sees arrive (a rig lidar's measured rate). `health` is
+//! [`super::health`].
 
-use std::future::Future;
 use std::time::SystemTime;
 
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
 
@@ -20,7 +19,9 @@ use ados_protocol::sidecar::{read_fresh_at, Reading};
 use ados_sensorbus::rig::{self, RigSummary};
 
 use super::clock::{clock_body, source_sigma};
-use super::{fresh_map, with_present, write_atomic, SensingPaths, FRESH};
+use super::health::{health_body, HealthInputs};
+use super::{fresh_map, with_present, SensingPaths, FRESH};
+use crate::routes::nav::{LidarView, NavKind};
 use crate::state::AppState;
 
 /// The flight-controller link as the sensors table reports it.
@@ -46,14 +47,20 @@ pub async fn get_sensors(State(state): State<AppState>) -> Json<Value> {
             autopilot: l.fc_firmware.as_str().map(str::to_string),
         }
     });
+    let lidar = state.nav.lidar_view();
+    let pilot = state.nav.latest(NavKind::Pilot);
+    let config = state.pairing_paths.config.clone();
     let body = tokio::task::spawn_blocking(move || {
-        sensors_body(
-            &paths,
-            &profile,
-            SystemTime::now(),
-            ados_sensorbus::time::mono_ns(),
-            fc,
-        )
+        let now = SystemTime::now();
+        let now_mono_ns = ados_sensorbus::time::mono_ns();
+        let mut body = sensors_body(&paths, &profile, now, now_mono_ns, fc, &lidar);
+        let inputs = HealthInputs {
+            pilot,
+            lidar,
+            config_text: std::fs::read_to_string(config).unwrap_or_default(),
+        };
+        body["health"] = health_body(&paths, &inputs, now, now_mono_ns);
+        body
     })
     .await
     .unwrap_or_else(|_| absent_body());
@@ -71,19 +78,34 @@ fn absent_body() -> Value {
     with_present(false, rest)
 }
 
-pub(crate) fn read_rig(paths: &SensingPaths) -> Option<RigSummary> {
+/// The stored rig document and its summary, when it validates.
+pub(crate) fn read_rig_doc(paths: &SensingPaths) -> Option<(Value, RigSummary)> {
     let text = std::fs::read_to_string(paths.rig()).ok()?;
     let doc: Value = serde_json::from_str(&text).ok()?;
-    rig::validate(&doc).ok()
+    let summary = rig::validate(&doc).ok()?;
+    Some((doc, summary))
 }
 
-/// The table for a node running `profile` (underscore form).
+/// The scan rate a rig sensor's lidar model declares.
+fn declared_scan_hz(doc: &Value, id: &str) -> Option<f64> {
+    doc["sensors"]
+        .as_array()?
+        .iter()
+        .find(|s| s["id"] == id)?
+        .get("lidar")?
+        .get("rate_hz")?
+        .as_f64()
+}
+
+/// The table for a node running `profile` (underscore form). `lidar` is what
+/// the nav hub measured of the scans.
 pub(crate) fn sensors_body(
     paths: &SensingPaths,
     profile: &str,
     now: SystemTime,
     now_mono_ns: u64,
     fc: Option<FcView>,
+    lidar: &LidarView,
 ) -> Value {
     let Some(streams) = fresh_map(&paths.sidecar("sensors.json"), Some(FRESH), now) else {
         return absent_body();
@@ -101,7 +123,10 @@ pub(crate) fn sensors_body(
         _ => (None, None),
     };
     let hub = hub_block(hub_side);
-    let rig = read_rig(paths);
+    let (rig_doc, rig) = match read_rig_doc(paths) {
+        Some((doc, summary)) => (doc, Some(summary)),
+        None => (Value::Null, None),
+    };
     // The per-stream rates the router asked the flight controller for, only
     // while its sidecar is inside the registry's freshness window.
     let fc_rates = fresh_map(
@@ -163,8 +188,10 @@ pub(crate) fn sensors_body(
             "sigma_ns": source_sigma(&clock, origin),
         }));
     }
-    // Rig sensors that are not streaming yet are listed, honestly idle. GNSS
-    // without a hub comes from `ados-gnss` where that service runs.
+    // Rig sensors that are not streaming on the bus are listed, honestly idle,
+    // except the lidar: its scans reach the nav hub, so once one has arrived it
+    // lists the measured rate and the last scan's age. GNSS without a hub
+    // comes from `ados-gnss` where that service runs.
     let gnss_lane = unit_on("ados-gnss", profile);
     if let Some(r) = &rig {
         for rs in &r.sensors {
@@ -178,9 +205,19 @@ pub(crate) fn sensors_body(
                 "gnss" if gnss_lane => "gnss",
                 _ => "fc",
             };
+            let (rate, expected, age_ms) = if rs.kind == "lidar" {
+                (
+                    lidar.rate_hz.unwrap_or(0.0),
+                    declared_scan_hz(&rig_doc, &rs.id),
+                    lidar.age_ms,
+                )
+            } else {
+                (0.0, None, None)
+            };
             sensors.push(json!({
                 "id": rs.id, "kind": rs.kind, "role": rs.role, "source": source,
-                "rate_hz": 0.0, "expected_hz": null, "last_t_ns": 0, "age_ms": null, "sigma_ns": -1,
+                "rate_hz": rate, "expected_hz": expected, "last_t_ns": 0, "age_ms": age_ms,
+                "sigma_ns": -1,
             }));
         }
     }
@@ -249,71 +286,6 @@ fn gnss_summary(paths: &SensingPaths, now: SystemTime) -> Value {
         Some(r) => json!({"fix": r["fix"], "sats": r["sats"], "hdop": r["hdop"], "rtk": r["rtk"]}),
         None => Value::Null,
     }
-}
-
-/// The unit command that makes the hub service re-read the rig extrinsics.
-const RELOAD_HUB: [&str; 3] = ["--no-block", "reload-or-restart", "ados-sensorhub.service"];
-
-/// `PUT /api/v1/sensors/rig`: validate a contract `rig.json` and store it.
-pub async fn put_rig(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
-    put_rig_with(SensingPaths::from_state(&state), body, |program, args| {
-        crate::probe::status_only(program, args, crate::probe::PROBE_TIMEOUT)
-    })
-    .await
-}
-
-/// Store the rig off the reactor, then have the hub service reload it through
-/// `run` (`systemctl` in production).
-pub(crate) async fn put_rig_with<F, Fut>(
-    paths: SensingPaths,
-    body: axum::body::Bytes,
-    run: F,
-) -> Response
-where
-    F: FnOnce(&'static str, &'static [&'static str]) -> Fut,
-    Fut: Future<Output = bool>,
-{
-    let (resp, stored) = match tokio::task::spawn_blocking(move || put_rig_at(&paths, &body)).await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "E_RIG_WRITE", "detail": e.to_string()})),
-            )
-                .into_response()
-        }
-    };
-    if stored && !run("systemctl", &RELOAD_HUB).await {
-        tracing::warn!("sensor hub reload after the rig write failed");
-    }
-    resp
-}
-
-/// Validate and store; the flag is true when the rig landed on disk.
-pub(crate) fn put_rig_at(paths: &SensingPaths, body: &[u8]) -> (Response, bool) {
-    let invalid = |detail: String| {
-        let body = Json(json!({"error": "E_RIG_INVALID", "detail": detail}));
-        ((StatusCode::BAD_REQUEST, body).into_response(), false)
-    };
-    let doc: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => return invalid(format!("body is not JSON: {e}")),
-    };
-    let summary = match rig::validate(&doc) {
-        Ok(s) => s,
-        Err(e) => return invalid(e),
-    };
-    let pretty = serde_json::to_vec_pretty(&doc).unwrap_or_default();
-    if let Err(e) = write_atomic(&paths.rig(), &pretty) {
-        let body = Json(json!({"error": "E_RIG_WRITE", "detail": e.to_string()}));
-        return (
-            (StatusCode::INTERNAL_SERVER_ERROR, body).into_response(),
-            false,
-        );
-    }
-    let ok = json!({"ok": true, "rig_id": summary.rig_id, "calib_version": summary.calib_version});
-    (Json(ok).into_response(), true)
 }
 
 #[cfg(test)]

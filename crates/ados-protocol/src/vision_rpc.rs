@@ -498,6 +498,9 @@ mod tests {
     fn a_batch_of_an_unknown_version_is_refused_at_decode() {
         let batch = DetectionBatch {
             v: VISION_DETECTION_VERSION + 1,
+            ts_sensor_ms: None,
+            hfov_deg: None,
+            mount_pitch_deg: None,
             model_id: "m".into(),
             camera_id: "c".into(),
             frame_id: 1,

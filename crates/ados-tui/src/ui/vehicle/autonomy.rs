@@ -1,6 +1,7 @@
 //! The Autonomy block from `/api/v1/nav/status`: follow phase, lock and range,
-//! the re-acquire mode, the navigation source, the lidar and the map session;
-//! and, from `/api/vision/status`, the cameras the detector is running on.
+//! the re-acquire mode, the navigation source, the sensor rows (flow, range,
+//! lidar, cameras; `sensor_rows.rs`) and the map session; and, from
+//! `/api/vision/status`, the cameras the detector is running on.
 //! Every state is a symbol and a word; colour only repeats what the word says.
 //! Every row built from a stale kind (or from a failed read) is dim and
 //! marked "(stale)".
@@ -197,36 +198,7 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             out.push(mark_stale(t, line, nav.stale));
         }
     }
-    // The nearest return: the scan's, else the nav kind's nearest obstacle;
-    // each value carries the staleness of the kind it came from.
-    let from_scan = a
-        .lidar
-        .as_ref()
-        .and_then(|l| l.min_range_m.map(|m| (m, l.stale)));
-    let from_nav = a
-        .nav
-        .as_ref()
-        .and_then(|n| n.min_obstacle_m.map(|m| (m, n.stale)));
-    if a.lidar.is_some() || from_nav.is_some() {
-        let nearest = from_scan.or(from_nav);
-        let rate = a
-            .nav
-            .as_ref()
-            .and_then(|n| n.obstacle_rate_hz.map(|r| (r, n.stale)));
-        let stale = nearest.map_or_else(|| a.lidar.as_ref().is_some_and(|l| l.stale), |(_, s)| s)
-            || rate.is_some_and(|(_, s)| s);
-        let line = kv_text(
-            t,
-            "Lidar",
-            LABEL,
-            format!(
-                "min {} · {}",
-                opt(nearest, |(m, _)| format!("{m:.1} m")),
-                opt(rate, |(r, _)| format!("{r:.0} Hz")),
-            ),
-        );
-        out.push(mark_stale(t, line, stale));
-    }
+    out.extend(super::sensor_rows::rows(core, a));
     if let Some(map) = &a.map {
         let memory = match (map.memory_used_mb, map.memory_budget_mb) {
             (Some(u), Some(b)) if b > 0.0 => {

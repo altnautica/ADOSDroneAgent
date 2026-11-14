@@ -26,6 +26,7 @@ use ados_vision_engine::daemon_support::{
     backoff, board_soc, init_tracing, reopen_pause, sd_ready, wait_for_shutdown,
 };
 use ados_vision_engine::depth::feed;
+use ados_vision_engine::depth::geometry::geometries_of;
 use ados_vision_engine::depth_bus;
 use ados_vision_engine::detection_bus;
 use ados_vision_engine::engine::{CameraMotionSetup, DepthSetup, VisionEngine};
@@ -221,7 +222,7 @@ async fn main() {
             model_id,
             unavailable,
             interval_ms,
-            geometries: config.camera_geometry.clone(),
+            geometries: geometries_of(&config.camera_mounts),
         });
         interval_ms
     };
@@ -229,9 +230,11 @@ async fn main() {
     // turn between batches. Under simulation the autopilot runs on the
     // simulator's clock, the one the simulated cameras stamp exposures with.
     engine.configure_camera_motion(CameraMotionSetup {
-        geometries: config.camera_geometry.clone(),
+        geometries: geometries_of(&config.camera_mounts),
         fc_on_sim_clock: config.simulation,
     });
+    // Every frame and detection batch carries its camera's configured mount.
+    engine.configure_camera_mounts(config.camera_mounts.clone());
 
     // Build the per-camera schedule input: every registered engine-run detection
     // model, each with a target rate + priority so the perception scheduler paces
@@ -331,7 +334,7 @@ async fn main() {
         let engine = engine.clone();
         let cancel = cancel.clone();
         let paces = paces.clone();
-        let input = work.input();
+        let input = work.input(cam.id());
         let work = work.clone();
         let factory = factory.clone();
         tasks.push(tokio::spawn(async move {

@@ -1,0 +1,10 @@
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture Multiplanar
+
+	[0]: 'NV12' (Y/UV 4:2:0)
+		Size: Stepwise 32x32 - 3840x2160 with step 2/2
+			Interval: Stepwise 0.033s - 1.000s with step 0.000s (1.000-30.000 fps)
+	[1]: 'NV21' (Y/VU 4:2:0)
+	[2]: 'YU12' (Planar YUV 4:2:0)
+		Size: Continuous 32x32 - 1920x1080
+			Interval: Continuous 0.017s - 1.000s (1.000-60.000 fps)

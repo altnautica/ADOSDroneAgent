@@ -53,6 +53,19 @@ impl Capability {
     }
 }
 
+/// `struct v4l2_fmtdesc` (64 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FmtDesc {
+    pub index: u32,
+    pub type_: u32,
+    pub flags: u32,
+    pub description: [u8; 32],
+    pub pixelformat: u32,
+    pub mbus_code: u32,
+    pub reserved: [u32; 3],
+}
+
 /// `struct v4l2_pix_format` (48 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -281,6 +294,7 @@ const READ: u64 = 2;
 const WRITE: u64 = 1;
 
 pub const VIDIOC_QUERYCAP: u64 = ioc(READ, 0, std::mem::size_of::<Capability>());
+pub const VIDIOC_ENUM_FMT: u64 = ioc(READ | WRITE, 2, std::mem::size_of::<FmtDesc>());
 pub const VIDIOC_S_FMT: u64 = ioc(READ | WRITE, 5, std::mem::size_of::<Format>());
 pub const VIDIOC_REQBUFS: u64 = ioc(READ | WRITE, 8, std::mem::size_of::<RequestBuffers>());
 pub const VIDIOC_QUERYBUF: u64 = ioc(READ | WRITE, 9, std::mem::size_of::<Buffer>());
@@ -329,6 +343,8 @@ macro_rules! typed_ioctl {
 typed_ioctl! {
     /// `VIDIOC_QUERYCAP`.
     query_cap: VIDIOC_QUERYCAP => Capability;
+    /// `VIDIOC_ENUM_FMT`.
+    enum_format: VIDIOC_ENUM_FMT => FmtDesc;
     /// `VIDIOC_S_FMT`.
     set_format: VIDIOC_S_FMT => Format;
     /// `VIDIOC_S_PARM`.
@@ -366,6 +382,7 @@ pub fn cstr(bytes: &[u8]) -> String {
 }
 
 /// Little-endian fourcc code of four ASCII bytes (`v4l2_fourcc`).
+#[cfg(test)]
 pub const fn fourcc_code(c: [u8; 4]) -> u32 {
     u32::from_le_bytes(c)
 }

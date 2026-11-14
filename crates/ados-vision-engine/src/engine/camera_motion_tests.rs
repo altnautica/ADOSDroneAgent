@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use super::*;
 use crate::depth::feed::Attitude;
 use crate::depth::geometry::CameraGeometry;
-use ados_protocol::framebus::{BoundingBox, DetectionHead, LockState, ModelKind};
+use ados_protocol::framebus::{BoundingBox, Detection, DetectionHead, LockState, ModelKind};
 
 #[path = "camera_motion_replay.rs"]
 mod replay;
@@ -98,6 +98,8 @@ fn frame(i: usize) -> (FrameDescriptor, Vec<u8>) {
         slot: 0,
         shm_name: String::new(),
         byte_len: W * H,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     };
     (desc, pixels)
 }

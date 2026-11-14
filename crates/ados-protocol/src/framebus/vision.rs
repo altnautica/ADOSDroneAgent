@@ -227,9 +227,34 @@ pub struct DetectionBatch {
     pub model_id: String,
     pub camera_id: String,
     pub frame_id: u64,
-    /// Capture time of the source frame: the frame's host CLOCK_MONOTONIC
-    /// timestamp in milliseconds (`FrameDescriptor::ts_ns / 1_000_000`).
+    /// Capture time of the source frame in milliseconds on the host
+    /// CLOCK_MONOTONIC clock (`FrameDescriptor::ts_ns / 1_000_000`): the
+    /// exposure midpoint when the source knows it (a V4L2 buffer with a
+    /// monotonic stamp, a frame joined to its sensor-hub trigger), else the
+    /// frame's arrival at the engine (an untriggered RTSP stream, a V4L2
+    /// stamp on the driver's own clock).
     pub ts_ms: i64,
+    /// Capture time of the source frame in milliseconds on the simulation
+    /// clock (`FrameDescriptor::ts_sensor_ns / 1_000_000` for a frame whose
+    /// `timebase` is `TIMEBASE_SIM`): the simulator's time at the frame's
+    /// render, the clock a software-in-the-loop flight controller runs on, so a
+    /// consumer pairs the batch with that controller's attitude at the same
+    /// instant. `None` for a frame without a simulation stamp (any real
+    /// camera, whose sensor clock is not the flight controller's): pair those
+    /// by `ts_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_sensor_ms: Option<i64>,
+    /// Horizontal field of view of the batch's camera in degrees: its
+    /// `cameras[]` roster entry's `fov_deg`. `None` when the camera has no
+    /// roster entry or the entry leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hfov_deg: Option<f32>,
+    /// Mount pitch of the batch's camera in degrees: its `cameras[]` roster
+    /// entry's `mount_pitch_deg`, in the roster's sign (negative looks down,
+    /// a belly camera is `-90`). `None` when the camera has no roster entry or
+    /// the entry leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_pitch_deg: Option<f32>,
     /// The source frame's pixel size, so a consumer scales the pixel-space boxes
     /// to the rendered frame. `0` when the source did not report it (the consumer
     /// then falls back to its own default). Additive + serde-default, so a batch

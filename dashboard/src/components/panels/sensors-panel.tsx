@@ -14,6 +14,8 @@ import {
   type SensorsStatus,
 } from "@/shared/api/sensors";
 import { fmtNum } from "@/shared/format";
+import { parseSensorsHealth } from "@/shared/hud/sensor-health";
+import { SensorHealthView } from "./sensor-health-card";
 
 const VERDICT_VARIANT: Record<RateVerdict, BadgeProps["variant"]> = {
   ok: "success",
@@ -27,14 +29,26 @@ export interface SensorsViewProps {
   clock: ClockStatus | null;
 }
 
-/** Hub, clock and GNSS summary over the per-stream table (kind, role, source,
- *  rate vs expected, age, σ). */
+/** Hub, clock and GNSS summary, the navigation sensor health (flow, range,
+ *  lidar, cameras), then the per-stream table (kind, role, source, rate vs
+ *  expected, age, σ). */
 export function SensorsView({ sensors, clock }: SensorsViewProps) {
   const { t } = useTranslation();
-  if (!sensors.present) return <p className="text-sm text-muted-foreground">{t("sensors.absent")}</p>;
+  // `health` is newer than the typed body; the parser validates it.
+  const health = parseSensorsHealth("health" in sensors ? sensors.health : null);
+  const healthView = health ? <SensorHealthView health={health} /> : null;
+  if (!sensors.present) {
+    return (
+      <div className="space-y-4 text-sm">
+        <p className="text-muted-foreground">{t("sensors.absent")}</p>
+        {healthView}
+      </div>
+    );
+  }
   const hub = sensors.hub;
   return (
     <div className="space-y-4 text-sm">
+      {healthView}
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <div>
           <div className="text-xs text-muted-foreground">{t("sensors.hub")}</div>

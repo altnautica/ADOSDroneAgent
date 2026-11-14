@@ -47,10 +47,12 @@ const BASE_RATES: &[(u32, f32)] = &[
 
 /// [`BASE_RATES`] plus what a drone's onboard autonomy steers from: the local
 /// NED position and velocity the guided setpoints are expressed in, the
-/// downward rangefinder that gives height above ground, attitude at the rate
-/// an external-navigation odometry stamps roll and pitch from, and the GNSS
-/// fix at the rate a GNSS-loss source switch watches. The router owns these
-/// rates so the plugins that read them never send competing requests.
+/// downward rangefinder that gives height above ground, the optical flow and
+/// the EKF status the flow-and-range position hold is judged by, attitude at
+/// the rate an external-navigation odometry stamps roll and pitch from, and
+/// the GNSS fix at the rate a GNSS-loss source switch watches. The router
+/// owns these rates so the plugins that read them never send competing
+/// requests.
 const DRONE_RATES: &[(u32, f32)] = &[
     (0, 1.0),    // HEARTBEAT
     (30, 50.0),  // ATTITUDE
@@ -66,6 +68,8 @@ const DRONE_RATES: &[(u32, f32)] = &[
     (242, 0.2),  // HOME_POSITION
     (285, 10.0), // GIMBAL_DEVICE_ATTITUDE_STATUS (AR camera attitude)
     (42, 2.0),   // MISSION_CURRENT (mission state)
+    (100, 20.0), // OPTICAL_FLOW
+    (193, 5.0),  // EKF_STATUS_REPORT
 ];
 
 /// [`DRONE_RATES`] plus the sensor streams a capture session records: the
@@ -91,6 +95,8 @@ const CAPTURE_RATES: &[(u32, f32)] = &[
     (242, 0.2),   // HOME_POSITION
     (285, 10.0),  // GIMBAL_DEVICE_ATTITUDE_STATUS
     (42, 2.0),    // MISSION_CURRENT
+    (100, 20.0),  // OPTICAL_FLOW
+    (193, 5.0),   // EKF_STATUS_REPORT
 ];
 
 /// The stream table for a node of `profile`: a visor always records sensor
@@ -118,6 +124,10 @@ const STREAM_GROUPS: &[(u8, u16)] = &[
     (10, 10), // EXTRA1 — ATTITUDE
     (11, 4),  // EXTRA2 — VFR_HUD
     (3, 4),   // RC_CHANNELS
+    // EXTRA3: ArduPilot sends DISTANCE_SENSOR, OPTICAL_FLOW and
+    // EKF_STATUS_REPORT in this group (the SRn_EXTRA3 parameter in
+    // libraries/GCS_MAVLink/GCS_MAVLink_Parameters.cpp).
+    (12, 5),
 ];
 
 /// Parameter sweep timing.
@@ -444,7 +454,10 @@ mod landed_request;
 pub(super) use landed_request::LandedStateRequest;
 mod sensor_sends;
 mod ticks;
+pub(super) use ticks::RequestTargets;
 
+#[cfg(test)]
+mod identity_tests;
 #[cfg(test)]
 mod stream_rate_tests;
 #[cfg(test)]

@@ -32,6 +32,12 @@ pub const VISION_STATUS_FILE: &str = "vision-status.json";
 /// The sidecar schema version, stamped on write.
 pub const VISION_STATUS_VERSION: u16 = 1;
 
+/// The start of a [`SourceError::error`] for a camera whose source stayed open
+/// but delivered no frame (`delivered no frame for 10 s`). The producer builds
+/// the reason from it, and a consumer tells a silent (wedged) device from one
+/// that failed to open or negotiate by it.
+pub const SOURCE_SILENT_PREFIX: &str = "delivered no frame for ";
+
 /// The last failure of one camera's frame source (open, format negotiation or
 /// stream end), kept until the source next delivers a frame.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +46,16 @@ pub struct SourceError {
     pub error: String,
 }
 
+impl SourceError {
+    /// The source went silent while open, as a wedged device does, rather
+    /// than failing to open or to negotiate a format.
+    pub fn is_silence(&self) -> bool {
+        self.error.starts_with(SOURCE_SILENT_PREFIX)
+    }
+}
+
 /// The engine's work state.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VisionStatus {
     #[serde(default)]
     pub version: u16,
@@ -64,6 +78,20 @@ pub struct VisionStatus {
     /// run there. Absent from an engine that predates the depth layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<DepthStatus>,
+    /// Per input camera, the delivered frame rate over the last couple of
+    /// seconds and the age of its newest frame, measured at write time. Both
+    /// are null until the camera's first frame. Absent from an older engine.
+    #[serde(default)]
+    pub cameras: BTreeMap<String, CameraRateStatus>,
+}
+
+/// One input camera's delivery rate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CameraRateStatus {
+    /// Frames received per second over the last ~2 s.
+    pub fps: Option<f64>,
+    /// Time since the newest frame arrived.
+    pub last_frame_age_ms: Option<u64>,
 }
 
 /// The detector's demand state: the mode and, per captured camera, whether
@@ -215,12 +243,24 @@ mod tests {
                     },
                 )]),
             }),
+            cameras: BTreeMap::from([
+                (
+                    "main".into(),
+                    CameraRateStatus {
+                        fps: Some(29.5),
+                        last_frame_age_ms: Some(12),
+                    },
+                ),
+                ("belly".into(), CameraRateStatus::default()),
+            ]),
         };
         let text = serde_json::to_string(&s).unwrap();
+        assert!(text.contains(r#""belly":{"fps":null,"last_frame_age_ms":null}"#));
         assert_eq!(serde_json::from_str::<VisionStatus>(&text).unwrap(), s);
         let old: VisionStatus =
             serde_json::from_str(r#"{"frames_consumed":3,"live_inputs":1}"#).unwrap();
         assert_eq!(old.version, 0);
+        assert!(old.cameras.is_empty());
         assert_eq!(old.work_counter(), Some(3));
     }
 }

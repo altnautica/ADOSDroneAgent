@@ -70,20 +70,12 @@ fn fourcc_codes_match_videodev2() {
 
 #[cfg(target_os = "linux")]
 mod layouts {
-    use super::super::capture::{accepted_layout, buffer_type, format_request, row_bytes};
+    use super::super::negotiate::{accepted_layout, buffer_type, format_request};
     use super::super::v4l2_sys as sys;
     use super::*;
 
-    fn settings(format: FrameFormat) -> V4l2Settings {
-        V4l2Settings {
-            device: "/dev/video0".into(),
-            width: 1280,
-            height: 800,
-            fps: 20,
-            format,
-            exposure_us: None,
-            gain: None,
-        }
+    fn request(buf_type: u32, format: FrameFormat) -> sys::Format {
+        format_request(buf_type, u32::from_le_bytes(fourcc(format)), 1280, 800)
     }
 
     #[test]
@@ -103,7 +95,7 @@ mod layouts {
 
     #[test]
     fn a_single_planar_request_reads_back_its_layout() {
-        let f = format_request(sys::BUF_TYPE_VIDEO_CAPTURE, &settings(FrameFormat::Gray8));
+        let f = request(sys::BUF_TYPE_VIDEO_CAPTURE, FrameFormat::Gray8);
         // The driver pads rows to 1344 bytes.
         let f = sys::Format::single(sys::PixFormat {
             bytesperline: 1344,
@@ -116,10 +108,7 @@ mod layouts {
 
     #[test]
     fn a_multi_planar_request_uses_plane_zero_and_refuses_split_planes() {
-        let f = format_request(
-            sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-            &settings(FrameFormat::Nv12),
-        );
+        let f = request(sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE, FrameFormat::Nv12);
         let mut mp = f.pix_mp();
         assert_eq!(mp.num_planes, 1);
         mp.plane_fmt[0].bytesperline = 1280;
@@ -139,3 +128,7 @@ mod layouts {
         assert_eq!(row_bytes(FrameFormat::Gray16, 10), 20);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "v4l2_convert_tests.rs"]
+mod conversion;

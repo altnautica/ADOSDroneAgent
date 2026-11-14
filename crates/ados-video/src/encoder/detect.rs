@@ -91,18 +91,19 @@ pub fn binary_present(program: &str) -> bool {
     false
 }
 
-/// The codec elements the label is derived from, hardware first. An argv can
-/// only ever carry one of them, so the order is a tie-break that never fires
-/// in practice; it is fixed so the emitted value is deterministic.
-pub(super) const ENCODER_ELEMENTS: [&str; 8] = [
-    "h264_v4l2m2m",
-    "hevc_v4l2m2m",
-    "mpph264enc",
-    "mpph265enc",
-    "omxh264videoenc",
-    "x264enc",
-    "libx264",
-    "libx265",
+/// The codec elements the label is derived from, hardware first, each with the
+/// builder family that runs it. An argv can only ever carry one of them, so the
+/// order is a tie-break that never fires in practice; it is fixed so the
+/// emitted value is deterministic.
+pub(super) const ENCODER_ELEMENTS: [(&str, &str); 8] = [
+    ("h264_v4l2m2m", "ffmpeg"),
+    ("hevc_v4l2m2m", "ffmpeg"),
+    ("mpph264enc", "gstreamer"),
+    ("mpph265enc", "gstreamer"),
+    ("omxh264videoenc", "gstreamer"),
+    ("x264enc", "gstreamer"),
+    ("libx264", "ffmpeg"),
+    ("libx265", "ffmpeg"),
 ];
 
 /// The on-wire encoder identity for the `camera-state.json` sidecar.
@@ -111,19 +112,18 @@ pub(super) const ENCODER_ELEMENTS: [&str; 8] = [
 /// `h264_v4l2m2m` path and the software `libx264` fallback, so a label derived
 /// from the kind tells an operator nothing about whether the node fell back to
 /// software — which is the one question the sidecar field exists to answer. The
-/// codec element appears only in the built command, so that is what is scanned.
+/// codec element appears only in the built command, so that is what is scanned,
+/// and the family is the element's own: the caller holds the PROBED kind, and
+/// the builder may have moved the leg onto a hardware GStreamer encoder (a
+/// frame-bus or vendor-board leg probed as `ffmpeg`).
 ///
 /// Values: `rpicam-vid`, and `<family>-<element>` for `ffmpeg` / `gstreamer`
-/// (e.g. `ffmpeg-h264_v4l2m2m`, `gstreamer-x264enc`), falling back to
-/// `<family>-unknown` when no known element is present.
+/// (e.g. `ffmpeg-h264_v4l2m2m`, `gstreamer-omxh264videoenc`), falling back to
+/// `<family>-unknown` (family from `kind`) when no known element is present.
 pub fn encoder_label(kind: EncoderKind, cmd: &[String]) -> String {
     if kind == EncoderKind::RpicamVid {
         return "rpicam-vid".to_string();
     }
-    let family = match kind {
-        EncoderKind::Gstreamer => "gstreamer",
-        _ => "ffmpeg",
-    };
     for token in cmd {
         // The rpicam / gstreamer forms are `bash -c "<pipeline>"`,
         // which carries the whole command in one token, so argv position alone
@@ -131,12 +131,16 @@ pub fn encoder_label(kind: EncoderKind, cmd: &[String]) -> String {
         // hit within the token.
         let hit = ENCODER_ELEMENTS
             .iter()
-            .filter_map(|el| token.find(el).map(|at| (at, *el)))
+            .filter_map(|&(el, family)| token.find(el).map(|at| (at, el, family)))
             .min();
-        if let Some((_, element)) = hit {
+        if let Some((_, element, family)) = hit {
             return format!("{family}-{element}");
         }
     }
+    let family = match kind {
+        EncoderKind::Gstreamer => "gstreamer",
+        _ => "ffmpeg",
+    };
     format!("{family}-unknown")
 }
 

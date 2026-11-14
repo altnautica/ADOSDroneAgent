@@ -14,14 +14,63 @@ fn item(id: &str, ok: bool, severity: Severity, msg: impl Into<String>) -> Readi
     }
 }
 
+/// An EKF_STATUS_REPORT older than this no longer vouches for the estimate.
+const EKF_STATUS_STALE_MS: u64 = 3000;
+/// Horizontal position test ratio that warns: half-way to rejection.
+const EKF_POS_VARIANCE_WARN: f32 = 0.5;
+/// Horizontal position test ratio that blocks: ArduPilot's default EKF
+/// failsafe threshold (`FS_EKF_THRESH` 0.8).
+const EKF_POS_VARIANCE_BLOCK: f32 = 0.8;
+
+/// `position`: a fresh local position, and while the FC reports its EKF
+/// status, an absolute horizontal position the EKF trusts. A local position
+/// keeps streaming after the EKF has lost its absolute fix, so it alone
+/// cannot say the estimate is good.
+fn position_item(fc: &FcState, now_ms: u64) -> Readiness {
+    let block = |msg| item("position", false, Severity::Block, msg);
+    let warn = |msg| item("position", false, Severity::Warn, msg);
+    if fc.fresh_local(now_ms).is_none() {
+        return block("No position estimate");
+    }
+    let Some(ekf) = fc.ekf else {
+        return item(
+            "position",
+            true,
+            Severity::Block,
+            "Position estimate available",
+        );
+    };
+    if now_ms.saturating_sub(ekf.at_ms) >= EKF_STATUS_STALE_MS {
+        return warn("Position degraded (EKF): status not reporting");
+    }
+    let v = ekf.v;
+    let enabled = |n: &str| fc.params.get(n).is_some_and(|p| *p != 0.0);
+    let relative_enabled = enabled("FLOW_TYPE") || enabled("VISO_TYPE");
+    if !v.has_position(fc.armed, relative_enabled) {
+        block("Position degraded (EKF): no absolute or relative horizontal position")
+    } else if v.horiz_variance >= EKF_POS_VARIANCE_BLOCK {
+        block("Position degraded (EKF): position variance too high")
+    } else if v.horiz_variance >= EKF_POS_VARIANCE_WARN {
+        warn("Position degraded (EKF): position variance high")
+    } else {
+        item(
+            "position",
+            true,
+            Severity::Block,
+            "Position estimate available",
+        )
+    }
+}
+
 /// Every readiness item for the current state.
 pub fn items(
     fc: &FcState,
     mode: ControlMode,
     controller_live: bool,
+    sensors: &crate::sensor_readiness::SensorCtx,
     now_ms: u64,
 ) -> Vec<Readiness> {
-    let mut out = Vec::with_capacity(6);
+    let mut out = Vec::with_capacity(10);
     out.push(if fc.linked(now_ms) {
         item(
             "fc_link",
@@ -57,33 +106,8 @@ pub fn items(
     if let Some(fw) = fc.firmware {
         out.push(profile_item(fc, fw, mode));
     }
-    out.push(if fc.fresh_local(now_ms).is_some() {
-        item(
-            "position",
-            true,
-            Severity::Block,
-            "Position estimate available",
-        )
-    } else {
-        item("position", false, Severity::Block, "No position estimate")
-    });
-    out.push(
-        if fc.rangefinder_agl(now_ms).is_some() || fc.landed() && fc.rangefinder.is_some() {
-            item(
-                "agl",
-                true,
-                Severity::Warn,
-                "Downward rangefinder available",
-            )
-        } else {
-            item(
-                "agl",
-                false,
-                Severity::Warn,
-                "No downward rangefinder: height reference is EKF altitude",
-            )
-        },
-    );
+    out.push(position_item(fc, now_ms));
+    out.extend(crate::sensor_readiness::items(fc, mode, sensors, now_ms));
     if mode == ControlMode::Ados {
         out.push(if controller_live {
             item("controller", true, Severity::Warn, "Controller connected")

@@ -195,6 +195,8 @@ fn desc(frame_id: u64) -> ados_protocol::framebus::FrameDescriptor {
         slot: 0,
         shm_name: String::new(),
         byte_len: W * H * 3,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     }
 }
 

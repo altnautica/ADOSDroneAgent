@@ -184,6 +184,11 @@ pub struct CameraStateSnapshot {
     /// encoder reads the frame bus.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub framebus: Vec<crate::framebus_input::FeedStats>,
+    /// Every local camera's own presence: the primary, and each captured or
+    /// secondary camera the pipeline does not discover itself. What the USB
+    /// recovery acts on per camera. Omitted only when nothing was assessed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cameras: Vec<crate::camera_presence::CameraPresence>,
     pub updated_at_unix: f64,
 }
 
@@ -212,6 +217,7 @@ impl CameraStateSnapshot {
             encoder_hw: None,
             encoder_forced_software: false,
             framebus: Vec::new(),
+            cameras: Vec::new(),
             updated_at_unix: now_unix(),
         }
     }
@@ -230,6 +236,7 @@ impl CameraStateSnapshot {
             encoder_hw: None,
             encoder_forced_software: false,
             framebus: Vec::new(),
+            cameras: Vec::new(),
             updated_at_unix: now_unix(),
         }
     }
@@ -258,6 +265,18 @@ impl CameraStateSnapshot {
     /// Stamp the frame-bus feed counters.
     pub fn with_framebus(mut self, feeds: Vec<crate::framebus_input::FeedStats>) -> Self {
         self.framebus = feeds;
+        self
+    }
+
+    /// Stamp each local camera's presence. A primary the vision engine
+    /// captures is never discovered, so its own presence is the primary's
+    /// state: a captured camera whose device is gone reads `missing`, not the
+    /// `ready` the frame-bus stand-in always carried.
+    pub fn with_cameras(mut self, cameras: Vec<crate::camera_presence::CameraPresence>) -> Self {
+        if let Some(p) = cameras.iter().find(|c| c.primary && c.captured) {
+            self.state = p.state;
+        }
+        self.cameras = cameras;
         self
     }
 

@@ -6,6 +6,39 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.0] - 2026-11-14
+
+### Changed
+
+- `ados-protocol`: `FrameDescriptor` and `DetectionBatch` gain public fields and `VisionStatus` gains `cameras` and no longer derives `Eq`. Code that builds these structs by field list must add the new fields, hence the minor version.
+
+### Added
+
+- Navigation sensor health. The pilot kind carries `sensors` {flow, range, lidar} and `GET /api/v1/sensors` carries `health` {flow, range, lidar, cameras}, classified from the new shared spec `cockpit-spec/sensor-health.json` (thresholds, state words, readiness messages and the flow/rangefinder parameter rules). Flow: the flight controller's OPTICAL_FLOW quality, rate and age (`ok`, `low` below quality 128 for 1 s, `lost` after 1 s, `absent`). Range: the downward DISTANCE_SENSOR height (`ok`, `out_of_range`, `lost`, `absent`). Lidar: the measured scan rate over 2 s and the capture service's driver health (`ok`, `degraded` outside 8–12 Hz or on a health warning, `lost` after 500 ms or a disconnected driver, `absent`). Cameras: per-camera frame rate and frame age from the vision engine (`live`, `stale` after 1 s, `lost` after 5 s or on a source error), with the stream leg each feeds. Flow and range are taken only from the autopilot's own system and component, so a module's forwarded frames are ignored.
+- Pilot readiness items `flow`, `rangefinder` (replacing `agl`), `lidar`, `sensor_params` and `nav_imu`. `sensor_params` checks the optical-flow and rangefinder parameters against the spec: `FLOW_TYPE` 5, `RNGFND1_TYPE` 10, `RNGFND1_ORIENT` 25, `FLOW_ORIENT_YAW` (the declared mount yaw, else a multiple of 90°), `FLOW_POS_*`/`RNGFND1_POS_*` (the declared mount within 1 cm, else not all zero), `EK3_FLOW_DELAY` 1–250, the flow scalers, `RNGFND1_MAX` ≤ 12, `EK3_SRC_OPTIONS` 0, `PRX_IGN_GND` 1 with a proximity sensor and a downward rangefinder, and no MAVLink forwarding on some MAVLink serial port (`SERIALn_OPTIONS` 1024, or `MAVn_OPTIONS` 2 on 4.7 and later). Flow and blocking parameter rows block a pilot-flown launch when the EKF fuses flow. An expected lidar that stopped blocks a pilot-flown launch; no lidar with avoidance on warns that avoidance is unavailable. `nav_imu` blocks while the lidar pose's flight-controller IMU feed is not live at 40 Hz or more. The mount is declared in `pilot.fc_sensors`.
+- In flight, optical flow that stays low or lost for 2 s shows on the `flow` readiness item with "Optical flow quality low: dark or featureless ground" or "Optical flow lost".
+- `POST /api/v1/sensors/rig/lidar` adds a Slamtec RPLIDAR C1 entry (`lidar0`) to the rig from a shipped template, creating a minimal rig when there is none and refusing when the rig already has a lidar.
+- Cockpit, kiosk, dashboard and terminal UI show flow quality, range height, the lidar scan rate and health, and camera state from the shared spec. The proximity radar header shows the lidar's own scan rate, not the obstacle message rate.
+- Detection batches carry the camera's roster `hfov_deg` and `mount_pitch_deg` and, for simulated frames, `ts_sensor_ms`; frame descriptors carry `hfov_deg` and `mount_pitch_deg`.
+
+### Fixed
+
+- The router asks the flight controller for OPTICAL_FLOW at 20 Hz and EKF_STATUS_REPORT at 5 Hz on a drone, and the legacy stream request includes EXTRA3. Neither was requested, so flow reached the agent only when a plugin asked for it and the EKF flags only at the firmware default.
+- Stream-rate, banner and landed-state requests wait for the flight controller's identity and go to its system and component id, and are sent again at once when it is first learned or changes. They went to system 1 component 1 before the identity was known, so a flight controller on another system id got its streams up to a minute late.
+- The serial port of a lidar declared by the rig or configured by device path is no longer opened as a flight-controller candidate by the router or the hardware probe on any profile. A CP2102 counts as the lidar only when it is the configured device, is held by another process, or answers the Slamtec device-info request.
+- `GET /api/v1/sensors` lists a scanning rig lidar with its measured rate and age instead of idle at 0 Hz.
+- A captured V4L2 camera that offers only MJPEG or YUYV opens: the engine negotiates the camera's own format and decodes or converts it to the frame-bus format, and refuses with the formats it found when none is usable. Camera discovery reads each camera's formats, sizes and rates, and classifies cameras by their kernel driver.
+- Captured cameras are encoded on the Allwinner OMX hardware encoder where `omxh264videoenc` is present, and secondary legs get their camera's capabilities. A YUYV camera is opened with `yuyv422`.
+- A captured or secondary camera whose device disappears, or whose source stays silent, reads missing in camera-state and triggers USB recovery; a captured primary no longer always reads ready.
+- Pilot: the `position` readiness item reads the flight controller's EKF_STATUS_REPORT and judges it as ArduCopter does (`ekf_has_absolute_position` / `ekf_has_relative_position`): an absolute horizontal position, or with optical flow or visual odometry enabled (`FLOW_TYPE` or `VISO_TYPE` non-zero) a relative one, predicted while disarmed and outside constant-position mode while armed. A flow-only source set therefore passes. Without either, or with a horizontal position variance of 0.8 or more, it blocks with "Position degraded (EKF): …", at 0.5 or more it warns, and while the EKF status is older than 3 s it warns "Position degraded (EKF): status not reporting". Before, any fresh local position passed, so a launch or Take control could start on an EKF that had lost its position. Every surface shows the item on the status pill as a pilot-readiness alert.
+- `GET /api/v1/sensors` `health`: a secondary camera streaming on its own leg reads live, not lost; the tapped primary's reading lands on the configured primary row instead of an extra `main` row; a vision status file past its freshness window is ignored; a camera's trigger fallback finds its `cam<N>` stream.
+- `health.lidar` takes the pilot's lidar verdict whenever a fresh pilot frame carries one, and otherwise applies the pilot's rules, so the lidar reads the same on every surface.
+- A null flow or range in `health` (no fresh word from the flight controller) reads unknown ("—") on the dashboard, cockpit, kiosk and terminal UI instead of "No flow"/"No range".
+- The kiosk shows each camera's state and keeps the sensor health when the sensor service reads absent.
+- An MJPEG frame without Huffman tables decodes: the standard tables (JPEG Annex K.3) are inserted before the scan, as other UVC stacks do. A frame cut short (no end-of-image marker) is refused and counted as corrupt.
+- A camera whose frames arrive but never decode for 3 s ends its capture with a decode error, which reads `error` in camera-state, not missing, so USB recovery no longer rebinds a working camera.
+- Two identical USB cameras no longer resolve to one video node: each leg's own source node wins, and a fingerprint that matches more than one free device names no node, so recovery never targets the other camera.
+
 ## [0.112.1] - 2026-11-14
 
 ### Added

@@ -3,10 +3,12 @@
 // frame) and the attitude card (roll/pitch horizon from telemetry beside the
 // same radar). The obstacle frame lives in the layer stack's mutable store,
 // not React state: the canvas polls it at 10 Hz and repaints only when its
-// version changes, and hides the sectors once the frame is 2 s old.
+// version changes, and hides the sectors once the frame is 2 s old. The
+// header carries the lidar's scan-rate word under the title.
 
 import { useEffect, useRef, useState } from "react";
 
+import { RadarLidarHeader } from "@/components/feed/radar-lidar-header";
 import { RADAR_RANGE_M, RADAR_STALE_MS, sectorRadius } from "@/lib/cockpit-flow";
 import { layerFrames } from "@/lib/layer-frames";
 import { cn } from "@/lib/utils";
@@ -107,6 +109,7 @@ export function ObstacleRadarCard({ className, titled = true }: { className?: st
   return (
     <div className={cn("relative", className)} data-testid="obstacle-radar">
       {titled ? <FaceTitle text={title} /> : null}
+      <RadarLidarHeader className={cn("left-[6px]", titled ? "top-[22px]" : "top-[6px]")} />
       <canvas ref={ref} className="h-full w-full" aria-label={title} />
       {/* Top-right: the title sits top-left and the card's dots along the foot. */}
       <span className="absolute right-[6px] top-[4px] font-mono text-[11px] text-hud-ink">{nearest}</span>

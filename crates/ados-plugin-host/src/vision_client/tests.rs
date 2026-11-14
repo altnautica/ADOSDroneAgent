@@ -62,6 +62,8 @@ fn sample_descriptor(frame_id: u64) -> FrameDescriptor {
         slot: 0,
         seq: frame_id,
         byte_len: (64 * 48 * 3) as u32,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     }
 }
 
@@ -217,6 +219,8 @@ async fn frame_descriptors_fan_out_to_a_subscriber() {
         slot: 0,
         seq: 1,
         byte_len: (64 * 48 * 3) as u32,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     };
     let bytes = descriptor.to_msgpack().unwrap();
     server.broadcast(deliver_envelope(&bytes).into()).await;
@@ -255,6 +259,9 @@ async fn detection_batches_fan_out_to_a_subscriber() {
 
     let batch = DetectionBatch {
         v: VISION_DETECTION_VERSION,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "m".into(),
         camera_id: "uvc-0".into(),
         frame_id: 1,

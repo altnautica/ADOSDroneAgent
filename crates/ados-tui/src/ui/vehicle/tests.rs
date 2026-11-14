@@ -9,7 +9,7 @@ use crate::poll::ResourceId;
 use crate::ui::tests::{draw, draw_buffer, feed, test_app};
 
 /// Put a resource body in the app and hand it to the Vehicle tab.
-fn land(app: &mut App, id: ResourceId, value: Value) {
+pub(super) fn land(app: &mut App, id: ResourceId, value: Value) {
     app.core.res.insert(
         id.clone(),
         Slot {
@@ -56,7 +56,7 @@ fn battery() -> Value {
     })
 }
 
-fn live_app() -> App {
+pub(super) fn live_app() -> App {
     let mut app = test_app();
     feed(&mut app, drone(), ProfileRoutes::default(), Duration::ZERO);
     app.activate_tab(TabId::Vehicle);
@@ -170,7 +170,7 @@ fn the_autonomy_block_shows_follow_nav_lidar_and_map_as_words() {
         "Reacquire Smart",
         "Set 1 · Ext nav Good",
         "30 Hz · GPS No fix",
-        "min 2.5 m · 10 Hz",
+        "min 2.5 m · obstacles 10 Hz",
         "120000 pts · 850 m²",
         "210/614 MB (34%) · voxel 10 cm",
     ] {
@@ -423,7 +423,7 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
         "Reacquire Smart",
         "Nav       ",
         "Odometry  30 Hz",
-        "Lidar     min 2.5 m",
+        "Lidar     ",
         "Map       120000 pts",
         "Memory    ",
     ] {
@@ -432,6 +432,11 @@ fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
             "{prefix:?} kept without a stale mark\n{text}"
         );
     }
+    // The mark follows the state word, ahead of a tail the column may clip.
+    assert!(
+        row(&text, "Lidar     ").contains("6.5 Hz (stale) · warning · min"),
+        "{text}"
+    );
     assert!(text.contains("last good read 0 s ago"), "{text}");
     let buf = draw_buffer(&mut app, 160, 48);
     assert_dim(&app, &buf, "Coasting #12");
@@ -452,17 +457,21 @@ fn every_row_built_from_a_stale_kind_is_marked_and_dim() {
         "Avoid     ",
         "Nav       ",
         "Odometry  ",
-        "Lidar     min 3.0 m",
+        "Lidar     ",
     ] {
         assert!(
             row(&text, prefix).contains("(stale)"),
             "{prefix:?} reads live from a stale kind\n{text}"
         );
     }
+    assert!(
+        row(&text, "Lidar     ").contains("6.5 Hz (stale) · warning · min"),
+        "{text}"
+    );
     assert!(!row(&text, "Follow    ").contains("(stale)"), "{text}");
     let buf = draw_buffer(&mut app, 160, 48);
     assert_dim(&app, &buf, "ADOS Pilot");
-    assert_dim(&app, &buf, "min 3.0 m");
+    assert_dim(&app, &buf, "warning · min");
 }
 
 #[test]

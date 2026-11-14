@@ -4,7 +4,8 @@
 //! because every frame arrives over a Unix socket (see
 //! [`ados_protocol::vision_status`]). So each capture task counts the frames
 //! it consumes and marks its input live while that input delivers, and
-//! [`run_writer`] publishes both about once a second.
+//! [`run_writer`] publishes both about once a second, with each camera's
+//! recent frame rate and newest-frame age.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,9 +13,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ados_protocol::framebus::mono_ns;
 use ados_protocol::vision_status::{
-    SourceError, VisionStatus, VISION_STATUS_FILE, VISION_STATUS_VERSION,
+    SourceError, VisionStatus, SOURCE_SILENT_PREFIX, VISION_STATUS_FILE, VISION_STATUS_VERSION,
 };
+
+use crate::work_rate::{FrameClock, RateWindow};
 
 /// How often the sidecar is rewritten.
 pub const WRITE_INTERVAL: Duration = Duration::from_secs(1);
@@ -32,6 +36,7 @@ pub struct WorkStatus {
     live_inputs: AtomicU32,
     error_frames: AtomicU64,
     source_errors: Mutex<BTreeMap<String, String>>,
+    cameras: Mutex<BTreeMap<String, RateWindow>>,
 }
 
 impl WorkStatus {
@@ -41,6 +46,19 @@ impl WorkStatus {
 
     /// The current state, as the sidecar carries it.
     pub fn snapshot(&self) -> VisionStatus {
+        self.snapshot_at(mono_ns())
+    }
+
+    /// The state at `now_ns` (host monotonic); the camera rates are measured
+    /// up to it.
+    pub fn snapshot_at(&self, now_ns: u64) -> VisionStatus {
+        let cameras = self
+            .cameras
+            .lock()
+            .expect("camera rates lock")
+            .iter_mut()
+            .map(|(id, window)| (id.clone(), window.sample(now_ns)))
+            .collect();
         let errors = self.source_errors.lock().expect("source errors lock");
         VisionStatus {
             version: VISION_STATUS_VERSION,
@@ -56,6 +74,7 @@ impl WorkStatus {
                 .collect(),
             detection: None,
             depth: None,
+            cameras,
         }
     }
 
@@ -77,10 +96,22 @@ impl WorkStatus {
         }
     }
 
-    /// A handle one capture task holds for its input.
-    pub fn input(self: &Arc<Self>) -> InputLiveness {
+    /// A handle `camera`'s capture task holds for its input. The camera is
+    /// listed in the sidecar's rates from now on, null until its first frame.
+    pub fn input(self: &Arc<Self>, camera: &str) -> InputLiveness {
+        self.input_at(camera, mono_ns())
+    }
+
+    /// [`input`](Self::input), measuring the camera's rate from `now_ns`.
+    pub fn input_at(self: &Arc<Self>, camera: &str, now_ns: u64) -> InputLiveness {
+        let clock = Arc::new(FrameClock::default());
+        self.cameras
+            .lock()
+            .expect("camera rates lock")
+            .insert(camera.to_string(), RateWindow::new(clock.clone(), now_ns));
         InputLiveness {
             status: self.clone(),
+            clock,
             live: false,
         }
     }
@@ -91,12 +122,19 @@ impl WorkStatus {
 #[derive(Debug)]
 pub struct InputLiveness {
     status: Arc<WorkStatus>,
+    clock: Arc<FrameClock>,
     live: bool,
 }
 
 impl InputLiveness {
     /// A frame was consumed from this input.
     pub fn frame(&mut self) {
+        self.frame_at(mono_ns());
+    }
+
+    /// A frame arrived from this input at `now_ns` (host monotonic).
+    pub fn frame_at(&mut self, now_ns: u64) {
+        self.clock.frame_at(now_ns);
         self.status.frames_consumed.fetch_add(1, Ordering::Relaxed);
         if !self.live {
             self.live = true;
@@ -121,7 +159,7 @@ impl Drop for InputLiveness {
 
 /// The source-error reason for an input that delivered nothing for `silence`.
 pub fn silence_reason(silence: Duration) -> String {
-    format!("delivered no frame for {} s", silence.as_secs())
+    format!("{SOURCE_SILENT_PREFIX}{} s", silence.as_secs())
 }
 
 /// Note a camera's source failure: record `reason` in the sidecar unless it is
@@ -241,6 +279,13 @@ mod tests {
             silence.clone()
         ));
         assert_eq!(status.snapshot().source_errors[0].error, silence);
+        // Consumers tell a silent source from a failed one by the reason.
+        assert!(status.snapshot().source_errors[0].is_silence());
+        assert!(!SourceError {
+            camera: "cam".into(),
+            error: "eof".into()
+        }
+        .is_silence());
     }
 
     #[test]
@@ -259,8 +304,8 @@ mod tests {
     #[test]
     fn an_input_is_live_from_its_first_frame_until_it_is_lost_or_dropped() {
         let status = WorkStatus::new();
-        let mut a = status.input();
-        let mut b = status.input();
+        let mut a = status.input("a");
+        let mut b = status.input("b");
         // Opened but not yet delivering: not live, nothing to judge.
         assert_eq!(status.snapshot().work_counter(), None);
 
@@ -290,7 +335,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = sidecar_path(&dir.path().to_string_lossy());
         let status = WorkStatus::new();
-        let mut input = status.input();
+        let mut input = status.input("main");
         input.frame();
         write_status(&path, &status.snapshot()).await.unwrap();
         let read: VisionStatus =

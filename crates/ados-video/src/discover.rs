@@ -14,12 +14,14 @@
 //! {
 //!   "cameras": [
 //!     {"name", "type", "device_path", "width", "height",
-//!      "capabilities", "hardware_role"}, ...
+//!      "capabilities", "formats", "hardware_role"}, ...
 //!   ],
 //!   "primary": {"device_path", "name"} | null,
 //!   "total_cameras": N
 //! }
 //! ```
+//! `formats` (one entry per offered fourcc and discrete size) is additive: a
+//! discovery that predates it parses with an empty list.
 //! A discovery that times out, fails to spawn, or returns malformed output is
 //! treated as no-primary (an empty result), never an error: the orchestrator's
 //! no-primary retry path then takes over cleanly.
@@ -33,6 +35,8 @@ use crate::camera_state::CameraStateSnapshot;
 use crate::encoder::{CameraInfo, CameraType};
 
 mod assign;
+#[cfg(test)]
+mod formats_tests;
 
 /// Default Python interpreter for the discovery subprocess. Overridable via
 /// `ADOS_PYTHON`, matching the convention the encoder uses for the SEI splice.
@@ -45,7 +49,7 @@ pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// A camera as reported by the Python discovery JSON. Field names match
 /// `CameraInfo.to_dict()` exactly.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DiscoveredCamera {
     pub name: String,
     #[serde(rename = "type")]
@@ -55,10 +59,28 @@ pub struct DiscoveredCamera {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
+    /// The lowercase pixel formats the device offers (`mjpeg`, `yuyv`, …),
+    /// in device order.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// What the device offers per format and size, as enumerated.
+    #[serde(default)]
+    pub formats: Vec<CameraFormat>,
     #[serde(default)]
     pub hardware_role: String,
+}
+
+/// One offered (format, size) pair and its frame rates, fastest first. An empty
+/// `fps` means the driver reported no frame intervals.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CameraFormat {
+    pub fourcc: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub fps: Vec<f64>,
 }
 
 /// The primary-camera block from the discovery JSON (`null` when no camera
@@ -70,7 +92,7 @@ pub struct Primary {
 }
 
 /// The full parsed discovery result.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DiscoveryResult {
     #[serde(default)]
     pub cameras: Vec<DiscoveredCamera>,
@@ -106,6 +128,7 @@ impl DiscoveryResult {
                 width: 0,
                 height: 0,
                 capabilities: vec!["rtsp".to_string()],
+                formats: Vec::new(),
                 hardware_role: "primary".to_string(),
             }],
             primary: Some(Primary {
@@ -129,6 +152,7 @@ impl DiscoveryResult {
                 width: 0,
                 height: 0,
                 capabilities: vec!["framebus".to_string()],
+                formats: Vec::new(),
                 hardware_role: "primary".to_string(),
             }],
             primary: Some(Primary {
@@ -161,6 +185,21 @@ impl DiscoveryResult {
         }
     }
 
+    /// The `CameraInfo` of the discovered camera at `source` (a device path,
+    /// matched as given or through its resolved node, so a `/dev/v4l/by-id/…`
+    /// link finds its `/dev/videoN`), or `None` when discovery did not list it.
+    /// A secondary leg reads its capability list from here.
+    pub fn camera_info_for(&self, source: &str) -> Option<CameraInfo> {
+        let resolved = std::fs::canonicalize(source).ok();
+        self.cameras
+            .iter()
+            .find(|c| {
+                c.device_path == source
+                    || resolved.is_some() && std::fs::canonicalize(&c.device_path).ok() == resolved
+            })
+            .map(DiscoveredCamera::to_camera_info)
+    }
+
     /// The camera-state sidecar snapshot for this result, applying the
     /// ready-gate (a primary plus at least one live camera → `ready`).
     pub fn camera_state_snapshot(&self) -> CameraStateSnapshot {
@@ -187,11 +226,22 @@ impl DiscoveredCamera {
     }
 
     /// Build the encoder's [`CameraInfo`] view (type + device path + caps).
+    /// A discovery that lists `formats` but no `capabilities` still yields the
+    /// formats it offers, in device order.
     pub fn to_camera_info(&self) -> CameraInfo {
+        let mut capabilities = self.capabilities.clone();
+        if capabilities.is_empty() {
+            for f in &self.formats {
+                let fourcc = f.fourcc.to_lowercase();
+                if !capabilities.contains(&fourcc) {
+                    capabilities.push(fourcc);
+                }
+            }
+        }
         CameraInfo {
             camera_type: self.camera_type_enum(),
             device_path: self.device_path.clone(),
-            capabilities: self.capabilities.clone(),
+            capabilities,
         }
     }
 }
@@ -312,6 +362,7 @@ mod tests {
             width: 0,
             height: 0,
             capabilities: vec![],
+            formats: vec![],
             hardware_role: "camera".into(),
         };
         assert_eq!(csi.camera_type_enum(), CameraType::Csi);

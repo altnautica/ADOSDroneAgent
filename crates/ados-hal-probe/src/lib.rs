@@ -5,6 +5,7 @@ pub mod board_sidecar;
 pub mod camera_probe;
 pub mod daemon;
 pub mod host_facts;
+pub mod lidar_port;
 pub mod probe;
 pub mod runner;
 pub mod sensor_hub;

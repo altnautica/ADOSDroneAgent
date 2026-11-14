@@ -244,6 +244,8 @@ fn sample_descriptor() -> FrameDescriptor {
         slot: 1,
         seq: 7,
         byte_len: (64 * 48 * 3) as u32,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     }
 }
 

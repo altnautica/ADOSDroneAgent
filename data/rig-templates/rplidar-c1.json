@@ -1,0 +1,24 @@
+{
+  "template": "rplidar-c1",
+  "description": "Slamtec RPLIDAR C1 on the companion computer (USB serial, 460800 baud): a planar 360 degree scanner, 0.05-12 m, 10 Hz, 0.72 degree angular resolution (5000 samples/s), +-30 mm range accuracy. T_body_sensor is a default (FLU, scan plane level, +x forward, mast 0.12 m above the CG): measure the mount and update the translation. blocked_azimuth_deg lists the sectors the airframe occludes; it starts empty.",
+  "sensor": {
+    "id": "lidar0",
+    "kind": "lidar",
+    "role": "nav",
+    "T_body_sensor": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0.12, 0, 0, 0, 1],
+    "time_offset_ns": 0,
+    "lidar": {
+      "model": "rplidar-c1",
+      "pattern": "planar",
+      "h_fov_deg": 360.0,
+      "v_min_deg": 0.0,
+      "v_max_deg": 0.0,
+      "rate_hz": 10.0,
+      "points_per_s": 5000.0,
+      "min_range_m": 0.05,
+      "max_range_m": 12.0,
+      "range_sigma_m": 0.03,
+      "blocked_azimuth_deg": []
+    }
+  }
+}

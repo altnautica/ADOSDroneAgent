@@ -32,6 +32,8 @@ fn descriptor(camera: &str, seq: u64, width: u32, slot: u32) -> FrameDescriptor 
         slot,
         seq,
         byte_len: width * H,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     }
 }
 

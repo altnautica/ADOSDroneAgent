@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-use super::hub::VISION_NAV_ID;
+use super::topics::VISION_NAV_ID;
 use crate::routes::plugins_state::read_plugin_sidecar;
 
 /// The sidecar entry vision-nav's `navigation` telemetry channel lands in.

@@ -101,6 +101,8 @@ fn descriptor(camera_id: &str, seq: u64) -> FrameDescriptor {
         slot: 0,
         seq,
         byte_len: (64 * 48 * 3) as u32,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     }
 }
 

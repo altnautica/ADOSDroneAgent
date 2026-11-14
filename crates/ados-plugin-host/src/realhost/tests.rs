@@ -1547,6 +1547,9 @@ fn a_published_batch_is_bound_to_its_plugin() {
     };
     let batch = DetectionBatch {
         v: ados_protocol::framebus::VISION_DETECTION_VERSION,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "det".into(),
         camera_id: "uvc-0".into(),
         frame_id: 1,

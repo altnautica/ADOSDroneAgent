@@ -1,6 +1,8 @@
 use super::*;
 use crate::backend::MockBackend;
-use ados_protocol::framebus::{BoundingBox, LockState, ModelKind};
+use ados_protocol::framebus::{
+    BoundingBox, Detection, LockState, ModelKind, VISION_DETECTION_VERSION,
+};
 
 pub(super) fn engine() -> Arc<VisionEngine> {
     VisionEngine::new(Box::new(MockBackend), 4)
@@ -359,6 +361,9 @@ async fn publish_detection_reaches_subscribers() {
     let mut rx = e.subscribe_detections();
     let batch = DetectionBatch {
         v: VISION_DETECTION_VERSION,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "m".into(),
         camera_id: "c".into(),
         frame_id: 1,
@@ -412,12 +417,80 @@ async fn infer_and_publish_builds_batch_from_descriptor() {
         slot: 1,
         seq: 1,
         byte_len: 192,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     };
     let batch = e.infer_and_publish("m", &desc, &[0u8; 192]).await.unwrap();
     assert_eq!(batch.model_id, "m");
     assert_eq!(batch.camera_id, "uvc-0");
     assert_eq!(batch.frame_id, 9);
     assert_eq!(rx.try_recv().unwrap(), batch);
+}
+
+/// Every frame and batch of a camera carries its `cameras[]` roster mount, in
+/// the roster's sign; a batch on a simulated frame carries the frame's
+/// simulation time; a camera without an entry, and a frame on the host clock,
+/// carry none.
+#[tokio::test]
+async fn frames_and_batches_carry_the_roster_mount_and_the_simulation_time() {
+    let e = engine();
+    e.register_model(meta("m", ModelExecution::EngineRun))
+        .await
+        .unwrap();
+    e.configure_camera_mounts(crate::depth::geometry::mounts_from_config(
+        "cameras:\n  - id: mount-front\n    fov_deg: 87\n    mount_pitch_deg: -15\n",
+    ));
+    let sim = FrameTiming {
+        ts_ns: 9_000_000_000,
+        ts_sensor_ns: Some(42_123_456_789),
+        exposure_ns: None,
+        trigger_seq: Some(5),
+        timebase: ados_protocol::framebus::TIMEBASE_SIM,
+    };
+    let desc = e
+        .publish_frame("mount-front", 1, sim, 8, 8, FrameFormat::Rgb24, &[0u8; 192])
+        .await
+        .unwrap();
+    assert_eq!(desc.hfov_deg, Some(87.0));
+    assert_eq!(desc.mount_pitch_deg, Some(-15.0));
+    let batch = e.infer_and_publish("m", &desc, &[0u8; 192]).await.unwrap();
+    assert_eq!(batch.hfov_deg, Some(87.0));
+    assert_eq!(batch.mount_pitch_deg, Some(-15.0));
+    assert_eq!(batch.ts_ms, 9_000);
+    assert_eq!(batch.ts_sensor_ms, Some(42_123));
+
+    let host = FrameTiming::host(9_000_000_000);
+    let bare = e
+        .publish_frame("mount-bare", 1, host, 8, 8, FrameFormat::Rgb24, &[0u8; 192])
+        .await
+        .unwrap();
+    assert_eq!((bare.hfov_deg, bare.mount_pitch_deg), (None, None));
+    let batch = e.infer_and_publish("m", &bare, &[0u8; 192]).await.unwrap();
+    assert_eq!(
+        (batch.hfov_deg, batch.mount_pitch_deg, batch.ts_sensor_ms),
+        (None, None, None)
+    );
+    // A sensor stamp on a real camera's own clock is not simulation time.
+    let device = FrameTiming {
+        ts_sensor_ns: Some(7_000_000),
+        timebase: ados_protocol::framebus::TIMEBASE_SENSOR,
+        ..host
+    };
+    let desc = e
+        .publish_frame(
+            "mount-front",
+            2,
+            device,
+            8,
+            8,
+            FrameFormat::Rgb24,
+            &[0u8; 192],
+        )
+        .await
+        .unwrap();
+    let batch = e.infer_and_publish("m", &desc, &[0u8; 192]).await.unwrap();
+    assert_eq!(batch.ts_sensor_ms, None);
+    assert_eq!(batch.hfov_deg, Some(87.0));
 }
 
 fn det(x: f32, y: f32, conf: f32, label: &str) -> Detection {

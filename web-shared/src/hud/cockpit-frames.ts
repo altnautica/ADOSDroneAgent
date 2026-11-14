@@ -168,6 +168,8 @@ export interface PilotState {
   /** A horizontal speed cap the pilot applies to every setpoint it flies
    *  (`gnss-denied` while the EKF horizontal source is not GNSS), or null. */
   speedCap: SpeedCap | null;
+  /** The raw `sensors` block (parse with sensor-health); null when absent. */
+  sensors: unknown;
 }
 
 const AVOID_STATES: readonly AvoidState[] = ["clear", "detour", "blocked", "off", "stale", "unavailable"];
@@ -243,6 +245,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     fcFailsafe: p.fc_failsafe === true,
     failsafeCause: str(p.failsafe_cause),
     speedCap: parseSpeedCap(p.speed_cap),
+    sensors: p.sensors ?? null,
   };
 }
 

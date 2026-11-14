@@ -66,6 +66,9 @@ fn detection_head_serializes_lowercase() {
 fn detection_batch_round_trips() {
     let b = DetectionBatch {
         v: VISION_DETECTION_VERSION,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "com.example.weeds".into(),
         camera_id: "uvc-0".into(),
         frame_id: 7,
@@ -95,12 +98,68 @@ fn detection_batch_round_trips() {
     assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), b);
 }
 
+/// The msgpack map keys of an encoded message.
+fn msgpack_keys(bytes: &[u8]) -> Vec<String> {
+    let rmpv::Value::Map(entries) = rmpv::decode::read_value(&mut &bytes[..]).unwrap() else {
+        panic!("not a msgpack map");
+    };
+    entries
+        .into_iter()
+        .map(|(k, _)| k.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn detection_batch_camera_geometry_and_sensor_time_round_trip_and_are_omitted_when_absent() {
+    let bare = DetectionBatch {
+        v: VISION_DETECTION_VERSION,
+        model_id: "m".into(),
+        camera_id: "front".into(),
+        frame_id: 3,
+        ts_ms: 9_000,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
+        frame_width: 640,
+        frame_height: 480,
+        detections: vec![],
+    };
+    let bytes = bare.to_msgpack().unwrap();
+    let keys = msgpack_keys(&bytes);
+    for absent in ["ts_sensor_ms", "hfov_deg", "mount_pitch_deg"] {
+        assert!(!keys.iter().any(|k| k == absent), "{absent} on the wire");
+    }
+    assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), bare);
+    let json = serde_json::to_value(&bare).unwrap();
+    assert!(json.get("hfov_deg").is_none() && json.get("ts_sensor_ms").is_none());
+
+    let full = DetectionBatch {
+        ts_sensor_ms: Some(42_123),
+        hfov_deg: Some(87.0),
+        mount_pitch_deg: Some(-15.0),
+        ..bare
+    };
+    let bytes = full.to_msgpack().unwrap();
+    assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), full);
+    let json = serde_json::to_value(&full).unwrap();
+    assert_eq!(json["ts_sensor_ms"], 42_123);
+    assert_eq!(json["hfov_deg"], 87.0);
+    assert_eq!(json["mount_pitch_deg"], -15.0);
+    assert_eq!(
+        serde_json::from_value::<DetectionBatch>(json).unwrap(),
+        full
+    );
+}
+
 #[test]
 fn detection_rejects_a_future_version() {
     // A batch stamped with a version this build does not speak must fail the
     // decode loudly rather than silently mis-parse.
     let batch = DetectionBatch {
         v: VISION_DETECTION_VERSION + 1,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "m".into(),
         camera_id: "c".into(),
         frame_id: 1,

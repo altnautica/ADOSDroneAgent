@@ -314,6 +314,9 @@ class DetectionBatch:
     camera_id: str
     frame_id: int
     ts_ms: int
+    """Capture time of the source frame in ms on the host monotonic clock: the
+    exposure midpoint when the source knows it, else the frame's arrival at the
+    engine."""
     detections: list[Detection] = field(default_factory=list)
     frame_width: int | None = None
     """The source frame's pixel width, so a consumer scales the pixel-space boxes
@@ -322,6 +325,19 @@ class DetectionBatch:
     the consumer fall back to its own default."""
     frame_height: int | None = None
     """The source frame's pixel height (paired with ``frame_width``)."""
+    ts_sensor_ms: int | None = None
+    """Capture time of the source frame in ms on the simulation clock, the one a
+    software-in-the-loop flight controller runs on, so the batch pairs with that
+    controller's attitude at the same instant. ``None`` for a frame without a
+    simulation stamp (any real camera): pair those by ``ts_ms``."""
+    hfov_deg: float | None = None
+    """Horizontal field of view of the batch's camera in degrees, from its
+    ``cameras[]`` roster entry's ``fov_deg``. ``None`` when the roster gives
+    none."""
+    mount_pitch_deg: float | None = None
+    """Mount pitch of the batch's camera in degrees, from its ``cameras[]``
+    roster entry, in the roster's sign (negative looks down). ``None`` when the
+    roster gives none."""
     v: int = _DETECTION_WIRE_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -339,6 +355,13 @@ class DetectionBatch:
             out["frame_width"] = int(self.frame_width)
         if self.frame_height is not None:
             out["frame_height"] = int(self.frame_height)
+        # Omitted on the wire when absent, as the Rust encoder does.
+        if self.ts_sensor_ms is not None:
+            out["ts_sensor_ms"] = int(self.ts_sensor_ms)
+        if self.hfov_deg is not None:
+            out["hfov_deg"] = float(self.hfov_deg)
+        if self.mount_pitch_deg is not None:
+            out["mount_pitch_deg"] = float(self.mount_pitch_deg)
         return out
 
     @classmethod
@@ -360,6 +383,21 @@ class DetectionBatch:
             frame_height=(
                 int(raw["frame_height"])
                 if raw.get("frame_height") is not None
+                else None
+            ),
+            ts_sensor_ms=(
+                int(raw["ts_sensor_ms"])
+                if raw.get("ts_sensor_ms") is not None
+                else None
+            ),
+            hfov_deg=(
+                float(raw["hfov_deg"])
+                if raw.get("hfov_deg") is not None
+                else None
+            ),
+            mount_pitch_deg=(
+                float(raw["mount_pitch_deg"])
+                if raw.get("mount_pitch_deg") is not None
                 else None
             ),
         )

@@ -165,6 +165,9 @@ pub struct Dashboard {
     /// route was not polled, absent, or the block is not configured).
     pub hub_connected: Option<bool>,
     pub sensors_fc_connected: Option<bool>,
+    /// Each camera's state from `/api/v1/sensors` `health.cameras`; empty
+    /// when the route was not polled or carries no health.
+    pub camera_health: Vec<sensor_health::CameraHealth>,
     /// The per-profile panel row (see [`Dashboard::merge_profile`]); empty when
     /// the profile has none or no route answered.
     pub profile_row: Vec<RowLine>,
@@ -187,6 +190,7 @@ pub mod base_alerts;
 pub mod flight_state;
 pub mod nav_source;
 pub mod pilot_alerts;
+pub mod sensor_health;
 pub mod skill_detail;
 pub mod spec_text;
 mod urls;

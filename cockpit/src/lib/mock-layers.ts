@@ -77,6 +77,12 @@ export function demoPilotData(nowMs: number): Record<string, unknown> {
     plan_ned: [],
     readiness: [],
     mission: follow ? null : MISSION,
+    // The navigation sensors (`sensor-health.json`): flow, range and the lidar.
+    sensors: {
+      flow: { state: "ok", quality: 212, rate_hz: 20, age_ms: 40 },
+      range: { state: "ok", height_m: 4.1, age_ms: 30 },
+      lidar: { state: "ok", rate_hz: 9.9, health: "good", age_ms: 80 },
+    },
     ...pins.pilot,
   };
 }

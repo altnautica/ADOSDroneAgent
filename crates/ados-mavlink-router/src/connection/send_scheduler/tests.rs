@@ -70,6 +70,7 @@ async fn stream_request_message_ids(legacy_stream_request: bool) -> Vec<u32> {
         ..MavlinkConfig::default()
     };
     let conn = FcConnection::new(cfg, state, params);
+    conn.latch_fc_identity(1, 1);
     let (tx, rx) = std::sync::mpsc::channel();
     conn.connected.store(true, Ordering::Relaxed);
     *conn.writer.lock().await = Some(Box::pin(CapturingWriter(tx)));
@@ -134,6 +135,7 @@ async fn an_unidentified_ardupilot_is_asked_for_its_banner_at_once_then_every_re
     }
     let params = std::sync::Arc::new(Mutex::new(ParamCache::new("/tmp/ados-test-params.json")));
     let conn = FcConnection::new(MavlinkConfig::default(), state.clone(), params);
+    conn.latch_fc_identity(1, 1);
     let (tx, rx) = std::sync::mpsc::channel();
     conn.connected.store(true, Ordering::Relaxed);
     *conn.writer.lock().await = Some(Box::pin(CapturingWriter(tx)));

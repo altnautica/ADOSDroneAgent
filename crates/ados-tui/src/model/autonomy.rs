@@ -10,6 +10,7 @@
 use serde_json::Value;
 
 use super::flight_state::{stale_after_ms, AR_ETA_MAX_AGE_MS, PILOT_OWNERS};
+use super::sensor_health::SensorHealth;
 
 pub mod detection;
 
@@ -156,6 +157,9 @@ pub struct Pilot {
     /// height above home (`agl_source`).
     pub agl_m: Option<f64>,
     pub agl_source: Option<String>,
+    /// The flight controller's flow and range and the lidar (`sensors`);
+    /// `None` without an FC link.
+    pub sensors: Option<SensorHealth>,
     /// FC STATUSTEXT at WARNING or worse from the last 30 s, newest first.
     pub statustext: Vec<FcStatusText>,
     /// The setup step a tuning flight is on.
@@ -380,6 +384,7 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             }),
         agl_m: f(d, "agl_m"),
         agl_source: one_of(d, "agl_source", &["rangefinder", "home"]),
+        sensors: d.get("sensors").and_then(SensorHealth::from_value),
         statustext,
         setup_step: d
             .get("setup_step")

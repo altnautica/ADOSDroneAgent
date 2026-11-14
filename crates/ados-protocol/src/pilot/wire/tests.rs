@@ -240,6 +240,51 @@ fn speed_cap_is_omitted_until_set() {
 }
 
 #[test]
+fn sensors_serialise_with_the_contract_shape() {
+    use crate::pilot::{
+        FlowState, LidarDriverHealth, LidarState, PilotState, RangeState, SensorHealth,
+    };
+    let s = PilotState::default();
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v.get("sensors"), Some(&serde_json::Value::Null));
+    let mut h = SensorHealth::default();
+    h.flow.state = FlowState::Low;
+    h.flow.quality = Some(90);
+    h.flow.rate_hz = Some(20.0);
+    h.flow.age_ms = Some(40);
+    h.range.state = RangeState::OutOfRange;
+    h.range.age_ms = Some(30);
+    h.lidar.state = LidarState::Degraded;
+    h.lidar.rate_hz = Some(6.5);
+    h.lidar.health = Some(LidarDriverHealth::Warning);
+    h.lidar.age_ms = Some(100);
+    let s = PilotState {
+        sensors: Some(h),
+        ..PilotState::default()
+    };
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(
+        v["sensors"],
+        serde_json::json!({
+            "flow": {"state": "low", "quality": 90, "rate_hz": 20.0, "age_ms": 40},
+            "range": {"state": "out_of_range", "height_m": null, "age_ms": 30},
+            "lidar": {"state": "degraded", "rate_hz": 6.5, "health": "warning", "age_ms": 100}
+        })
+    );
+    let absent = serde_json::to_value(SensorHealth::default()).unwrap();
+    assert_eq!(
+        absent,
+        serde_json::json!({
+            "flow": {"state": "absent", "quality": null, "rate_hz": null, "age_ms": null},
+            "range": {"state": "absent", "height_m": null, "age_ms": null},
+            "lidar": {"state": "absent", "rate_hz": null, "health": null, "age_ms": null}
+        })
+    );
+    let back: PilotState = serde_json::from_value(v).unwrap();
+    assert_eq!(back, s);
+}
+
+#[test]
 fn a_vantage_goal_decodes_with_its_spec_and_hypotheses() {
     let frame = serde_json::json!({
         "op": "goal", "lease_id": 4,

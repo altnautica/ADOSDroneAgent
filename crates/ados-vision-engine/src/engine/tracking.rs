@@ -70,18 +70,7 @@ impl VisionEngine {
         } else {
             detections
         };
-        let batch = DetectionBatch {
-            v: VISION_DETECTION_VERSION,
-            model_id: model_id.to_string(),
-            camera_id: desc.camera_id.clone(),
-            frame_id: desc.frame_id,
-            ts_ms: (desc.ts_ns / 1_000_000) as i64,
-            // The vision frame's pixel size the boxes are in, so the overlay
-            // scales to it.
-            frame_width: desc.width,
-            frame_height: desc.height,
-            detections,
-        };
+        let batch = self.detection_batch(model_id, desc, detections);
         self.publish_detection(batch.clone());
         Ok(batch)
     }

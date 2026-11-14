@@ -1,4 +1,6 @@
-//! Sensors page: sensor hub link, IMU rate, clock lock, GNSS and FC link.
+//! Sensors page: sensor hub link, IMU rate, clock lock, GNSS and FC link, then
+//! the navigation sensors (optical flow, downward range, lidar scan rate and
+//! driver health, camera states) from the sensors route's `health`.
 //!
 //! A tabbed read-only surface over [`PageContext::sensing`]. A block that is
 //! not fitted reads "not fitted" (or `--`); a failed read reads "unreachable".
@@ -11,6 +13,11 @@ use crate::pages::sensing_ctx::{
     SensorInfo, DASH, VALUE_X,
 };
 use crate::pages::{blank_panel, Chrome, HitZone, Page, PageContext};
+
+/// Camera words fit side by side on the last row.
+const CAMERA_SLOTS: usize = 3;
+/// Width of one camera word on that row.
+const CAMERA_SLOT_W: i32 = 116;
 
 /// The sensors surface, registered as `sensors`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -114,6 +121,30 @@ impl Page for SensorsPage {
             None => DASH,
         };
         paint_status(c, 4, VALUE_X, v, bool_color(palette, fc));
+
+        // The navigation sensors, as the cockpit spec words and colours them;
+        // rows only when the route carries `health`.
+        if let Some(h) = sensors.and_then(|x| x.health.as_ref()) {
+            let lidar = match h.lidar_health.as_deref() {
+                Some(d) => format!("{}  {d}", h.lidar.text),
+                None => h.lidar.text.clone(),
+            };
+            for (row, label, text, color) in [
+                (5, "FLOW", h.flow.text.as_str(), h.flow.color),
+                (6, "RANGE", h.range.text.as_str(), h.range.color),
+                (7, "LIDAR", lidar.as_str(), h.lidar.color),
+            ] {
+                paint_label(c, palette, row, label);
+                paint_status(c, row, VALUE_X, text, color);
+            }
+            if !h.cameras.is_empty() {
+                paint_label(c, palette, 8, "CAMERAS");
+                for (i, w) in h.cameras.iter().take(CAMERA_SLOTS).enumerate() {
+                    let x = VALUE_X + i as i32 * CAMERA_SLOT_W;
+                    paint_status(c, 8, x, &w.text, w.color);
+                }
+            }
+        }
         canvas
     }
 
@@ -129,6 +160,37 @@ mod tests {
     use crate::pages::sensing_ctx::test_util::{
         assert_renders_and_leaves_tab_band, full_ctx, row_has_color,
     };
+
+    #[test]
+    fn flow_range_and_lidar_rows_take_the_spec_words_and_colours() {
+        use crate::pages::sensor_health::nav_health;
+        use embedded_graphics::pixelcolor::Rgb888;
+
+        let mut ctx = full_ctx(1000.0);
+        let health = nav_health(&serde_json::json!({
+            "flow": {"state": "ok", "quality": 212},
+            "range": {"state": "lost"},
+            "lidar": {"state": "degraded", "rate_hz": 5.2, "health": "warning"},
+        }))
+        .expect("an object");
+        assert_eq!(health.flow.text, "Flow 212");
+        assert_eq!(health.range.text, "Range lost");
+        assert_eq!(health.lidar.text, "Lidar 5.2 Hz");
+        let none = SensorsPage.render(&ctx, &DARK);
+        if let Some(s) = ctx.sensing.sensors.present_mut() {
+            s.health = Some(health);
+        }
+        let c = SensorsPage.render(&ctx, &DARK);
+        let (ready, not_ready, avoiding) = (
+            Rgb888::new(0x00, 0xC8, 0x53),
+            Rgb888::new(0xEF, 0x44, 0x44),
+            Rgb888::new(0xF5, 0x9E, 0x0B),
+        );
+        assert!(row_has_color(&c, 5, VALUE_X, ready));
+        assert!(row_has_color(&c, 6, VALUE_X, not_ready));
+        assert!(row_has_color(&c, 7, VALUE_X, avoiding));
+        assert!(!row_has_color(&none, 7, VALUE_X, avoiding));
+    }
 
     #[test]
     fn renders_full_and_empty_without_touching_the_tab_band() {
@@ -171,5 +233,29 @@ mod tests {
         };
         let failed = SensorsPage.render(&ctx, &DARK);
         assert_ne!(absent.as_rgb888(), failed.as_rgb888());
+    }
+
+    #[test]
+    fn camera_states_paint_in_their_spec_colours() {
+        use crate::pages::sensor_health::nav_health;
+        use embedded_graphics::pixelcolor::Rgb888;
+
+        let mut ctx = full_ctx(1000.0);
+        let none = SensorsPage.render(&ctx, &DARK);
+        let health = nav_health(&serde_json::json!({"flow": null, "cameras": [
+            {"id": "front", "state": "live", "fps": 30.0},
+            {"id": "belly", "state": "lost"},
+        ]}))
+        .expect("an object");
+        assert_eq!(health.cameras[1].text, "belly lost");
+        assert_eq!(health.flow.text, "—");
+        if let Some(s) = ctx.sensing.sensors.present_mut() {
+            s.health = Some(health);
+        }
+        let c = SensorsPage.render(&ctx, &DARK);
+        let (ready, not_ready) = (Rgb888::new(0x00, 0xC8, 0x53), Rgb888::new(0xEF, 0x44, 0x44));
+        assert!(row_has_color(&c, 8, VALUE_X, ready));
+        assert!(row_has_color(&c, 8, VALUE_X + CAMERA_SLOT_W, not_ready));
+        assert!(!row_has_color(&none, 8, VALUE_X, ready));
     }
 }

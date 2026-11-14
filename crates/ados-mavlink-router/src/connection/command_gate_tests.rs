@@ -108,6 +108,7 @@ async fn a_gated_source_installs_no_writer_and_suppresses_every_send_path() {
         "the gated branch installs no writer"
     );
     c.send_heartbeat().await;
+    c.latch_fc_identity(1, 1);
     c.tick_streams().await;
     c.send_bytes(b"\xfd\x00\x00\x00").await;
     assert!(

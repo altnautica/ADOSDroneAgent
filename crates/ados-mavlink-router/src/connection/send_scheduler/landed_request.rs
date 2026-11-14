@@ -13,6 +13,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::ticks::RequestLane;
 use super::{stream_rates, FcConnection};
 use crate::state::MSG_EXTENDED_SYS_STATE;
 
@@ -73,6 +74,12 @@ impl LandedStateRequest {
         self.requests == 1
     }
 
+    /// The FC identity moved: the request made to the old one does not
+    /// count, so the next [`Self::due`] past the grace asks at once.
+    pub(crate) fn retarget(&mut self) {
+        self.requested_at = None;
+    }
+
     #[cfg(test)]
     pub(crate) fn absent_since(&mut self, at: Instant) {
         self.absent_since = Some(at);
@@ -82,11 +89,16 @@ impl LandedStateRequest {
 impl FcConnection {
     /// Ask the FC for EXTENDED_SYS_STATE at 1 Hz while it is not arriving and
     /// the active stream table does not already request it, at most once per
-    /// [`LANDED_STATE_REREQUEST`].
+    /// [`LANDED_STATE_REREQUEST`]. Nothing is requested before the FC
+    /// identity is latched; an identity change re-requests without waiting
+    /// out the re-request interval.
     pub async fn tick_landed_state_request(&self) {
         if !self.transport_open() {
             return;
         }
+        let Some(fc) = self.learned_fc_identity() else {
+            return;
+        };
         let table = stream_rates(&self.cfg.profile, self.sensor_streams.capture_active());
         if table.iter().any(|&(id, _)| id == MSG_EXTENDED_SYS_STATE) {
             return;
@@ -99,6 +111,9 @@ impl FcConnection {
                 .landed_state_req
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.retarget(RequestLane::Landed, fc) {
+                req.retarget();
+            }
             let due = req.due(linked, arriving, now);
             (due, req.first_of_link_up())
         };
@@ -110,7 +125,7 @@ impl FcConnection {
             } else {
                 tracing::debug!("re-requesting EXTENDED_SYS_STATE at 1 Hz: still not arriving");
             }
-            self.send_message_interval(MSG_EXTENDED_SYS_STATE, LANDED_STATE_INTERVAL_US)
+            self.send_message_interval(fc, MSG_EXTENDED_SYS_STATE, LANDED_STATE_INTERVAL_US)
                 .await;
         }
     }

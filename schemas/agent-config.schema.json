@@ -990,6 +990,73 @@
       "title": "EndpointConfig",
       "type": "object"
     },
+    "FcSensorsConfig": {
+      "description": "The declared flow and rangefinder mount the pilot checks the flight\ncontroller's ``FLOW_*`` and ``RNGFND1_POS_*`` parameters against.",
+      "properties": {
+        "flow": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlowMountConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rangefinder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RangefinderMountConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "FcSensorsConfig",
+      "type": "object"
+    },
+    "FlowMountConfig": {
+      "description": "The optical flow module's mount: body FRD metres from the CG and its\nyaw against the body in centidegrees (``FLOW_ORIENT_YAW``).",
+      "properties": {
+        "orient_yaw_cdeg": {
+          "anyOf": [
+            {
+              "maximum": 18000,
+              "minimum": -17999,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orient Yaw Cdeg"
+        },
+        "pos_m": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pos M"
+        }
+      },
+      "title": "FlowMountConfig",
+      "type": "object"
+    },
     "GnssBaseConfig": {
       "description": "RTK base station mode of the first receiver.",
       "properties": {
@@ -2297,6 +2364,9 @@
           "title": "Avoid",
           "type": "string"
         },
+        "fc_sensors": {
+          "$ref": "#/$defs/FcSensorsConfig"
+        },
         "gnss_denied_max_accel_mps2": {
           "default": 1.5,
           "maximum": 6.0,
@@ -2485,6 +2555,30 @@
         }
       },
       "title": "RadioConfig",
+      "type": "object"
+    },
+    "RangefinderMountConfig": {
+      "description": "The downward rangefinder's mount, body FRD metres from the CG.",
+      "properties": {
+        "pos_m": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pos M"
+        }
+      },
+      "title": "RangefinderMountConfig",
       "type": "object"
     },
     "RecordingConfig": {

@@ -102,6 +102,9 @@ mod tests {
     fn sample_batch() -> DetectionBatch {
         DetectionBatch {
             v: VISION_DETECTION_VERSION,
+            ts_sensor_ms: None,
+            hfov_deg: None,
+            mount_pitch_deg: None,
             model_id: "com.example.weeds".into(),
             camera_id: "uvc-0".into(),
             frame_id: 7,

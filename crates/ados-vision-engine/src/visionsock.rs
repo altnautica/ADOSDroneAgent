@@ -18,7 +18,8 @@
 //!   stamped as `owner`.
 //! - `vision.infer` — run a registered engine-run model against one frame this
 //!   engine published, named by its descriptor; the reply carries the batch.
-//! - `vision.publish_detection` — publish a [`DetectionBatch`]. Used by
+//! - `vision.publish_detection` — publish a
+//!   [`DetectionBatch`](ados_protocol::framebus::DetectionBatch). Used by
 //!   plugin-side models and offloaded detection.
 //! - `vision.designate_track` — lock a captured camera's tracker onto a box.
 //! - `vision.request_detection` — take, renew or release a consumer's lease on
@@ -41,7 +42,7 @@ use std::sync::Arc;
 
 use ados_protocol::camera_control::CAMERA_CONTROL_METHOD;
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
-use ados_protocol::framebus::{methods, DetectionBatch, VISION_DETECTION_VERSION};
+use ados_protocol::framebus::methods;
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use ados_protocol::vision_rpc;
 use anyhow::{anyhow, Result};
@@ -290,16 +291,7 @@ async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value>
             desc.format,
         )
         .await?;
-    let batch = DetectionBatch {
-        v: VISION_DETECTION_VERSION,
-        model_id: req.model_id.clone(),
-        camera_id: desc.camera_id.clone(),
-        frame_id: desc.frame_id,
-        ts_ms: (desc.ts_ns / 1_000_000) as i64,
-        frame_width: desc.width,
-        frame_height: desc.height,
-        detections,
-    };
+    let batch = engine.detection_batch(&req.model_id, desc, detections);
     Ok(vision_rpc::infer_reply(&batch)?)
 }
 
@@ -435,8 +427,8 @@ mod tests {
     use super::*;
     use crate::backend::MockBackend;
     use ados_protocol::framebus::{
-        BoundingBox, Detection, FrameDescriptor, FrameFormat, ModelExecution, ModelKind,
-        ModelMetadata,
+        BoundingBox, Detection, DetectionBatch, FrameDescriptor, FrameFormat, ModelExecution,
+        ModelKind, ModelMetadata, VISION_DETECTION_VERSION,
     };
 
     fn engine() -> Arc<VisionEngine> {
@@ -621,6 +613,9 @@ mod tests {
         let _rx = e.subscribe_detections();
         let batch = DetectionBatch {
             v: VISION_DETECTION_VERSION,
+            ts_sensor_ms: None,
+            hfov_deg: None,
+            mount_pitch_deg: None,
             model_id: "m".into(),
             camera_id: "c".into(),
             frame_id: 1,
@@ -680,6 +675,8 @@ mod tests {
             slot: 0,
             seq: 3,
             byte_len: 192,
+            hfov_deg: None,
+            mount_pitch_deg: None,
         };
         let frame = deliver_frame(&desc).unwrap();
         // Strip the length prefix and decode the envelope.
@@ -706,6 +703,9 @@ mod tests {
     fn deliver_detection_carries_batch_binary() {
         let batch = DetectionBatch {
             v: VISION_DETECTION_VERSION,
+            ts_sensor_ms: None,
+            hfov_deg: None,
+            mount_pitch_deg: None,
             model_id: "m".into(),
             camera_id: "uvc-0".into(),
             frame_id: 9,

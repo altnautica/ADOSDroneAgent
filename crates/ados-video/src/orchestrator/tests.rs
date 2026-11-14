@@ -895,6 +895,7 @@ fn present_camera_discovery() -> DiscoveryResult {
             width: 1280,
             height: 720,
             capabilities: vec!["h264".into()],
+            formats: Vec::new(),
             hardware_role: String::new(),
         }],
         primary: Some(crate::discover::Primary {
@@ -1000,6 +1001,7 @@ async fn every_source_kind_reads_as_a_live_main_stream_only_while_main_is_publis
             width: 1920,
             height: 1080,
             capabilities: Vec::new(),
+            formats: Vec::new(),
             hardware_role: "primary".into(),
         }],
         primary: Some(crate::discover::Primary {

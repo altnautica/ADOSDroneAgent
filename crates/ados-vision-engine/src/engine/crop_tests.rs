@@ -13,7 +13,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use ados_protocol::framebus::{BoundingBox, DetectionHead, LockState, ModelKind};
+use ados_protocol::framebus::{BoundingBox, Detection, DetectionHead, LockState, ModelKind};
 
 const W: u32 = 1280;
 const H: u32 = 720;
@@ -231,6 +231,8 @@ fn desc(frame_id: u64) -> FrameDescriptor {
         slot: 0,
         shm_name: String::new(),
         byte_len: W * H * 3,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     }
 }
 

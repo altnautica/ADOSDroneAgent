@@ -244,6 +244,9 @@ impl VisionClient {
     ) -> Result<Value, ClientError> {
         let batch = DetectionBatch {
             v: VISION_DETECTION_VERSION,
+            ts_sensor_ms: None,
+            hfov_deg: None,
+            mount_pitch_deg: None,
             model_id: model_id.to_string(),
             camera_id: frame.descriptor.camera_id.clone(),
             frame_id: frame.descriptor.frame_id,
@@ -424,6 +427,8 @@ mod tests {
             slot,
             seq,
             byte_len,
+            hfov_deg: None,
+            mount_pitch_deg: None,
         }
     }
 

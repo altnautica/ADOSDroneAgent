@@ -12,7 +12,8 @@
 //
 // Feed request budget with no extensions enabled (drone): /api/telemetry 5/s,
 // /api/status/full 1/s (shell), /api/v1/battery 0.2/s (shell), /api/wfb 0.1/s
-// (shell), /api/video/roster 1/30 s, /api/plugins 0.2/s — about 6.5/s, plus
+// (shell), /api/video/roster 1/30 s, /api/v1/sensors 0.5/s (camera health),
+// /api/plugins 0.2/s — about 7/s, plus
 // the pilot link (`WS /api/v1/pilot/stream`) and the nav stream. A node with a
 // vision path adds POST /api/vision/demand 0.5/s per shown target overlay.
 
@@ -56,6 +57,7 @@ import { useGroundDetectionPoll } from "@/hooks/use-ground-detection-poll";
 import { useNavStream } from "@/hooks/use-nav-stream";
 import { usePilotInput } from "@/hooks/use-pilot-input";
 import { useRoster } from "@/hooks/use-roster";
+import { useCameraHealthPoll } from "@/hooks/use-camera-health";
 import { useSkillKeys } from "@/hooks/use-skill-keys";
 import { useVideoHost } from "@/hooks/use-video-host";
 import { hasLocalVision, useVisionDetections } from "@/hooks/use-vision-detections";
@@ -98,6 +100,7 @@ export function FeedScreen() {
   // A visor carries its own cameras like a drone, so it lists the same roster.
   const ownsCameras = isDrone || profile === "visor";
   const roster = useRoster(ownsCameras);
+  useCameraHealthPoll(ownsCameras);
   const streams = useStatusStore((s) => s.status?.video?.streams);
   const cameras = useMemo(() => feedCameras(streams, roster), [streams, roster]);
   const activeCameraId = useFeedStore((s) => s.activeCameraId);

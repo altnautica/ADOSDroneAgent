@@ -26,7 +26,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "ados-capabilities-codegen"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "hex",
  "serde",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "ados-clock-service"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "ados-cloud"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-macpin",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-macpin",
  "ados-protocol",
@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config-tunnel"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-mavlink-tunnel",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "ados-control"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-groundlink",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "ados-crsf"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-crsf-codec",
@@ -224,7 +224,7 @@ version = "0.1.1"
 
 [[package]]
 name = "ados-display"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ab_glyph",
  "ados-config",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gnss"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-positioning",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gpio"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "ados-groundlink"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-plugin-host",
@@ -338,10 +338,12 @@ dependencies = [
 
 [[package]]
 name = "ados-hal-probe"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-protocol",
+ "base64 0.23.1",
  "nix 0.29.0",
+ "rmpv",
  "serde",
  "serde_json",
  "serde_norway",
@@ -352,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hid"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-hmi",
@@ -390,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "ados-installer"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -421,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "ados-logd"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -465,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "ados-lora-service"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-gpio",
@@ -499,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "ados-mavlink-router"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -534,7 +536,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ados-net"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-proc",
@@ -566,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "ados-pilot"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -585,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "ados-plugin-host"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -631,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "ados-proc"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "nix 0.29.0",
  "tempfile",
@@ -641,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "ados-protocol"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -668,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "ados-radio"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-proc",
@@ -698,7 +700,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ados-sdk"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-plugin-host",
  "ados-protocol",
@@ -721,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorbus"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-protocol",
  "hex",
@@ -752,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub-service"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -772,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "ados-supervisor"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -807,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "ados-swarmbus"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-protocol",
  "ados-radio",
@@ -842,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "ados-tui"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -859,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "ados-video"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -882,14 +884,14 @@ dependencies = [
 
 [[package]]
 name = "ados-vision"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-protocol",
 ]
 
 [[package]]
 name = "ados-vision-engine"
-version = "0.112.1"
+version = "0.113.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -911,6 +913,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -6814,6 +6817,21 @@ checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",
+]
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
 ]
 
 [[package]]

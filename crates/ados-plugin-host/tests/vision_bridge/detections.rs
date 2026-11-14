@@ -7,6 +7,9 @@ use ados_protocol::framebus::{BoundingBox, Detection, VISION_DETECTION_VERSION};
 fn sample_batch(frame_id: u64) -> DetectionBatch {
     DetectionBatch {
         v: VISION_DETECTION_VERSION,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "com.example.det".into(),
         camera_id: "uvc-0".into(),
         frame_id,

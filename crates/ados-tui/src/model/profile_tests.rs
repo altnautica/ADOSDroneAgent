@@ -258,3 +258,20 @@ fn lora_multi_sub_band_shows_two_highest() {
         .iter()
         .any(|(t, lv)| t == "0.8%/1% " && *lv == Level::Warn));
 }
+
+#[test]
+fn camera_health_comes_from_the_sensors_route() {
+    let mut body = sensors_fixture(true, true);
+    body["health"] =
+        json!({"cameras": [{"id": "front", "leg": "main", "state": "stale", "fps": 3}]});
+    let routes = ProfileRoutes {
+        sensors: Some(body),
+        ..ProfileRoutes::default()
+    };
+    let d = dash("drone", &routes);
+    let words: Vec<String> = d.camera_health.iter().map(|c| c.word().text).collect();
+    assert_eq!(words, ["front stale"]);
+    assert!(dash("drone", &ProfileRoutes::default())
+        .camera_health
+        .is_empty());
+}

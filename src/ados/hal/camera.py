@@ -13,8 +13,17 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ados.core.logging import get_logger
+from ados.hal.v4l2_formats import best_mode, capabilities, probe_formats, v4l2_driver
 
 log = get_logger("hal.camera")
+
+# Kernel drivers that settle what a V4L2 node is when sysfs names them. A node
+# behind any other driver (or none readable) falls back to the name filter in
+# `_discover_usb_cameras` and is typed USB.
+_DRIVER_TYPES = {
+    "uvcvideo": "usb",
+    "sunxi-vin": "csi",
+}
 
 # Discovery sidecar the enumeration writes and the native camera-roster route
 # (ados-control `GET /api/video/roster`) reads, so the serve path stays
@@ -59,7 +68,12 @@ class CameraInfo:
     device_path: str
     width: int = 0
     height: int = 0
+    # Highest frame rate offered at width x height; 0 when unknown.
+    fps: float = 0.0
     capabilities: list[str] = field(default_factory=list)
+    # What a V4L2 node offers, one entry per format and size
+    # (``ados.hal.v4l2_formats``); empty when not enumerated.
+    formats: list[dict] = field(default_factory=list)
     hardware_role: HardwareRole = HardwareRole.CAMERA
     # Physical fingerprint the camera roster reconciles a declared leg against
     # when the device node has been renamed by a hot-plug/reboot: a USB camera
@@ -75,7 +89,9 @@ class CameraInfo:
             "device_path": self.device_path,
             "width": self.width,
             "height": self.height,
+            "fps": self.fps,
             "capabilities": self.capabilities,
+            "formats": self.formats,
             "hardware_role": self.hardware_role.value,
             "match": self.match,
         }
@@ -188,8 +204,15 @@ def _video_node_openable(path: str) -> bool:
     return True
 
 
+def _is_internal_device(block_name: str) -> bool:
+    """A --list-devices block an SoC codec / ISP / decoder / Pi unicam owns,
+    judged by name (the fallback when its driver is not a known camera)."""
+    name = (block_name or "").lower()
+    return any(word in name for word in ("codec", "isp", "hevc", "rpivid", "unicam"))
+
+
 def _discover_usb_cameras() -> list[CameraInfo]:
-    """Detect USB cameras via v4l2-ctl --list-devices.
+    """Detect V4L2 cameras via v4l2-ctl --list-devices.
 
     v4l2-ctl exits non-zero when any /dev/videoN node fails to open
     (a stale node from a recently unplugged device, for example), but
@@ -204,6 +227,12 @@ def _discover_usb_cameras() -> list[CameraInfo]:
     one as secondary while both point at the same physical device. Only
     the first /dev/videoN in each device-name block becomes a CameraInfo;
     later nodes are metadata or alternates.
+
+    A node's type comes from its sysfs driver where that is readable:
+    ``uvcvideo`` is a USB camera, ``sunxi-vin`` the Allwinner CSI capture
+    (listed only when it offers a format, i.e. a sensor is bound). Each
+    camera's formats, sizes and rates are enumerated from the node, and
+    its capabilities and best mode follow from them.
     """
     cameras: list[CameraInfo] = []
     try:
@@ -233,23 +262,18 @@ def _discover_usb_cameras() -> list[CameraInfo]:
                     # Skip subsequent nodes in the same device block
                     # (UVC metadata node, alternate formats, etc.)
                     continue
-                # v4l2-ctl --list-devices returns the kernel's video subsystem,
-                # which on a Raspberry Pi includes the bcm2835 codec / ISP /
-                # hevc decoder / unicam capture backplane alongside any real
-                # USB UVC camera. Those internal devices are not capturable
-                # cameras for our purposes — skip them entirely so they do
-                # not pollute the camera list surfaced through /api/video,
-                # the wizard, or the GCS Hardware tab. The CSI capture path
-                # is reported separately by `_discover_csi_cameras` via
-                # rpicam-hello, which is the canonical source for CSI input.
-                name_lower = (current_name or "").lower()
-                if (
-                    "codec" in name_lower
-                    or "isp" in name_lower
-                    or "hevc" in name_lower
-                    or "rpivid" in name_lower
-                    or "unicam" in name_lower
-                ):
+                driver = v4l2_driver(stripped)
+                cam_type = _DRIVER_TYPES.get(driver or "")
+                # Without a known driver, v4l2-ctl --list-devices still returns
+                # the kernel's whole video subsystem, which on a Raspberry Pi
+                # includes the bcm2835 codec / ISP / hevc decoder / unicam
+                # capture backplane alongside any real USB UVC camera. Those
+                # internal devices are not capturable cameras for our purposes:
+                # skip them so they do not pollute the camera list surfaced
+                # through /api/video, the wizard, or the GCS Hardware tab. The
+                # Pi CSI capture path is reported by `_discover_csi_cameras`
+                # via rpicam-hello.
+                if cam_type is None and _is_internal_device(current_name):
                     block_consumed = True
                     continue
                 if not _video_node_openable(stripped):
@@ -263,11 +287,21 @@ def _discover_usb_cameras() -> list[CameraInfo]:
                         msg="node listed but failed to open; treating as absent",
                     )
                     continue
+                formats = probe_formats(stripped)
+                if cam_type == "csi" and not formats:
+                    # A CSI capture node with no sensor bound offers nothing.
+                    log.debug("csi_node_without_formats", device=stripped, driver=driver)
+                    continue
+                width, height, fps = best_mode(formats)
                 cameras.append(CameraInfo(
                     name=current_name or "USB Camera",
-                    type=CameraType.USB,
+                    type=CameraType(cam_type or "usb"),
                     device_path=stripped,
-                    capabilities=["mjpeg", "yuyv"],
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    capabilities=capabilities(formats),
+                    formats=formats,
                     hardware_role=HardwareRole.CAMERA,
                     match=_usb_match(stripped),
                 ))

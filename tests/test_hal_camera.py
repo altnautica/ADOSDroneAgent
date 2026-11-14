@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ados.hal.camera import (
     CameraInfo,
     CameraType,
@@ -71,6 +73,13 @@ class TestDiscoverCsiCameras:
 
 
 class TestDiscoverUsbCameras:
+    @pytest.fixture(autouse=True)
+    def _no_sysfs_driver(self):
+        # These cover the name-filter path a node without a readable driver
+        # takes; the host's own /sys must not decide the outcome.
+        with patch("ados.hal.camera.v4l2_driver", return_value=None):
+            yield
+
     def test_v4l2_not_found(self):
         with patch("ados.hal.camera.subprocess.run", side_effect=FileNotFoundError):
             result = _discover_usb_cameras()

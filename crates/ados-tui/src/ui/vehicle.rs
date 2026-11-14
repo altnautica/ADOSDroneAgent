@@ -30,6 +30,7 @@ mod packs;
 mod pilot;
 mod read;
 mod readings;
+mod sensor_rows;
 
 use chart::{line_chart, Trace};
 use read::Read;

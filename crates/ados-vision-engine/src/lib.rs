@@ -56,4 +56,5 @@ pub mod sei;
 pub mod source;
 pub mod trigger;
 pub mod visionsock;
+mod work_rate;
 pub mod work_status;

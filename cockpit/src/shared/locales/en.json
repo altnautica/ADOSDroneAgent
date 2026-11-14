@@ -1824,6 +1824,11 @@
   },
   "sensors": {
     "title": "Sensors",
+    "health": "Navigation sensors",
+    "healthFlow": "Optical flow",
+    "healthRange": "Downward range",
+    "healthLidar": "Lidar",
+    "healthCameras": "Cameras",
     "loadFailed": "Could not read the sensor status.",
     "absent": "No sensor service on this node.",
     "hub": "Sensor hub",

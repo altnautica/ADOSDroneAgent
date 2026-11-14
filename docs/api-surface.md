@@ -231,6 +231,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/security/api-key/rotate` | relay-forbidden |
 | GET | `/api/v1/sensors` |  |
 | PUT | `/api/v1/sensors/rig` |  |
+| POST | `/api/v1/sensors/rig/lidar` |  |
 | GET | `/api/v1/storage` |  |
 | POST | `/api/v1/system/restart-supervisor` |  |
 | GET | `/api/v2/observability/{*upstream_path}` |  |
@@ -271,7 +272,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-246 native routes.
+247 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

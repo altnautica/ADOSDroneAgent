@@ -1,6 +1,6 @@
 use super::demand::drop_oversized_boxes;
 use super::*;
-use ados_protocol::framebus::{BoundingBox, DetectionHead, ModelKind};
+use ados_protocol::framebus::{BoundingBox, Detection, DetectionHead, ModelKind};
 
 fn engine_with(policy: DetectionPolicy) -> Arc<VisionEngine> {
     VisionEngine::with_tracker_reid(
@@ -209,6 +209,8 @@ async fn the_engine_drops_oversized_boxes_before_publishing() {
         slot: 0,
         shm_name: String::new(),
         byte_len: 640 * 480 * 3,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     };
     let batch = e
         .infer_and_publish("det", &desc, &vec![0u8; 640 * 480 * 3])

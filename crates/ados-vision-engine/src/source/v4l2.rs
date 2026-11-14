@@ -3,8 +3,11 @@
 //! applied on the same open device ([`controls`]).
 //!
 //! The device is streamed with MMAP buffers on a dedicated thread (a dequeue
-//! blocks), each buffer copied once into a pooled frame buffer. Timing comes
-//! from the buffer, not from the moment the frame reached user space: a
+//! blocks), each buffer written once into a pooled frame buffer in the
+//! configured bus format: copied when the camera delivers that format,
+//! decoded or converted when it delivers MJPEG or YUYV (a UVC camera).
+//! Timing comes from the buffer, not from the moment the frame reached user
+//! space (nor from when its decode finished): a
 //! driver that stamps `V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC` uses the host
 //! monotonic clock every agent service shares, and its start-of-exposure or
 //! end-of-frame flag places the stamp relative to the exposure. A triggered
@@ -110,6 +113,18 @@ pub fn fourcc(format: FrameFormat) -> [u8; 4] {
         FrameFormat::Yuv420p => *b"YU12",
         FrameFormat::BayerRggb8 => *b"RGGB",
         FrameFormat::BayerRggb16 => *b"RG16",
+    }
+}
+
+/// Bytes per pixel row of the first plane (the stride a driver pads).
+pub fn row_bytes(format: FrameFormat, width: u32) -> usize {
+    let w = width as usize;
+    match format {
+        FrameFormat::Rgb24 => w * 3,
+        FrameFormat::Gray16 | FrameFormat::BayerRggb16 => w * 2,
+        FrameFormat::Gray8 | FrameFormat::BayerRggb8 | FrameFormat::Nv12 | FrameFormat::Yuv420p => {
+            w
+        }
     }
 }
 
@@ -305,6 +320,18 @@ pub use controls::ControlCall;
 #[cfg(target_os = "linux")]
 #[path = "v4l2_sys.rs"]
 mod v4l2_sys;
+
+#[cfg(target_os = "linux")]
+#[path = "v4l2_negotiate.rs"]
+mod negotiate;
+
+#[cfg(target_os = "linux")]
+#[path = "v4l2_convert.rs"]
+mod convert;
+
+#[cfg(target_os = "linux")]
+#[path = "v4l2_pixels.rs"]
+mod pixels;
 
 #[cfg(test)]
 #[path = "v4l2_tests.rs"]

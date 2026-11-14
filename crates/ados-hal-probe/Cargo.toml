@@ -31,6 +31,10 @@ serde_json = { workspace = true }
 # The board-profile YAMLs are embedded and parsed here so a zero-Python node can
 # still resolve its real board instead of degrading to unknown / npu_tops 0.
 serde_norway = { workspace = true }
+# The LiDAR port rule reads the plugin host's config store: base64 of each
+# value's msgpack encoding.
+base64 = { workspace = true }
+rmpv = { workspace = true }
 tracing = { workspace = true }
 # The probe binary's own log sink (journald is picked up by the unit's
 # StandardOutput=journal, so the plain fmt layer is enough here).

@@ -114,4 +114,6 @@ pub fn cloud_push_args(local_rtsp: &str, push_url: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod presence_tests;
+#[cfg(test)]
 mod tests;

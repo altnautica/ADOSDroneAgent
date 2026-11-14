@@ -1,0 +1,12 @@
+sunxi-vin (platform:vin_video0):
+	/dev/video0
+	/dev/video1
+
+Generic UVC Camera: Generic UVC (usb-ehci-1.1):
+	/dev/video2
+	/dev/video3
+
+Second UVC Camera: Generic UVC (usb-ehci-1.2):
+	/dev/video4
+	/dev/video5
+

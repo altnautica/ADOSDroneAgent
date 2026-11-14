@@ -42,6 +42,8 @@ fn descriptor_round_trips_through_msgpack() {
         slot: 3,
         seq: 1234,
         byte_len: (640 * 480 * 3) as u32,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     };
     let bytes = base.to_msgpack().unwrap();
     assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), base);
@@ -63,6 +65,48 @@ fn descriptor_round_trips_through_msgpack() {
         let bytes = d.to_msgpack().unwrap();
         assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), d);
     }
+}
+
+#[test]
+fn descriptor_camera_geometry_round_trips_and_is_omitted_when_absent() {
+    let bare = FrameDescriptor {
+        v: FRAMEBUS_DESCRIPTOR_VERSION,
+        camera_id: "front".into(),
+        frame_id: 1,
+        ts_ns: 9_000_000_000,
+        ts_sensor_ns: None,
+        exposure_ns: None,
+        trigger_seq: None,
+        timebase: TIMEBASE_HOST,
+        width: 8,
+        height: 8,
+        format: FrameFormat::Rgb24,
+        shm_name: "ados-vision-front".into(),
+        slot: 0,
+        seq: 1,
+        byte_len: 192,
+        hfov_deg: None,
+        mount_pitch_deg: None,
+    };
+    let bytes = bare.to_msgpack().unwrap();
+    let rmpv::Value::Map(entries) = rmpv::decode::read_value(&mut &bytes[..]).unwrap() else {
+        panic!("not a msgpack map");
+    };
+    assert!(!entries
+        .iter()
+        .any(|(k, _)| matches!(k.as_str(), Some("hfov_deg" | "mount_pitch_deg"))));
+    assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), bare);
+
+    let full = FrameDescriptor {
+        hfov_deg: Some(87.0),
+        mount_pitch_deg: Some(-15.0),
+        ..bare
+    };
+    let bytes = full.to_msgpack().unwrap();
+    assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), full);
+    let json = serde_json::to_value(&full).unwrap();
+    assert_eq!(json["hfov_deg"], 87.0);
+    assert_eq!(json["mount_pitch_deg"], -15.0);
 }
 
 #[test]
@@ -93,6 +137,8 @@ fn descriptor_rejects_a_future_version() {
         slot: 0,
         seq: 1,
         byte_len: 192,
+        hfov_deg: None,
+        mount_pitch_deg: None,
     };
     let bytes = d.to_msgpack().unwrap();
     assert!(matches!(

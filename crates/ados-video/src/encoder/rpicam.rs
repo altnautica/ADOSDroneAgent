@@ -154,10 +154,13 @@ pub(super) fn shell_quote(arg: &str) -> String {
     }
 }
 
-/// Choose the V4L2 input format from camera capabilities.
+/// Choose the V4L2 input format from the camera's discovered capabilities.
 ///
-/// Priority: mjpeg (compressed, high fps) > yuyv (raw). Returns `None` when
-/// capabilities are unknown (let ffmpeg auto-detect).
+/// Priority: mjpeg (compressed, high fps) > raw YUYV. Returns the ffmpeg
+/// `-input_format` name: `mjpeg`, or `yuyv422` — ffmpeg's pixel-format name
+/// for packed YUYV. Plain `yuyv` names no ffmpeg pixel format or codec, so
+/// `-input_format yuyv` makes the v4l2 demuxer refuse to open the camera.
+/// Returns `None` when the capabilities name neither (let ffmpeg pick).
 pub(super) fn select_input_format(camera: Option<&CameraInfo>) -> Option<&'static str> {
     let camera = camera?;
     let caps: Vec<String> = camera
@@ -167,8 +170,11 @@ pub(super) fn select_input_format(camera: Option<&CameraInfo>) -> Option<&'stati
         .collect();
     if caps.iter().any(|c| c == "mjpeg" || c == "mjpg") {
         Some("mjpeg")
-    } else if caps.iter().any(|c| c == "yuyv" || c == "rawvideo") {
-        Some("yuyv")
+    } else if caps
+        .iter()
+        .any(|c| c == "yuyv" || c == "yuyv422" || c == "rawvideo")
+    {
+        Some("yuyv422")
     } else {
         None
     }

@@ -18,6 +18,28 @@ impl VideoOrchestrator {
         }
     }
 
+    /// The camera a local secondary leg's encoder reads: its bus class from the
+    /// source hint, and the capability list discovery found for that device, so
+    /// the direct encode asks the camera for a format it really offers (MJPEG,
+    /// else YUYV). A device discovery did not list gets no capability list and
+    /// ffmpeg picks the format itself.
+    pub(crate) fn secondary_camera_info(
+        &self,
+        source: &str,
+        camera_type: CameraType,
+    ) -> CameraInfo {
+        let capabilities = self
+            .last_cameras
+            .camera_info_for(source)
+            .map(|c| c.capabilities)
+            .unwrap_or_default();
+        CameraInfo {
+            camera_type,
+            device_path: source.to_string(),
+            capabilities,
+        }
+    }
+
     /// Run one frame-bus pump per leg whose source is a captured camera, and
     /// stop the pumps of legs that are gone. Called before any encoder that
     /// reads a pipe is spawned.
@@ -74,11 +96,7 @@ impl VideoOrchestrator {
                 tracing::warn!(id = %leg.id, "secondary_encoder_skipped: no encoder available");
                 continue;
             };
-            let camera = CameraInfo {
-                camera_type,
-                device_path: leg.source.clone(),
-                capabilities: Vec::new(),
-            };
+            let camera = self.secondary_camera_info(&leg.source, camera_type);
             let cam_cfg = leg.to_camera_config();
             let mut params = EncoderParams::from_camera_config(kind, &cam_cfg);
             params.framebus_input = leg.raw_input();

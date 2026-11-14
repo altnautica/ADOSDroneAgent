@@ -4,6 +4,8 @@ use std::mem::{align_of, offset_of, size_of};
 #[test]
 fn struct_sizes_match_the_kernel_abi() {
     assert_eq!(size_of::<Capability>(), 104);
+    assert_eq!(size_of::<FmtDesc>(), 64);
+    assert_eq!(offset_of!(FmtDesc, pixelformat), 44);
     assert_eq!(size_of::<PixFormat>(), 48);
     assert_eq!(size_of::<PlanePixFormat>(), 20);
     assert_eq!(size_of::<PixFormatMplane>(), 192);
@@ -32,6 +34,7 @@ fn struct_sizes_match_the_kernel_abi() {
 fn ioctl_numbers_match_videodev2() {
     // Values as the 64-bit kernel headers define them.
     assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
+    assert_eq!(VIDIOC_ENUM_FMT, 0xc040_5602);
     assert_eq!(VIDIOC_S_FMT, 0xc0d0_5605);
     assert_eq!(VIDIOC_REQBUFS, 0xc014_5608);
     assert_eq!(VIDIOC_QUERYBUF, 0xc058_5609);

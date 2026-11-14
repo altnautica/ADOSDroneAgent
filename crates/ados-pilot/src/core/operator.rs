@@ -8,10 +8,17 @@ use super::{Out, Pilot};
 impl Pilot {
     /// Every readiness item, including the setup engine's.
     pub fn readiness(&self, now_ms: u64) -> Vec<ados_protocol::pilot::Readiness> {
+        let sensors = crate::sensor_readiness::SensorCtx {
+            lidar: &self.lidar,
+            avoid_on: self.settings.pilot.avoid != ados_protocol::pilot::AvoidMode::Off,
+            mounts: &self.settings.pilot.fc_sensors,
+            nav_imu: &self.nav_imu,
+        };
         let mut items = crate::readiness::items(
             &self.fc,
             self.control_mode(),
             self.sessions.owner.is_some(),
+            &sensors,
             now_ms,
         );
         if let Some(v) = &self.setup_needed {
@@ -26,34 +33,6 @@ impl Pilot {
         }
         if let Some(item) = self.mission_inferred() {
             items.push(item);
-        }
-        // Avoid is on. No obstacle sensor expected: a pre-arm warning that
-        // nothing will be avoided and Fly Here is refused. One expected but
-        // stale: a block, so a lidar lost on the ground refuses the arm and
-        // the launch instead of holding after take-off.
-        if self.settings.pilot.avoid != ados_protocol::pilot::AvoidMode::Off {
-            use ados_protocol::pilot::Severity;
-            let (ok, severity, msg) = if !self.lidar_expected() {
-                (
-                    false,
-                    Severity::Warn,
-                    "No lidar: obstacle avoidance unavailable",
-                )
-            } else if self.obstacles.scan_fresh(now_ms) {
-                (true, Severity::Block, "Lidar reporting")
-            } else {
-                (
-                    false,
-                    Severity::Block,
-                    "Obstacle data stale: lidar not reporting",
-                )
-            };
-            items.push(ados_protocol::pilot::Readiness {
-                id: "lidar".into(),
-                ok,
-                severity,
-                msg: msg.into(),
-            });
         }
         items
     }

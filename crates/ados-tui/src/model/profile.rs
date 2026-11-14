@@ -138,6 +138,11 @@ impl Dashboard {
         };
         self.hub_connected = connected("hub");
         self.sensors_fc_connected = connected("fc");
+        self.camera_health = routes
+            .sensors
+            .as_ref()
+            .map(super::sensor_health::CameraHealth::list)
+            .unwrap_or_default();
         self.profile_row = match self.profile.as_str() {
             "visor" => visor_line(routes).into_iter().collect(),
             "drone" => routes

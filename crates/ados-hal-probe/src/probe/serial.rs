@@ -13,6 +13,9 @@
 //! is exercised only by its tests today. When it IS wired, callers pass the
 //! pinned CRSF/ELRS device (`radio.crsf.device`) so the RC module's port
 //! scores 0, mirroring the exclusion the router's live path already enforces.
+//! The rig's serial LiDAR ([`crate::lidar_port`]) scores 0 the same way: a
+//! CP2102 fronts a flight controller as often as the LiDAR, so a CP2102 scores
+//! as an FC bridge unless it is identified as the LiDAR.
 //!
 //! The scoring and the sysfs walk are split: `score_fc` is a pure function
 //! tested on any host, and `enumerate_from_root` takes the `/sys/class/tty`
@@ -21,6 +24,8 @@
 use std::path::Path;
 
 use ados_protocol::hwcaps::{Probed, SerialPort, UsbId};
+
+use crate::lidar_port::LidarPort;
 
 /// The sysfs class directory every tty node exposes a link under.
 #[cfg(target_os = "linux")]
@@ -62,6 +67,12 @@ mod fc_vendors {
 /// "not an FC candidate" — a caller picking the head of the list must treat 0
 /// as no-candidate rather than a weak one.
 ///
+/// The rig's serial LiDAR ([`LidarPort::load`]) scores 0 too. Under
+/// [`LidarPort::Auto`] each CP2102 port is checked with
+/// [`probe_rplidar`](crate::lidar_port::probe_rplidar): a
+/// port another process holds is left alone, a free one is sent the RPLIDAR
+/// `STOP` and `GET_INFO` requests and closed again.
+///
 /// Returns [`Probed::Present`] with the scored ports sorted best-first, or
 /// [`Probed::Absent`] with
 /// [`AbsenceReason::NodeMissing`](ados_protocol::hwcaps::AbsenceReason) when no
@@ -69,9 +80,12 @@ mod fc_vendors {
 /// no `/sys/class/tty` to read).
 #[cfg(target_os = "linux")]
 pub fn probe_serial_ports(crsf_pin: Option<&str>) -> Probed<Vec<SerialPort>> {
+    use crate::lidar_port::probe_rplidar;
     use ados_protocol::hwcaps::{AbsenceReason, Evidence};
 
-    let ports = enumerate_from_root(Path::new(TTY_CLASS_DIR), crsf_pin);
+    let lidar = LidarPort::load();
+    let mut confirm = |port: &str| probe_rplidar(port).is_lidar();
+    let ports = enumerate_from_root(Path::new(TTY_CLASS_DIR), crsf_pin, &lidar, &mut confirm);
     if ports.is_empty() {
         return Probed::absent(AbsenceReason::NodeMissing);
     }
@@ -91,12 +105,18 @@ pub fn probe_serial_ports(_crsf_pin: Option<&str>) -> Probed<Vec<SerialPort>> {
 /// A node named by `crsf_pin` (compared by node basename, so `/dev/ttyUSB0`
 /// and `ttyUSB0` both match; the caller resolves any symlink spelling first)
 /// stays in the inventory but scores 0 — the pinned RC module is a real serial
-/// port, just never an FC candidate.
+/// port, just never an FC candidate. A node `lidar` identifies (asking
+/// `confirm` where the rule needs a probe) scores 0 for the same reason.
 ///
 /// Factored out of [`probe_serial_ports`] so a fake layout can be fed in by a
 /// test without touching the real `/sys`.
 #[allow(dead_code)]
-fn enumerate_from_root(tty_root: &Path, crsf_pin: Option<&str>) -> Vec<SerialPort> {
+fn enumerate_from_root(
+    tty_root: &Path,
+    crsf_pin: Option<&str>,
+    lidar: &LidarPort,
+    confirm: &mut dyn FnMut(&str) -> bool,
+) -> Vec<SerialPort> {
     let pin_node = crsf_pin
         .map(|p| p.trim().trim_start_matches("/dev/"))
         .unwrap_or("");
@@ -112,13 +132,17 @@ fn enumerate_from_root(tty_root: &Path, crsf_pin: Option<&str>) -> Vec<SerialPor
             continue;
         }
         let usb = resolve_usb_id(&entry.path().join("device"));
-        let fc_score = if !pin_node.is_empty() && node == pin_node {
+        let path = format!("/dev/{node}");
+        let usb_pair = usb.as_ref().map(|id| (id.vid, id.pid));
+        let excluded = (!pin_node.is_empty() && node == pin_node)
+            || lidar.identifies(&path, usb_pair, &mut *confirm);
+        let fc_score = if excluded {
             0
         } else {
             score_fc(&node, usb.as_ref())
         };
         ports.push(SerialPort {
-            path: format!("/dev/{node}"),
+            path,
             usb,
             fc_score,
         });
@@ -229,6 +253,13 @@ fn score_fc(node: &str, usb: Option<&UsbId>) -> u8 {
 mod tests {
     use super::*;
 
+    /// The walk with no LiDAR on the node.
+    fn enumerate(tty_root: &Path, crsf_pin: Option<&str>) -> Vec<SerialPort> {
+        enumerate_from_root(tty_root, crsf_pin, &LidarPort::None, &mut |_| {
+            panic!("no LiDAR rule, no probe")
+        })
+    }
+
     #[test]
     fn acm_outscores_usb_for_same_vendor() {
         let stm = UsbId {
@@ -314,7 +345,7 @@ mod tests {
         std::fs::create_dir_all(tty.join("tty")).unwrap();
         std::fs::create_dir_all(tty.join("ttyprintk")).unwrap();
 
-        let ports = enumerate_from_root(tty, None);
+        let ports = enumerate(tty, None);
 
         // Three indexed USB-serial nodes; tty / ttyprintk skipped.
         assert_eq!(ports.len(), 3, "expected 3 ports, got {ports:?}");
@@ -359,7 +390,7 @@ mod tests {
         std::fs::write(usb_dev.join("idVendor"), "10c4\n").unwrap();
         std::fs::write(usb_dev.join("idProduct"), "ea60\n").unwrap();
 
-        let ports = enumerate_from_root(tty, Some("/dev/ttyUSB0"));
+        let ports = enumerate(tty, Some("/dev/ttyUSB0"));
         assert_eq!(ports.len(), 2);
         assert_eq!(ports[0].path, "/dev/ttyACM0");
         assert_eq!(ports[1].path, "/dev/ttyUSB0");
@@ -377,11 +408,11 @@ mod tests {
         );
 
         // The bare-node-name pin spelling matches too.
-        let ports = enumerate_from_root(tty, Some("ttyUSB0"));
+        let ports = enumerate(tty, Some("ttyUSB0"));
         assert_eq!(ports[1].fc_score, 0);
 
         // A pin naming an absent node changes nothing.
-        let ports = enumerate_from_root(tty, Some("/dev/ttyUSB9"));
+        let ports = enumerate(tty, Some("/dev/ttyUSB9"));
         assert!(ports.iter().all(|p| p.fc_score > 0));
     }
 
@@ -389,6 +420,10 @@ mod tests {
     fn missing_tty_root_enumerates_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let nope = tmp.path().join("does-not-exist");
-        assert!(enumerate_from_root(&nope, None).is_empty());
+        assert!(enumerate(&nope, None).is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "serial_lidar_tests.rs"]
+mod lidar_tests;

@@ -1,6 +1,7 @@
 // The cockpit grid's zones around the video (cockpit spec `layout.json`): the left
 // column (Take off / Land, Return home, Pause) and the bottom telemetry row
-// (D, H, H.S, V.S, AGL); the right column lives in `right-column.tsx`. Every
+// (D, H, H.S, V.S, AGL, then the flow and range words); the right column lives
+// in `right-column.tsx`. Every
 // control fires a cockpit action or a built-in skill through the same gates as
 // a controller binding. An unavailable control stays pressable and shows its
 // reason in the cockpit toast. Panels use the spec's chrome tokens (`chrome-*`
@@ -13,12 +14,14 @@ import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { distanceFromHomeM, readoutParts, rowAgl } from "@/lib/bottom-row";
 import { leftColumnCaption } from "@/lib/cockpit-layout";
+import { freshSensors } from "@/lib/sensor-words";
 import { FLIGHT_PX } from "@/lib/flight-layout";
 import { requestSkill } from "@/lib/skill-runner";
 import { BUILTIN_SKILL_BY_ID, resolveSkillState } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import builtinsJson from "@/shared/cockpit-spec/builtins.json";
 import { aglMarkText } from "@/shared/hud/chip-inputs";
+import { sensorRowWords } from "@/shared/hud/sensor-health";
 import { specText } from "@/shared/hud/spec-text";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useFlightStore } from "@/stores/flight-store";
@@ -131,9 +134,10 @@ function Readout({
 }
 
 /** The bottom telemetry row: distance from home, height, horizontal and
- *  vertical speed, height above ground; distance and height only where the
- *  row is short. A missing source reads a dash; the AGL from a stalled pilot
- *  dims to a dash. */
+ *  vertical speed, height above ground, then the flow and range words
+ *  (`sensor-health.json`, each only when not absent); distance and height
+ *  only where the row is short. A missing source reads a dash; the AGL from a
+ *  stalled pilot dims to a dash and a stalled pilot's sensor words go. */
 export function BottomRow({ short = false }: { short?: boolean }) {
   const t = useFlightStore((s) => s.telemetry);
   const home = useFlightStore((s) => s.home);
@@ -141,6 +145,7 @@ export function BottomRow({ short = false }: { short?: boolean }) {
   const follow = useNavStreamStore((s) => s.follow?.data ?? null);
   const now = useNow(pilot ? 500 : null);
   const agl = rowAgl(pilot, follow ? { aglM: follow.aglM, aglSource: follow.aglSource } : null, now);
+  const sensorWords = short ? [] : sensorRowWords(freshSensors(pilot, now));
   return (
     <div
       className="chrome-panel pointer-events-auto flex h-full w-full items-center justify-evenly px-[10px]"
@@ -156,6 +161,15 @@ export function BottomRow({ short = false }: { short?: boolean }) {
           <Readout label={specText("cockpit.readout.hspeed")} value={readoutParts("speed", t?.velocity?.groundspeed)} />
           <Readout label={specText("cockpit.readout.vspeed")} value={readoutParts("speed", t?.velocity?.climb)} />
           <Readout label={specText("cockpit.readout.agl")} value={readoutParts("metres", agl.m)} mark={aglMarkText(agl.mark)} dim={agl.stale} />
+          {sensorWords.length > 0 ? (
+            <span className="flex flex-col items-start gap-[3px] font-mono text-[11px] leading-none" data-testid="sensor-words">
+              {sensorWords.map((w) => (
+                <span key={w.text} className="whitespace-nowrap" style={{ color: w.hex }} data-state={w.state}>
+                  {w.text}
+                </span>
+              ))}
+            </span>
+          ) : null}
         </>
       ) : null}
     </div>

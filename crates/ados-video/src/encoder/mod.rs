@@ -364,12 +364,14 @@ fn use_omx_encoder(params: &EncoderParams, env: &EncoderEnv) -> bool {
 /// A network source never takes the OMX path: that pipeline starts with
 /// `v4l2src`, which cannot open a URL, so it keeps the probed base kind.
 ///
-/// A frame-bus source on a Rockchip board with `mpph264enc` takes the
-/// GStreamer VPU path. The frames arrive as raw video the agent already holds,
-/// so the encoder is fed NV12 with no RGA stage — the configuration the retest
-/// procedure on [`detect_encoder_for_camera`] calls for. The software fallback
-/// still applies: once the health tick has forced `encoder: "software"`, the
-/// leg keeps its probed base kind and a software codec.
+/// A frame-bus source (a camera the vision engine captures) takes the board's
+/// hardware encoder too: GStreamer `omxh264videoenc` on an Allwinner vendor
+/// board, GStreamer `mpph264enc` on a Rockchip board. The frames arrive as raw
+/// video the agent already holds, so the encoder is fed NV12 with no RGA stage
+/// — the configuration the retest procedure on [`detect_encoder_for_camera`]
+/// calls for. The software fallback still applies: once the health tick has
+/// forced `encoder: "software"`, the leg keeps its probed base kind and a
+/// software codec, and a board without the element keeps the base kind.
 fn resolve_kind(
     base: EncoderKind,
     params: &EncoderParams,
@@ -377,13 +379,12 @@ fn resolve_kind(
     network_source: bool,
     framebus: bool,
 ) -> EncoderKind {
-    let omx =
-        !network_source && !framebus && env.encoder_api == "vendor" && env.has_omxh264videoenc;
+    let omx = !network_source && env.encoder_api == "vendor" && env.has_omxh264videoenc;
     match params.encoder.as_str() {
         "v4l2m2m" => EncoderKind::Ffmpeg,
         "software" => base,
-        _ if framebus && env.has_mpph264enc => EncoderKind::Gstreamer,
         _ if omx => EncoderKind::Gstreamer,
+        _ if framebus && env.has_mpph264enc => EncoderKind::Gstreamer,
         _ => base,
     }
 }

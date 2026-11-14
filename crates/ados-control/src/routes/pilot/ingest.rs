@@ -315,6 +315,9 @@ mod tests {
             }
             .unwrap();
             assert_eq!(back, v, "{name} fixture does not round-trip");
+            if name == "pilot" {
+                assert!(back["sensors"]["lidar"]["health"] == "warning", "{back}");
+            }
         }
     }
 }

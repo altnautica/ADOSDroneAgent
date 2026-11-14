@@ -3,10 +3,47 @@
 use super::*;
 use crate::connection::imu_fallback::{MSG_HIGHRES_IMU, MSG_RAW_IMU, RAW_IMU_FALLBACK_HZ};
 
+/// The FC identity (system id, component id) each vehicle-addressed request
+/// lane last went to. Until an autopilot HEARTBEAT latches the identity
+/// nothing is sent (a request to the default 1/1 misses every FC on another
+/// id); the first latch, or an FC answering on another id, makes the lane
+/// re-send at once instead of at its next cadence tick.
+#[derive(Debug, Default)]
+pub(crate) struct RequestTargets {
+    streams: Option<(u8, u8)>,
+    banner: Option<(u8, u8)>,
+    landed: Option<(u8, u8)>,
+}
+
+/// One request lane in [`RequestTargets`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RequestLane {
+    Streams,
+    Banner,
+    Landed,
+}
+
 impl FcConnection {
+    /// Record that `lane` now addresses `fc`; true when that moved its target
+    /// (the first request after the latch, or a new FC identity).
+    pub(super) fn retarget(&self, lane: RequestLane, fc: (u8, u8)) -> bool {
+        let mut t = self
+            .request_targets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let slot = match lane {
+            RequestLane::Streams => &mut t.streams,
+            RequestLane::Banner => &mut t.banner,
+            RequestLane::Landed => &mut t.landed,
+        };
+        slot.replace(fc) != Some(fc)
+    }
+
     /// Adaptive stream request. Picks the interval from how long the link has
     /// been idle (stalled link re-requests fast; healthy link relaxes toward
     /// the max), then re-sends the per-message rates when the interval elapses.
+    /// Nothing is requested before the FC identity is latched; the first latch
+    /// and an identity change re-request at once, addressed to the FC.
     ///
     /// `#[allow(deprecated)]`: the `legacy_stream_request` branch below builds a
     /// spec-superseded `REQUEST_DATA_STREAM` on purpose; the branch comment says
@@ -16,6 +53,9 @@ impl FcConnection {
         if !self.transport_open() {
             return;
         }
+        let Some(fc) = self.learned_fc_identity() else {
+            return;
+        };
         let idle = self.last_msg_idle();
         {
             let mut interval = self.stream_interval.lock().await;
@@ -49,7 +89,8 @@ impl FcConnection {
                 }
             })
             .collect();
-        let changed = self.sensor_streams.changed(&table);
+        let retargeted = self.retarget(RequestLane::Streams, fc);
+        let changed = retargeted || self.sensor_streams.changed(&table);
         let due = changed || {
             let last = self.last_stream_req.lock().await;
             last.map(|t| t.elapsed() >= interval).unwrap_or(true)
@@ -58,14 +99,13 @@ impl FcConnection {
             return;
         }
         for &(msg_id, rate_hz) in &table {
-            self.send_message_interval(msg_id, 1_000_000.0 / rate_hz)
+            self.send_message_interval(fc, msg_id, 1_000_000.0 / rate_hz)
                 .await;
         }
         for msg_id in self.sensor_streams.dropped_by(&table) {
-            self.send_message_interval(msg_id, 0.0).await;
+            self.send_message_interval(fc, msg_id, 0.0).await;
         }
         self.sensor_streams.requested(capture_table, &table, now);
-        let target = self.target_system.load(Ordering::Relaxed);
         // The legacy `REQUEST_DATA_STREAM` groups, off by default.
         //
         // This used to be sent unconditionally, on the assumption that a firmware
@@ -84,8 +124,8 @@ impl FcConnection {
         if self.cfg.legacy_stream_request {
             for &(stream_id, rate_hz) in STREAM_GROUPS {
                 let req = MavMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
-                    target_system: target,
-                    target_component: 1,
+                    target_system: fc.0,
+                    target_component: fc.1,
                     req_stream_id: stream_id,
                     req_message_rate: rate_hz,
                     start_stop: 1,
@@ -96,12 +136,13 @@ impl FcConnection {
         *self.last_stream_req.lock().await = Some(Instant::now());
     }
 
-    /// `MAV_CMD_SET_MESSAGE_INTERVAL` for `msg_id`: `interval_us` between
-    /// messages, 0 to restore the FC's default rate, or -1 to stop the message.
-    pub(super) async fn send_message_interval(&self, msg_id: u32, interval_us: f32) {
+    /// `MAV_CMD_SET_MESSAGE_INTERVAL` for `msg_id` to the FC `fc` (system id,
+    /// component id): `interval_us` between messages, 0 to restore the FC's
+    /// default rate, or -1 to stop the message.
+    pub(super) async fn send_message_interval(&self, fc: (u8, u8), msg_id: u32, interval_us: f32) {
         let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
-            target_system: self.target_system.load(Ordering::Relaxed),
-            target_component: 1,
+            target_system: fc.0,
+            target_component: fc.1,
             command: MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
             confirmation: 0,
             param1: msg_id as f32,
@@ -121,11 +162,16 @@ impl FcConnection {
     /// copter-typed heartbeat cannot be told from a QuadPlane, so no flight
     /// mode can be named or commanded. Its own fixed cadence rather than the
     /// stream refresh's, which relaxes to tens of seconds on a healthy link and
-    /// left a freshly connected copter unidentified for that long.
+    /// left a freshly connected copter unidentified for that long. Sent only
+    /// once the FC identity is latched, to that identity; an identity change
+    /// asks at once.
     pub async fn tick_banner_request(&self) {
         if !self.transport_open() {
             return;
         }
+        let Some(fc) = self.learned_fc_identity() else {
+            return;
+        };
         let unidentified = {
             let s = self.state.lock().await;
             s.firmware.is_none()
@@ -135,16 +181,17 @@ impl FcConnection {
         if !unidentified {
             return;
         }
+        let retargeted = self.retarget(RequestLane::Banner, fc);
         {
             let mut last = self.last_banner_req.lock().await;
-            if last.is_some_and(|t| t.elapsed() < BANNER_RETRY) {
+            if !retargeted && last.is_some_and(|t| t.elapsed() < BANNER_RETRY) {
                 return;
             }
             *last = Some(Instant::now());
         }
         let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
-            target_system: self.target_system.load(Ordering::Relaxed),
-            target_component: 1,
+            target_system: fc.0,
+            target_component: fc.1,
             command: MavCmd::MAV_CMD_DO_SEND_BANNER,
             confirmation: 0,
             param1: 0.0,

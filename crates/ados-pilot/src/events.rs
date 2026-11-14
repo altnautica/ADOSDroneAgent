@@ -1,5 +1,5 @@
 //! The plugin event export client: the World Engine scan, live occupancy and
-//! pose topics feed the obstacle model.
+//! pose topics feed the obstacle model; its lidar status feeds sensor health.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,6 +11,8 @@ use tokio::sync::mpsc;
 /// Topics the pilot reads.
 pub const TOPICS: &[&str] = &[
     "plugin.world-engine.scan",
+    "plugin.world-engine.lidar",
+    "plugin.world-engine.map_status",
     "plugin.world-engine.occupancy",
     "plugin.world-engine.pose",
     // vision-nav's active EKF source set: the GNSS-denied speed cap.

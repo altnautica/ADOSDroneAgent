@@ -166,7 +166,7 @@ pub struct VisionConfig {
     pub models_dir: String,
     /// Each camera's mount and field of view, from `cameras[]`.
     #[serde(skip)]
-    pub camera_geometry: std::collections::HashMap<String, crate::depth::geometry::CameraGeometry>,
+    pub camera_mounts: std::collections::HashMap<String, crate::depth::geometry::CameraMount>,
 }
 
 impl Default for VisionConfig {
@@ -199,7 +199,7 @@ impl Default for VisionConfig {
             max_box_area_frac: default_max_box_area_frac(),
             depth: DepthConfig::default(),
             models_dir: default_models_dir(),
-            camera_geometry: std::collections::HashMap::new(),
+            camera_mounts: std::collections::HashMap::new(),
         }
     }
 }
@@ -299,7 +299,7 @@ impl VisionConfig {
             .partition(|c| c.capture && c.enabled);
         let other_camera_ids: Vec<String> = others.into_iter().map(|c| c.id).collect();
         let invalid_cameras = entries.invalid;
-        let camera_geometry = crate::depth::geometry::geometries_from_config(&text);
+        let camera_mounts = crate::depth::geometry::mounts_from_config(&text);
         let simulation = ados_config::simulation::read_gate_from(&text).enabled;
         let tap_sink = raw.video.vision.enabled.then(|| {
             raw.video
@@ -319,7 +319,7 @@ impl VisionConfig {
                 tap_sink,
                 simulation,
                 invalid_cameras,
-                camera_geometry,
+                camera_mounts,
                 ..VisionConfig::default()
             };
         };
@@ -352,7 +352,7 @@ impl VisionConfig {
             max_box_area_frac: v.max_box_area_frac,
             depth: v.depth,
             models_dir: v.models_dir,
-            camera_geometry,
+            camera_mounts,
         }
     }
 

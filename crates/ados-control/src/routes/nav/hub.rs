@@ -10,36 +10,10 @@ use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
 use tokio::sync::{broadcast, watch};
 
+use super::lidar_watch::{LidarView, LidarWatch};
 use super::tiles::TileStore;
+use super::topics::{route, Routed};
 use super::view::{LeaseHolder, ViewDemand, ViewLease, ViewLeases};
-
-/// The plugin that owns the pose, scan, occupancy and map-status topics.
-pub const WORLD_ENGINE_ID: &str = "com.altnautica.world-engine";
-/// The plugin that publishes `nav.state`.
-pub const VISION_NAV_ID: &str = "com.altnautica.vision-nav";
-/// The plugin that publishes `follow.state` and the follow events.
-pub const FOLLOW_ME_ID: &str = "com.altnautica.follow-me";
-
-pub const TOPIC_POSE: &str = "plugin.world-engine.pose";
-pub const TOPIC_SCAN: &str = "plugin.world-engine.scan";
-pub const TOPIC_OCCUPANCY: &str = "plugin.world-engine.occupancy";
-pub const TOPIC_MAP_STATUS: &str = "plugin.world-engine.map_status";
-pub const TOPIC_NAV_STATE: &str = "nav.state";
-pub const TOPIC_FOLLOW_STATE: &str = "follow.state";
-pub const TOPIC_FOLLOW_REACQUIRED: &str = "follow.reacquired";
-pub const TOPIC_FOLLOW_LOST: &str = "follow.lost";
-
-/// Every topic the hub subscribes to on the export socket.
-pub const EXPORT_TOPICS: [&str; 8] = [
-    TOPIC_POSE,
-    TOPIC_SCAN,
-    TOPIC_OCCUPANCY,
-    TOPIC_MAP_STATUS,
-    TOPIC_NAV_STATE,
-    TOPIC_FOLLOW_STATE,
-    TOPIC_FOLLOW_REACQUIRED,
-    TOPIC_FOLLOW_LOST,
-];
 
 /// Depth of the follow-event fanout. The events are rare (one per lock loss or
 /// re-acquisition); a stream that lags past this loses the oldest.
@@ -157,40 +131,6 @@ fn narrow(data: &Value, camera: Option<&str>) -> Value {
     out
 }
 
-/// Where one exported event goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Routed {
-    Latest(NavKind),
-    Tiles,
-    FollowEvent,
-    Ignored,
-}
-
-/// Route an event by topic and host-stamped publisher. Each topic is pinned to
-/// the plugin that owns it, so another plugin publishing a look-alike
-/// `follow.state` (any plugin with `event.publish` may) never reaches the
-/// operator's display.
-pub fn route(topic: &str, publisher: &str) -> Routed {
-    let owner = match topic {
-        TOPIC_POSE | TOPIC_SCAN | TOPIC_OCCUPANCY | TOPIC_MAP_STATUS => WORLD_ENGINE_ID,
-        TOPIC_NAV_STATE => VISION_NAV_ID,
-        TOPIC_FOLLOW_STATE | TOPIC_FOLLOW_REACQUIRED | TOPIC_FOLLOW_LOST => FOLLOW_ME_ID,
-        _ => return Routed::Ignored,
-    };
-    if publisher != owner {
-        return Routed::Ignored;
-    }
-    match topic {
-        TOPIC_POSE => Routed::Latest(NavKind::Pose),
-        TOPIC_SCAN => Routed::Latest(NavKind::Scan),
-        TOPIC_MAP_STATUS => Routed::Latest(NavKind::Map),
-        TOPIC_NAV_STATE => Routed::Latest(NavKind::Nav),
-        TOPIC_FOLLOW_STATE => Routed::Latest(NavKind::Follow),
-        TOPIC_OCCUPANCY => Routed::Tiles,
-        _ => Routed::FollowEvent,
-    }
-}
-
 #[derive(Debug, Clone)]
 struct Latest {
     data: Value,
@@ -207,6 +147,8 @@ struct Inner {
     seq: u64,
     tiles: TileStore,
     views: ViewLeases,
+    /// Scan arrivals and the lidar driver status.
+    lidar: LidarWatch,
 }
 
 impl Inner {
@@ -388,8 +330,14 @@ impl NavHub {
     /// Apply one exported event.
     pub fn ingest(&self, topic: &str, publisher: &str, ts_ms: i64, payload: Value) {
         match route(topic, publisher) {
-            Routed::Latest(kind) => self.store_latest(kind, ts_ms, payload),
+            Routed::Latest(kind) => {
+                if kind == NavKind::Scan {
+                    self.inner.lock().lidar.on_scan(Instant::now());
+                }
+                self.store_latest(kind, ts_ms, payload)
+            }
             Routed::Tiles => self.inner.lock().tiles.apply(&payload),
+            Routed::LidarStatus => self.inner.lock().lidar.on_status(&payload, Instant::now()),
             Routed::FollowEvent => {
                 let frame = json!({
                     "kind": "follow_event",
@@ -464,6 +412,11 @@ impl NavHub {
             }
         }
         frames
+    }
+
+    /// The measured scan rate, the last scan's age and the lidar driver status.
+    pub fn lidar_view(&self) -> LidarView {
+        self.inner.lock().lidar.view(Instant::now())
     }
 
     /// The latest `data` of `kind` and its age in milliseconds, `None` when

@@ -265,6 +265,10 @@ pub struct PilotState {
     /// The horizontal speed cap in force, omitted while there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_cap: Option<SpeedCap>,
+    /// Flow, downward range and lidar health; `None` (JSON `null`) while the
+    /// FC link is down.
+    #[serde(default)]
+    pub sensors: Option<super::SensorHealth>,
 }
 
 /// One camera's obstacle (or depth) grid: 32×18 cells, row-major, row 0 at

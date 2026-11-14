@@ -107,6 +107,14 @@ class FrameDescriptor:
     """Hardware trigger sequence that produced this frame, when known."""
     timebase: int = TIMEBASE_HOST
     """Clock domain of ``ts_sensor_ns`` (``TIMEBASE_*``)."""
+    hfov_deg: float | None = None
+    """Horizontal field of view of the source camera in degrees, from its
+    ``cameras[]`` roster entry's ``fov_deg``. ``None`` when the roster gives
+    none."""
+    mount_pitch_deg: float | None = None
+    """Mount pitch of the source camera in degrees, from its ``cameras[]``
+    roster entry, in the roster's sign (negative looks down). ``None`` when the
+    roster gives none."""
 
     def to_dict(self) -> dict[str, Any]:
         """The msgpack-named mapping. ``format`` is the lowercase string;
@@ -129,6 +137,10 @@ class FrameDescriptor:
             value = getattr(self, key)
             if value is not None:
                 out[key] = int(value)
+        for key in ("hfov_deg", "mount_pitch_deg"):
+            angle = getattr(self, key)
+            if angle is not None:
+                out[key] = float(angle)
         return out
 
     @classmethod
@@ -143,6 +155,10 @@ class FrameDescriptor:
         def opt(key: str) -> int | None:
             value = raw.get(key)
             return None if value is None else int(value)
+
+        def opt_angle(key: str) -> float | None:
+            value = raw.get(key)
+            return None if value is None else float(value)
 
         return cls(
             camera_id=str(raw["camera_id"]),
@@ -159,6 +175,8 @@ class FrameDescriptor:
             exposure_ns=opt("exposure_ns"),
             trigger_seq=opt("trigger_seq"),
             timebase=int(raw["timebase"]),
+            hfov_deg=opt_angle("hfov_deg"),
+            mount_pitch_deg=opt_angle("mount_pitch_deg"),
         )
 
     def to_msgpack(self) -> bytes:

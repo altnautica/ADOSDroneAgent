@@ -6,10 +6,11 @@ use ados_protocol::pilot::{AvoidMode, AvoidState};
 use super::super::Pilot;
 
 impl Pilot {
-    /// A lidar is expected on this vehicle: a scan was seen this boot. The
-    /// one place that decides "never had" from "lost".
+    /// A lidar is expected on this vehicle: it scanned this boot or the
+    /// capture service reports one. The one place that decides "never had"
+    /// from "lost".
     pub(in crate::core) fn lidar_expected(&self) -> bool {
-        self.obstacles.scan_seen()
+        self.lidar.expected()
     }
 
     /// With avoid on, what is wrong with the obstacle data: `Stale` when a

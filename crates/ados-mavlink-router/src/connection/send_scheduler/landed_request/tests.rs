@@ -88,6 +88,7 @@ async fn linked(
         ..MavlinkConfig::default()
     };
     let conn = FcConnection::new(cfg, state, params);
+    conn.latch_fc_identity(1, 1);
     let (tx, rx) = std::sync::mpsc::channel();
     conn.connected.store(true, Ordering::Relaxed);
     *conn.writer.lock().await = Some(Box::pin(CapturingWriter(tx)));

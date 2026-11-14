@@ -1,7 +1,10 @@
 //! Sensing reads for the cameras, sensors and storage pages: the sensor, clock
 //! and storage routes plus the world-engine capture state. Each read is
 //! independent: a `present: false` body (or a route not served) leaves its
-//! block absent, a failed request leaves it unreachable.
+//! block absent, a failed request leaves it unreachable. The sensors route's
+//! `health` (flow, range, lidar, cameras) is worded by the cockpit spec on the
+//! way in, and read even from a `present: false` body: the route attaches it
+//! whether or not the sensor service is current.
 
 use super::*;
 use crate::pages::reading::Reading;
@@ -9,6 +12,7 @@ use crate::pages::sensing_ctx::{
     CaptureCamera, CaptureInfo, ClockInfo, ExposureInfo, GnssSummary, HubInfo, SensingCtx,
     SensorInfo, SensorsInfo, StorageInfo,
 };
+use crate::pages::sensor_health::nav_health;
 
 /// The world-engine capture state route behind the plugin proxy.
 pub(super) const CAPTURE_STATE_PATH: &str =
@@ -34,7 +38,13 @@ pub(super) fn sensing_ctx(
     capture: Reading<Value>,
 ) -> SensingCtx {
     SensingCtx {
-        sensors: sensors.and_then(|v| present(Some(&v)).map(sensors_info)),
+        sensors: sensors.and_then(|v| match present(Some(&v)) {
+            Some(v) => Some(sensors_info(v)),
+            None => health(&v).map(|health| SensorsInfo {
+                health: Some(health),
+                ..SensorsInfo::default()
+            }),
+        }),
         clock: clock.and_then(|v| present(Some(&v)).map(clock_info)),
         storage: storage.and_then(|v| present(Some(&v)).map(storage_info)),
         capture: capture.and_then(|v| v.is_object().then(|| capture_info(&v))),
@@ -49,6 +59,11 @@ fn present(v: Option<&Value>) -> Option<&Value> {
 /// A child that is a JSON object (null and absent both read `None`).
 fn obj<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     v.get(key).filter(|c| c.is_object())
+}
+
+/// The worded `health` object, when the body carries one.
+fn health(v: &Value) -> Option<crate::pages::sensor_health::NavHealth> {
+    obj(v, "health").and_then(nav_health)
 }
 
 /// A ns sigma; negative wire values mean unknown.
@@ -89,6 +104,7 @@ fn sensors_info(v: &Value) -> SensorsInfo {
             fix: string_field(g, "fix"),
             sats: i64_field(g, "sats"),
         }),
+        health: health(v),
     }
 }
 
@@ -250,6 +266,65 @@ mod tests {
         assert!(ctx.clock.is_present());
         assert_eq!(ctx.storage, Reading::Unreachable);
         assert_eq!(ctx.capture, Reading::Unreachable);
+    }
+
+    #[test]
+    fn the_sensors_health_is_worded_on_the_way_in() {
+        let body = json!({"present": true, "sensors": [], "health": {
+            "flow": {"state": "low", "quality": 40, "rate_hz": 20.0, "age_ms": 30, "mount": null},
+            "range": {"state": "ok", "height_m": 3.42, "age_ms": 20, "mount": null},
+            "lidar": {"state": "ok", "rate_hz": 9.94, "health": "good", "age_ms": 80},
+            "cameras": []}});
+        let s = sensing_ctx(
+            Reading::Present(body),
+            Reading::Absent,
+            Reading::Absent,
+            Reading::Absent,
+        )
+        .sensors
+        .into_present()
+        .expect("sensors");
+        let h = s.health.expect("health");
+        assert_eq!(
+            [h.flow.text, h.range.text, h.lidar.text],
+            ["Flow low 40", "Range 3.4 m", "Lidar 9.9 Hz"]
+        );
+        assert_eq!(h.lidar_health.as_deref(), Some("good"));
+        let bare = json!({"present": true, "sensors": []});
+        let s = sensing_ctx(
+            Reading::Present(bare),
+            Reading::Absent,
+            Reading::Absent,
+            Reading::Absent,
+        );
+        assert!(s.sensors.into_present().expect("sensors").health.is_none());
+    }
+
+    #[test]
+    fn health_shows_while_the_sensor_service_reads_absent() {
+        let body = json!({"present": false, "hub": null, "fc": null, "sensors": [], "gnss": null,
+            "health": {"flow": null, "range": {"state": "lost"}, "lidar": {"state": "absent"},
+                "cameras": [{"id": "front", "state": "live", "fps": 30.0}]}});
+        let s = sensing_ctx(
+            Reading::Present(body),
+            Reading::Absent,
+            Reading::Absent,
+            Reading::Absent,
+        )
+        .sensors
+        .into_present()
+        .expect("health keeps the sensors block");
+        assert_eq!((s.hub, s.fc_connected, s.sensors.len()), (None, None, 0));
+        let h = s.health.expect("health");
+        assert_eq!(
+            [
+                h.flow.text.as_str(),
+                h.range.text.as_str(),
+                h.lidar.text.as_str()
+            ],
+            ["—", "Range lost", "No lidar"]
+        );
+        assert_eq!(h.cameras[0].text, "front 30 fps");
     }
 
     #[test]

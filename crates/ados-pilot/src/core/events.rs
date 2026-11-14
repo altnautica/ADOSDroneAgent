@@ -64,6 +64,7 @@ impl Pilot {
     pub fn on_feed(&mut self, topic: &str, payload: &serde_json::Value, now_ms: u64) {
         match topic {
             "plugin.world-engine.scan" => {
+                self.lidar.on_scan(now_ms);
                 let Some(pos) = self.pos_ne(now_ms) else {
                     return;
                 };
@@ -76,6 +77,8 @@ impl Pilot {
                 };
                 self.obstacles.ingest_scan(payload, level, pos, now_ms);
             }
+            "plugin.world-engine.lidar" => self.lidar.on_status(payload, now_ms),
+            "plugin.world-engine.map_status" => self.nav_imu.on_status(payload, now_ms),
             "plugin.world-engine.occupancy" => self.obstacles.ingest_occupancy(payload),
             "plugin.world-engine.pose" => {
                 let pos = self.pos_ne(now_ms);
@@ -149,8 +152,13 @@ impl Pilot {
         self.params_ms = now_ms;
         let Some(fw) = self.fc.firmware else { return };
         let class = self.fc.vehicle_class();
+        // The flow and rangefinder rules read ArduPilot parameters only.
+        let sensors = (fw == crate::fc_profile::Firmware::Ardupilot)
+            .then(crate::fc_sensor_profile::param_names)
+            .unwrap_or_default();
         let names: Vec<&str> = crate::fc_profile::all_names(fw, class)
             .chain(EXTRA_PARAMS.iter().copied())
+            .chain(sensors.iter().map(String::as_str))
             .collect();
         for n in names {
             if !self.fc.params.contains_key(n) {

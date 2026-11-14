@@ -1973,6 +1973,15 @@
     },
     {
       "method": "POST",
+      "notes": null,
+      "path": "/api/v1/sensors/rig/lidar",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
       "notes": "relay-forbidden",
       "path": "/api/v1/setup/apply",
       "public": false,

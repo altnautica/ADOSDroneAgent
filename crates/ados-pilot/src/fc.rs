@@ -4,10 +4,10 @@
 use std::collections::{HashMap, VecDeque};
 
 use ados_protocol::mavlink::ardupilotmega::{
-    MavAutopilot, MavCmd, MavFrame, MavLandedState, MavMessage, MavModeFlag, MavParamType,
-    MavState, MavType, MavVtolState, PositionTargetTypemask, COMMAND_INT_DATA, COMMAND_LONG_DATA,
-    HEARTBEAT_DATA, MANUAL_CONTROL_DATA, PARAM_REQUEST_READ_DATA, PARAM_SET_DATA,
-    SET_POSITION_TARGET_LOCAL_NED_DATA,
+    EkfStatusFlags, MavAutopilot, MavCmd, MavFrame, MavLandedState, MavMessage, MavModeFlag,
+    MavParamType, MavState, MavType, MavVtolState, PositionTargetTypemask, COMMAND_INT_DATA,
+    COMMAND_LONG_DATA, HEARTBEAT_DATA, MANUAL_CONTROL_DATA, PARAM_REQUEST_READ_DATA,
+    PARAM_SET_DATA, SET_POSITION_TARGET_LOCAL_NED_DATA,
 };
 use ados_protocol::pilot::VehicleClass;
 
@@ -53,6 +53,44 @@ pub struct LocalPos {
     pub vd: f32,
 }
 
+/// The FC's EKF_STATUS_REPORT, as far as the position item reads it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EkfPosition {
+    /// `EKF_POS_HORIZ_ABS`: the EKF has an absolute horizontal position.
+    pub horiz_abs: bool,
+    /// `EKF_PRED_POS_HORIZ_ABS`: a predicted absolute horizontal position.
+    pub pred_horiz_abs: bool,
+    /// `EKF_POS_HORIZ_REL`: a horizontal position relative to the start.
+    pub horiz_rel: bool,
+    /// `EKF_PRED_POS_HORIZ_REL`: a predicted relative horizontal position.
+    pub pred_horiz_rel: bool,
+    /// `EKF_CONST_POS_MODE`: the EKF holds a constant position (no aiding).
+    pub const_pos_mode: bool,
+    /// The horizontal position innovation test ratio (1.0 rejects).
+    pub horiz_variance: f32,
+}
+
+impl EkfPosition {
+    /// ArduCopter's own position test (`ArduCopter/system.cpp`, Copter-4.6.2
+    /// lines 239-294; `ekf_check.cpp:53` takes relative or absolute):
+    /// disarmed it accepts a predicted absolute or, with a relative source
+    /// enabled, a predicted relative position; armed it needs an absolute or
+    /// enabled relative position outside constant-position mode.
+    /// `relative_enabled` stands for `optflow.enabled() ||
+    /// visual_odom.enabled()` (`FLOW_TYPE` or `VISO_TYPE` non-zero).
+    pub fn has_position(&self, armed: bool, relative_enabled: bool) -> bool {
+        let (abs, rel) = if armed {
+            (
+                self.horiz_abs && !self.const_pos_mode,
+                self.horiz_rel && !self.const_pos_mode,
+            )
+        } else {
+            (self.horiz_abs || self.pred_horiz_abs, self.pred_horiz_rel)
+        };
+        abs || (relative_enabled && rel)
+    }
+}
+
 /// Everything decoded from FC traffic.
 #[derive(Debug, Clone, Default)]
 pub struct FcState {
@@ -79,6 +117,12 @@ pub struct FcState {
     /// GPS_RAW_INT `fix_type` (3 = 3-D fix), `None` until one arrives.
     pub gps_fix: Option<Stamped<u8>>,
     pub rc: Option<Stamped<[u16; 18]>>,
+    /// OPTICAL_FLOW from the FC itself.
+    pub flow_track: crate::sensor_health::FlowTrack,
+    /// The downward DISTANCE_SENSOR from the FC itself.
+    pub range_track: crate::sensor_health::RangeTrack,
+    /// The FC's own EKF_STATUS_REPORT, `None` until one arrives.
+    pub ekf: Option<Stamped<EkfPosition>>,
 }
 
 impl FcState {
@@ -131,9 +175,21 @@ impl FcState {
                 };
                 self.local = Some(Stamped { v, at_ms: now_ms });
             }
-            MavMessage::DISTANCE_SENSOR(d) => {
+            // The FC re-emits its flow module's flow and range; a bridge may
+            // also forward the module's own raw frames (its own sysid), which
+            // are not what the EKF fuses, so only the FC's count.
+            MavMessage::OPTICAL_FLOW(f) if self.from_fc(sysid, compid) => {
+                self.flow_track.on_msg(f.quality, now_ms);
+            }
+            MavMessage::DISTANCE_SENSOR(d) if self.from_fc(sysid, compid) => {
                 use ados_protocol::mavlink::ardupilotmega::MavSensorOrientation as O;
                 if d.orientation == O::MAV_SENSOR_ROTATION_PITCH_270 {
+                    self.range_track.on_msg(
+                        d.current_distance,
+                        d.min_distance,
+                        d.max_distance,
+                        now_ms,
+                    );
                     let m = f32::from(d.current_distance) / 100.0;
                     let valid = d.current_distance >= d.min_distance
                         && d.current_distance <= d.max_distance;
@@ -144,6 +200,19 @@ impl FcState {
                         });
                     }
                 }
+            }
+            MavMessage::EKF_STATUS_REPORT(e) if self.from_fc(sysid, compid) => {
+                self.ekf = Some(Stamped {
+                    v: EkfPosition {
+                        horiz_abs: e.flags.contains(EkfStatusFlags::EKF_POS_HORIZ_ABS),
+                        pred_horiz_abs: e.flags.contains(EkfStatusFlags::EKF_PRED_POS_HORIZ_ABS),
+                        horiz_rel: e.flags.contains(EkfStatusFlags::EKF_POS_HORIZ_REL),
+                        pred_horiz_rel: e.flags.contains(EkfStatusFlags::EKF_PRED_POS_HORIZ_REL),
+                        const_pos_mode: e.flags.contains(EkfStatusFlags::EKF_CONST_POS_MODE),
+                        horiz_variance: e.pos_horiz_variance,
+                    },
+                    at_ms: now_ms,
+                });
             }
             MavMessage::EXTENDED_SYS_STATE(x) => {
                 self.landed_state = Some(x.landed_state);
@@ -213,6 +282,11 @@ impl FcState {
 
     pub fn linked(&self, now_ms: u64) -> bool {
         self.heartbeat_ms > 0 && now_ms.saturating_sub(self.heartbeat_ms) < 3000
+    }
+
+    /// The frame comes from the autopilot whose heartbeat the pilot follows.
+    pub fn from_fc(&self, sysid: u8, compid: u8) -> bool {
+        self.heartbeat_ms > 0 && sysid == self.sysid && compid == self.compid
     }
 
     /// Vehicle class from HEARTBEAT type and `Q_ENABLE`.

@@ -1,5 +1,12 @@
 use super::*;
+use crate::routes::nav::LidarStatus;
 use std::time::Duration;
+
+const NO_LIDAR: LidarView = LidarView {
+    rate_hz: None,
+    age_ms: None,
+    status: None,
+};
 
 fn paths(dir: &std::path::Path) -> SensingPaths {
     SensingPaths {
@@ -57,7 +64,14 @@ fn the_table_joins_streams_rig_hub_clock_and_fc() {
         connected: true,
         autopilot: Some("ardupilot".into()),
     };
-    let body = sensors_body(&p, "drone", SystemTime::now(), 3_000_000, Some(fc));
+    let body = sensors_body(
+        &p,
+        "drone",
+        SystemTime::now(),
+        3_000_000,
+        Some(fc),
+        &NO_LIDAR,
+    );
     assert_eq!(body["present"], true);
     assert_eq!(body["rig_id"], "visor-pro-01");
     assert_eq!(body["calib_version"], "2026-10-19a");
@@ -137,7 +151,14 @@ fn the_table_joins_streams_rig_hub_clock_and_fc() {
 #[test]
 fn nothing_running_is_not_present_with_null_blocks() {
     let dir = tempfile::tempdir().unwrap();
-    let body = sensors_body(&paths(dir.path()), "drone", SystemTime::now(), 0, None);
+    let body = sensors_body(
+        &paths(dir.path()),
+        "drone",
+        SystemTime::now(),
+        0,
+        None,
+        &NO_LIDAR,
+    );
     assert_eq!(body["present"], false);
     assert_eq!(body["hub"], Value::Null);
     assert_eq!(body["fc"], Value::Null);
@@ -161,7 +182,7 @@ fn a_stale_stream_table_empties_every_block() {
         connected: true,
         autopilot: None,
     };
-    let body = sensors_body(&p, "drone", later, 0, Some(fc));
+    let body = sensors_body(&p, "drone", later, 0, Some(fc), &NO_LIDAR);
     assert_eq!(body["present"], false);
     for key in ["hub", "fc", "gnss", "rig_id", "calib_version"] {
         assert_eq!(body[key], Value::Null, "{key}");
@@ -180,7 +201,7 @@ fn a_stale_hub_reads_as_configured_but_disconnected() {
         .unwrap();
     hub.set_modified(SystemTime::now() - Duration::from_secs(30))
         .unwrap();
-    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None, &NO_LIDAR);
     assert_eq!(body["present"], true);
     assert_eq!(body["hub"]["connected"], false);
     // No live hub rate: hub streams carry no expectation.
@@ -198,7 +219,7 @@ fn each_hub_imu_expects_the_per_imu_odr() {
           {"kind":"imu","src":"imu0","origin":"hub","rate_hz":1000.0,"last_t_ns":1,"last_rx_ns":1,"count":9},
           {"kind":"imu","src":"imu1","origin":"hub","rate_hz":1000.0,"last_t_ns":1,"last_rx_ns":1,"count":9}]}"#,
     );
-    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None, &NO_LIDAR);
     assert_eq!(body["sensors"][0]["expected_hz"], 1000.0);
     assert_eq!(body["sensors"][1]["expected_hz"], 1000.0);
 }
@@ -212,7 +233,7 @@ fn a_hub_without_a_configured_trigger_rate_gives_no_camera_expectation() {
         p.sidecar("sensorhub.json"),
         r#"{"version":1,"connected":true,"transport":"auto","imu_odr_hz":1000.0,"trigger_hz":20.0}"#,
     );
-    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None, &NO_LIDAR);
     assert_eq!(body["sensors"][1]["id"], "cam0");
     assert_eq!(body["sensors"][1]["expected_hz"], Value::Null);
 }
@@ -224,7 +245,7 @@ fn idle_rig_gnss_without_a_hub_names_the_service_that_owns_it() {
     seed(&p);
     std::fs::remove_file(p.sidecar("sensorhub.json")).unwrap();
     let source = |profile: &str| {
-        let body = sensors_body(&p, profile, SystemTime::now(), 0, None);
+        let body = sensors_body(&p, profile, SystemTime::now(), 0, None, &NO_LIDAR);
         let sensors = body["sensors"].as_array().unwrap().clone();
         let gnss = sensors.iter().find(|s| s["id"] == "gnss0").unwrap();
         gnss["source"].clone()
@@ -250,7 +271,7 @@ fn a_stale_router_sidecar_gives_no_fc_expectation() {
     router
         .set_modified(SystemTime::now() - Duration::from_secs(30))
         .unwrap();
-    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None, &NO_LIDAR);
     let fc_imu = body["sensors"]
         .as_array()
         .unwrap()
@@ -261,53 +282,49 @@ fn a_stale_router_sidecar_gives_no_fc_expectation() {
     assert_eq!(fc_imu["rate_hz"], 200.0);
 }
 
-async fn json_of(resp: Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+const LIDAR_RIG: &str = r#"{"contract":"ados.capture/1","rig_id":"x500","calib_version":"1",
+  "sensors":[
+   {"id":"imu0","kind":"imu","role":"nav","T_body_sensor":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],"time_offset_ns":0},
+   {"id":"lidar0","kind":"lidar","role":"nav","T_body_sensor":[1,0,0,0,0,1,0,0,0,0,1,0.12,0,0,0,1],"time_offset_ns":0,
+    "lidar":{"model":"rplidar-c1","pattern":"planar","h_fov_deg":360.0,"v_min_deg":0.0,"v_max_deg":0.0,
+     "rate_hz":10.0,"points_per_s":5000.0,"min_range_m":0.05,"max_range_m":12.0,"range_sigma_m":0.03}}]}"#;
+
+fn lidar_row(body: &Value) -> Value {
+    body["sensors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "lidar0")
+        .expect("the rig lidar is listed")
+        .clone()
 }
 
-#[tokio::test]
-async fn the_rig_write_validates_stores_then_reloads_the_hub() {
-    use std::sync::{Arc, Mutex};
+#[test]
+fn a_scanning_rig_lidar_lists_its_measured_rate_not_idle() {
     let dir = tempfile::tempdir().unwrap();
     let p = paths(dir.path());
-    let calls: Arc<Mutex<Vec<String>>> = Arc::default();
-    let put = |body: &'static [u8]| {
-        let calls = calls.clone();
-        put_rig_with(
-            p.clone(),
-            axum::body::Bytes::from_static(body),
-            move |program, args| {
-                calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("{program} {}", args.join(" ")));
-                async { true }
-            },
-        )
+    seed(&p);
+    write(p.rig(), LIDAR_RIG);
+    let scanning = LidarView {
+        rate_hz: Some(9.8),
+        age_ms: Some(40),
+        status: Some(LidarStatus {
+            device: Some("/dev/ttyUSB0".into()),
+            connected: true,
+            health: Some("good".into()),
+        }),
     };
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None, &scanning);
+    let row = lidar_row(&body);
+    assert_eq!(row["source"], "lidar");
+    assert_eq!(row["rate_hz"], 9.8);
+    assert_eq!(row["age_ms"], 40);
+    assert_eq!(row["expected_hz"], 10.0);
 
-    let ok = put(RIG.as_bytes()).await;
-    assert_eq!(ok.status(), StatusCode::OK);
-    assert_eq!(
-        json_of(ok).await,
-        json!({"ok": true, "rig_id": "visor-pro-01", "calib_version": "2026-10-19a"})
-    );
-    assert_eq!(read_rig(&p).unwrap().sensors.len(), 3);
-    assert_eq!(
-        *calls.lock().unwrap(),
-        ["systemctl --no-block reload-or-restart ados-sensorhub.service"]
-    );
-
-    let bad = put(br#"{"contract":"ados.capture/1","rig_id":"x"}"#).await;
-    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-    let v = json_of(bad).await;
-    assert_eq!(v["error"], "E_RIG_INVALID");
-    assert!(v["detail"].as_str().is_some());
-    assert_eq!(put(b"not json").await.status(), StatusCode::BAD_REQUEST);
-    // A refused write reloads nothing, and the stored rig is the earlier one.
-    assert_eq!(calls.lock().unwrap().len(), 1);
-    assert_eq!(read_rig(&p).unwrap().rig_id, "visor-pro-01");
+    // Before any scan the lidar is honestly idle, still expecting its rate.
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None, &NO_LIDAR);
+    let row = lidar_row(&body);
+    assert_eq!(row["rate_hz"], 0.0);
+    assert_eq!(row["age_ms"], Value::Null);
+    assert_eq!(row["expected_hz"], 10.0);
 }

@@ -302,6 +302,8 @@ impl TestRing {
             slot,
             seq,
             byte_len: pixels.len() as u32,
+            hfov_deg: None,
+            mount_pitch_deg: None,
         }
     }
 }
@@ -309,6 +311,9 @@ impl TestRing {
 fn batch(frame_id: u64) -> DetectionBatch {
     DetectionBatch {
         v: VISION_DETECTION_VERSION,
+        ts_sensor_ms: None,
+        hfov_deg: None,
+        mount_pitch_deg: None,
         model_id: "com.example.detector".to_string(),
         camera_id: CAMERA.to_string(),
         frame_id,

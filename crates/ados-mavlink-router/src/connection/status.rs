@@ -211,4 +211,21 @@ impl FcConnection {
     pub fn param_sweep_send_failed(&self) -> bool {
         self.param_sweep_send_failed.load(Ordering::Relaxed)
     }
+
+    /// The current attitude-arrival cadence.
+    ///
+    /// Exposed so the measurement can be read by whatever is asking -- a
+    /// periodic emitter, a diagnostic, or a test -- rather than only existing
+    /// inside the read loop that produces it.
+    pub async fn attitude_cadence(&self) -> crate::cadence::CadenceSnapshot {
+        self.attitude_cadence.lock().await.snapshot()
+    }
+
+    /// Forget the attitude timing history, keeping the cumulative counters.
+    ///
+    /// Called when the link drops so the gap spanning an outage does not land
+    /// in a distribution that otherwise describes milliseconds.
+    pub async fn reset_attitude_cadence(&self) {
+        self.attitude_cadence.lock().await.reset_stream();
+    }
 }

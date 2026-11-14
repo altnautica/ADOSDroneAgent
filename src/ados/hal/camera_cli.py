@@ -13,8 +13,8 @@ The output schema is the orchestrator's wire contract:
 
     {
       "cameras": [
-        {"name", "type", "device_path", "width", "height",
-         "capabilities", "hardware_role"},
+        {"name", "type", "device_path", "width", "height", "fps",
+         "capabilities", "formats", "hardware_role", "match"},
         ...
       ],
       "primary": {"device_path", "name"} | null,

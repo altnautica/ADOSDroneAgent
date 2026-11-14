@@ -194,6 +194,8 @@ impl FakeVisionEngine {
             slot,
             seq,
             byte_len: pixels.len() as u32,
+            hfov_deg: None,
+            mount_pitch_deg: None,
         };
 
         if let Some(frame) = self.resolve(descriptor) {
@@ -304,6 +306,9 @@ mod tests {
         let engine = FakeVisionEngine::new("uvc-0", 2, 2, FrameFormat::Rgb24);
         let batch = DetectionBatch {
             v: ados_protocol::framebus::VISION_DETECTION_VERSION,
+            ts_sensor_ms: None,
+            hfov_deg: None,
+            mount_pitch_deg: None,
             model_id: "com.example.weeds".into(),
             camera_id: "uvc-0".into(),
             frame_id: 1,

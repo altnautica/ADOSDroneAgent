@@ -1,5 +1,5 @@
-//! The sensing surface: `/api/v1/clock`, `/api/v1/sensors` (+ the rig write),
-//! `/api/v1/storage` and `/api/v1/gnss*`.
+//! The sensing surface: `/api/v1/clock`, `/api/v1/sensors` (+ the rig
+//! writes), `/api/v1/storage` and `/api/v1/gnss*`.
 //!
 //! Every read is served from the sidecar its owning service rewrites (clock,
 //! sensors and gnss at 1 Hz, capture storage every 10 s). A route whose
@@ -8,6 +8,9 @@
 
 pub mod clock;
 pub mod gnss;
+pub(crate) mod health;
+pub(crate) mod health_cameras;
+pub mod rig_write;
 pub mod sensors;
 pub mod storage;
 

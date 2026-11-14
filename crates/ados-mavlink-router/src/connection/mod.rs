@@ -317,6 +317,8 @@ pub struct FcConnection {
     sensor_streams: imu_fallback::SensorStreams,
     /// Once-per-link-up EXTENDED_SYS_STATE request (`tick_landed_state_request`).
     landed_state_req: std::sync::Mutex<send_scheduler::LandedStateRequest>,
+    /// Where each FC-addressed request lane last went (`send_scheduler::RequestTargets`).
+    request_targets: std::sync::Mutex<send_scheduler::RequestTargets>,
 }
 
 impl FcConnection {
@@ -387,6 +389,7 @@ impl FcConnection {
             last_banner_req: Mutex::new(None),
             sensor_streams: imu_fallback::SensorStreams::default(),
             landed_state_req: std::sync::Mutex::new(send_scheduler::LandedStateRequest::default()),
+            request_targets: std::sync::Mutex::new(send_scheduler::RequestTargets::default()),
         })
     }
 
@@ -474,27 +477,10 @@ impl FcConnection {
     pub fn frames_decoded(&self) -> u64 {
         self.fc_frames_decoded.load(Ordering::Relaxed)
     }
-    /// Seconds since the last decoded HEARTBEAT, or `None` when none has been
-    /// seen on the current process. The freshness signal the alive gate reads.
-    /// The current attitude-arrival cadence.
-    ///
-    /// Exposed so the measurement can be read by whatever is asking -- a
-    /// periodic emitter, a diagnostic, or a test -- rather than only existing
-    /// inside the read loop that produces it.
-    pub async fn attitude_cadence(&self) -> crate::cadence::CadenceSnapshot {
-        self.attitude_cadence.lock().await.snapshot()
-    }
-
-    /// Forget the attitude timing history, keeping the cumulative counters.
-    ///
-    /// Called when the link drops so the gap spanning an outage does not land
-    /// in a distribution that otherwise describes milliseconds.
-    pub async fn reset_attitude_cadence(&self) {
-        self.attitude_cadence.lock().await.reset_stream();
-    }
 }
 
 mod discovery;
+mod lidar_exclusion;
 mod reader;
 mod status;
 

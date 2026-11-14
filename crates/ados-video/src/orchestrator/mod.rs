@@ -249,6 +249,10 @@ pub struct VideoOrchestrator {
     /// re-persist can be asserted against a temp file.
     pub(crate) camera_state_path: Option<std::path::PathBuf>,
 
+    /// Where each local camera's presence is read (the V4L2 sysfs class and
+    /// the vision engine's status sidecar). Pointed at a fake tree in tests.
+    pub(crate) presence_sources: crate::camera_presence::PresenceSources,
+
     /// Override for the video-streams sidecar path. `None` ⇒ the canonical
     /// `/run/ados/video-streams.json` contract path. Set only in tests.
     pub(crate) video_streams_path: Option<std::path::PathBuf>,
@@ -368,6 +372,7 @@ impl VideoOrchestrator {
             python_executable: discover::python_executable(),
             env,
             camera_state_path: None,
+            presence_sources: crate::camera_presence::PresenceSources::system(),
             video_streams_path: None,
             hero_base,
             encoder_control: EncoderControl::new(boot, boot_settings),

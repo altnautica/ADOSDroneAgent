@@ -64,6 +64,8 @@ pub struct SensorsInfo {
     pub fc_connected: Option<bool>,
     pub sensors: Vec<SensorInfo>,
     pub gnss: Option<GnssSummary>,
+    /// The navigation sensor health (`health`): flow, range, lidar.
+    pub health: Option<crate::pages::sensor_health::NavHealth>,
 }
 
 /// `/api/v1/clock` as the pages read it.
@@ -310,6 +312,7 @@ pub(crate) mod test_util {
                     fix: Some("3d".into()),
                     sats: Some(14),
                 }),
+                health: None,
             }),
             clock: Reading::Present(ClockInfo {
                 timebase: Some("hub_freerun".into()),
