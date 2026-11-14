@@ -30,6 +30,7 @@ import { PreflightSheet } from "@/components/feed/cockpit/preflight-sheet";
 import { AttitudeRadarCard, ObstacleRadarCard } from "@/components/feed/cockpit/radar-cards";
 import { TopBar } from "@/components/feed/cockpit/top-bar";
 import { LandscapeGrid, PortraitGrid, type FeedSlots } from "@/components/feed/feed-layouts";
+import { FollowAwaitPrompt } from "@/components/feed/follow-await-prompt";
 import { FollowStrip } from "@/components/feed/follow-chrome";
 import { useFollowStripState } from "@/hooks/use-follow-strip";
 import { HudCanvas } from "@/components/feed/hud-canvas";
@@ -231,6 +232,7 @@ export function FeedScreen() {
             />
           )
         : null,
+    followPrompt: <FollowAwaitPrompt widthClass={widthClass} />,
     topBar: <TopBar compact={widthClass === "compact"} />,
     alerts: (
       <>

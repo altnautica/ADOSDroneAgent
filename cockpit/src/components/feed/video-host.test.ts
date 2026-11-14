@@ -53,6 +53,7 @@ function Harness({ layout }: { layout: Layout }) {
     rightColumn: () => null,
     bottomRow: null,
     followStrip: null,
+    followPrompt: null,
     skillPicker: null,
     ack: null,
     visionPanel: null,

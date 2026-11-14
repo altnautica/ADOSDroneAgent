@@ -6,14 +6,13 @@
 // designated with the follow skill installed; outside it only the chip shows,
 // and only while a target is designated. The re-acquired toast fires from the
 // nav stream's `follow.reacquired` events whatever the mode. While follow-me
-// holds for the operator, the waiting prompt drops from the strip in the range
-// panel's place.
+// holds for the operator, the range panel stays shut: the waiting prompt
+// (its own grid slot, `feed-layouts`) takes the place under the strip.
 
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { FollowRail } from "@/components/feed/follow-rail";
-import { FollowAwaitPrompt } from "@/components/feed/follow-await-prompt";
 import { FollowRangePanel } from "@/components/feed/follow-range-panel";
 import { WhatsLockedChip } from "@/components/feed/whats-locked-chip";
 import { useFollowSkill } from "@/hooks/use-follow-skill";
@@ -89,11 +88,7 @@ export function FollowStrip({
           />
         </div>
       ) : null}
-      {awaiting ? (
-        <div className="pointer-events-none absolute left-1/2 top-[calc(100%+8px)] z-10 -translate-x-1/2">
-          <FollowAwaitPrompt widthClass={widthClass} />
-        </div>
-      ) : following && panelOpen ? (
+      {following && panelOpen && !awaiting ? (
         <div className="pointer-events-auto absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2">
           <FollowRangePanel follow={follow?.data ?? null} ageMs={followAgeMs} widthClass={widthClass === "compact" ? "medium" : widthClass} />
         </div>

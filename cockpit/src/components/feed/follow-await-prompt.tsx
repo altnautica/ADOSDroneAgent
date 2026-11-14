@@ -79,7 +79,7 @@ export function FollowAwaitPrompt({ widthClass }: { widthClass: WidthClass }) {
       tabIndex={0}
       onKeyDown={onKeyDown}
       data-zone="follow_prompt"
-      className="chrome-panel pointer-events-auto flex max-w-[min(92vw,720px)] flex-col gap-[8px] border border-hud-crit/70 p-[10px] outline-none focus-visible:ring-2 focus-visible:ring-hud-crit"
+      className="chrome-panel pointer-events-auto flex max-w-[min(100%,720px)] flex-col gap-[8px] border border-hud-crit/70 p-[10px] outline-none focus-visible:ring-2 focus-visible:ring-hud-crit"
     >
       <div className="flex flex-col gap-[2px]">
         <span id="follow-prompt-title" className={cn("font-semibold text-hud-crit", widthClass === "tv" ? "text-[20px]" : "text-[15px]")}>

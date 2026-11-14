@@ -8,8 +8,10 @@
 // left and right columns vertically centred between the top bar and the
 // bottom zones, the bottom-left card, the telemetry row and the skill picker
 // along the bottom, and the follow strip under the top bar between the
-// columns. Portrait stacks a 16:9 video with the top bar inside it over the
-// left column as a row, the skill picker, the telemetry row and the map.
+// columns, the waiting prompt heading the alerts under it. Portrait stacks a
+// 16:9 video with the top bar inside it over the follow strip, the waiting
+// prompt, the left column as a row, the skill picker, the telemetry row and
+// the map.
 // The data layers draw only over the main video: the video in the card and
 // a picture-in-picture inset never carry layers or targets
 // (`layers.json` `pip_draws_layers: false`). Every layer sits on the CS-1
@@ -51,6 +53,10 @@ export interface FeedSlots {
   bottomRow: ((short: boolean) => ReactNode) | null;
   /** The follow strip's contents, given the band height under it. */
   followStrip: ((bandHeightPx: number) => ReactNode) | null;
+  /** The waiting-for-instructions prompt (renders nothing unless follow-me
+   *  waits for the operator). In the flow, never under another zone: under
+   *  the strip in portrait, at the head of the alerts column in landscape. */
+  followPrompt: ReactNode;
   skillPicker: ReactNode;
   /** The last command outcome line. */
   ack: ReactNode;
@@ -295,6 +301,7 @@ export function LandscapeGrid({
         className={cn("pointer-events-none absolute flex flex-col items-center gap-[6px]", Z.alerts)}
         style={{ left: L.alerts.x, top: L.alerts.y, width: L.alerts.w }}
       >
+        {slots.followPrompt}
         {slots.alerts}
         {slots.overlays}
         {slots.ack}
@@ -366,6 +373,7 @@ export function PortraitGrid({ slots }: { slots: FeedSlots }) {
       </div>
       <div className="flex shrink-0 flex-col items-center gap-[6px]">{slots.alerts}</div>
       {slots.followStrip ? <div className="h-[56px] shrink-0">{slots.followStrip(0)}</div> : null}
+      <div className="flex shrink-0 justify-center empty:hidden">{slots.followPrompt}</div>
       <div className={cn("flex shrink-0 items-center justify-between gap-[8px]", Z.zoneChrome)}>
         {slots.leftColumn({ row: true, labels: false })}
         {slots.skillPicker}
