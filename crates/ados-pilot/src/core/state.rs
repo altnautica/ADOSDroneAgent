@@ -55,8 +55,14 @@ impl Pilot {
             Owner::FcMode => format!("FC · {fc_mode_name}"),
             Owner::Tuning => "TUNING".into(),
         };
+        // Stale or no obstacle data: the reported state says which.
+        let data = self.obstacle_data_state(now_ms);
+        let stale = data.is_some();
         let avoid_state = if self.settings.pilot.avoid == AvoidMode::Off {
             AvoidState::Off
+        } else if let Some(s) = data {
+            // Unknown obstacles never read clear, whoever flies.
+            s
         } else if matches!(owner, Owner::Skill | Owner::Goto) {
             // The worse of the planner's verdict and the goal brake's.
             match (self.plan.state, self.brake_avoid) {
@@ -69,11 +75,13 @@ impl Pilot {
         } else {
             AvoidState::Clear
         };
+        // No clearance is known from stale obstacle data.
         let min_clearance_m = self
             .pos_ne(now_ms)
             .and_then(|p| self.obstacles.grid.clearance(p))
             .filter(|c| c.is_finite())
             .or(self.plan.min_clearance)
+            .filter(|_| !stale)
             .map(wire);
         let planning = matches!(owner, Owner::Skill | Owner::Goto);
         // The commanded goal: a skill's lease goal, else the goto target.
@@ -83,15 +91,17 @@ impl Pilot {
             .and_then(|l| l.goal.as_ref())
             .map(|g| [g.n, g.e, g.d])
             .or(self.goto);
-        // A blocked plan holds with no goal or path of its own; the frame keeps
-        // the commanded goal and the straight way to it, so the surfaces draw
-        // them in the blocked colour rather than dropping them.
-        let blocked_goal =
-            if planning && self.plan.goal.is_none() && self.plan.state == AvoidState::Blocked {
-                commanded.map(|c| [c[0], c[1]])
-            } else {
-                None
-            };
+        // A blocked or stale plan holds with no goal or path of its own; the
+        // frame keeps the commanded goal and the straight way to it, so the
+        // surfaces draw them in the plan's colour rather than dropping them.
+        let blocked_goal = if planning
+            && self.plan.goal.is_none()
+            && matches!(self.plan.state, AvoidState::Blocked | AvoidState::Stale)
+        {
+            commanded.map(|c| [c[0], c[1]])
+        } else {
+            None
+        };
         let goal_ned = if planning {
             self.plan.goal.or(blocked_goal).map(|g| {
                 let d = commanded.map_or(0.0, |c| c[2]);

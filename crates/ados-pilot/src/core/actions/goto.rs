@@ -1,6 +1,6 @@
 //! A surface's "fly here" (C1 `goto`).
 
-use ados_protocol::pilot::{ControlMode, Owner};
+use ados_protocol::pilot::{AvoidState, ControlMode, Owner};
 use serde_json::Value;
 
 use super::ActionRes;
@@ -38,6 +38,14 @@ impl Pilot {
         // changes mode first (Take control, or the Mode sheet).
         if self.fc_failsafe {
             return Err("failsafe".into());
+        }
+        // Avoid is on and the obstacles are unknown: nothing new is flown
+        // until the scans are fresh. With no obstacle sensor at all, Fly
+        // Here cannot avoid anything, so it is refused (`avoid = off` flies it).
+        match self.obstacle_data_state(now_ms) {
+            Some(AvoidState::Stale) => return Err("obstacle_data_stale".into()),
+            Some(_) => return Err("obstacle_data_unavailable".into()),
+            None => {}
         }
         // A take-off still climbing would replace the goto with its own
         // after-takeoff action at the top of the climb, so it waits.

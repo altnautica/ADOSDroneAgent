@@ -134,6 +134,10 @@ export function avoidChip(state: AvoidState | null): { text: string; tone: "ok" 
       return { text: "BLOCKED", tone: "crit" };
     case "off":
       return { text: specText("pilot.avoid.off"), tone: "crit" };
+    case "stale":
+      return { text: specText("pilot.avoid.stale").toUpperCase(), tone: "warn" };
+    case "unavailable":
+      return { text: specText("pilot.avoid.unavailable").toUpperCase(), tone: "warn" };
     default:
       return null;
   }

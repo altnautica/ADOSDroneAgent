@@ -27,6 +27,21 @@ pub const SCAN_MAX_AGE_MS: u64 = 500;
 /// How far the planar scan sees along a bin without a return (the 12 m
 /// planar lidar; the sector display marches the grid as far).
 pub const SCAN_HORIZON_M: f32 = 12.0;
+/// Weight of the newest scan pair in the smoothed closing speed (a lidar
+/// range is good to ±30 mm 3σ, so one 0.1 s pair alone is ±0.4 m/s).
+pub const CLOSING_SMOOTH: f32 = 0.5;
+/// Fastest closing speed a scan pair may measure, m/s: above the fastest
+/// multirotor profile (14 m/s). A sector whose nearest range falls faster
+/// than this has a new nearest surface (a post passing in front of a far
+/// wall, a dropout recovering), not motion, and measures nothing.
+pub const SCAN_CLOSING_MAX_MPS: f32 = 16.0;
+/// Range noise allowed on top of [`SCAN_CLOSING_MAX_MPS`] per pair, metres.
+pub const SCAN_CLOSING_SLACK_M: f32 = 0.1;
+
+/// The 5° sector (of `n`) of a bearing, radians clockwise from north.
+fn sector_of(bearing: f32, n: usize) -> usize {
+    (bearing.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU * n as f32) as usize % n
+}
 
 /// One non-ground scan return.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,7 +68,17 @@ pub struct Obstacles {
     /// returns nothing. Nothing beyond is known free, so the stick brake
     /// treats these points as possible obstacles.
     horizon: Vec<V2>,
-    scan_ms: u64,
+    /// When the current scan arrived (`None`: no scan yet).
+    scan_ms: Option<u64>,
+    /// Nearest horizontal return per 5° world sector (north = 0, clockwise)
+    /// of the current scan, metres (infinite: none).
+    sector_min: Vec<f32>,
+    /// Closing speed toward each world sector measured from the scans
+    /// themselves (smoothed range rate of its nearest return, m/s, ≥ 0).
+    /// The brake takes the larger of this and the EKF's velocity, so an
+    /// estimate that lags the real motion (delayed external navigation)
+    /// cannot make it brake late.
+    closing: Vec<f32>,
     pub grid: Grid,
 }
 
@@ -161,12 +186,83 @@ impl Obstacles {
                 (floor, true) => self.horizon.push(floor.ne),
             }
         }
-        self.scan_ms = now_ms;
+        self.update_closing(level.yaw, now_ms);
+        self.scan_ms = Some(now_ms);
+    }
+
+    /// How old the current scan is, ms (`None`: no scan yet).
+    pub fn scan_age_ms(&self, now_ms: u64) -> Option<u64> {
+        self.scan_ms.map(|t| now_ms.saturating_sub(t))
+    }
+
+    /// A scan arrived within [`SCAN_MAX_AGE_MS`].
+    pub fn scan_fresh(&self, now_ms: u64) -> bool {
+        self.scan_age_ms(now_ms)
+            .is_some_and(|a| a <= SCAN_MAX_AGE_MS)
+    }
+
+    /// A scan arrived at some point since start: an obstacle sensor exists.
+    pub fn scan_seen(&self) -> bool {
+        self.scan_ms.is_some()
+    }
+
+    /// Range rate of each world sector's nearest return between the previous
+    /// scan and this one, smoothed; sectors without a return in both, or a
+    /// gap outside 50-500 ms, decay toward zero.
+    fn update_closing(&mut self, yaw: f32, now_ms: u64) {
+        let n = ados_protocol::pilot::SECTORS;
+        let mut cur = vec![f32::INFINITY; n];
+        for h in &self.hits {
+            let s = sector_of(yaw + h.body_bearing, n);
+            cur[s] = cur[s].min(h.range_m);
+        }
+        let dt = self
+            .scan_ms
+            .map_or(f32::INFINITY, |t| now_ms.saturating_sub(t) as f32 / 1000.0);
+        let paired =
+            self.sector_min.len() == n && (0.05..=SCAN_MAX_AGE_MS as f32 / 1000.0).contains(&dt);
+        if self.closing.len() != n {
+            self.closing = vec![0.0; n];
+        }
+        for (s, (c, &now)) in self.closing.iter_mut().zip(&cur).enumerate() {
+            let prev = self.sector_min.get(s).copied().unwrap_or(f32::INFINITY);
+            let fall = prev - now;
+            let same_surface = fall <= SCAN_CLOSING_MAX_MPS * dt + SCAN_CLOSING_SLACK_M;
+            let rate = if paired && now.is_finite() && prev.is_finite() && same_surface {
+                (fall / dt).max(0.0)
+            } else {
+                0.0
+            };
+            *c = CLOSING_SMOOTH * rate + (1.0 - CLOSING_SMOOTH) * *c;
+        }
+        self.sector_min = cur;
+    }
+
+    /// Closing speed toward the world direction `dir` (unit) measured from
+    /// the scans: the largest of its sector and the two beside it, m/s.
+    pub fn scan_closing(&self, dir: V2, now_ms: u64) -> f32 {
+        let n = self.closing.len();
+        if n == 0 || !self.scan_fresh(now_ms) {
+            return 0.0;
+        }
+        let s = sector_of(geo::bearing_of(dir), n);
+        [(s + n - 1) % n, s, (s + 1) % n]
+            .iter()
+            .map(|&i| self.closing[i])
+            .fold(0.0, f32::max)
+    }
+
+    /// The fastest closing speed toward any sector, m/s.
+    pub fn max_scan_closing(&self, now_ms: u64) -> f32 {
+        if !self.scan_fresh(now_ms) {
+            return 0.0;
+        }
+        self.closing.iter().copied().fold(0.0, f32::max)
     }
 
     /// Current (fresh) scan horizon points within `r` of `pos`.
     pub fn horizon_near(&self, pos: V2, r: f32, now_ms: u64) -> impl Iterator<Item = V2> + '_ {
-        let fresh = now_ms.saturating_sub(self.scan_ms) <= SCAN_MAX_AGE_MS;
+        let fresh = self.scan_fresh(now_ms);
         self.horizon
             .iter()
             .copied()
@@ -175,7 +271,7 @@ impl Obstacles {
 
     /// Current (fresh) non-ground scan hits.
     pub fn hits(&self, now_ms: u64) -> &[Hit] {
-        if now_ms.saturating_sub(self.scan_ms) <= SCAN_MAX_AGE_MS {
+        if self.scan_fresh(now_ms) {
             &self.hits
         } else {
             &[]
@@ -202,7 +298,7 @@ impl Obstacles {
                 }
             }
         }
-        let fresh = now_ms.saturating_sub(self.scan_ms) <= SCAN_MAX_AGE_MS;
+        let fresh = self.scan_fresh(now_ms);
         if fresh {
             for h in &self.hits {
                 self.grid.mark(h.ne);

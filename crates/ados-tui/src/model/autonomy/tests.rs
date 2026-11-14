@@ -114,6 +114,37 @@ fn an_unknown_owner_or_enum_value_reads_as_absent() {
 }
 
 #[test]
+fn stale_obstacle_data_reads_and_names_itself_in_the_warning_colour() {
+    let mut frame = pilot_frame();
+    frame["avoid_state"] = json!("stale");
+    frame["hold_reason"] = json!("obstacle-data-stale");
+    let p = Autonomy::from_value(&json!({"pilot": {"ts_ms": 1, "age_ms": 1, "data": frame}}))
+        .pilot
+        .unwrap();
+    assert_eq!(p.avoid_state.as_deref(), Some("stale"));
+    let line = crate::model::flight_state::avoid_state_text("stale").unwrap();
+    assert_eq!(line.text, "Obstacle data stale");
+    assert_eq!(line.color, "avoiding");
+    assert_eq!(
+        crate::model::flight_state::hold_reason_label("obstacle-data-stale"),
+        "Holding: no fresh obstacle data"
+    );
+}
+
+#[test]
+fn no_obstacle_sensor_reads_unavailable_in_the_warning_colour() {
+    let mut frame = pilot_frame();
+    frame["avoid_state"] = json!("unavailable");
+    let p = Autonomy::from_value(&json!({"pilot": {"ts_ms": 1, "age_ms": 1, "data": frame}}))
+        .pilot
+        .unwrap();
+    assert_eq!(p.avoid_state.as_deref(), Some("unavailable"));
+    let line = crate::model::flight_state::avoid_state_text("unavailable").unwrap();
+    assert_eq!(line.text, "No obstacle sensor");
+    assert_eq!(line.color, "avoiding");
+}
+
+#[test]
 fn an_old_pilot_kind_is_stale_and_a_null_one_is_absent() {
     let old = Autonomy::from_value(
         &json!({"pilot": {"ts_ms": 1, "age_ms": 4000, "data": pilot_frame()}}),

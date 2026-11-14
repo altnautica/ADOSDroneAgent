@@ -284,6 +284,9 @@ fn tuning_owner_survives_the_landing_between_setup_flight_steps() {
 #[test]
 fn lease_grant_goal_and_revocations() {
     let mut w = World::new();
+    // Avoidance off: the goal is flown as a position setpoint at the target
+    // (with avoidance on, the brake caps it to the space the lidar has seen).
+    w.p.settings.pilot.avoid = ados_protocol::pilot::AvoidMode::Off;
     w.airborne(copter::GUIDED);
     let id = w.lease();
     assert_eq!(w.p.owner(), Owner::Skill);
@@ -405,6 +408,7 @@ fn fc_profile_mismatch_blocks_arming() {
 #[test]
 fn goto_flies_and_arrives_into_hold() {
     let mut w = World::new();
+    w.p.settings.pilot.avoid = ados_protocol::pilot::AvoidMode::Off;
     w.airborne(copter::GUIDED);
     w.req(Request::Goto {
         n: 0.5,

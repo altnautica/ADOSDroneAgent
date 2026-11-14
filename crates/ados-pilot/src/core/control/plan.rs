@@ -6,13 +6,40 @@ use ados_protocol::pilot::{AvoidMode, AvoidState, Owner};
 
 use super::{
     geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_OBSTACLE_CLOSE,
+    HOLD_OBSTACLE_STALE,
 };
 use crate::core::Pilot;
 use crate::fc::MASK_POS_VEL_YAW;
 use crate::geo::{self, V2};
+use crate::model::HOLD_CAPTURE_MPS;
 
 impl Pilot {
-    pub(super) fn fly_plan(&mut self, pos: [f32; 3], yaw: f32, now_ms: u64) {
+    /// `stale_hold` is last tick's hold for stale obstacle data, if any.
+    pub(super) fn fly_plan(
+        &mut self,
+        pos: [f32; 3],
+        yaw: f32,
+        dt: f32,
+        stale_hold: Option<[f32; 3]>,
+        now_ms: u64,
+    ) {
+        if self.obstacle_data_stale(now_ms) {
+            // Unknown obstacles: hold where the vehicle was when the data
+            // went stale, with no push (nothing is seen to push from). The
+            // goal is flown again once the scans are fresh.
+            let hold = stale_hold.unwrap_or(pos);
+            self.stale_hold = Some(hold);
+            self.hold_reason = Some(HOLD_OBSTACLE_STALE.into());
+            if self.nav_capped(now_ms) {
+                self.cap_flown([0.0, 0.0], now_ms);
+            }
+            self.setpoint = Some(hold);
+            let m = self
+                .tx()
+                .setpoint(MASK_POS_VEL_YAW, hold, [0.0; 3], yaw, 0.0);
+            self.mav(m);
+            return;
+        }
         let pos_ne = [pos[0], pos[1]];
         let margin = self.margin();
         let close = self
@@ -56,11 +83,32 @@ impl Pilot {
                 }
                 .into(),
             );
-            let hold = *self.plan_hold.get_or_insert(pos);
+            // Inside the margin the brake's push moves the hold back out, as
+            // it does for a stick hold: a fast push flies from the vehicle's
+            // own position, a slow one walks the hold point.
+            let push = geofence(
+                pos_ne,
+                home,
+                max_dist,
+                self.brake_limit(pos, [0.0, 0.0], now_ms),
+            );
+            let mut hold = *self.plan_hold.get_or_insert(pos);
+            let mut vel = [0.0; 3];
+            if geo::norm(push) >= HOLD_CAPTURE_MPS {
+                // Horizontal only: the hold keeps its altitude.
+                hold = [pos[0], pos[1], hold[2]];
+                vel = [push[0], push[1], 0.0];
+                self.plan_hold = Some(hold);
+            } else if geo::norm(push) > 1e-3 {
+                hold[0] += push[0] * dt;
+                hold[1] += push[1] * dt;
+                self.plan_hold = Some(hold);
+            }
+            if self.nav_capped(now_ms) {
+                self.cap_flown(push, now_ms);
+            }
             self.setpoint = Some(hold);
-            let m = self
-                .tx()
-                .setpoint(MASK_POS_VEL_YAW, hold, [0.0; 3], yaw, 0.0);
+            let m = self.tx().setpoint(MASK_POS_VEL_YAW, hold, vel, yaw, 0.0);
             self.mav(m);
             return;
         };

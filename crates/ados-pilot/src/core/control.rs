@@ -4,7 +4,6 @@
 use ados_protocol::pilot::{
     AvoidMode, AvoidState, ControlMode, GoalKind, Owner, Sticks, VehicleClass,
 };
-use serde_json::json;
 
 use super::{Out, Pilot, PLAN_PERIOD_MS, STICKS_PERIOD_MS};
 use crate::fc::{heartbeat, MASK_POS_VEL_YAW, MASK_VELOCITY};
@@ -14,6 +13,8 @@ use crate::model::{Command, StickIn};
 use crate::planner;
 
 mod brake;
+mod failsafes;
+mod obstacle_data;
 mod plan;
 pub use brake::*;
 
@@ -31,8 +32,6 @@ const FLOOR_AGL_M: f32 = 0.5;
 const SWARM_STALE_MS: u64 = 500;
 /// Goto arrival radius.
 const GOTO_ARRIVE_M: f32 = 1.0;
-/// Low-battery RTH countdown.
-const LOW_BATT_COUNTDOWN_MS: u64 = 10_000;
 /// The FC's response time the stick brake plans for. In the SITL x500 traces
 /// the measured velocity trails a cut setpoint by about 0.5 s at cruise and
 /// keeps rising for 0.6 s when the cut comes mid-acceleration (the FC first
@@ -45,6 +44,8 @@ const BRAKE_RANGE_M: f32 = 20.0;
 pub const HARD_STOP_FRAC: f32 = 0.6;
 /// `hold_reason` while the hard stop holds.
 pub const HOLD_OBSTACLE_CLOSE: &str = "obstacle-close";
+/// `hold_reason` while avoid is on and the obstacle data is stale.
+pub const HOLD_OBSTACLE_STALE: &str = "obstacle-data-stale";
 /// A braked velocity under this counts as stopped (`avoid_state` blocked).
 const STOPPED_MPS: f32 = 0.1;
 /// Bearing sectors (5°) the stick brake keeps one constraint per.
@@ -90,7 +91,11 @@ impl Pilot {
         self.stick_transitions(axes, raw, now_ms);
         self.failsafes(now_ms);
         self.low_battery(now_ms);
-        if now_ms.saturating_sub(self.plan_ms) >= PLAN_PERIOD_MS {
+        // Fresh scans after a stale spell (or the first scans of a lidar not
+        // seen before) replan at once: a goal waits for no planning period.
+        let recovered = matches!(self.plan.state, AvoidState::Stale | AvoidState::Unavailable)
+            && self.obstacle_data_state(now_ms).is_none();
+        if recovered || now_ms.saturating_sub(self.plan_ms) >= PLAN_PERIOD_MS {
             self.plan_ms = now_ms;
             if let Some(p) = self.pos_ne(now_ms) {
                 self.obstacles.rebuild(p, now_ms);
@@ -180,74 +185,6 @@ impl Pilot {
         }
     }
 
-    fn failsafes(&mut self, now_ms: u64) {
-        // The FC's own landed state: a touchdown never holds a failsafe back.
-        let airborne = self.fc.armed && !self.fc.landed();
-        // Controller lost: the owning session stopped streaming.
-        if self.owner() == Owner::Pilot
-            && self.sessions.owner.is_some()
-            && self.failsafe.input_stale(now_ms)
-            && !self.controller_lost_shown
-        {
-            self.controller_lost_shown = true;
-            self.sessions.axes = [0.0; 4];
-            self.brake_hold(now_ms, Some("controller-lost"));
-            self.banner = Some(banner("pilot.banner.controller_lost", &[], now_ms));
-        }
-        let flying = matches!(
-            self.owner(),
-            Owner::Pilot | Owner::Skill | Owner::Goto | Owner::Swarm
-        );
-        let window = u64::from(self.settings.pilot.link_loss_s) * 1000;
-        if airborne && flying && self.failsafe.link_lost(now_ms, window) {
-            let action = self.settings.pilot.link_loss_action;
-            self.banner = Some(banner(
-                "pilot.banner.link_loss",
-                &[("action", json!(action.as_str())), ("in_s", json!(0))],
-                now_ms,
-            ));
-            let _ = match action {
-                crate::config::LinkLossAction::Rth => self.do_rth(now_ms),
-                crate::config::LinkLossAction::Land => self.do_land(now_ms),
-                crate::config::LinkLossAction::Hold => {
-                    self.revoke("link-loss");
-                    self.brake_hold(now_ms, Some("link-loss"));
-                    Ok(())
-                }
-            };
-        }
-    }
-
-    fn low_battery(&mut self, now_ms: u64) {
-        let Some(pct) = self.fc.battery_pct else {
-            return;
-        };
-        let p = &self.fc.params;
-        let low_pct = match (p.get("BATT_LOW_MAH"), p.get("BATT_CAPACITY")) {
-            (Some(&l), Some(&c)) if l > 0.0 && c > 0.0 => l / c * 100.0,
-            _ => 20.0,
-        };
-        let airborne = self.fc.armed && !self.fc.landed();
-        if !airborne || pct > low_pct + 5.0 {
-            self.rth_deadline_ms = None;
-            if pct > low_pct + 5.0 {
-                self.low_batt_cancelled = false;
-            }
-            return;
-        }
-        if pct > low_pct || self.low_batt_cancelled || matches!(self.owner(), Owner::FcMode) {
-            return;
-        }
-        let deadline = *self
-            .rth_deadline_ms
-            .get_or_insert(now_ms + LOW_BATT_COUNTDOWN_MS);
-        if now_ms >= deadline {
-            self.rth_deadline_ms = None;
-            self.low_batt_cancelled = true;
-            let _ = self.do_rth(now_ms);
-        }
-    }
-
     fn replan(&mut self, now_ms: u64) {
         let Some(pos) = self.pos_ne(now_ms) else {
             return;
@@ -275,13 +212,29 @@ impl Pilot {
             };
             return;
         }
-        self.plan = planner::plan(&self.obstacles, &goal, pos, margin);
+        match self.obstacle_data_state(now_ms) {
+            Some(AvoidState::Stale) => self.plan = planner::Plan::hold(AvoidState::Stale),
+            // No obstacle sensor: the goal flies straight, reported as such.
+            Some(s) => {
+                let t = [goal.n, goal.e];
+                self.plan = planner::Plan {
+                    state: s,
+                    target: Some(t),
+                    goal: Some(t),
+                    path: vec![pos, t],
+                    min_clearance: None,
+                };
+            }
+            None => self.plan = planner::plan(&self.obstacles, &goal, pos, margin),
+        }
     }
 
     /// Produce this tick's command for the owner.
     fn fly(&mut self, axes: [f32; 4], dt: f32, now_ms: u64) {
         self.setpoint = None;
         self.brake_avoid = AvoidState::Clear;
+        // A goal's stale hold lasts only while every tick keeps it.
+        let stale_hold = self.stale_hold.take();
         if !self.fc.armed || !self.in_guided() {
             return;
         }
@@ -308,7 +261,11 @@ impl Pilot {
                 }
             }
             Owner::Pilot => self.fly_sticks(axes, pos, yaw, dt, now_ms),
-            Owner::Skill | Owner::Goto => self.fly_plan(pos, yaw, now_ms),
+            Owner::Skill | Owner::Goto => self.fly_plan(pos, yaw, dt, stale_hold, now_ms),
+            // Unknown obstacles: the swarm goal is not flown; the pilot holds.
+            Owner::Swarm if self.obstacle_data_stale(now_ms) => {
+                self.brake_hold(now_ms, Some(HOLD_OBSTACLE_STALE));
+            }
             Owner::Swarm => match self.swarm {
                 Some(g) if now_ms.saturating_sub(g.at_ms) <= SWARM_STALE_MS => {
                     // The ramp first, then the brake: the brake's cut flies
@@ -334,7 +291,10 @@ impl Pilot {
     fn fly_sticks(&mut self, axes: [f32; 4], pos: [f32; 3], yaw: f32, dt: f32, now_ms: u64) {
         let lim = self.stick_limits(axes, now_ms);
         let agl = self.agl(now_ms);
-        let mut axes = axes;
+        // Unknown obstacles: the sticks ask nothing (a landing still
+        // descends), and with no scans there is nothing to push away from.
+        let stale = self.obstacle_data_stale(now_ms);
+        let mut axes = if stale { [0.0; 4] } else { axes };
         if self.landing {
             axes = [axes[0], axes[1], -1.0, axes[3]];
             if agl.is_some_and(|a| a < LAND_SWITCH_AGL_M) {
@@ -381,7 +341,8 @@ impl Pilot {
             dt,
         };
         let pos_ne = [pos[0], pos[1]];
-        let brake = self.settings.pilot.avoid != AvoidMode::Off;
+        let unavailable = self.obstacle_data_unavailable(now_ms);
+        let brake = self.settings.pilot.avoid != AvoidMode::Off && !stale && !unavailable;
         let home = self.fc.home_ne();
         let max_dist = self.settings.pilot.max_dist_m;
         let obstacles = &self.obstacles;
@@ -399,16 +360,39 @@ impl Pilot {
             geofence(pos_ne, home, max_dist, v)
         };
         let cmd = self.mr.step(&inp, &lim, limit, vz);
+        // Judged against what the sticks ask, not the shaped velocity: the
+        // shaper follows what flew, push included, so it may point back.
+        let ask = if axes[0] == 0.0 && axes[1] == 0.0 {
+            [0.0, 0.0]
+        } else {
+            crate::model::Multirotor::stick_velocity(axes, yaw, &lim)
+        };
         self.brake_avoid = match braked {
-            Some(b) if b.close || (b.cut && geo::norm(b.v) < STOPPED_MPS) => AvoidState::Blocked,
+            _ if stale => AvoidState::Stale,
+            _ if unavailable => AvoidState::Unavailable,
+            Some(b) if b.close || (b.cut && progress(ask, b.v) < STOPPED_MPS) => {
+                AvoidState::Blocked
+            }
             Some(b) if b.cut => AvoidState::Detour,
             _ => AvoidState::Clear,
         };
-        let close = braked.is_some_and(|b| b.close);
-        if close {
-            self.hold_reason = Some(HOLD_OBSTACLE_CLOSE.into());
-        } else if self.hold_reason.as_deref() == Some(HOLD_OBSTACLE_CLOSE) {
-            self.hold_reason = None;
+        let reason = if stale && !self.landing {
+            Some(HOLD_OBSTACLE_STALE)
+        } else if braked.is_some_and(|b| b.close) {
+            Some(HOLD_OBSTACLE_CLOSE)
+        } else {
+            None
+        };
+        match reason {
+            Some(r) => self.hold_reason = Some(r.into()),
+            None if matches!(
+                self.hold_reason.as_deref(),
+                Some(HOLD_OBSTACLE_CLOSE | HOLD_OBSTACLE_STALE)
+            ) =>
+            {
+                self.hold_reason = None;
+            }
+            None => {}
         }
         let tx = self.tx();
         let m = match cmd {
@@ -438,7 +422,7 @@ impl Pilot {
     }
 
     fn brake_limit(&self, pos: [f32; 3], v: V2, now_ms: u64) -> V2 {
-        if self.settings.pilot.avoid == AvoidMode::Off {
+        if self.settings.pilot.avoid == AvoidMode::Off || self.obstacle_data_unavailable(now_ms) {
             return v;
         }
         let lim = self.limits_now(now_ms);
@@ -467,7 +451,7 @@ impl Pilot {
     /// `v_cap` is returned, to fly from where the vehicle is; `None` leaves
     /// the planned setpoint.
     fn goal_brake(&mut self, pos: V2, ask: V2, v_cap: f32, now_ms: u64) -> Option<V2> {
-        if self.settings.pilot.avoid == AvoidMode::Off {
+        if self.settings.pilot.avoid == AvoidMode::Off || self.obstacle_data_unavailable(now_ms) {
             return None;
         }
         let a_h = self.limits_now(now_ms).a_h;
@@ -482,11 +466,23 @@ impl Pilot {
             return None;
         }
         let v = geo::clamp_len(asked.v, v_cap);
-        self.brake_avoid = if geo::norm(v) < STOPPED_MPS {
+        self.brake_avoid = if progress(ask, v) < STOPPED_MPS {
             AvoidState::Blocked
         } else {
             AvoidState::Detour
         };
         Some(v)
+    }
+}
+
+/// How fast `v` still goes the way `ask` asked, m/s (the speed of `v` when
+/// nothing was asked): a brake that leaves only a push sideways or back out
+/// of the margin has stopped the asked motion.
+fn progress(ask: V2, v: V2) -> f32 {
+    let n = geo::norm(ask);
+    if n < 1e-3 {
+        geo::norm(v)
+    } else {
+        geo::dot(v, ask) / n
     }
 }

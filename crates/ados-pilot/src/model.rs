@@ -199,8 +199,21 @@ impl Multirotor {
         if horiz_centred && self.hold_ne.is_none() && coasting {
             self.settle_s += inp.dt;
         }
+        // The limiter may fly the vehicle with the sticks centred (the
+        // obstacle brake's push back out of the margin). Faster than a hold
+        // captures, it flies as velocity: no hold, and a held vehicle leaves
+        // the hold point. Slower, a captured hold (a stick hover, a goto's
+        // arrival) moves with it, so a push of any size is carried.
+        let limiter_flies = geo::norm(v_ne) >= HOLD_CAPTURE_MPS;
+        if limiter_flies {
+            self.hold_ne = None;
+        } else if let Some(h) = self.hold_ne.as_mut() {
+            h[0] += v_ne[0] * inp.dt;
+            h[1] += v_ne[1] * inp.dt;
+        }
         if horiz_centred
             && self.hold_ne.is_none()
+            && !limiter_flies
             && geo::norm(self.shaper.v) < HOLD_CAPTURE_MPS
             && (!coasting || self.settle_s >= HOLD_SETTLE_S)
         {

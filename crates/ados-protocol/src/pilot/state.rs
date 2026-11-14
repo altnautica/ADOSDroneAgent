@@ -66,12 +66,21 @@ pub enum AvoidMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AvoidState {
     #[default]
     Clear,
     Detour,
     Blocked,
     Off,
+    /// Avoidance is on and a lidar was seen, but its scans are stale:
+    /// obstacles are unknown, so the pilot holds and flies no motion command
+    /// until the scans are fresh.
+    Stale,
+    /// Avoidance is on but no obstacle data was ever seen (no lidar fitted
+    /// or detected): nothing is avoided, sticks fly, and features that need
+    /// obstacle data are refused.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

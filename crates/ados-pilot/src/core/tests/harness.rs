@@ -7,7 +7,8 @@ use crate::core::{Out, Pilot, Reply};
 pub const FC_SYS: u8 = 1;
 pub const FC_COMP: u8 = 1;
 
-/// A copter in SITL terms: heartbeat, position, attitude, rangefinder.
+/// A copter in SITL terms: heartbeat, position, attitude, rangefinder, and
+/// a planar lidar in open space.
 pub struct World {
     pub p: Pilot,
     pub now: u64,
@@ -39,6 +40,10 @@ pub struct World {
     pub inbox: Vec<MavMessage>,
     /// Answers to deferred actions, by token.
     pub answers: Vec<(u64, ActionResult)>,
+    /// The lidar scans: whenever the pilot's scan is 100 ms old (a test feeds
+    /// none of its own), an open-space scan (no returns) arrives. Off: no scan
+    /// arrives at all.
+    pub lidar: bool,
 }
 
 impl World {
@@ -76,6 +81,7 @@ impl World {
             acks: false,
             inbox: Vec::new(),
             answers: Vec::new(),
+            lidar: true,
         };
         w.feed();
         w
@@ -158,6 +164,16 @@ impl World {
                 ..Default::default()
             });
             self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
+        }
+        let due = self
+            .p
+            .obstacles
+            .scan_age_ms(self.now)
+            .is_none_or(|a| a >= 100);
+        if self.lidar && due {
+            let open = serde_json::json!({"frame": "body_frd", "angle_start_rad": 0.0,
+                "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": vec![0.0; 360]});
+            self.p.on_feed("plugin.world-engine.scan", &open, self.now);
         }
     }
 

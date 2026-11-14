@@ -347,7 +347,11 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         control_mode: one_of(d, "control_mode", &["ados", "fc_manual", "elrs"]),
         profile: one_of(d, "profile", &["cine", "normal", "sport"]),
         avoid: one_of(d, "avoid", &["brake", "bypass", "off"]),
-        avoid_state: one_of(d, "avoid_state", &["clear", "detour", "blocked", "off"]),
+        avoid_state: one_of(
+            d,
+            "avoid_state",
+            &["clear", "detour", "blocked", "off", "stale", "unavailable"],
+        ),
         hold_reason: s(d, "hold_reason"),
         min_clearance_m: f(d, "min_clearance_m"),
         fc_mode: f(d, "fc_mode"),

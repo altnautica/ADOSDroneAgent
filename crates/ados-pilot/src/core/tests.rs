@@ -6,5 +6,6 @@ mod mission;
 mod nav_cap;
 mod rules;
 mod safety;
+mod stale;
 mod take;
 mod touchdown;

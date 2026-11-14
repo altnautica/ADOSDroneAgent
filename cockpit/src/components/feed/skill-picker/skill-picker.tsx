@@ -141,10 +141,24 @@ function SkillTweak({ skill, focusedParam, onBack }: { skill: Skill; focusedPara
             data-testid="picker-avoid-chip"
             className={cn(
               "rounded border px-[0.3rem] font-mono text-[0.7rem]",
-              avoid === "clear" ? "border-ok/60 text-ok" : avoid === "detour" ? "border-warn text-warn" : "border-err text-err",
+              avoid === "clear"
+                ? "border-ok/60 text-ok"
+                : avoid === "detour" || avoid === "stale" || avoid === "unavailable"
+                  ? "border-warn text-warn"
+                  : "border-err text-err",
             )}
           >
-            {specText(avoid === "clear" ? "skill.avoid.clear" : avoid === "detour" ? "skill.avoid.detour" : avoid === "blocked" ? "skill.avoid.blocked" : "pilot.avoid.off")}
+            {specText(
+              avoid === "clear"
+                ? "skill.avoid.clear"
+                : avoid === "detour"
+                  ? "skill.avoid.detour"
+                  : avoid === "blocked"
+                    ? "skill.avoid.blocked"
+                    : avoid === "stale" || avoid === "unavailable"
+                      ? `skill.avoid.${avoid}`
+                      : "pilot.avoid.off",
+            )}
           </span>
         ) : null}
       </div>

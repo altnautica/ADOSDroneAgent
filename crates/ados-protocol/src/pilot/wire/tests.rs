@@ -58,6 +58,25 @@ fn malformed_input_names_the_op() {
 }
 
 #[test]
+fn avoid_state_wire_strings() {
+    use crate::pilot::AvoidState;
+    for (s, wire) in [
+        (AvoidState::Clear, "clear"),
+        (AvoidState::Detour, "detour"),
+        (AvoidState::Blocked, "blocked"),
+        (AvoidState::Off, "off"),
+        (AvoidState::Stale, "stale"),
+        (AvoidState::Unavailable, "unavailable"),
+    ] {
+        assert_eq!(serde_json::to_value(s).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<AvoidState>(serde_json::json!(wire)).unwrap(),
+            s
+        );
+    }
+}
+
+#[test]
 fn distance_code_covers_the_range() {
     assert_eq!(decode_distance(0), None);
     assert!((decode_distance(1).unwrap() - 0.2).abs() < 1e-4);

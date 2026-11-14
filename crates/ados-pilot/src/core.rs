@@ -132,6 +132,9 @@ pub struct Pilot {
     params_ms: u64,
     setpoint: Option<[f32; 3]>,
     plan_hold: Option<[f32; 3]>,
+    /// Where a skill goal or goto holds while the obstacle data is stale,
+    /// from the tick it went stale; cleared on any tick that does not keep it.
+    stale_hold: Option<[f32; 3]>,
     /// The EKF source set the FC flies: the last one vision-nav's `nav.state`
     /// named, the boot set before any ([`nav_cap`]).
     nav_set: u8,
@@ -192,6 +195,7 @@ impl Pilot {
             params_ms: 0,
             setpoint: None,
             plan_hold: None,
+            stale_hold: None,
             nav_set: nav_cap::BOOT_SOURCE_SET,
             cap_vel: None,
             last_tick_ms: None,
@@ -431,7 +435,9 @@ impl Pilot {
         if !self.fc.armed || self.landed() || self.fc_failsafe {
             return;
         }
-        if matches!(self.owner(), Owner::Tuning) {
+        // A tuning flight keeps the vehicle; with unknown obstacles, or no
+        // obstacle sensor while avoid is on, no new goto is flown.
+        if matches!(self.owner(), Owner::Tuning) || self.obstacle_data_state(now_ms).is_some() {
             return;
         }
         self.goto = Some(target);
@@ -444,7 +450,7 @@ impl Pilot {
     }
 
     fn on_swarm(&mut self, g: SwarmGoal) {
-        if !self.fc.armed || !self.in_guided() {
+        if !self.fc.armed || !self.in_guided() || self.obstacle_data_stale(g.at_ms) {
             return;
         }
         match self.owner() {

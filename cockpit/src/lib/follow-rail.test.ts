@@ -89,6 +89,8 @@ describe("avoidChip", () => {
   it("maps the pilot's avoidance state", () => {
     expect(avoidChip("detour")).toEqual({ text: "AVOIDING", tone: "warn" });
     expect(avoidChip("blocked")?.tone).toBe("crit");
+    expect(avoidChip("stale")).toEqual({ text: "OBSTACLE DATA STALE", tone: "warn" });
+    expect(avoidChip("unavailable")).toEqual({ text: "NO OBSTACLE SENSOR", tone: "warn" });
     expect(avoidChip(null)).toBeNull();
   });
 });
