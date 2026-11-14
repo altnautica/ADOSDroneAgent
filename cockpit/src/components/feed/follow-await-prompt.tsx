@@ -3,17 +3,21 @@
 // strip names why and offers the actions `followPrompt` allows: search again,
 // pick a target, return home, land, stop following. Modal-free, so the video
 // and the columns stay live. It takes focus when it appears (unless a text
-// field has it) and answers R, P, H, L and X while focused; the touch targets
-// grow with the width class, so the kiosk's are the largest.
+// field has it) and answers R, P, H, L and X while focused. Return home and
+// land request the same built-in as the left column, so its gate and its
+// hold-to-confirm apply to a tap and a key alike. The touch targets grow with
+// the width class, so the kiosk's are the largest.
 
 import { useEffect, useRef, type KeyboardEvent } from "react";
 
 import { useNow } from "@/hooks/use-now";
+import { skillContextNow } from "@/hooks/use-skill-context";
 import { putPluginConfig } from "@/lib/api";
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { FOLLOW_ACTION_KEYS, followActionForKey, runFollowAction } from "@/lib/follow-actions";
 import { railButtonPx } from "@/lib/follow-rail";
-import { sendPilotAction } from "@/lib/pilot-link";
+import { requestSkill } from "@/lib/skill-runner";
+import { BUILTIN_SKILL_BY_ID } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { toast } from "@/shared/api/toast";
 import { followPrompt, type FollowPromptAction } from "@/shared/hud/follow-prompt";
@@ -51,8 +55,18 @@ export function FollowAwaitPrompt({ widthClass }: { widthClass: WidthClass }) {
 
   if (!prompt) return null;
 
+  /** The left column's path: gate, then the hold-to-confirm sheet. The sheet
+   *  answers Enter only from the page or itself, so a prompt that held the
+   *  keyboard hands it back. */
+  const flight = (skillId: "rth" | "land"): boolean => {
+    const opened = requestSkill(BUILTIN_SKILL_BY_ID[skillId], skillContextNow());
+    const el = document.activeElement;
+    if (opened && el instanceof HTMLElement && ref.current?.contains(el)) el.blur();
+    return opened;
+  };
+
   const run = (action: FollowPromptAction) => {
-    void runFollowAction(action, { put: putPluginConfig, pilot: sendPilotAction, startPick, seq }).then((r) => {
+    void runFollowAction(action, { put: putPluginConfig, flight, startPick, seq }).then((r) => {
       if (!r.ok) toast.err(specText(`follow.prompt.action.${action}`), r.err);
     });
   };

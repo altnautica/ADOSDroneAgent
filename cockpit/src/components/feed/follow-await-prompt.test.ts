@@ -1,25 +1,41 @@
 // @vitest-environment happy-dom
 // The waiting-for-instructions prompt as it renders: shown only while
 // follow-me holds for the operator, its words from the spec, each action wired
-// to its transport by tap and by key, and bigger touch targets in the kiosk
-// layout.
+// to its transport by tap and by key (return home and land through their
+// built-in's gate and hold-to-confirm, never straight to the pilot), and
+// bigger touch targets in the kiosk layout.
 
 import { createElement } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { putPluginConfig, sendPilotAction } = vi.hoisted(() => ({
+import type * as Skills from "@/lib/skills";
+
+const { putPluginConfig, sendPilotAction, gate } = vi.hoisted(() => ({
   putPluginConfig: vi.fn<(...args: unknown[]) => Promise<unknown>>(() => Promise.resolve({})),
   sendPilotAction: vi.fn<(...args: unknown[]) => Promise<{ ok: boolean }>>(() => Promise.resolve({ ok: true })),
+  // Open: every skill gate passes, as on an armed drone with a fresh link.
+  // Closed: the real gates read this test's empty stores.
+  gate: { open: true },
 }));
-vi.mock("@/lib/api", () => ({ putPluginConfig }));
-vi.mock("@/lib/pilot-link", () => ({ sendPilotAction }));
+vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<Record<string, unknown>>()), putPluginConfig }));
+vi.mock("@/lib/pilot-link", async (importOriginal) => ({ ...(await importOriginal<Record<string, unknown>>()), sendPilotAction }));
+vi.mock("@/lib/skills", async (importOriginal) => {
+  const real = await importOriginal<typeof Skills>();
+  return {
+    ...real,
+    resolveSkillState: (...args: Parameters<typeof real.resolveSkillState>) =>
+      gate.open ? { enabled: true, active: false, reason: null } : real.resolveSkillState(...args),
+  };
+});
+vi.mock("@/stores/voice-store", () => ({ speak: () => {} }));
 
 import { FollowAwaitPrompt } from "@/components/feed/follow-await-prompt";
 import { widthClassFor, type WidthClass } from "@/lib/cockpit-layout";
 import { parseFollowState } from "@/shared/hud/nav-types";
 import { specText } from "@/shared/hud/spec-text";
+import { useConfirmStore } from "@/stores/confirm-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -59,6 +75,8 @@ beforeEach(() => {
   useNavStreamStore.getState().designate(DESIGNATED);
   putPluginConfig.mockClear();
   sendPilotAction.mockClear();
+  useConfirmStore.getState().cancel();
+  gate.open = true;
 });
 
 afterEach(async () => {
@@ -101,13 +119,32 @@ describe("FollowAwaitPrompt", () => {
     expect(putPluginConfig).toHaveBeenCalledWith("com.altnautica.follow-me", "operator_resume_seq", 3);
   });
 
-  it("return home, land and stop go to their transports", async () => {
+  it("return home and land open their built-in's hold-to-confirm, never the bare pilot socket", async () => {
     setFollow(AWAITING);
     await mount("medium");
     await act(async () => button(specText("follow.prompt.action.rth")).click());
-    expect(sendPilotAction).toHaveBeenCalledWith("rth");
+    expect(useConfirmStore.getState().pending?.skill.id).toBe("rth");
+    expect(useConfirmStore.getState().pending?.skill.confirm).toEqual({ kind: "hold", ms: 1500 });
+    await act(async () => useConfirmStore.getState().cancel());
     await act(async () => button(specText("follow.prompt.action.land")).click());
-    expect(sendPilotAction).toHaveBeenCalledWith("land");
+    expect(useConfirmStore.getState().pending?.skill.id).toBe("land");
+    expect(sendPilotAction).not.toHaveBeenCalled();
+  });
+
+  it("return home and land stay behind their built-in's gate", async () => {
+    // No telemetry and no pilot link: the built-ins' own gate refuses them.
+    gate.open = false;
+    setFollow(AWAITING);
+    await mount("medium");
+    await act(async () => button(specText("follow.prompt.action.rth")).click());
+    await act(async () => button(specText("follow.prompt.action.land")).click());
+    expect(useConfirmStore.getState().pending).toBeNull();
+    expect(sendPilotAction).not.toHaveBeenCalled();
+  });
+
+  it("stop turns follow off", async () => {
+    setFollow(AWAITING);
+    await mount("medium");
     await act(async () => button(specText("follow.prompt.action.stop")).click());
     expect(putPluginConfig).toHaveBeenCalledWith("com.altnautica.follow-me", "active", false);
   });
@@ -119,22 +156,29 @@ describe("FollowAwaitPrompt", () => {
     expect(useNavStreamStore.getState().designated).toBeNull();
   });
 
-  it("takes focus and answers its keys without passing them on", async () => {
+  it("once focused, H and L open the confirm and never fire at once", async () => {
     setFollow(AWAITING);
     const prompt = (await mount("medium"))!;
-    expect(document.activeElement).toBe(prompt);
+    await act(async () => prompt.focus());
     const onWindow = vi.fn();
     window.addEventListener("keydown", onWindow);
     await act(async () => {
       prompt.dispatchEvent(new KeyboardEvent("keydown", { key: "h", bubbles: true }));
     });
-    expect(sendPilotAction).toHaveBeenCalledWith("rth");
+    expect(useConfirmStore.getState().pending?.skill.id).toBe("rth");
+    // The confirm sheet takes Enter from the page: the prompt hands back the keyboard.
+    expect(document.activeElement).not.toBe(prompt);
+    await act(async () => useConfirmStore.getState().cancel());
+    await act(async () => {
+      prompt.dispatchEvent(new KeyboardEvent("keydown", { key: "l", bubbles: true }));
+    });
+    expect(useConfirmStore.getState().pending?.skill.id).toBe("land");
+    expect(sendPilotAction).not.toHaveBeenCalled();
     expect(onWindow).not.toHaveBeenCalled();
     // A chord is not the prompt's: Shift+L stays the land built-in's.
     await act(async () => {
       prompt.dispatchEvent(new KeyboardEvent("keydown", { key: "L", shiftKey: true, bubbles: true }));
     });
-    expect(sendPilotAction).toHaveBeenCalledTimes(1);
     expect(onWindow).toHaveBeenCalledTimes(1);
     window.removeEventListener("keydown", onWindow);
   });

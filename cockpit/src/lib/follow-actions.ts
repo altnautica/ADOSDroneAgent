@@ -1,15 +1,17 @@
 // The waiting-for-instructions prompt's actions (follow-me holding for the
 // operator) and their transports: search again writes the next
 // `operator_resume_seq` to the follow-me config, pick a target arms the
-// click-a-box designate flow, return home and land go to the pilot, and stop
-// writes `active = false`. The transports are injected, so the dispatcher is
-// pure and every route is unit-tested.
+// click-a-box designate flow, return home and land request their flight
+// built-in exactly as the left column does (its gate, its hold-to-confirm and
+// the motion-skill stop), and stop writes `active = false`. The transports are
+// injected, so the dispatcher is pure and every route is unit-tested.
 //
 // Keys: R search again, P pick, H home, L land, X stop. They answer only while
 // the prompt has focus and only without a modifier: the built-ins own the
 // Shift chords (Shift+R return home, Shift+L land, Shift+X kill) and a plugin
 // may bind a bare letter globally (a camera pod's `R` record, `L` laser), so
-// the prompt never takes a key from the window.
+// the prompt never takes a key from the window. H and L open the confirm like
+// a tap; neither fires on its own.
 
 import type { ActionResult } from "@/lib/pilot-link";
 import type { FollowPromptAction } from "@/shared/hud/follow-prompt";
@@ -19,8 +21,9 @@ export const FOLLOW_ME_PLUGIN_ID = "com.altnautica.follow-me";
 export interface FollowActionDeps {
   /** Write one plugin config key (`PUT /api/plugins/{id}/config`). */
   put: (pluginId: string, key: string, value: unknown) => Promise<unknown>;
-  /** Send a pilot action; resolves with its result, never rejects. */
-  pilot: (name: string) => Promise<ActionResult>;
+  /** Request a flight built-in (`rth`, `land`) through its gate and confirm.
+   *  False when the gate refused it; the gate says why itself. */
+  flight: (skillId: "rth" | "land") => boolean;
   /** Arm the pick-a-target mode. */
   startPick: () => void;
   /** The `operator_resume_seq` follow-me last reported. */
@@ -46,7 +49,8 @@ export async function runFollowAction(action: FollowPromptAction, d: FollowActio
       return { ok: true };
     case "rth":
     case "land":
-      return d.pilot(action);
+      d.flight(action);
+      return { ok: true };
     case "stop":
       return write(d, "active", false);
   }
