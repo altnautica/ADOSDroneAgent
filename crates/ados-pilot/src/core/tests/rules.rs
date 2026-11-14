@@ -543,7 +543,7 @@ fn surface_goto_is_only_offered_under_ados() {
 
 /// While the FC flies an RTL or land the pilot did not command (an RC switch,
 /// a radio, battery or EKF failsafe), a surface's map point is refused: the
-/// operator changes mode first. After Take control it flies.
+/// operator changes mode first. After Hand to FC (LOITER) it flies.
 #[test]
 fn surface_goto_refused_during_an_fc_failsafe() {
     let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
@@ -561,7 +561,8 @@ fn surface_goto_refused_during_an_fc_failsafe() {
         );
         w.run(100);
         assert_eq!(w.mode, mode, "the FC keeps flying its failsafe");
-        assert!(matches!(w.action("take_control"), Reply::Action(a) if a.ok));
+        let hand = serde_json::json!({"mode": "loiter", "control_mode": "ados"});
+        assert!(matches!(w.action_args("hand_to_fc", hand), Reply::Action(a) if a.ok));
         w.run(100);
         assert!(matches!(w.action_args("goto", args.clone()), Reply::Action(a) if a.ok));
         w.run(100);
@@ -570,8 +571,8 @@ fn surface_goto_refused_during_an_fc_failsafe() {
 }
 
 /// During an FC failsafe RTL or land a skill's motion lease is refused with
-/// `failsafe` and the FC keeps flying its failsafe. Take control still works,
-/// and after it the lease is granted again.
+/// `failsafe` and the FC keeps flying its failsafe. After the operator's mode
+/// change (Hand to FC) the lease is granted again.
 #[test]
 fn skill_lease_refused_during_an_fc_failsafe() {
     for mode in [copter::RTL, copter::SMART_RTL, copter::LAND] {
@@ -595,7 +596,8 @@ fn skill_lease_refused_during_an_fc_failsafe() {
         w.run(200);
         assert_eq!(w.mode, mode, "the FC keeps flying its failsafe");
         assert_ne!(w.p.owner(), Owner::Skill, "mode {mode}");
-        assert!(matches!(w.action("take_control"), Reply::Action(a) if a.ok));
+        let hand = serde_json::json!({"mode": "loiter", "control_mode": "ados"});
+        assert!(matches!(w.action_args("hand_to_fc", hand), Reply::Action(a) if a.ok));
         w.run(100);
         w.lease();
         assert_eq!(w.p.owner(), Owner::Skill, "mode {mode}");

@@ -70,6 +70,11 @@ impl Pilot {
         if self.fc.armed && !self.fc.landed() {
             return Err("airborne".into());
         }
+        // Armed on the ground in an FC failsafe land (before its disarm): a
+        // launch would switch the FC to GUIDED and climb out of it.
+        if self.fc_failsafe {
+            return Err("failsafe".into());
+        }
         if l.step == LaunchStep::Checks || !self.fc.armed {
             self.ready_to_arm(now_ms)?;
         }

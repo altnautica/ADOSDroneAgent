@@ -55,12 +55,17 @@ fn answered(w: &World, token: u64) -> Option<(bool, Option<&str>)> {
         .map(|(_, a)| (a.ok, a.err.as_deref()))
 }
 
-/// Airborne in a landing the FC started on its own (an EKF failsafe).
-fn failsafe_landing() -> World {
+/// Airborne in a landing a ground station commanded (not an FC failsafe,
+/// where Take control is refused before the FC is asked), past the window in
+/// which its mode command makes the FC's acks ambiguous.
+fn gcs_landing() -> World {
     let mut w = World::new();
     w.airborne(copter::LOITER);
+    w.p.on_feed(CLIENT_MODE_TOPIC, &json!({"mode": "land"}), w.now);
     w.mode = copter::LAND;
     w.run(40);
+    w.run(super::super::CLIENT_MODE_WINDOW_MS + 100);
+    assert!(!w.p.state(w.now).fc_failsafe);
     assert_eq!(w.p.owner(), Owner::FcMode);
     w
 }
@@ -80,7 +85,7 @@ fn assert_refused(w: &mut World, r: &Reply, want: &str) {
 
 #[test]
 fn a_failed_ack_refuses_with_the_fc_reason_and_keeps_the_owner() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.acks = true;
     w.refuse_mode = Some((
         copter::GUIDED,
@@ -93,7 +98,7 @@ fn a_failed_ack_refuses_with_the_fc_reason_and_keeps_the_owner() {
 
 #[test]
 fn a_denied_ack_without_a_reason_refuses() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.acks = true;
     w.refuse_mode = Some((copter::GUIDED, MavResult::MAV_RESULT_DENIED, None));
     let r = w.action("take_control");
@@ -102,7 +107,7 @@ fn a_denied_ack_without_a_reason_refuses() {
 
 #[test]
 fn a_lost_ack_with_the_fc_reason_refuses_with_it() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.refuse_mode = Some((
         copter::GUIDED,
         MavResult::MAV_RESULT_FAILED,
@@ -114,7 +119,7 @@ fn a_lost_ack_with_the_fc_reason_refuses_with_it() {
 
 #[test]
 fn no_answer_and_no_guided_refuses() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.refuse_mode = Some((copter::GUIDED, MavResult::MAV_RESULT_FAILED, None));
     let r = w.action("take_control");
     assert_refused(&mut w, &r, "fc_no_answer");
@@ -122,7 +127,7 @@ fn no_answer_and_no_guided_refuses() {
 
 #[test]
 fn an_accepting_fc_hands_the_vehicle_to_the_pilot() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.acks = true;
     let r = w.action("take_control");
     assert_eq!(answer(&r), (true, None));
@@ -134,7 +139,7 @@ fn an_accepting_fc_hands_the_vehicle_to_the_pilot() {
 
 #[test]
 fn an_accepting_ack_answers_ok_before_the_heartbeat_shows_guided() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     let t = take_now(&mut w);
     assert_eq!(
         w.p.owner(),
@@ -154,7 +159,7 @@ fn an_accepting_ack_answers_ok_before_the_heartbeat_shows_guided() {
 
 #[test]
 fn a_lost_ack_is_answered_only_by_the_heartbeat_in_guided() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     let t = take_now(&mut w);
     w.p.tick(w.now + 20);
     w.collect();
@@ -167,7 +172,7 @@ fn a_lost_ack_is_answered_only_by_the_heartbeat_in_guided() {
 
 #[test]
 fn an_ack_while_a_ground_station_changes_mode_waits_for_the_heartbeat() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.p.on_feed(CLIENT_MODE_TOPIC, &json!({"mode": copter::LOITER}), w.now);
     w.refuse_mode = Some((copter::GUIDED, MavResult::MAV_RESULT_FAILED, None));
     let t = take_now(&mut w);
@@ -182,7 +187,7 @@ fn an_ack_while_a_ground_station_changes_mode_waits_for_the_heartbeat() {
 
 #[test]
 fn a_second_take_control_while_the_fc_answers_is_pending() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.refuse_mode = Some((copter::GUIDED, MavResult::MAV_RESULT_FAILED, None));
     take_now(&mut w);
     assert_eq!(answer(&w.req_now(take_req())), (false, Some("pending")));
@@ -190,7 +195,7 @@ fn a_second_take_control_while_the_fc_answers_is_pending() {
 
 #[test]
 fn rth_while_the_fc_answers_ends_the_take_control_busy() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.refuse_mode = Some((copter::GUIDED, MavResult::MAV_RESULT_FAILED, None));
     let t = take_now(&mut w);
     assert_eq!(answer(&w.action("rth")), (true, None));
@@ -203,7 +208,7 @@ fn rth_while_the_fc_answers_ends_the_take_control_busy() {
 /// left in GUIDED with nobody flying it.
 #[test]
 fn a_guided_after_the_refusal_is_not_left_unflown() {
-    let mut w = failsafe_landing();
+    let mut w = gcs_landing();
     w.refuse_mode = Some((copter::GUIDED, MavResult::MAV_RESULT_FAILED, None));
     let t = take_now(&mut w);
     w.run(2600);

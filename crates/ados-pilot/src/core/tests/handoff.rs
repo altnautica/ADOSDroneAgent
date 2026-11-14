@@ -223,7 +223,7 @@ fn the_pilot_kind_names_an_fc_failsafe() {
     assert_eq!(v["fc_failsafe"], true);
     // No RC input reported: the FC changed mode by itself.
     assert_eq!(v["failsafe_cause"], "fc");
-    assert!(ok(&w.action("take_control")));
+    assert!(ok(&w.action_args("hand_to_fc", json!({"mode": "loiter"}))));
     w.run(100);
     assert!(
         !w.p.state(w.now).fc_failsafe,

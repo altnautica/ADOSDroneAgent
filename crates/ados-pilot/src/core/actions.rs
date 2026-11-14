@@ -360,10 +360,14 @@ impl Pilot {
     /// Continue a paused mission: in AUTO (a pause there) with
     /// DO_PAUSE_CONTINUE, otherwise by putting the FC back in AUTO, where it
     /// carries on from the item it was on. Either way the FC flies it
-    /// (`mission_fc`).
+    /// (`mission_fc`). Refused during an FC failsafe RTL or land: AUTO would
+    /// pull the FC out of it.
     fn do_resume(&mut self, now_ms: u64) -> ActionRes {
         if !self.fc.armed {
             return Err("disarmed".into());
+        }
+        if self.fc_failsafe {
+            return Err("failsafe".into());
         }
         if !self.mission_resumable() {
             return Err("nothing_paused".into());
@@ -388,12 +392,20 @@ impl Pilot {
     /// Take the vehicle as `pilot`. Outside GUIDED the FC is asked for it and
     /// the request waits on its answer ([`super::take`]): nothing changes
     /// hands until the FC confirms the mode.
+    ///
+    /// Refused during an FC failsafe RTL or land (`fc_failsafe`): the pilot
+    /// never flies over the FC's own failsafe, and a GUIDED request there
+    /// would cancel it. The operator changes the FC's mode first (the Mode
+    /// sheet, or Hand to FC), which ends the failsafe state.
     fn take_control(&mut self, now_ms: u64) -> ActionRes {
         if self.take.pending() {
             return Err("pending".into());
         }
         if !self.fc.armed {
             return Err("disarmed".into());
+        }
+        if self.fc_failsafe {
+            return Err("failsafe".into());
         }
         if self.owner() == Owner::Tuning {
             return Err("busy".into());

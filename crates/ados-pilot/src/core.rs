@@ -117,7 +117,9 @@ pub struct Pilot {
     /// reposition replaces it instead of being overwritten on the next tick.
     fc_hold: Option<[f32; 3]>,
     /// The FC switched itself (or an RC switch or failsafe did) to an RTL or
-    /// land mode: a surface goto waits until the operator changes mode.
+    /// land mode: nothing that would put it in GUIDED or AUTO (Take control,
+    /// Pause, a goto, a lease, Resume, a launch) runs until the operator
+    /// changes the FC's mode.
     fc_failsafe: bool,
     /// Why the FC flies `fc_failsafe`: the `fc_mode_cause` code at the mode
     /// change. `None` while `fc_failsafe` is false.
@@ -400,7 +402,8 @@ impl Pilot {
             return refuse("not_guided_capable", None);
         }
         // A skill or the swarm never pulls the FC out of an RTL or land it
-        // flies on its own; the operator's Take control or Mode sheet does.
+        // flies on its own; only the operator's mode change (the Mode sheet,
+        // Hand to FC) ends it.
         if self.fc_failsafe {
             return refuse("failsafe", None);
         }

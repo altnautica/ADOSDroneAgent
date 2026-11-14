@@ -23,10 +23,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.110.2] - 2026-11-14
 
+### Fixed
+
+- Pilot: Take control no longer overrides a flight-controller failsafe. While the pilot reports `fc_failsafe` (the flight controller flies an RTL, SmartRTL or land nobody commanded: an RC switch, or a radio, battery or EKF failsafe), `take_control` is refused with `failsafe` and nothing asks the flight controller for GUIDED. Before, it was accepted, the flight controller was put in GUIDED and the pilot flew until the flight controller re-asserted its failsafe. Resume (which would switch to AUTO) and a launch or take-off while still armed on the ground after a failsafe landing are refused the same way. The operator's own mode change (the Mode sheet, Hand to FC) ends the failsafe state, and Take control works after it. Every surface shows the existing `failsafe` refusal text.
+
+## [0.110.2] - 2026-11-14
+
 ### Changed
 
 - Pilot: the stick-flight limits under the GNSS-denied cap live beside the cap itself; no change in behaviour.
-
 ## [0.110.1] - 2026-11-14
 
 ### Added
@@ -38,7 +43,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: a STOP, a hold or a smaller stick under the GNSS-denied speed cap slows the vehicle at the profile's acceleration (3 m/s² on Normal, 6 on Sport), not at the cap's 1.5 m/s². Only speeding up is held to the cap's acceleration.
 - Pilot: the pilot frame carries `speed_cap` only while the pilot flies setpoints under it: armed and airborne in GUIDED, with the pilot, a skill, a goto or the swarm flying, a heard FC, and not in fixed-wing forward flight. The chip no longer reads "GNSS-denied" during an FC RTH, an FC mission, on the ground or with the FC unheard.
 - The chip prints the cap with at most one decimal, the same on every surface (1.5 reads "1.5 m/s max", not "2").
-
 ## [0.110.0] - 2026-11-14
 
 ### Changed
