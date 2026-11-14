@@ -131,6 +131,7 @@ describe("0.5 follow phases", () => {
       "no-range",
       "lease-busy",
       "lease-refused",
+      "camera-lost",
     ]) {
       expect(S[`follow.hold_reason.${r}`], r).toBeTruthy();
     }
