@@ -312,8 +312,10 @@ impl PositionUnverified {
 pub const FRAME_FC_LOCAL_NED: &str = "fc_local_ned";
 
 /// What the pilot asked and flew on its latest control tick of a skill goal
-/// or a goto, and which limits cut it. Diagnostics for logs and replays: it
-/// rides the pilot socket and the nav stream, never the radio downlink.
+/// or a goto, and which limits cut it since the previous frame.
+/// Diagnostics for logs and replays: it rides the pilot socket and the nav
+/// stream, never the radio downlink. It carries no acceleration: the
+/// setpoint commands position, velocity and yaw only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PilotCommand {
@@ -324,25 +326,35 @@ pub struct PilotCommand {
     /// The skill's own goal (or the goto target) before the planner picks a
     /// detour; `goal_ned` is the goal the plan aims at.
     pub goal_ned: Option<[f64; 3]>,
-    /// The point flown toward this tick: the goal, or the detour waypoint
-    /// along `plan_ned`. `None` while the pilot holds.
+    /// The point the goal aims at this tick: the goal, or the detour
+    /// waypoint along `plan_ned`. While the pilot holds it is still the
+    /// point the goal aims at; `None` only with no goal to aim at.
     pub target_ne: Option<[f64; 2]>,
     /// The horizontal velocity asked before any limit: the goal's
     /// feed-forward plus the flight controller's position-loop pull toward
-    /// the target (m/s). Zero while holding.
+    /// the target (m/s). Kept while the pilot holds, so asked against
+    /// `cmd_vel_ne` shows the hold.
     pub ask_vel_ne: [f64; 2],
     /// The horizontal velocity the setpoint asks of the flight controller:
-    /// its velocity plus the position-loop pull toward its position (m/s).
+    /// its velocity plus the position-loop pull toward its position, that
+    /// pull held so the sum stays within `v_cap_mps` (m/s).
     pub cmd_vel_ne: [f64; 2],
     /// The velocity field of the setpoint sent (m/s).
     pub sp_vel_ned: [f64; 3],
     /// The horizontal speed limit for this goal: its own maximum held to the
-    /// profile's and to any `speed_cap` (m/s).
+    /// profile's and to any `speed_cap` (m/s). Kept while the pilot holds.
     pub v_cap_mps: f64,
-    /// Every limit that changed the asked velocity this tick, in the order
-    /// the pilot applies them; empty when it flew as asked. One of
+    /// Every limit that changed the asked velocity on any control tick since
+    /// the previous frame, so a cut shorter than the frame period is still
+    /// logged; empty when every tick flew as asked. The speed limit that
+    /// bound comes first (`nav_cap` when the `speed_cap` is below the goal's
+    /// own limit), then the rest in the order the pilot applies them. One of
     /// [`COMMAND_LIMITS`].
     pub limits: Vec<String>,
+    /// Every `hold_reason` in force on a control tick of a goal since the
+    /// previous frame, first seen first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hold_reasons: Vec<String>,
 }
 
 /// The [`PilotCommand::limits`] codes, in the order the pilot applies them:
@@ -406,6 +418,7 @@ impl PilotCommand {
             sp_vel_ned: [0.0; 3],
             v_cap_mps: 0.0,
             limits: Vec::new(),
+            hold_reasons: Vec::new(),
         }
     }
 }

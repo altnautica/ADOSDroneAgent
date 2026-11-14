@@ -26,39 +26,68 @@ pub mod limit {
 /// A shadow command older than this is no longer published.
 pub const SHADOW_MAX_AGE_MS: u64 = 1000;
 
+/// What a goal asks on a control tick, before any limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Ask {
+    /// The point the goal aims at (its own point or the detour waypoint);
+    /// `None` with no goal.
+    pub target_ne: Option<V2>,
+    /// The goal's feed-forward plus the FC's position-loop pull toward
+    /// `target_ne`.
+    pub vel: V2,
+    /// The goal's speed limit; 0 with no goal.
+    pub v_cap: f32,
+}
+
+impl Ask {
+    /// Nothing to aim at.
+    pub const NONE: Self = Self {
+        target_ne: None,
+        vel: [0.0; 2],
+        v_cap: 0.0,
+    };
+}
+
 /// One control tick of a skill goal or a goto, as flown.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Tick {
     pub at_ms: u64,
-    /// The point flown toward; `None` while holding.
-    pub target_ne: Option<V2>,
-    /// The horizontal velocity asked before any limit.
-    pub ask: V2,
+    /// What the goal asked, kept while the pilot holds.
+    pub ask: Ask,
     /// The horizontal velocity the setpoint asks of the FC (its velocity
     /// plus the position-loop pull toward its position).
     pub cmd: V2,
     /// The setpoint's velocity field.
     pub sp_vel: [f32; 3],
-    /// The goal's speed limit; 0 while holding.
-    pub v_cap: f32,
     /// [`limit`] bits.
     pub limits: u16,
+    /// The [`limit`] bit of the speed limit that bound this tick
+    /// ([`limit::SPEED`] or [`limit::NAV_CAP`]), 0 when none did; it is
+    /// published first.
+    pub bound_by: u16,
 }
 
 impl Tick {
-    /// A hold at `at_ms`: no target, nothing asked, `cmd` and `sp_vel` as
+    /// A hold at `at_ms` of a goal that asked `ask`: `cmd` and `sp_vel` as
     /// sent, with [`limit::HOLD`] and `extra`.
-    pub fn hold(at_ms: u64, cmd: V2, sp_vel: [f32; 3], extra: u16) -> Self {
+    pub fn hold(at_ms: u64, ask: Ask, cmd: V2, sp_vel: [f32; 3], extra: u16) -> Self {
         Self {
             at_ms,
-            target_ne: None,
-            ask: [0.0; 2],
+            ask,
             cmd,
             sp_vel,
-            v_cap: 0.0,
             limits: limit::HOLD | extra,
+            bound_by: 0,
         }
     }
+}
+
+/// The limits and hold reasons of every goal tick since the pilot frame was
+/// last published, so a cut shorter than the frame period reaches the log.
+#[derive(Debug, Default)]
+pub(crate) struct Latch {
+    limits: u16,
+    holds: Vec<String>,
 }
 
 /// A command of a planner run in shadow mode, on the pilot's clock and in
@@ -101,23 +130,59 @@ impl Pilot {
             .or(self.goto)
     }
 
+    /// Fold this tick's limits and hold reason into the latch, at the end of
+    /// every control tick that flew a goal.
+    pub(super) fn latch_tick(&mut self) {
+        let Some(t) = self.command else {
+            return;
+        };
+        self.latch.limits |= t.limits;
+        if let Some(r) = &self.hold_reason {
+            if !self.latch.holds.contains(r) {
+                self.latch.holds.push(r.clone());
+            }
+        }
+    }
+
+    /// The pilot frame built by [`Pilot::state`] was published: the next
+    /// frame's `command` latches the ticks from here.
+    pub fn state_published(&mut self) {
+        self.latch.limits = 0;
+        self.latch.holds.clear();
+    }
+
     /// The published `command`: the latest tick of a goal, if this tick
-    /// flew one.
+    /// flew one, with the limits and hold reasons latched since the last
+    /// published frame.
     pub(super) fn command_frame(&self) -> Option<PilotCommand> {
         let t = self.command?;
         let mut c = PilotCommand::new(t.at_ms + self.epoch_offset_ms);
         c.goal_ned = self.commanded_goal().map(|g| g.map(wire));
-        c.target_ne = t.target_ne.map(ne);
-        c.ask_vel_ne = ne(t.ask);
+        c.target_ne = t.ask.target_ne.map(ne);
+        c.ask_vel_ne = ne(t.ask.vel);
         c.cmd_vel_ne = ne(t.cmd);
         c.sp_vel_ned = t.sp_vel.map(wire);
-        c.v_cap_mps = wire(t.v_cap);
+        c.v_cap_mps = wire(t.ask.v_cap);
+        let bits = t.limits | self.latch.limits;
+        let first = bits & t.bound_by;
         c.limits = COMMAND_LIMITS
             .iter()
             .enumerate()
-            .filter(|(i, _)| t.limits & (1 << i) != 0)
+            .filter(|(i, _)| first & (1 << i) != 0)
+            .chain(
+                COMMAND_LIMITS
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| bits & !first & (1 << i) != 0),
+            )
             .map(|(_, n)| (*n).to_owned())
             .collect();
+        c.hold_reasons = self.latch.holds.clone();
+        if let Some(r) = &self.hold_reason {
+            if !c.hold_reasons.contains(r) {
+                c.hold_reasons.push(r.clone());
+            }
+        }
         Some(c)
     }
 

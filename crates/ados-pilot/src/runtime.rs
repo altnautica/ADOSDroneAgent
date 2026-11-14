@@ -252,6 +252,7 @@ impl Core {
                             changed
                         });
                         self.publish("state", &s);
+                        self.pilot.state_published();
                     }
                     if self.pilot.obstacles_due(t) {
                         if let Some(o) = self.pilot.obstacles_frame(t) {

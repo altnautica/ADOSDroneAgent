@@ -231,7 +231,8 @@ impl World {
         }
     }
 
-    /// Advance time by `ms` in 20 ms ticks, feeding state each tick.
+    /// Advance time by `ms` in 20 ms ticks, feeding state each tick. As the
+    /// runtime does, the pilot frame is published every 100 ms of the clock.
     pub fn run(&mut self, ms: u64) {
         let end = self.now + ms;
         while self.now < end {
@@ -239,6 +240,9 @@ impl World {
             self.feed();
             self.p.tick(self.now);
             self.collect();
+            if self.now % 100 == 0 {
+                self.p.state_published();
+            }
         }
     }
 

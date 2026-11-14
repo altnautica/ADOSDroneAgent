@@ -156,6 +156,9 @@ pub struct Pilot {
     /// This tick's command of a skill goal or a goto ([`trace`]); `None`
     /// on a tick that flew none.
     command: Option<trace::Tick>,
+    /// The goal ticks' limits and hold reasons since the last published
+    /// frame.
+    latch: trace::Latch,
     /// The shadow planner's latest command and its source.
     shadow: Option<(&'static str, ShadowCmd)>,
     plan_hold: Option<[f32; 3]>,
@@ -234,6 +237,7 @@ impl Pilot {
             params_ms: 0,
             setpoint: None,
             command: None,
+            latch: trace::Latch::default(),
             shadow: None,
             plan_hold: None,
             stale_hold: None,

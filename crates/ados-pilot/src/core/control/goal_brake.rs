@@ -36,13 +36,14 @@ impl Pilot {
     /// now, are held to the stick brake's caps ([`brake_limit`]: seen space,
     /// obstacles, FC lag). When either breaks one, the braked `ask` within
     /// `v_cap` is returned, to fly from where the vehicle is, with the
-    /// brake terms that cut ([`crate::core::limit`] bits); `None` leaves the
-    /// planned setpoint.
+    /// brake terms that cut ([`crate::core::limit`] bits) and `cap_by` when
+    /// `v_cap` cut the braked `ask`; `None` leaves the planned setpoint.
     pub(super) fn goal_brake(
         &mut self,
         pos: V2,
         ask: V2,
         v_cap: f32,
+        cap_by: u16,
         now_ms: u64,
     ) -> Option<(V2, u16)> {
         if self.settings.pilot.avoid == AvoidMode::Off || self.obstacle_data_unavailable(now_ms) {
@@ -60,11 +61,16 @@ impl Pilot {
             return None;
         }
         let v = geo::clamp_len(asked.v, v_cap);
+        let capped = if geo::norm(asked.v) > v_cap + 1e-3 {
+            cap_by
+        } else {
+            0
+        };
         self.brake_avoid = if progress(ask, v) < STOPPED_MPS {
             AvoidState::Blocked
         } else {
             AvoidState::Detour
         };
-        Some((v, asked.by | flying.by))
+        Some((v, asked.by | flying.by | capped))
     }
 }

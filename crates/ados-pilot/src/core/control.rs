@@ -74,6 +74,11 @@ fn max_abs(a: [f32; 4]) -> f32 {
 impl Pilot {
     /// One control tick at `now_ms`.
     pub fn tick(&mut self, now_ms: u64) {
+        self.control_tick(now_ms);
+        self.latch_tick();
+    }
+
+    fn control_tick(&mut self, now_ms: u64) {
         let dt = self.last_tick_ms.map_or(0.02, |t| {
             (now_ms.saturating_sub(t) as f32 / 1000.0).clamp(0.001, 0.1)
         });
@@ -475,6 +480,7 @@ impl Pilot {
         };
         self.mav(m);
     }
+
 
 }
 

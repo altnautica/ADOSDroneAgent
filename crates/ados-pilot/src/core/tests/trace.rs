@@ -3,7 +3,7 @@
 
 use std::f32::consts::TAU;
 
-use ados_protocol::pilot::{Goal, GoalKind, Request};
+use ados_protocol::pilot::{AvoidMode, Goal, GoalKind, Request};
 use serde_json::{json, Value};
 
 use super::harness::World;
@@ -109,8 +109,9 @@ fn a_braked_goal_names_the_limit_that_cut_it() {
     assert!(geo::dist(flown, fc_ask(&w, [0.0, 0.0])) < 1e-3);
 }
 
-/// A wall across a goto holds the vehicle: the command is a hold with
-/// nothing asked and no target, and `hold_reason` says why.
+/// A wall across a goto holds the vehicle: the command is a hold that keeps
+/// the target and what the goto asked, so asked against commanded shows the
+/// freeze, and `hold_reason` says why.
 #[test]
 fn a_blocked_goto_publishes_a_hold() {
     let mut w = World::new();
@@ -130,32 +131,144 @@ fn a_blocked_goto_publishes_a_hold() {
     let cmd = &v["command"];
     assert_eq!(v["hold_reason"], "blocked");
     assert_eq!(limits(cmd), ["hold"], "{cmd}");
-    assert!(cmd["target_ne"].is_null(), "{cmd}");
-    assert_eq!(pair(&cmd["ask_vel_ne"]), [0.0, 0.0]);
+    assert_eq!(cmd["hold_reasons"], json!(["blocked"]), "{cmd}");
+    assert_eq!(pair(&cmd["target_ne"]), [20.0, 0.0], "{cmd}");
     assert_eq!(cmd["goal_ned"], json!([20.0, 0.0, -5.0]));
+    // Asked: the pull toward the goto target from where the vehicle is.
+    let ask = pair(&cmd["ask_vel_ne"]);
+    let pull = geo::sub([20.0, 0.0], [w.pos[0], w.pos[1]]);
+    assert!(geo::dist(ask, pull) < 1e-2, "asked {ask:?}, pull {pull:?}");
+    assert!(cmd["v_cap_mps"].as_f64().unwrap() > 0.0, "{cmd}");
+    // Flown: the hold, far below what was asked.
+    let flown = pair(&cmd["cmd_vel_ne"]);
+    assert!(geo::norm(flown) < 1.0, "flown {flown:?}");
 }
 
-/// Under external navigation the speed cap binds a far goal: the command
-/// names it.
+/// A wall in front of a follow goal holds the vehicle; the command keeps the
+/// goal's feed-forward and speed limit in what was asked.
 #[test]
-fn the_nav_cap_is_named_when_it_binds() {
+fn a_blocked_follow_keeps_what_it_asked() {
     let mut w = World::new();
-    w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
-    w.p.fc.params.insert("EK3_SRC2_POSXY".into(), 6.0);
     w.airborne(copter::GUIDED);
-    // vision-nav reports source set 2 (external nav) active.
-    w.p.on_feed("nav.state", &json!({"active_set": 2, "gps_fix": 0}), w.now);
     let id = w.lease();
     w.req(Request::Goal {
         lease_id: id,
-        goal: follow_goal([8.0, 0.0, -5.0], [3.0, 0.0]),
+        goal: follow_goal([20.0, 0.0, -5.0], [3.0, 0.0]),
+    });
+    let end = w.now + 1500;
+    while w.now < end {
+        w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+        w.run(20);
+    }
+    let v = frame(&w);
+    let cmd = &v["command"];
+    assert_eq!(v["hold_reason"], "blocked", "{v}");
+    assert_eq!(
+        limits(cmd).last().map(String::as_str),
+        Some("hold"),
+        "{cmd}"
+    );
+    let target = pair(&cmd["target_ne"]);
+    let to = geo::sub(target, [w.pos[0], w.pos[1]]);
+    let ask = pair(&cmd["ask_vel_ne"]);
+    assert!(
+        geo::dist(ask, geo::add([3.0, 0.0], to)) < 1e-2,
+        "asked {ask:?}, target {target:?}"
+    );
+    assert_eq!(cmd["v_cap_mps"].as_f64(), Some(6.0));
+    let flown = pair(&cmd["cmd_vel_ne"]);
+    assert!(geo::norm(flown) < 1.0, "flown {flown:?}");
+}
+
+/// Under external navigation the speed cap binds a far goal: the command
+/// names it first, and names the goal's own limit only when that cut too.
+#[test]
+fn the_nav_cap_is_named_when_it_binds() {
+    for (ff, want) in [(3.0, vec!["nav_cap"]), (8.0, vec!["nav_cap", "speed"])] {
+        let mut w = World::new();
+        w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
+        w.p.fc.params.insert("EK3_SRC2_POSXY".into(), 6.0);
+        w.airborne(copter::GUIDED);
+        // vision-nav reports source set 2 (external nav) active.
+        w.p.on_feed("nav.state", &json!({"active_set": 2, "gps_fix": 0}), w.now);
+        let id = w.lease();
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: follow_goal([8.0, 0.0, -5.0], [ff, 0.0]),
+        });
+        w.run(300);
+        let cmd = &frame(&w)["command"];
+        assert_eq!(limits(cmd), want, "feed-forward {ff}: {cmd}");
+        assert_eq!(cmd["v_cap_mps"].as_f64(), Some(2.0));
+        let flown = pair(&cmd["cmd_vel_ne"]);
+        assert!(geo::norm(flown) <= 2.0 + 1e-3, "{flown:?}");
+    }
+}
+
+/// A goal far away with nothing to brake for: the setpoint's pull toward it
+/// is held, so the commanded velocity stays within the speed limit.
+#[test]
+fn the_commanded_velocity_stays_within_the_limit() {
+    let mut w = World::new();
+    w.p.settings.pilot.avoid = AvoidMode::Off;
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    w.req(Request::Goal {
+        lease_id: id,
+        goal: follow_goal([30.0, 0.0, -5.0], [0.0, 0.0]),
     });
     w.run(300);
     let cmd = &frame(&w)["command"];
-    assert!(limits(cmd).contains(&"nav_cap".to_owned()), "{cmd}");
-    assert_eq!(cmd["v_cap_mps"].as_f64(), Some(2.0));
+    assert!(pair(&cmd["ask_vel_ne"])[0] > 25.0, "{cmd}");
     let flown = pair(&cmd["cmd_vel_ne"]);
-    assert!(geo::norm(flown) <= 2.0 + 1e-3, "{flown:?}");
+    assert!(geo::norm(flown) <= 6.0 + 1e-3, "flown {flown:?}");
+    assert!(flown[0] > 5.0, "flown {flown:?}");
+}
+
+/// A hold shorter than the frame period still reaches the next frame's
+/// command, and is gone from the frame after it.
+#[test]
+fn a_short_hold_reaches_the_next_frame() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    w.req(Request::Goal {
+        lease_id: id,
+        goal: follow_goal([20.0, 0.0, -5.0], [0.0, 0.0]),
+    });
+    w.run(500);
+    while w.now % 100 != 0 {
+        w.run(20);
+    }
+    // One tick behind a wall, then open space again.
+    w.p.on_feed("plugin.world-engine.scan", &wall_scan(2.0), w.now);
+    w.run(20);
+    assert!(
+        frame(&w)["hold_reason"].is_string(),
+        "the wall did not hold"
+    );
+    w.p.on_feed("plugin.world-engine.scan", &open_scan(), w.now);
+    w.run(60);
+    let v = frame(&w);
+    assert!(v["hold_reason"].is_null(), "still holding: {v}");
+    let cmd = &v["command"];
+    assert!(limits(cmd).contains(&"hold".to_owned()), "{cmd}");
+    assert_eq!(
+        cmd["hold_reasons"].as_array().map(Vec::len),
+        Some(1),
+        "{cmd}"
+    );
+    // Published: the next frame starts clean.
+    w.run(40);
+    let cmd = &frame(&w)["command"];
+    assert!(!limits(cmd).contains(&"hold".to_owned()), "{cmd}");
+    assert!(cmd.get("hold_reasons").is_none(), "{cmd}");
+}
+
+/// A scan with no returns.
+fn open_scan() -> Value {
+    json!({"frame": "body_frd", "angle_start_rad": 0.0,
+           "angle_increment_rad": TAU / 360.0, "ranges_m": vec![0.0f32; 360]})
 }
 
 /// A feed-forward faster than the goal's own limit is held to it.
