@@ -2,7 +2,7 @@
 
 use ados_protocol::pilot::{
     wire, AvoidMode, AvoidState, FcStatusText, ObstaclesFrame, Owner, PilotState, Profile,
-    Sequence, SkillRef,
+    Sequence, SkillRef, VehicleClass,
 };
 
 use super::Pilot;
@@ -203,7 +203,20 @@ impl Pilot {
         if owner == Owner::Tuning {
             s.setup_step = self.setup_step.map(str::to_owned);
         }
-        s.speed_cap = self.nav_cap(now_ms);
+        // The cap is shown only while the pilot flies setpoints under it: not
+        // in an FC mode or mission, on the ground, in forward flight, or with
+        // the FC unheard.
+        let applies = fc_linked
+            && self.fc.armed
+            && !self.fc.landed()
+            && self.in_guided()
+            && matches!(
+                owner,
+                Owner::Pilot | Owner::Skill | Owner::Goto | Owner::Swarm
+            )
+            && self.fc.vehicle_class() != VehicleClass::Fixedwing
+            && !self.fc.vtol_forward();
+        s.speed_cap = applies.then(|| self.nav_cap(now_ms)).flatten();
         s
     }
 

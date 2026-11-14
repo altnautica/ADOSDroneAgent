@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.110.1] - 2026-11-14
+
+### Added
+
+- The flight-state chip on the cockpit, the kiosk, the dashboard and the terminal UI shows the GNSS-denied speed cap as a secondary line ("GNSS-denied: 2 m/s max").
+
+### Fixed
+
+- Pilot: a STOP, a hold or a smaller stick under the GNSS-denied speed cap slows the vehicle at the profile's acceleration (3 m/s² on Normal, 6 on Sport), not at the cap's 1.5 m/s². Only speeding up is held to the cap's acceleration.
+- Pilot: the pilot frame carries `speed_cap` only while the pilot flies setpoints under it: armed and airborne in GUIDED, with the pilot, a skill, a goto or the swarm flying, a heard FC, and not in fixed-wing forward flight. The chip no longer reads "GNSS-denied" during an FC RTH, an FC mission, on the ground or with the FC unheard.
+- The chip prints the cap with at most one decimal, the same on every surface (1.5 reads "1.5 m/s max", not "2").
+
 ## [0.110.0] - 2026-11-14
 
 ### Changed

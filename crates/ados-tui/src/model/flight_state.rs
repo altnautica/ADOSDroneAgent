@@ -309,7 +309,7 @@ pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
             "speed_cap" => {
                 if let Some(v) = f.speed_cap_mps {
                     out.push(ChipLine {
-                        text: sec.speed_cap.text.replace("{v}", &format!("{v:.0}")),
+                        text: sec.speed_cap.text.replace("{v}", &cap_text(v)),
                         color: sec.speed_cap.color.clone(),
                     });
                 }
@@ -444,6 +444,12 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         age_ms,
         owner,
     })
+}
+
+/// The cap in m/s with at most one decimal (1.5 → "1.5", 2 → "2"), as every
+/// surface prints it.
+fn cap_text(v: f64) -> String {
+    format!("{}", (v * 10.0).round() / 10.0)
 }
 
 #[cfg(test)]

@@ -290,3 +290,74 @@ fn stick_flight_at_speed_drops_to_the_cap_when_it_switches_on() {
         assert!(s <= CAP + 1e-3, "{s} m/s");
     }
 }
+
+/// Fly forward at the cap, then centre the sticks (a STOP) and return the
+/// commanded speeds of the slow-down.
+fn capped_stop(w: &mut World) -> Vec<f32> {
+    w.action("take_control");
+    w.stick([0.0; 4], 600); // pass the gate
+    for _ in 0..8 {
+        ext_nav(w);
+        w.stick([0.0, 1.0, 0.0, 0.0], 500);
+    }
+    let from = w.sent.len();
+    for _ in 0..4 {
+        ext_nav(w);
+        w.stick([0.0; 4], 500);
+    }
+    speeds(w, from)
+}
+
+#[test]
+fn a_stop_under_the_cap_slows_at_the_profiles_acceleration() {
+    let mut w = ext_nav_world();
+    w.p.settings.pilot.avoid = ados_protocol::pilot::AvoidMode::Off;
+    ext_nav(&mut w);
+    let v = capped_stop(&mut w);
+    assert!(v[0] > CAP - 0.2, "at the cap before the stop: {v:?}");
+    let profile = crate::model::limits(w.p.settings.pilot.profile).a_h;
+    assert!(profile > ACCEL, "the test needs a profile faster than the cap");
+    let decel = v
+        .windows(2)
+        // The last step to the position hold drops to zero at once.
+        .filter(|p| p[1] > crate::model::HOLD_CAPTURE_MPS)
+        .map(|p| (p[0] - p[1]) / TICK_S)
+        .fold(0.0f32, f32::max);
+    assert!(
+        decel > ACCEL + 0.25,
+        "slow-down limited to the cap's {ACCEL} m/s²: peak {decel} m/s²"
+    );
+    assert!(decel <= profile + 0.05, "{decel} m/s²");
+}
+
+#[test]
+fn the_cap_is_shown_only_while_the_pilot_flies_under_it() {
+    // On the ground: nothing flies, nothing is capped.
+    let mut w = World::new();
+    w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
+    w.p.fc.params.insert("EK3_SRC2_POSXY".into(), 6.0);
+    ext_nav(&mut w);
+    w.run(200);
+    assert!(w.p.nav_capped(w.now));
+    assert!(w.p.state(w.now).speed_cap.is_none(), "on the ground");
+
+    // In the air under the pilot's stick flight: shown.
+    w.airborne(copter::GUIDED);
+    run_ext_nav(&mut w, 1000);
+    w.action("take_control");
+    w.stick([0.0; 4], 600);
+    assert!(w.p.state(w.now).speed_cap.is_some(), "pilot flight");
+
+    // The FC unheard: the pilot sends nothing it could cap.
+    assert!(w.p.state(w.now + 3000).speed_cap.is_none(), "FC unheard");
+
+    // An FC RTL flies at the FC's own speeds.
+    w.mode = copter::RTL;
+    run_ext_nav(&mut w, 1000);
+    assert!(w.p.state(w.now).speed_cap.is_none(), "FC RTL");
+
+    // An FC mission likewise.
+    w.mode = copter::AUTO;
+    run_ext_nav(&mut w, 1000);
+    assert!(w.p.state(w.now).speed_cap.is_none(), "FC mission");
+}
