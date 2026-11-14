@@ -1059,9 +1059,9 @@ required_cap = "flight.rate_setpoint"
 
 # ---- pilot motion lease ----
 # Take, use and give back the ADOS pilot's single motion lease. The host stamps
-# the plugin id onto the holder, delivers `flight.sticks` and
-# `flight.lease.revoked` events only to the holder, and releases the lease when
-# the plugin stops.
+# the plugin id onto the holder, delivers `flight.sticks`,
+# `flight.goal.status` and `flight.lease.revoked` events only to the holder,
+# and releases the lease when the plugin stops.
 [[method]]
 id = "flight.lease.acquire"
 required_cap = "flight.motion"

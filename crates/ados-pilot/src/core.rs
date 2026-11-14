@@ -16,8 +16,8 @@ use std::collections::HashMap;
 
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use ados_protocol::pilot::{
-    ActionResult, Banner, Holder, LeaseReply, LeaseRevoked, Mission, Owner, Request, Sticks,
-    ViewDemand,
+    ActionResult, Banner, GoalStatus, Holder, LeaseReply, LeaseRevoked, Mission, Owner, Request,
+    Sticks, ViewDemand,
 };
 
 use crate::authority::Authority;
@@ -53,6 +53,9 @@ pub enum Out {
     Revoked(LeaseRevoked),
     /// `sticks`, to every subscriber while a skill owns motion.
     Sticks(Sticks),
+    /// `goal.status`, at every replan while the lease goal is a vantage
+    /// goal (the plugin host forwards it to the holder only).
+    GoalStatus(GoalStatus),
     /// Persist `section.key = value` in the agent config.
     Persist {
         section: &'static str,

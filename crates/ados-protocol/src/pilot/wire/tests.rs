@@ -238,3 +238,46 @@ fn speed_cap_is_omitted_until_set() {
     let back: crate::pilot::PilotState = serde_json::from_value(v).unwrap();
     assert_eq!(back, s);
 }
+
+#[test]
+fn a_vantage_goal_decodes_with_its_spec_and_hypotheses() {
+    let frame = serde_json::json!({
+        "op": "goal", "lease_id": 4,
+        "goal": {"kind": "vantage", "n": 0.0, "e": 0.0, "d": -5.0, "max_speed_mps": 2.0,
+                 "vantage": {"predicted_ne": [7.0, 1.0], "cov_ne": [0.5, 0.0, 0.5],
+                             "sigma_k": 1.0, "standoff_m": 5.0, "max_radius_m": 12.0,
+                             "anchor_ne": [0.0, 0.0], "hypotheses_ne": [[3.0, 0.0]]}}
+    });
+    let (req, _) = json_to_request_body(&frame).unwrap();
+    let Request::Goal { goal, .. } = req else {
+        panic!("not a goal")
+    };
+    assert_eq!(goal.kind, GoalKind::Vantage);
+    let v = goal.vantage.expect("vantage spec");
+    assert_eq!(v.predicted_ne, [7.0, 1.0]);
+    assert_eq!(v.hypotheses_ne, vec![[3.0, 0.0]]);
+}
+
+#[test]
+fn a_vantage_spec_without_hypotheses_decodes_empty() {
+    let v: crate::pilot::VantageSpec = serde_json::from_value(serde_json::json!({
+        "predicted_ne": [1.0, 2.0], "cov_ne": [0.1, 0.0, 0.1], "sigma_k": 2.0,
+        "standoff_m": 4.0, "max_radius_m": 10.0, "anchor_ne": [0.0, 0.0]
+    }))
+    .unwrap();
+    assert!(v.hypotheses_ne.is_empty());
+}
+
+#[test]
+fn goal_status_states_are_kebab_case_on_the_wire() {
+    let mut s = GoalStatus::new(9, VantageState::NoVantage, 0.0);
+    s.occluder_width_m = Some(2.5);
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["state"], "no-vantage");
+    assert_eq!(v["lease_id"], 9);
+    let body = encode_op("goal.status", &s).unwrap();
+    let (op, _) = peek_op(&body).unwrap();
+    assert_eq!(op, "goal.status");
+    let back: GoalStatus = serde_json::from_value(v).unwrap();
+    assert_eq!(back, s);
+}

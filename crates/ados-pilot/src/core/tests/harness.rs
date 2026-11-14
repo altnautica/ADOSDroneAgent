@@ -1,5 +1,7 @@
 use ados_protocol::mavlink::ardupilotmega::*;
-use ados_protocol::pilot::{ActionReq, ActionResult, Goal, GoalKind, Holder, Input, Request};
+use ados_protocol::pilot::{
+    ActionReq, ActionResult, Goal, GoalKind, GoalStatus, Holder, Input, Request, VantageSpec,
+};
 
 use crate::config::Settings;
 use crate::core::{Out, Pilot, Reply};
@@ -44,6 +46,8 @@ pub struct World {
     /// none of its own), an open-space scan (no returns) arrives. Off: no scan
     /// arrives at all.
     pub lidar: bool,
+    /// `goal.status` messages, in order.
+    pub goal_status: Vec<GoalStatus>,
 }
 
 impl World {
@@ -82,6 +86,7 @@ impl World {
             inbox: Vec::new(),
             answers: Vec::new(),
             lidar: true,
+            goal_status: Vec::new(),
         };
         w.feed();
         w
@@ -197,6 +202,7 @@ impl World {
                 }
                 Out::Revoked(r) => self.revoked.push((r.lease_id, r.reason)),
                 Out::Answer(t, a) => self.answers.push((t, a)),
+                Out::GoalStatus(s) => self.goal_status.push(s),
                 Out::Sticks(_) | Out::Persist { .. } => {}
             }
         }
@@ -382,6 +388,24 @@ impl World {
     pub fn goal_d(&mut self, lease_id: u64, n: f32, e: f32, d: f32) {
         let goal = Goal::new(GoalKind::Position, [n, e, d], 5.0);
         self.req(Request::Goal { lease_id, goal });
+    }
+
+    /// A vantage goal at 5 m height, 2 m/s: subject predicted at `pred`,
+    /// the search bounded 12 m around `anchor`.
+    pub fn vantage_goal(&mut self, lease_id: u64, pred: [f32; 2], anchor: [f32; 2]) {
+        let mut goal = Goal::new(GoalKind::Vantage, [0.0, 0.0, -5.0], 2.0);
+        goal.vantage = Some(VantageSpec::new(pred, [0.5, 0.0, 0.5], 1.0, 5.0, 12.0, anchor));
+        self.req(Request::Goal { lease_id, goal });
+    }
+
+    /// Keep the vantage goal fresh (the lease drops a goal older than 1 s)
+    /// for `ms`.
+    pub fn hold_vantage(&mut self, lease_id: u64, pred: [f32; 2], anchor: [f32; 2], ms: u64) {
+        let end = self.now + ms;
+        while self.now < end {
+            self.vantage_goal(lease_id, pred, anchor);
+            self.run(200);
+        }
     }
 
     pub fn last_setpoint(&self) -> Option<&SET_POSITION_TARGET_LOCAL_NED_DATA> {

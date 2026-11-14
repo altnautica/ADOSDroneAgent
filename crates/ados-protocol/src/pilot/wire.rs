@@ -255,5 +255,50 @@ pub struct LeaseRevoked {
     pub reason: String,
 }
 
+/// Progress toward a `vantage` goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum VantageState {
+    /// Flying to the vantage point.
+    Enroute,
+    /// Within 1 m of the vantage point and nearly still.
+    Arrived,
+    /// No reachable point inside the search bound sees the area.
+    NoVantage,
+}
+
+/// The `goal.status` message, published at every replan while the lease
+/// goal is a `vantage` goal. The plugin host forwards it to the holder only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GoalStatus {
+    pub lease_id: u64,
+    pub state: VantageState,
+    #[serde(default)]
+    pub vantage_ne: Option<[f32; 2]>,
+    /// Fraction of the sample points in line of sight from the vantage point (0..1).
+    pub coverage: f32,
+    #[serde(default)]
+    pub occluder_ne: Option<[f32; 2]>,
+    #[serde(default)]
+    pub occluder_width_m: Option<f32>,
+}
+
+impl GoalStatus {
+    /// A status with no vantage point and no occluder; set them on the
+    /// returned value.
+    pub fn new(lease_id: u64, state: VantageState, coverage: f32) -> Self {
+        Self {
+            lease_id,
+            state,
+            vantage_ne: None,
+            coverage,
+            occluder_ne: None,
+            occluder_width_m: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

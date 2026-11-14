@@ -32,3 +32,4 @@ pub mod readiness;
 pub mod router_state;
 pub mod runtime;
 pub mod setup;
+pub mod vantage;

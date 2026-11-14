@@ -2,9 +2,10 @@
 //!
 //! Skills command motion through the pilot's single motion lease. The host
 //! stamps the plugin id on every lease, forwards goals only from the holder,
-//! delivers the pilot's `sticks` and `lease.revoked` messages as the bus topics
-//! [`STICKS_TOPIC`] and [`REVOKED_TOPIC`] to the holder alone, and releases a
-//! plugin's lease when the plugin stops.
+//! delivers the pilot's `sticks`, `goal.status` and `lease.revoked` messages
+//! as the bus topics [`STICKS_TOPIC`], [`GOAL_STATUS_TOPIC`] and
+//! [`REVOKED_TOPIC`] to the holder alone, and releases a plugin's lease when
+//! the plugin stops.
 //!
 //! Older plugins that still send `flight.guided_setpoint.send` get an implicit
 //! lease on their first setpoint; each setpoint becomes a `position` goal, and
@@ -26,6 +27,9 @@ use crate::handlers::EventBus;
 pub const STICKS_TOPIC: &str = "flight.sticks";
 /// Bus topic telling the holder its lease ended.
 pub const REVOKED_TOPIC: &str = "flight.lease.revoked";
+/// Bus topic carrying the pilot's progress toward a vantage goal to the
+/// holder.
+pub const GOAL_STATUS_TOPIC: &str = "flight.goal.status";
 /// Skill id of the implicit lease a legacy setpoint stream takes.
 pub const LEGACY_SKILL: &str = "legacy-setpoint";
 /// A legacy implicit lease is released after this long without a setpoint.
@@ -301,6 +305,22 @@ impl PilotClient {
                 if let Some(plugin) = target {
                     let axes = get(&body, "axes").cloned().unwrap_or(Value::Nil);
                     self.publish(STICKS_TOPIC, &plugin, id, vec![("axes", axes)]);
+                }
+            }
+            "goal.status" => {
+                let Some(id) = get(&body, "lease_id").and_then(Value::as_u64) else {
+                    return;
+                };
+                let target = lock(&self.leases).holder.get(&id).cloned();
+                if let Some(plugin) = target {
+                    let fields = body
+                        .as_map()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|(k, v)| Some((k.as_str()?, v.clone())))
+                        .filter(|(k, _)| !matches!(*k, "op" | "lease_id" | "plugin_id"))
+                        .collect();
+                    self.publish(GOAL_STATUS_TOPIC, &plugin, id, fields);
                 }
             }
             "lease.revoked" => {

@@ -237,7 +237,7 @@ pub fn along(path: &[V2], dist: f32) -> V2 {
     *path.last().unwrap_or(&[0.0, 0.0])
 }
 
-fn decimate(path: &[V2], max: usize) -> Vec<V2> {
+pub(crate) fn decimate(path: &[V2], max: usize) -> Vec<V2> {
     if path.len() <= max {
         return path.to_vec();
     }

@@ -323,6 +323,7 @@ impl Core {
                     }
                 }
                 Out::Sticks(s) => self.publish("sticks", &s),
+                Out::GoalStatus(s) => self.publish("goal.status", &s),
                 Out::Persist {
                     section,
                     key,

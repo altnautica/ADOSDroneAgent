@@ -181,3 +181,55 @@ fn lease_id_accepts_integer_or_string() {
     assert_eq!(lease_id_of(&int), Some(12));
     assert_eq!(lease_id_of(&text), Some(12));
 }
+
+#[tokio::test]
+async fn goal_status_reaches_only_the_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pilot.sock");
+    let _rx = fake_pilot(path.clone(), true).await;
+    let bus = Arc::new(EventBus::new());
+    let mut events = bus.subscribe();
+    let client = PilotClient::spawn(path, Arc::clone(&bus));
+    ready(&client).await;
+    let reply = client
+        .acquire("com.example.follow", "follow-me", "motion")
+        .await;
+    assert_eq!(lease_id_of(&reply), Some(7));
+
+    // A status for a lease nobody holds goes nowhere.
+    client.on_message(
+        "goal.status",
+        rmpv::ext::to_value(serde_json::json!({"lease_id": 8, "state": "enroute", "coverage": 0.5}))
+            .unwrap(),
+    );
+    client.on_message(
+        "goal.status",
+        rmpv::ext::to_value(serde_json::json!({
+            "op": "goal.status", "lease_id": 7, "state": "arrived", "vantage_ne": [1.0, 2.0],
+            "coverage": 0.9, "occluder_ne": [3.0, 0.0], "occluder_width_m": 0.8
+        }))
+        .unwrap(),
+    );
+    let ev = loop {
+        let e = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if e.topic == GOAL_STATUS_TOPIC {
+            break e;
+        }
+    };
+    assert!(flight_event_for("com.example.follow", &ev.payload));
+    assert!(!flight_event_for("com.example.other", &ev.payload));
+    let p: serde_json::Value = rmpv::ext::from_value(ev.payload.clone()).unwrap();
+    assert_eq!(p["lease_id"], 7);
+    assert_eq!(p["state"], "arrived");
+    assert_eq!(p["vantage_ne"], serde_json::json!([1.0, 2.0]));
+    assert_eq!(p["occluder_width_m"], 0.8);
+    assert!(p.get("op").is_none());
+}
+
+#[test]
+fn goal_status_is_a_holder_topic() {
+    assert!(crate::handlers::FLIGHT_TOPICS_FOR_SUBSCRIBE.contains(&GOAL_STATUS_TOPIC));
+}

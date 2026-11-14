@@ -6,6 +6,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Pilot: a `vantage` skill goal. The skill sends where a lost subject is predicted to be (`goal.vantage`: the predicted point, its covariance, a sigma scale, a standoff, the search bound around an anchor, and optional `hypotheses_ne` such as where the subject stopped or turned back). At every replan the pilot picks a reachable point, clear of obstacles by the margin and inside the bound, that sees the most of the uncertainty ellipse and the hypotheses: beside a trunk, past a wall corner, in line with a doorway. A prediction inside an obstacle is moved to the free space beside it, and one beyond the obstacle grid gets a point toward it. The vehicle flies the path there facing the prediction (or the goal's own yaw), with the brake, the geofence and the speed cap acting as on any goal, and holds when no point qualifies.
+- Pilot: `goal.status` to the lease holder at every replan of a vantage goal: `enroute`, `arrived` (within 1 m of the point and below 0.3 m/s) or `no-vantage`, with the point, its coverage and the occluder's position and width. The plugin host forwards it as the host event `flight.goal.status` to the holder only, under `flight.motion`.
+
 ## [0.112.0] - 2026-11-14
 
 ### Changed
@@ -19,7 +24,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: while the flight controller is in its own failsafe, a mission the pilot had paused no longer reads `paused` in the pilot frame, so the chip shows the failsafe return or landing instead of "Mission paused" with a Resume button that could only be refused. The cockpit and the kiosk disable Resume and Take control with the failsafe reason while the pilot reports `fc_failsafe`, as Pause already was.
 - Pilot: Copter's AUTO_RTL ("Auto DO_LAND_START or RTL") and BRAKE ("Brake or Land") entered with no operator command count as a flight-controller failsafe, as RTL, SmartRTL and LAND do. Before, an AUTO_RTL failsafe read as an FC mission, where Take control and a stick deflection switched to GUIDED. The operator's own AUTO_RTL or BRAKE is not a failsafe.
 - Pilot: Take control no longer overrides a flight-controller failsafe. While the pilot reports `fc_failsafe` (the flight controller flies an RTL, SmartRTL or land nobody commanded: an RC switch, or a radio, battery or EKF failsafe), `take_control` is refused with `failsafe` and nothing asks the flight controller for GUIDED. Before, it was accepted, the flight controller was put in GUIDED and the pilot flew until the flight controller re-asserted its failsafe. Resume (which would switch to AUTO) and a launch or take-off while still armed on the ground after a failsafe landing are refused the same way. The operator's own mode change (the Mode sheet, Hand to FC) ends the failsafe state, and Take control works after it. Every surface shows the existing `failsafe` refusal text.
-
 ## [0.111.0] - 2026-11-14
 
 ### Changed
@@ -34,13 +38,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: a vehicle with avoidance on and no lidar expected (no scan seen this boot) has no obstacle sensor, which is not the same as a lost one. It reports `avoid_state` `unavailable`, sticks, skill goals and swarm goals fly with no obstacle brake and no hold, a Fly Here is refused with `obstacle_data_unavailable` (a ground station's reposition is not started), and the readiness item `lidar` warns "No lidar: obstacle avoidance unavailable", so every surface shows it before arming. The first scan turns avoidance on. A lidar that is expected but stale makes `lidar` a failing block, so a lidar lost on the ground refuses the arm and the launch instead of holding after take-off.
 - Breaking: `ados-protocol`'s `AvoidState` has `Stale` and `Unavailable` variants (`"stale"` and `"unavailable"` on the wire) and is now `#[non_exhaustive]`, so later states stay additive; a `match` on it outside the crate needs a catch-all arm.
 - The cockpit and dashboard flight-state chip, the follow controls, the skill picker, the AR motion path and the TUI Pilot block show stale obstacle data as "Obstacle data stale" and a missing obstacle sensor as "No obstacle sensor", both in the warning colour, and the stale hold reason as "Holding: no fresh obstacle data". The two Fly Here refusals have their own text.
-
 ## [0.110.2] - 2026-11-14
 
 ### Changed
 
 - Pilot: the stick-flight limits under the GNSS-denied cap live beside the cap itself; no change in behaviour.
-
 ## [0.110.1] - 2026-11-14
 
 ### Added
@@ -52,7 +54,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: a STOP, a hold or a smaller stick under the GNSS-denied speed cap slows the vehicle at the profile's acceleration (3 m/s² on Normal, 6 on Sport), not at the cap's 1.5 m/s². Only speeding up is held to the cap's acceleration.
 - Pilot: the pilot frame carries `speed_cap` only while the pilot flies setpoints under it: armed and airborne in GUIDED, with the pilot, a skill, a goto or the swarm flying, a heard FC, and not in fixed-wing forward flight. The chip no longer reads "GNSS-denied" during an FC RTH, an FC mission, on the ground or with the FC unheard.
 - The chip prints the cap with at most one decimal, the same on every surface (1.5 reads "1.5 m/s max", not "2").
-
 ## [0.110.0] - 2026-11-14
 
 ### Changed

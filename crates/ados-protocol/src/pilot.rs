@@ -40,7 +40,7 @@ pub const CLIENT_MODE_TOPIC: &str = "client.mode";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Goal {
-    /// `follow`, `orbit` or `position`.
+    /// `follow`, `orbit`, `position` or `vantage`.
     pub kind: GoalKind,
     pub n: f32,
     pub e: f32,
@@ -67,6 +67,11 @@ pub struct Goal {
     /// The skill's own obstacle margin; `None` uses `pilot.obstacle_margin_m`.
     #[serde(default)]
     pub margin_m: Option<f32>,
+    /// For a `vantage` goal: where the lost subject is predicted to be and
+    /// how far the search may go. `n`/`e` are ignored for it; `d` holds
+    /// the height.
+    #[serde(default)]
+    pub vantage: Option<VantageSpec>,
 }
 
 impl Goal {
@@ -88,6 +93,7 @@ impl Goal {
             max_speed_mps,
             candidates: None,
             margin_m: None,
+            vantage: None,
         }
     }
 }
@@ -99,6 +105,53 @@ pub enum GoalKind {
     Follow,
     Orbit,
     Position,
+    /// Fly to a point that sees the lost subject's predicted area.
+    Vantage,
+}
+
+/// Where a lost subject may be and the bounds of the search for a point
+/// that sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VantageSpec {
+    /// Predicted subject position, local NED north/east (m).
+    pub predicted_ne: [f32; 2],
+    /// Position covariance `[nn, ne, ee]` (m²).
+    pub cov_ne: [f32; 3],
+    /// Ellipse scale in sigmas for the coverage test.
+    pub sigma_k: f32,
+    /// Preferred distance from the predicted position (m).
+    pub standoff_m: f32,
+    /// Vantage points further than this from `anchor_ne` are refused (m).
+    pub max_radius_m: f32,
+    /// Where the recovery started: the hard bound of the search.
+    pub anchor_ne: [f32; 2],
+    /// Other places the subject may be (where it stopped, where it turned
+    /// back); each counts like an ellipse sample in the coverage test.
+    #[serde(default)]
+    pub hypotheses_ne: Vec<[f32; 2]>,
+}
+
+impl VantageSpec {
+    /// A spec with no hypotheses; set them on the returned value.
+    pub fn new(
+        predicted_ne: [f32; 2],
+        cov_ne: [f32; 3],
+        sigma_k: f32,
+        standoff_m: f32,
+        max_radius_m: f32,
+        anchor_ne: [f32; 2],
+    ) -> Self {
+        Self {
+            predicted_ne,
+            cov_ne,
+            sigma_k,
+            standoff_m,
+            max_radius_m,
+            anchor_ne,
+            hypotheses_ne: Vec::new(),
+        }
+    }
 }
 
 /// Where the planner may look for a detour goal.

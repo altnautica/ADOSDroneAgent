@@ -2,7 +2,7 @@
 //! the same way stick flight is, and held inside the geofence and the
 //! altitude limits.
 
-use ados_protocol::pilot::{AvoidMode, AvoidState, Owner};
+use ados_protocol::pilot::{AvoidMode, AvoidState, GoalKind, Owner};
 
 use super::{
     geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_OBSTACLE_CLOSE,
@@ -49,7 +49,13 @@ impl Pilot {
             && self.settings.pilot.avoid != AvoidMode::Off;
         let (goal, max_speed, goal_d, goal_yaw, subject) = match self.owner() {
             Owner::Skill => match self.auth.lease().and_then(|l| l.goal.clone()) {
-                Some(g) => (Some(g.clone()), g.max_speed_mps, g.d, g.yaw, g.subject_ne),
+                // A vantage goal faces the predicted subject unless it sets a yaw.
+                Some(g) => {
+                    let subject = g
+                        .subject_ne
+                        .or_else(|| g.vantage.as_ref().map(|v| v.predicted_ne));
+                    (Some(g.clone()), g.max_speed_mps, g.d, g.yaw, subject)
+                }
                 None => (None, 0.0, pos[2], None, None),
             },
             _ => match self.goto {
@@ -116,7 +122,9 @@ impl Pilot {
         self.plan_hold = None;
         let v_cap = max_speed.min(self.limits_now(now_ms).v_h).max(0.5);
         let to = geo::sub(target, pos_ne);
-        let detour = self.plan.state == AvoidState::Detour;
+        // A vantage goal carries no feed-forward: it flies its path.
+        let detour = self.plan.state == AvoidState::Detour
+            || goal.as_ref().is_some_and(|g| g.kind == GoalKind::Vantage);
         let vel = match (&goal, detour) {
             (Some(g), false) => geo::clamp_len([g.vn, g.ve], v_cap),
             _ => geo::clamp_len(geo::scale(to, 1.0), v_cap),

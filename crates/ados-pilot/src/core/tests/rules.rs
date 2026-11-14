@@ -972,3 +972,62 @@ fn skill_goal_altitude_is_held_over_the_floor() {
     let sp = w.last_setpoint().unwrap();
     assert!(sp.z <= -0.5 + 1e-3, "d {} under the floor", sp.z);
 }
+
+#[test]
+fn a_vantage_goal_reports_enroute_then_arrived_to_the_holder() {
+    use ados_protocol::pilot::VantageState;
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    // Clear grid: the vehicle already sees the prediction, so it is the
+    // vantage point; still moving, it is on the way.
+    w.vel = [1.0, 0.0, 0.0];
+    w.hold_vantage(id, [7.0, 0.0], [0.0, 0.0], 400);
+    let first = w.goal_status.first().expect("status").clone();
+    assert_eq!(first.lease_id, id);
+    assert_eq!(first.state, VantageState::Enroute);
+    assert_eq!(first.vantage_ne, Some([w.pos[0], w.pos[1]]));
+    w.vel = [0.0; 3];
+    w.hold_vantage(id, [7.0, 0.0], [0.0, 0.0], 1000);
+    let last = w.goal_status.last().unwrap();
+    assert_eq!(last.state, VantageState::Arrived);
+    assert!(last.coverage > 0.99);
+}
+
+#[test]
+fn a_vantage_goal_faces_the_predicted_subject() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    w.hold_vantage(id, [0.0, 7.0], [0.0, 0.0], 600);
+    let sp = w.last_setpoint().expect("a setpoint");
+    assert!((sp.yaw - std::f32::consts::FRAC_PI_2).abs() < 0.05, "yaw {}", sp.yaw);
+    assert!(sp.vx.hypot(sp.vy) < 0.1, "no feed-forward: {sp:?}");
+}
+
+#[test]
+fn a_vantage_goal_without_a_spec_holds_and_says_so() {
+    use ados_protocol::pilot::{Goal, GoalKind, VantageState};
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    for _ in 0..3 {
+        let goal = Goal::new(GoalKind::Vantage, [9.0, 0.0, -5.0], 2.0);
+        w.req(Request::Goal { lease_id: id, goal });
+        w.run(200);
+    }
+    assert_eq!(w.goal_status.last().unwrap().state, VantageState::NoVantage);
+    assert!(w.goal_status.iter().all(|s| s.vantage_ne.is_none()));
+}
+
+#[test]
+fn only_a_vantage_goal_publishes_goal_status() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    for _ in 0..3 {
+        w.goal(id, 5.0, 0.0);
+        w.run(200);
+    }
+    assert!(w.goal_status.is_empty());
+}
