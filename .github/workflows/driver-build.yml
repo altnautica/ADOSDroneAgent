@@ -81,7 +81,7 @@ jobs:
     outputs:
       include: ${{ steps.load.outputs.include }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: load
         name: Load the blessed-image matrix
         run: |
@@ -140,7 +140,7 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
