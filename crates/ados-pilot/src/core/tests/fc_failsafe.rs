@@ -294,3 +294,26 @@ fn the_plane_wizard_abort_rtl_leaves_take_control_available() {
     let r = w.action("take_control");
     assert!(ok(&r), "{r:?}");
 }
+
+/// The Plane wizard's abort from FBWA: its RTL is sent and the wizard lets
+/// go before the FC's heartbeat shows RTL. Leaving the wizard does not ask
+/// for GUIDED over that RTL; the FC flies it.
+#[test]
+fn leaving_the_wizard_right_after_its_abort_rtl_sends_no_guided() {
+    use crate::modes::plane;
+    let mut w = World::new();
+    w.mavtype = MavType::MAV_TYPE_FIXED_WING;
+    w.airborne(plane::FBWA);
+    w.p.auth.enter_tuning().unwrap();
+    w.run(100);
+    w.sent.clear();
+    w.p.note_setup_mode(plane::RTL, w.now);
+    w.p.exit_tuning(w.now);
+    w.run(100);
+    assert_eq!(w.set_modes(plane::GUIDED), 0);
+    assert_eq!(w.p.owner(), Owner::FcMode);
+    w.mode = plane::RTL;
+    w.run(200);
+    assert!(!w.p.state(w.now).fc_failsafe);
+    assert_eq!(w.p.owner(), Owner::FcMode);
+}

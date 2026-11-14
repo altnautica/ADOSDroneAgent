@@ -91,22 +91,18 @@ impl Pilot {
 
     /// Leave the setup engine's `tuning` owner. Airborne: fly as `pilot` from a
     /// hold here (back in GUIDED); on the ground: idle or whatever came before.
-    /// During an FC failsafe the FC keeps flying it (`fc_mode`).
+    /// During an FC failsafe the FC keeps flying it (`fc_mode`), and so it does
+    /// after the wizard's own return or land (its abort RTL), even before the
+    /// FC's heartbeat shows that mode.
     pub fn exit_tuning(&mut self, now_ms: u64) {
         if self.owner() != Owner::Tuning {
             return;
         }
         self.auth.exit_tuning();
-        let fam = self.family();
-        let mode = self.fc.custom_mode;
-        let returning = fam.is_rtl(mode)
-            || fam.is_land(mode)
-            || mode == crate::modes::copter::LAND && fam == crate::modes::Family::Copter
-            || fam == crate::modes::Family::Plane
-                && matches!(
-                    mode,
-                    crate::modes::plane::LOITER | crate::modes::plane::QLAND
-                );
+        let returning = self.is_returning(self.fc.custom_mode)
+            || self.own_mode.is_some_and(|(m, t)| {
+                now_ms.saturating_sub(t) < super::OWN_MODE_WINDOW_MS && self.is_returning(m)
+            });
         if self.fc.armed && !self.fc.landed() && (returning || self.fc_failsafe) {
             self.set_owner(Owner::FcMode, "tuning-end");
         } else if self.fc.armed && !self.fc.landed() {
@@ -119,6 +115,19 @@ impl Pilot {
         } else if !self.fc.armed {
             self.set_owner(Owner::Idle, "tuning-end");
         }
+    }
+
+    /// A mode in which the FC returns or lands on its own.
+    fn is_returning(&self, mode: u32) -> bool {
+        let fam = self.family();
+        fam.is_rtl(mode)
+            || fam.is_land(mode)
+            || mode == crate::modes::copter::LAND && fam == crate::modes::Family::Copter
+            || fam == crate::modes::Family::Plane
+                && matches!(
+                    mode,
+                    crate::modes::plane::LOITER | crate::modes::plane::QLAND
+                )
     }
 
     /// No operator surface heard from for `pilot.link_loss_s`.
