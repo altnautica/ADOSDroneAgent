@@ -168,6 +168,9 @@ pub struct Pilot {
     pub fc_failsafe: bool,
     /// What tripped that failsafe (`fc`, `rc_or_failsafe`), when the pilot said.
     pub failsafe_cause: Option<String>,
+    /// The horizontal speed cap (m/s) the pilot applies to every setpoint it
+    /// flies (`speed_cap.v_h_mps`, e.g. while GNSS-denied); `None` without one.
+    pub speed_cap_mps: Option<f64>,
     /// The pilot operations a surface may offer now (`goto`, ...).
     pub surface_ops: Vec<String>,
     /// The arm and landed state; `None` while unknown (the FC is unheard),
@@ -387,6 +390,11 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         }),
         fc_failsafe: d.get("fc_failsafe").and_then(Value::as_bool) == Some(true),
         failsafe_cause: one_of(d, "failsafe_cause", &["fc", "rc_or_failsafe"]),
+        speed_cap_mps: d
+            .get("speed_cap")
+            .filter(|c| c.get("reason").and_then(Value::as_str).is_some())
+            .and_then(|c| c.get("v_h_mps"))
+            .and_then(Value::as_f64),
         surface_ops: d
             .get("surface_ops")
             .and_then(Value::as_array)

@@ -33,6 +33,7 @@ const base: ChipFacts = {
   avoidState: null,
   launchStep: null,
   fcFailsafe: false,
+  speedCapMps: null,
   ageMs: 100,
 };
 

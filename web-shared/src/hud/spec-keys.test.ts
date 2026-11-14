@@ -267,4 +267,7 @@ describe("cockpit panel words", () => {
       expect(S[k], k).toBeTruthy();
     }
   });
+  it("has the GNSS-denied speed-cap words", () => {
+    expect(S["pilot.speed_cap.gnss_denied"]).toBe("GNSS-denied: {v} m/s max");
+  });
 });

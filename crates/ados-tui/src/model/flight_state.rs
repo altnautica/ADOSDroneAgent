@@ -81,6 +81,7 @@ struct Conditional {
 struct Secondary {
     order: Vec<String>,
     fc_failsafe: Styled,
+    speed_cap: Styled,
     mission_paused_line: Conditional,
     avoid_state: BTreeMap<String, Option<Styled>>,
     hold_reason: Styled,
@@ -162,6 +163,8 @@ pub struct ChipFacts {
     pub plane: bool,
     pub control_mode: Option<String>,
     pub hold_reason: Option<String>,
+    /// The pilot's horizontal speed cap in m/s, while one applies.
+    pub speed_cap_mps: Option<f64>,
     pub avoid_state: Option<String>,
     /// The step of a running launch sequence (not `done`, no error).
     pub launch_step: Option<String>,
@@ -287,8 +290,9 @@ pub fn control_mode_text(mode: &str) -> String {
         .unwrap_or_else(|| word_label(mode))
 }
 
-/// The secondary line, in the spec's order: FC failsafe, a mission the pilot
-/// holds paused, hold reason, avoidance state, control mode.
+/// The secondary line, in the spec's order: FC failsafe, the pilot's speed
+/// cap, a mission the pilot holds paused, hold reason, avoidance state,
+/// control mode.
 pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
     let sec = &SPEC.secondary;
     let mut out = Vec::new();
@@ -299,6 +303,14 @@ pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
                     out.push(ChipLine {
                         text: sec.fc_failsafe.text.clone(),
                         color: sec.fc_failsafe.color.clone(),
+                    });
+                }
+            }
+            "speed_cap" => {
+                if let Some(v) = f.speed_cap_mps {
+                    out.push(ChipLine {
+                        text: sec.speed_cap.text.replace("{v}", &format!("{v:.0}")),
+                        color: sec.speed_cap.color.clone(),
                     });
                 }
             }
@@ -425,6 +437,7 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         plane: matches!(p.vehicle_class.as_deref(), Some("fixedwing" | "vtol")),
         control_mode: p.control_mode.clone(),
         hold_reason: p.hold_reason.clone(),
+        speed_cap_mps: p.speed_cap_mps,
         avoid_state: p.avoid_state.clone(),
         launch_step: p.launch_step.clone(),
         fc_failsafe: p.fc_failsafe,

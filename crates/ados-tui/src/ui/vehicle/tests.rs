@@ -955,3 +955,13 @@ fn trend_charts_hide_while_telemetry_fails_or_the_fc_is_down() {
         assert!(!text.contains(g), "{g:?} drawn with the FC down\n{text}");
     }
 }
+
+#[test]
+fn the_chip_shows_the_gnss_denied_cap() {
+    let mut app = live_app();
+    let mut frame = pilot_frame();
+    frame["speed_cap"] = json!({"reason": "gnss-denied", "v_h_mps": 2.0});
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("GNSS-denied: 2 m/s max"), "{text}");
+}
