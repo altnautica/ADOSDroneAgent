@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.2] - 2026-11-15
+
+### Changed
+
+- Internal only: the pilot core, the setup fake flight controller and the fixed-wing air steps are split into smaller modules under the Rust size ratchet (no behaviour change).
+
 ## [0.113.1] - 2026-11-15
 
 ### Fixed
