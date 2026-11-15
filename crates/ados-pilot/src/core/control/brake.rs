@@ -4,9 +4,14 @@
 use super::{BRAKE_LAG_S, BRAKE_RANGE_M, BRAKE_SECTORS, HARD_STOP_FRAC};
 use crate::geo::{self, V2};
 
-/// Horizontal distance from the lidar (the vehicle centre) to the prop tips,
-/// metres: the x500 class (0.5 m motor diagonal, 10" props) and smaller.
-pub const BODY_RADIUS_M: f32 = 0.4;
+/// What the brake keeps clear: the obstacle margin and the vehicle's own
+/// radius from the lidar (the CG) to its outermost rigid extent
+/// ([`crate::config::PilotSection::body_radius_m`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrakeGeom {
+    pub margin: f32,
+    pub body_m: f32,
+}
 /// Clearance-based speed: within the brake's reach the horizontal speed is
 /// held to this many m/s per metre of free space between the prop tips and
 /// the nearest obstacle. A vehicle 2.25 m from both walls of a 4.5 m drift
@@ -70,9 +75,10 @@ pub fn brake_limit(
     vel: V2,
     v: V2,
     a_h: f32,
-    margin: f32,
+    geom: BrakeGeom,
     now_ms: u64,
 ) -> Braked {
+    let margin = geom.margin;
     // A standing obstacle closes no faster than the vehicle flies: the scans'
     // range rate is trusted up to twice the EKF speed plus 1 m/s (an estimate
     // trailing the real motion), so a nearer surface stepping into a sector
@@ -132,7 +138,7 @@ pub fn brake_limit(
     } else {
         nearest_within(v, &caps)
     };
-    let (v_conf, push) = confined(&near, margin);
+    let (v_conf, push) = confined(&near, geom);
     let out = with_push(out, v_conf, push);
     Braked {
         v: out,
@@ -165,7 +171,8 @@ fn with_push(out: V2, v_conf: f32, push: V2) -> V2 {
 
 /// The clearance speed and the push back out of the margin, from the nearest
 /// obstacle point per sector (`(direction toward it, distance)`).
-pub fn confined(near: &[Option<(V2, f32)>], margin: f32) -> (f32, V2) {
+pub fn confined(near: &[Option<(V2, f32)>], geom: BrakeGeom) -> (f32, V2) {
+    let BrakeGeom { margin, body_m } = geom;
     let d_min = near
         .iter()
         .flatten()
@@ -174,7 +181,7 @@ pub fn confined(near: &[Option<(V2, f32)>], margin: f32) -> (f32, V2) {
     if !d_min.is_finite() {
         return (f32::INFINITY, [0.0, 0.0]);
     }
-    let v_conf = (CONFINED_SPEED_PER_M * (d_min - BODY_RADIUS_M)).max(CONFINED_MIN_MPS);
+    let v_conf = (CONFINED_SPEED_PER_M * (d_min - body_m)).max(CONFINED_MIN_MPS);
     let mut sum = [0.0, 0.0];
     let mut weight = 0.0;
     for &(dir, d) in near.iter().flatten() {

@@ -8,8 +8,9 @@ use ados_protocol::pilot::{AvoidState, Goal, GoalKind, Owner, Request};
 use serde_json::{json, Value};
 
 use super::harness::World;
+use crate::config::DEFAULT_BODY_RADIUS_M;
 use crate::core::control::{
-    brake_limit, stop_cap, BODY_RADIUS_M, BRAKE_LAG_S, CONFINED_SPEED_PER_M, HOLD_OBSTACLE_CLOSE,
+    brake_limit, stop_cap, BrakeGeom, BRAKE_LAG_S, CONFINED_SPEED_PER_M, HOLD_OBSTACLE_CLOSE,
     PUSH_MAX_MPS,
 };
 use crate::core::Reply;
@@ -17,6 +18,12 @@ use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
 use crate::geo;
 use crate::modes::{copter, plane};
 use crate::obstacles::{level_hit, Level, Obstacles};
+
+/// A 1.5 m margin on a vehicle of the default body radius.
+const G: BrakeGeom = BrakeGeom {
+    margin: 1.5,
+    body_m: DEFAULT_BODY_RADIUS_M,
+};
 
 /// Mark a square block of cells centred on `c` with half-width `half`.
 fn block(o: &mut Obstacles, c: [f32; 2], half: [f32; 2]) {
@@ -55,13 +62,13 @@ fn stop_cap_stops_before_the_margin_after_the_lag() {
 fn brake_caps_speed_before_a_wall_and_keeps_sliding() {
     let mut o = Obstacles::new();
     block(&mut o, [3.1, 0.0], [0.05, 15.0]);
-    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [8.0, 0.0], 3.0, 1.5, 0);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [8.0, 0.0], 3.0, G, 0);
     assert!(b.cut && !b.close);
     assert!((b.v[0] - cap(3.0)).abs() < 0.35, "capped to {:?}", b.v);
     assert!(b.v[1].abs() < 0.05, "no sideways motion added: {:?}", b.v);
     // Sliding along it 3 m away is kept, at the clearance speed.
-    let s = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 3.0], 3.0, 1.5, 0);
-    let conf = CONFINED_SPEED_PER_M * (3.0 - BODY_RADIUS_M);
+    let s = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 3.0], 3.0, G, 0);
+    let conf = CONFINED_SPEED_PER_M * (3.0 - DEFAULT_BODY_RADIUS_M);
     assert!((s.v[1] - conf).abs() < 0.05, "slide kept: {:?}", s.v);
     assert!(s.v[0].abs() < 0.05, "no motion toward it: {:?}", s.v);
 }
@@ -72,7 +79,7 @@ fn brake_sees_a_column_between_sample_rays() {
     // fan from the nose touches it, yet flying at it must be capped.
     let mut o = Obstacles::new();
     block(&mut o, [7.0, 1.0], [0.3, 0.3]);
-    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [8.0, 0.0], 3.0, 1.5, 0);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [8.0, 0.0], 3.0, G, 0);
     assert!(b.cut, "column ignored: {:?}", b.v);
     let rel = [7.0f32, 1.0];
     let dir = geo::scale(rel, 1.0 / geo::norm(rel));
@@ -92,14 +99,14 @@ fn brake_measures_from_where_the_vehicle_coasts_to() {
     // more toward the wall may be asked.
     let mut o = Obstacles::new();
     block(&mut o, [3.95, 0.0], [0.05, 4.0]);
-    let b = brake_limit(&o, [0.0, 0.0], [5.0, 0.0], [2.0, 0.0], 3.0, 1.5, 0);
+    let b = brake_limit(&o, [0.0, 0.0], [5.0, 0.0], [2.0, 0.0], 3.0, G, 0);
     assert!(
         b.v[0] < 0.05 && b.v[1].abs() < 0.05,
         "still asking {:?}",
         b.v
     );
     // A slower command with the vehicle at rest stays.
-    let r = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [1.5, 0.0], 3.0, 1.5, 0);
+    let r = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [1.5, 0.0], 3.0, G, 0);
     assert!((r.v[0] - 1.5).abs() < 1e-3, "{:?}", r.v);
 }
 
@@ -108,7 +115,7 @@ fn inside_the_hard_stop_only_motion_away_is_kept() {
     // A wall 0.75 m to the east, inside 0.6 × 1.5 m.
     let mut o = Obstacles::new();
     block(&mut o, [0.0, 0.85], [3.0, 0.05]);
-    let slide = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [2.0, 0.0], 3.0, 1.5, 0);
+    let slide = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [2.0, 0.0], 3.0, G, 0);
     assert!(slide.close);
     assert!(slide.v[0].abs() < 0.05, "slid along it: {:?}", slide.v);
     assert!(
@@ -116,7 +123,7 @@ fn inside_the_hard_stop_only_motion_away_is_kept() {
         "not moved back out of the margin: {:?}",
         slide.v
     );
-    let away = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, -1.0], 3.0, 1.5, 0);
+    let away = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, -1.0], 3.0, G, 0);
     assert!(away.v[1] <= -0.95, "backing off kept: {:?}", away.v);
 }
 
@@ -147,9 +154,9 @@ fn a_confined_passage_holds_speed_to_the_clearance() {
         &mut o,
         &[([0.0, 2.35], [15.0, 0.05]), ([0.0, -2.35], [15.0, 0.05])],
     );
-    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [8.0, 0.0], 3.0, 1.5, 0);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [8.0, 0.0], 3.0, G, 0);
     // Cells at ±2.375 m: 2.25 m to their near faces.
-    let conf = CONFINED_SPEED_PER_M * (2.25 - BODY_RADIUS_M);
+    let conf = CONFINED_SPEED_PER_M * (2.25 - DEFAULT_BODY_RADIUS_M);
     assert!(b.cut, "not limited: {:?}", b.v);
     assert!(
         b.v[0] <= conf + 0.05 && b.v[0] >= conf - 0.15,
@@ -160,8 +167,35 @@ fn a_confined_passage_holds_speed_to_the_clearance() {
     // In the open the clearance speed leaves the ask alone.
     let mut open = Obstacles::new();
     block(&mut open, [0.0, 14.0], [15.0, 0.05]);
-    let f = brake_limit(&open, [0.0, 0.0], [0.0, 0.0], [5.0, 0.0], 3.0, 1.5, 0);
+    let f = brake_limit(&open, [0.0, 0.0], [0.0, 0.0], [5.0, 0.0], 3.0, G, 0);
     assert!((f.v[0] - 5.0).abs() < 1e-3 && !f.cut, "{:?}", f.v);
+}
+
+#[test]
+fn the_brake_keeps_the_vehicles_own_radius_clear() {
+    // The same drift for a 0.20 m caged vehicle: the clearance speed counts
+    // from its own outer extent, not the 0.4 m default.
+    let mut o = Obstacles::new();
+    blocks(
+        &mut o,
+        &[([0.0, 2.35], [15.0, 0.05]), ([0.0, -2.35], [15.0, 0.05])],
+    );
+    let small = BrakeGeom {
+        margin: 1.5,
+        body_m: 0.2,
+    };
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [8.0, 0.0], 3.0, small, 0);
+    let conf = CONFINED_SPEED_PER_M * (2.25 - 0.2);
+    assert!(
+        b.v[0] <= conf + 0.05 && b.v[0] >= conf - 0.15,
+        "flies {:?}, clearance speed {conf}",
+        b.v
+    );
+    // The pilot brakes with the configured radius; unset, the default.
+    let mut w = World::new();
+    assert_eq!(w.p.brake_geom(1.5).body_m, DEFAULT_BODY_RADIUS_M);
+    w.p.settings.pilot.prop_tip_radius_m = Some(0.2);
+    assert_eq!(w.p.brake_geom(1.5), small);
 }
 
 #[test]
@@ -170,7 +204,7 @@ fn drift_inside_the_margin_is_pushed_back_out() {
     // margin but outside the hard stop: the brake moves it back west.
     let mut o = Obstacles::new();
     block(&mut o, [0.0, 1.1], [5.0, 0.05]);
-    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, 1.5, 0);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, G, 0);
     assert!(b.cut && !b.close, "{b:?}");
     assert!(
         b.v[1] < -0.3 && b.v[1] >= -PUSH_MAX_MPS - 1e-3,
@@ -181,13 +215,13 @@ fn drift_inside_the_margin_is_pushed_back_out() {
     // Flying along the wall keeps going, at no more than the clearance speed
     // 1 m from a wall (~0.5 m/s), and drifts back out as it goes, no faster
     // than the push or the slide alone (not their sum).
-    let a = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [1.0, 0.0], 3.0, 1.5, 0);
+    let a = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [1.0, 0.0], 3.0, G, 0);
     assert!(a.v[0] > 0.3 && a.v[0] < 0.6, "{:?}", a.v);
     assert!(a.v[1] < -0.3 && a.v[1] >= -0.6, "{:?}", a.v);
     // Beyond the margin nothing is added.
     let mut far = Obstacles::new();
     block(&mut far, [0.0, 2.1], [5.0, 0.05]);
-    let c = brake_limit(&far, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, 1.5, 0);
+    let c = brake_limit(&far, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, G, 0);
     assert!(geo::norm(c.v) < 1e-3 && !c.cut, "{c:?}");
 }
 
@@ -199,10 +233,10 @@ fn a_passage_narrower_than_twice_the_margin_centres_the_vehicle() {
         &mut o,
         &[([0.0, 1.4], [5.0, 0.05]), ([0.0, -1.4], [5.0, 0.05])],
     );
-    let c = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, 1.5, 0);
+    let c = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, G, 0);
     assert!(geo::norm(c.v) < 0.05, "centred, yet pushed {:?}", c.v);
     // 0.5 m off the centre toward the east wall: pushed back west.
-    let off = brake_limit(&o, [0.0, 0.5], [0.0, 0.0], [0.0, 0.0], 3.0, 1.5, 0);
+    let off = brake_limit(&o, [0.0, 0.5], [0.0, 0.0], [0.0, 0.0], 3.0, G, 0);
     assert!(off.v[1] < -0.2, "not re-centred: {:?}", off.v);
     // A 2 m passage, 0.3 m off the centre: both walls inside the margin, the
     // push away from the near one still flies toward the farther one.
@@ -210,7 +244,7 @@ fn a_passage_narrower_than_twice_the_margin_centres_the_vehicle() {
         &mut o,
         &[([0.0, 1.0], [5.0, 0.05]), ([0.0, -1.0], [5.0, 0.05])],
     );
-    let both = brake_limit(&o, [0.0, 0.3], [0.0, 0.0], [0.0, 0.0], 3.0, 1.5, 0);
+    let both = brake_limit(&o, [0.0, 0.3], [0.0, 0.0], [0.0, 0.0], 3.0, G, 0);
     assert!(
         both.v[1] < -0.1,
         "not re-centred between both walls: {:?}",
@@ -236,7 +270,7 @@ fn a_lagging_velocity_estimate_does_not_make_the_brake_late() {
         o.ingest_scan(&wall_scan(*d), level, [0.0, 0.0], 1000 + 100 * k as u64);
     }
     o.rebuild([0.0, 0.0], 1300);
-    let b = brake_limit(&o, [0.0, 0.0], [1.6, 0.0], [1.6, 0.0], 3.0, 1.5, 1300);
+    let b = brake_limit(&o, [0.0, 0.0], [1.6, 0.0], [1.6, 0.0], 3.0, G, 1300);
     assert!(
         b.cut && b.v[0] < 1.0,
         "still asks {:?} closing at 2.8 m/s",
@@ -249,7 +283,7 @@ fn a_lagging_velocity_estimate_does_not_make_the_brake_late() {
         s.ingest_scan(&wall_scan(3.6), level, [0.0, 0.0], 1000 + 100 * k);
     }
     s.rebuild([0.0, 0.0], 1300);
-    let c = brake_limit(&s, [0.0, 0.0], [1.6, 0.0], [1.6, 0.0], 3.0, 1.5, 1300);
+    let c = brake_limit(&s, [0.0, 0.0], [1.6, 0.0], [1.6, 0.0], 3.0, G, 1300);
     assert!(c.v[0] > 1.5, "a standing wall braked {:?}", c.v);
 }
 
@@ -278,7 +312,7 @@ fn a_new_nearest_surface_is_not_a_closing_speed() {
     p.ingest_scan(&wall_scan(4.0), level, [0.0, 0.0], 1000);
     p.ingest_scan(&wall_scan(3.0), level, [0.0, 0.0], 1100);
     p.rebuild([0.0, 0.0], 1100);
-    let b = brake_limit(&p, [0.0, 0.0], [0.0, 0.0], [1.0, 0.0], 3.0, 1.5, 1100);
+    let b = brake_limit(&p, [0.0, 0.0], [0.0, 0.0], [1.0, 0.0], 3.0, G, 1100);
     assert!(b.v[0] > 0.9, "a hover braked by a new surface: {:?}", b.v);
 }
 
@@ -291,7 +325,7 @@ fn the_push_never_closes_on_a_nearer_post() {
         &mut o,
         &[([0.0, 1.3], [5.0, 0.05]), ([0.0, -1.05], [0.05, 0.05])],
     );
-    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, 1.5, 0);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 3.0, G, 0);
     assert!(b.v[1] >= -1e-3, "pushed toward the post: {:?}", b.v);
 }
 
@@ -371,7 +405,7 @@ fn replayed_column_approach_never_allows_more_than_it_can_stop_from() {
         let mut o = Obstacles::new();
         o.ingest_scan(&scan, level, pos, 1000);
         o.rebuild(pos, 1000);
-        let b = brake_limit(&o, pos, vel, [8.0, 0.0], 3.0, 1.5, 1000);
+        let b = brake_limit(&o, pos, vel, [8.0, 0.0], 3.0, G, 1000);
         let truth = num("truth_to_column_m");
         let allowed = b.v[0];
         let safe = stop_cap(truth, 0.0, 3.0, 1.0 + 0.35);
@@ -393,7 +427,7 @@ fn replayed_column_approach_never_allows_more_than_it_can_stop_from() {
                       "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
     let mut o = Obstacles::new();
     o.ingest_scan(&scan, level, [0.0, 0.0], 1000);
-    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [2.0, 0.0], 3.0, 1.5, 1000);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [2.0, 0.0], 3.0, G, 1000);
     assert!((b.v[0] - 2.0).abs() < 1e-3, "{:?}", b.v);
 }
 

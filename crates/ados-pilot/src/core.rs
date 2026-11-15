@@ -335,6 +335,15 @@ impl Pilot {
             .and_then(|g| g.margin_m)
             .map_or_else(|| p.effective_margin_m(), |m| p.floored_margin_m(m))
     }
+
+    /// The brake's geometry with obstacle margin `margin`: the vehicle's
+    /// configured outer extent, else the default body radius.
+    fn brake_geom(&self, margin: f32) -> control::BrakeGeom {
+        control::BrakeGeom {
+            margin,
+            body_m: self.settings.pilot.body_radius_m(),
+        }
+    }
 }
 
 #[cfg(test)]

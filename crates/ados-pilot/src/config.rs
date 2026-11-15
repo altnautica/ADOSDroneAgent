@@ -69,7 +69,9 @@ pub struct PilotSection {
     /// propeller tips, the mission route check and the slow cap near walls).
     /// The operator's choice only.
     pub place_class: PlaceClass,
-    /// The airframe's propeller-tip radius from the CG, metres. A confined
+    /// The airframe's outermost rigid extent in the body x-y plane from the
+    /// CG, metres: the largest of the propeller tips, guards or cage, and
+    /// rigid mounts (a guarded frame enters the guard radius). A confined
     /// place needs it.
     pub prop_tip_radius_m: Option<f32>,
     pub max_alt_agl_m: f32,
@@ -105,8 +107,18 @@ pub struct PilotSection {
 pub const OPEN_MARGIN_FLOOR_M: f32 = 0.5;
 /// What a confined margin keeps beyond the propeller tips, metres.
 pub const CONFINED_TIP_EXTRA_M: f32 = 0.1;
+/// The body radius the brake assumes when `prop_tip_radius_m` is unset,
+/// metres: the x500 class (0.5 m motor diagonal, 10" props) and smaller. A
+/// confined place requires the key, so never flies this.
+pub const DEFAULT_BODY_RADIUS_M: f32 = 0.4;
 
 impl PilotSection {
+    /// The vehicle's outermost rigid extent from the CG the brake keeps
+    /// clear: `prop_tip_radius_m` when set, else [`DEFAULT_BODY_RADIUS_M`].
+    pub fn body_radius_m(&self) -> f32 {
+        self.prop_tip_radius_m.unwrap_or(DEFAULT_BODY_RADIUS_M)
+    }
+
     /// The margin floor of the place class: 0.5 m in an open place, the
     /// propeller-tip radius plus 0.1 m in a confined one (0.5 m while the
     /// radius is unknown; the confined launch is refused then).
@@ -125,6 +137,7 @@ impl PilotSection {
 
     /// The obstacle margin the pilot flies: the configured one, at least
     /// the class floor.
+    /// propeller-tip radius plus 0.1 m, whatever the
     pub fn effective_margin_m(&self) -> f32 {
         self.floored_margin_m(self.obstacle_margin_m)
     }

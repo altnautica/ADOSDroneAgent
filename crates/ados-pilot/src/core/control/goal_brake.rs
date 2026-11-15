@@ -23,7 +23,7 @@ impl Pilot {
             vel,
             v,
             lim.a_h,
-            self.margin(),
+            self.brake_geom(self.margin()),
             now_ms,
         )
         .v
@@ -42,13 +42,13 @@ impl Pilot {
             return None;
         }
         let a_h = self.limits_now(now_ms).a_h;
-        let margin = self.margin();
+        let geom = self.brake_geom(self.margin());
         let vel = self
             .fc
             .fresh_local(now_ms)
             .map_or([0.0; 2], |l| [l.vn, l.ve]);
-        let asked = brake_limit(&self.obstacles, pos, vel, ask, a_h, margin, now_ms);
-        let flying = brake_limit(&self.obstacles, pos, vel, vel, a_h, margin, now_ms);
+        let asked = brake_limit(&self.obstacles, pos, vel, ask, a_h, geom, now_ms);
+        let flying = brake_limit(&self.obstacles, pos, vel, vel, a_h, geom, now_ms);
         if !asked.cut && !flying.cut {
             return None;
         }

@@ -374,11 +374,11 @@ impl Pilot {
         let max_dist = self.settings.pilot.max_dist_m;
         let obstacles = &self.obstacles;
         let a_h = lim.a_h;
-        let margin = self.settings.pilot.effective_margin_m();
+        let geom = self.brake_geom(self.settings.pilot.effective_margin_m());
         let mut braked: Option<Braked> = None;
         let limit = |v: V2| {
             let v = if brake {
-                let b = brake_limit(obstacles, pos_ne, [vel[0], vel[1]], v, a_h, margin, now_ms);
+                let b = brake_limit(obstacles, pos_ne, [vel[0], vel[1]], v, a_h, geom, now_ms);
                 braked = Some(b);
                 b.v
             } else {
