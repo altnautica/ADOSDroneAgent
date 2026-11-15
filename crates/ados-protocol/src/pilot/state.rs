@@ -129,6 +129,65 @@ pub struct Mission {
     pub source: String,
     pub age_ms: Option<u64>,
     pub landing_seq: bool,
+    /// The active item's target, from the router's mirror at `seq`: the item
+    /// position in the FC's local NED frame when it has one. Omitted while
+    /// the mirror holds no item at `seq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<MissionTarget>,
+    /// Items the pilot skipped this mission (coverage gaps to re-fly),
+    /// oldest first. Omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<MissionGap>,
+}
+
+/// The mission item the FC flies now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MissionTarget {
+    pub seq: u32,
+    /// MAV_CMD of the item.
+    pub cmd: u16,
+    /// The item position in the FC's local NED frame, metres; `None` for an
+    /// item without a position (DELAY, DO_*), a zero position (hold here), a
+    /// terrain-relative altitude or before the vehicle's own global position
+    /// is known.
+    #[serde(default)]
+    pub ned: Option<[f64; 3]>,
+    /// A loiter item's radius, metres (`None` for other items).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius_m: Option<f64>,
+}
+
+/// One skipped mission item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionGap {
+    pub seq: u32,
+    /// `stall_timeout` (skipped after the countdown) or `stall_operator`.
+    pub reason: String,
+    /// Wall-clock epoch ms of the skip.
+    pub at_ms: u64,
+}
+
+/// A mission or return that stopped making progress: the vehicle holds and
+/// the operator chooses. Persistent while it lasts (the banner is a 3 s slot).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MissionStall {
+    /// `mission` (no progress to a waypoint) or `return` (a blocked return).
+    pub kind: String,
+    /// The mission item stalled on; `None` for a return.
+    #[serde(default)]
+    pub seq: Option<u32>,
+    /// The item's label as the plan shows it; `None` for a return.
+    #[serde(default)]
+    pub wp_label: Option<String>,
+    /// Wall-clock epoch ms the stall was raised.
+    pub since_ms: u64,
+    /// Seconds until the automatic action: the skip for a mission, the
+    /// landing for a return. `None`: no countdown, the vehicle holds until
+    /// the operator answers.
+    #[serde(default)]
+    pub skip_in_s: Option<f64>,
+    /// The no-progress window that raised it, seconds.
+    pub window_s: f64,
 }
 
 /// The surface whose sticks are accepted.
@@ -281,6 +340,10 @@ pub struct PilotState {
     pub sequence: Option<Sequence>,
     pub banner: Option<Banner>,
     pub rth_countdown_s: Option<f64>,
+    /// A mission or return that stopped making progress (the vehicle holds
+    /// for the operator); omitted while none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_stall: Option<MissionStall>,
     /// Pilot actions a ground surface may send on the pilot stream beyond
     /// the safety set (e.g. `goto`).
     pub surface_ops: Vec<String>,
