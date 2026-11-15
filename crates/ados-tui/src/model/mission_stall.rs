@@ -107,12 +107,15 @@ pub fn stall_keys(v: &StallView) -> String {
         .join(" · ")
 }
 
-/// The low-battery return countdown, whole seconds rounded up.
-pub fn low_battery_line(rth_countdown_s: f64) -> String {
-    spec_text(
-        "flow.low_battery.title",
-        &[("in_s", &ceil_s(rth_countdown_s))],
-    )
+/// The low-battery countdown, whole seconds rounded up: a landing when
+/// `land` (a GNSS-free copter), else the return along the flown path.
+pub fn low_battery_line(rth_countdown_s: f64, land: bool) -> String {
+    let key = if land {
+        "flow.low_battery.title_land"
+    } else {
+        "flow.low_battery.title"
+    };
+    spec_text(key, &[("in_s", &ceil_s(rth_countdown_s))])
 }
 
 /// A banner in the spec's words while it shows at `now_ms` (epoch ms), else
@@ -293,14 +296,29 @@ mod tests {
     }
 
     #[test]
-    fn the_low_battery_countdown_rounds_up() {
+    fn the_low_battery_countdown_rounds_up_and_names_its_action() {
         assert_eq!(
-            low_battery_line(9.2),
+            low_battery_line(9.2, false),
             "Battery reserve reached · Returning along the flown path in 10 s"
         );
         assert_eq!(
-            low_battery_line(-1.0),
+            low_battery_line(-1.0, false),
             "Battery reserve reached · Returning along the flown path in 0 s"
+        );
+        assert_eq!(low_battery_line(9.2, true), "Low battery: landing in 10 s");
+    }
+
+    #[test]
+    fn the_gnss_free_countdown_banner_and_line_say_landing() {
+        let p = pilot_of(json!({
+            "rth_countdown_s": 9.0, "low_battery_action": "land",
+            "banner": {"text_key": "pilot.banner.low_battery_land_in",
+                       "args": {"pct": 19, "need_pct": 20, "in_s": 10}}
+        }));
+        assert!(p.low_battery_countdown_land);
+        assert_eq!(
+            banner_text(p.banner.as_ref().unwrap(), 0).as_deref(),
+            Some("Battery reserve 19% (need 20%) · Landing in 10 s")
         );
     }
 }

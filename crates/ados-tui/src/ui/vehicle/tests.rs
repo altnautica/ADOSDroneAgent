@@ -725,7 +725,9 @@ fn the_alerts_name_the_pilots_low_battery_action_once_it_fired() {
         pilot_status(frame.clone(), 100),
     );
     let text = draw(&mut app, 160, 48);
-    assert!(!text.contains("Low battery: landing"), "{text}");
+    // The countdown says it lands; the fired alert is not shown yet.
+    assert!(text.contains("Low battery: landing in 4 s"), "{text}");
+    assert_eq!(text.matches("Low battery: landing").count(), 1, "{text}");
     frame["rth_countdown_s"] = Value::Null;
     land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
     let text = draw(&mut app, 160, 48);

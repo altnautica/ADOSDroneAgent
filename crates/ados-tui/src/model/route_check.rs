@@ -38,6 +38,10 @@ pub struct RouteCheck {
     pub pinch: Option<RoutePinch>,
     /// `to_seq` of the legs through cells not yet observed.
     pub unverified_legs: Vec<i64>,
+    /// Mission items the check cannot place (no position).
+    pub unchecked: Vec<i64>,
+    /// The mission is longer than the route the check holds.
+    pub truncated: bool,
 }
 
 fn num(v: &Value, key: &str) -> Option<f64> {
@@ -68,12 +72,17 @@ pub fn parse_route_check(v: &Value) -> Option<RouteCheck> {
         margin_m: num(v, "margin_m"),
         sigma_m: num(v, "sigma_m"),
         pinch: v.get("pinch").and_then(pinch),
-        unverified_legs: v
-            .get("unverified_legs")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_i64).collect())
-            .unwrap_or_default(),
+        unverified_legs: seqs(v, "unverified_legs"),
+        unchecked: seqs(v, "unchecked"),
+        truncated: v.get("truncated").and_then(Value::as_bool) == Some(true),
     })
+}
+
+fn seqs(v: &Value, key: &str) -> Vec<i64> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default()
 }
 
 /// `place_class` of the pilot frame; absent or unknown reads open.
@@ -127,7 +136,14 @@ pub struct RouteCheckReport {
 /// (`3→4`) with its clearance and the clearance it needs.
 pub fn route_check_report(rc: &RouteCheck) -> RouteCheckReport {
     let p = rc.pinch.as_ref();
-    let key = format!("route_check.{}", rc.state);
+    // An unverified route that left items unchecked says which, before the
+    // generic "not seen yet".
+    let state = match rc.state.as_str() {
+        "unverified" if !rc.unchecked.is_empty() => "unchecked",
+        "unverified" if rc.truncated => "truncated",
+        s => s,
+    };
+    let key = format!("route_check.{state}");
     let line = if rc.state == "infeasible" {
         let leg = p.map_or_else(
             || NO_DATA.to_string(),
@@ -144,7 +160,16 @@ pub fn route_check_report(rc: &RouteCheck) -> RouteCheckReport {
             ],
         )
     } else {
-        spec_text(&key, &[("required_m", &metres2(rc.required_m))])
+        let items = rc
+            .unchecked
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        spec_text(
+            &key,
+            &[("required_m", &metres2(rc.required_m)), ("items", &items)],
+        )
     };
     let pinch_at = p.map(|p| {
         let (n, e, h) = (metres1(p.ned[0]), metres1(p.ned[1]), metres1(-p.ned[2]));
@@ -257,6 +282,24 @@ mod tests {
             "Route not seen yet · slow near walls"
         );
         assert_eq!(route_check_report(&unseen).severity, ReportSeverity::Warn);
+        // Items with no position, then a mission longer than the feed, are
+        // named before the generic line.
+        let rc = parse_route_check(&json!({"state": "unverified", "unchecked": [2, 5],
+                                           "truncated": true}))
+        .unwrap();
+        assert_eq!((rc.unchecked.clone(), rc.truncated), (vec![2, 5], true));
+        assert_eq!(
+            route_check_report(&rc).line,
+            "Route not fully checked: no position for waypoint 2, 5 · slow near walls"
+        );
+        let long = RouteCheck {
+            unchecked: vec![],
+            ..rc
+        };
+        assert_eq!(
+            route_check_report(&long).line,
+            "Route not fully checked: the mission is too long · slow near walls"
+        );
     }
 
     #[test]

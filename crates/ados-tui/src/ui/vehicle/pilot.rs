@@ -103,7 +103,7 @@ fn countdown_rows(core: &Core, p: &Pilot, age_ms: u64, now_ms: u64, stale: bool)
         out.extend(phrase_rows(
             t,
             "Battery",
-            &low_battery_line(s - elapsed_s),
+            &low_battery_line(s - elapsed_s, p.low_battery_countdown_land),
             critical,
             stale,
         ));
