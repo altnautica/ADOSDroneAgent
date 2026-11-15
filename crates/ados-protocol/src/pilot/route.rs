@@ -88,4 +88,8 @@ pub struct RouteCheck {
     /// The mission has more navigation items than the route the check holds.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// The router's mission feed may not hold the FC's mission (not
+    /// downloaded yet, or out of step with the FC's count).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
 }

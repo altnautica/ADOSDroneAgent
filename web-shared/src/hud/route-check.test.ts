@@ -29,6 +29,7 @@ const check = (over: Partial<RouteCheck> = {}): RouteCheck => ({
   unverifiedLegs: [],
   unchecked: [],
   truncated: false,
+  stale: false,
   ...over,
 });
 
@@ -44,6 +45,7 @@ describe("the confined frame through the parser", () => {
       unverifiedLegs: [5, 6],
       unchecked: [],
       truncated: false,
+      stale: false,
     });
     expect(confined.speedCap).toEqual({ reason: "confined-near", vHMps: 0.5 });
     expect(confined.holdReason).toBe("route-infeasible");
@@ -58,8 +60,8 @@ describe("the confined frame through the parser", () => {
   it("drops a malformed route check and a malformed pinch", () => {
     expect(parseRouteCheck({ state: "maybe" })).toBeNull();
     expect(parseRouteCheck(null)).toBeNull();
-    const noPinch = parseRouteCheck({ state: "unverified", required_m: 0.6, margin_m: 0.5, sigma_m: null, pinch: { from_seq: 1 }, unverified_legs: [2, "x", 3], unchecked: [4, null], truncated: true });
-    expect(noPinch).toEqual({ state: "unverified", requiredM: 0.6, marginM: 0.5, sigmaM: null, pinch: null, unverifiedLegs: [2, 3], unchecked: [4], truncated: true });
+    const noPinch = parseRouteCheck({ state: "unverified", required_m: 0.6, margin_m: 0.5, sigma_m: null, pinch: { from_seq: 1 }, unverified_legs: [2, "x", 3], unchecked: [4, null], truncated: true, stale: true });
+    expect(noPinch).toEqual({ state: "unverified", requiredM: 0.6, marginM: 0.5, sigmaM: null, pinch: null, unverifiedLegs: [2, 3], unchecked: [4], truncated: true, stale: true });
   });
 });
 
@@ -99,7 +101,10 @@ describe("the route-check report", () => {
     });
   });
 
-  it("names the waypoints it could not place, then a mission too long to check", () => {
+  it("says a mission not downloaded yet, then names the waypoints it could not place, then a mission too long to check", () => {
+    expect(routeCheckReport(check({ state: "unverified", unchecked: [3], stale: true }))!.line).toBe(
+      "Route not fully checked: the mission is not downloaded yet · slow near walls",
+    );
     expect(routeCheckReport(check({ state: "unverified", unchecked: [3, 5], truncated: true }))!.line).toBe(
       "Route not fully checked: no position for waypoint 3, 5 · slow near walls",
     );

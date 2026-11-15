@@ -81,10 +81,10 @@ fn a_new_flight_checks_the_legs_an_earlier_flight_skipped() {
 }
 
 #[test]
-fn a_ground_station_jump_is_checked_from_where_the_vehicle_is() {
-    // The FC jumps from the way to item 2 straight to item 4: it flies
-    // (9, 0) → (25, 0) past the post at n 15, though the legs between the
-    // items after it are clear.
+fn a_ground_station_auto_is_checked_from_where_the_vehicle_is() {
+    // The FC enters AUTO at item 4 from n 9: it flies (9, 0) → (25, 0) past
+    // the post at n 15, though the legs between the items after it are
+    // clear.
     let mut w = World::new();
     confined(&mut w);
     w.airborne(copter::AUTO);
@@ -93,15 +93,80 @@ fn a_ground_station_jump_is_checked_from_where_the_vehicle_is() {
     map(&mut w, &area(&post(15.0)));
     route(&mut w, "active", 4, &LINE);
     run_seen(&mut w, 1500);
+    assert_held_on_3_to_4(&w);
+}
+
+/// Held on the leg from here to item 4, and the route check still says so
+/// while the vehicle holds.
+fn assert_held_on_3_to_4(w: &World) {
     assert_eq!(w.set_modes(copter::BRAKE), 1, "held");
     let s = w.p.state(w.now);
     assert_eq!(s.hold_reason.as_deref(), Some("route-infeasible"));
     assert_eq!(s.banner.expect("banner").args["leg"], "3→4");
+    let rc = s.route_check.expect("route_check");
+    assert_eq!(rc.state, RouteState::Infeasible, "{rc:?}");
+    let pinch = rc.pinch.expect("pinch");
+    assert_eq!((pinch.from_seq, pinch.to_seq), (3, 4));
+}
+
+/// A post 1.8–2.0 m east at n 15: clear of the items' line, on the line
+/// from (9, 3) to (25, 0).
+fn jump_post(n: f32, e: f32) -> bool {
+    (n - 15.0).abs() < 0.1 && (1.8..2.0).contains(&e)
+}
+
+#[test]
+fn a_ground_station_jump_is_checked_from_where_the_vehicle_is() {
+    let mut w = World::new();
+    confined(&mut w);
+    w.airborne(copter::AUTO);
+    w.pos = [9.0, 3.0, -5.0];
+    w.run(100);
+    map(&mut w, &area(&jump_post));
+    route(&mut w, "active", 2, &LINE);
+    run_seen(&mut w, 1500);
+    assert_eq!(w.set_modes(copter::BRAKE), 0, "the items' legs are clear");
+    // A ground station jumps the FC to item 4.
+    route(&mut w, "active", 4, &LINE);
+    run_seen(&mut w, 1500);
+    assert_held_on_3_to_4(&w);
+}
+
+/// A post 0.7–0.9 m east at n 15: clear of the leg 2→3, on the line from a
+/// vehicle drifted to (12, 1) to item 3.
+fn drift_post(n: f32, e: f32) -> bool {
+    (n - 15.0).abs() < 0.1 && (0.7..0.9).contains(&e)
+}
+
+#[test]
+fn item_to_item_the_leg_is_checked_from_the_item_before_not_the_vehicle() {
+    let mut w = flying_to_2(&LINE, &drift_post);
+    run_seen(&mut w, 1000);
+    assert_eq!(w.set_modes(copter::BRAKE), 0);
+    // The FC reaches item 2 and goes on to item 3, the vehicle drifted a
+    // metre east: the FC flies the leg 2→3, which keeps the clearance.
+    w.pos = [12.0, 1.0, -5.0];
+    w.run(100);
+    route(&mut w, "active", 3, &LINE);
+    run_seen(&mut w, 1500);
+    let s = w.p.state(w.now);
+    assert_eq!(
+        w.set_modes(copter::BRAKE),
+        0,
+        "no hold: {:?} {:?} {:?}",
+        s.hold_reason,
+        s.banner.as_ref().map(|b| &b.text_key),
+        s.route_check
+    );
+    assert_eq!(s.hold_reason, None);
+    let rc = s.route_check.expect("route_check");
+    assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
 }
 
 #[test]
 fn no_auto_without_the_position_the_leg_from_here_starts_at() {
-    let mut w = flying_to_2(&LINE, &post(15.0));
+    // The bridge 1→3 is clear: only the missing position keeps AUTO off.
+    let mut w = flying_to_2(&DOGLEG, &dogleg_post);
     assert_eq!(
         w.p.state(w.now).hold_reason.as_deref(),
         Some("route-infeasible")
@@ -121,4 +186,5 @@ fn no_auto_without_the_position_the_leg_from_here_starts_at() {
     );
     assert_eq!(w.set_modes(copter::AUTO), 0, "AUTO never commanded");
     assert_ne!(w.mode, copter::AUTO);
+    assert_eq!(s.hold_reason.as_deref(), Some("position-unverified"));
 }

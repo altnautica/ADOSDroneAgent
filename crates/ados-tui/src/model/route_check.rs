@@ -42,6 +42,8 @@ pub struct RouteCheck {
     pub unchecked: Vec<i64>,
     /// The mission is longer than the route the check holds.
     pub truncated: bool,
+    /// The mission feed may not hold the FC's mission.
+    pub stale: bool,
 }
 
 fn num(v: &Value, key: &str) -> Option<f64> {
@@ -75,6 +77,7 @@ pub fn parse_route_check(v: &Value) -> Option<RouteCheck> {
         unverified_legs: seqs(v, "unverified_legs"),
         unchecked: seqs(v, "unchecked"),
         truncated: v.get("truncated").and_then(Value::as_bool) == Some(true),
+        stale: v.get("stale").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -136,9 +139,10 @@ pub struct RouteCheckReport {
 /// (`3→4`) with its clearance and the clearance it needs.
 pub fn route_check_report(rc: &RouteCheck) -> RouteCheckReport {
     let p = rc.pinch.as_ref();
-    // An unverified route that left items unchecked says which, before the
-    // generic "not seen yet".
+    // An unverified route that was not fully checked says why (a feed not
+    // in step with the FC first), before the generic "not seen yet".
     let state = match rc.state.as_str() {
+        "unverified" if rc.stale => "stale",
         "unverified" if !rc.unchecked.is_empty() => "unchecked",
         "unverified" if rc.truncated => "truncated",
         s => s,
@@ -299,6 +303,14 @@ mod tests {
         assert_eq!(
             route_check_report(&long).line,
             "Route not fully checked: the mission is too long · slow near walls"
+        );
+        let rc = parse_route_check(&json!({"state": "unverified", "unchecked": [2],
+                                           "stale": true}))
+        .unwrap();
+        assert!(rc.stale);
+        assert_eq!(
+            route_check_report(&rc).line,
+            "Route not fully checked: the mission is not downloaded yet · slow near walls"
         );
     }
 

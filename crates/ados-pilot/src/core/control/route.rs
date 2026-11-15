@@ -77,8 +77,11 @@ pub struct Clearance {
 #[derive(Debug, Default)]
 pub struct Route {
     feed: RouteFeed,
-    /// Where the FC flies the item it was put in AUTO at from.
+    /// Where the FC flies the item it was put in AUTO at, or jumped to,
+    /// from (by the pilot or a ground station).
     pub origin: Option<Origin>,
+    /// Whether the FC flew the mission, and its item, at the last tick.
+    flown: Option<(bool, Option<u32>)>,
     /// The last check of the legs still ahead.
     pub legs: Vec<LegCheck>,
     /// Items ahead with no position.
@@ -185,6 +188,7 @@ impl Route {
                 .collect(),
             unchecked: self.unchecked.clone(),
             truncated: self.feed.truncated,
+            stale: self.feed.stale,
         })
     }
 }
@@ -237,21 +241,13 @@ impl Pilot {
     pub(in crate::core) fn check_route(&mut self, now_ms: u64) {
         self.note_sigma();
         let c = self.required_clearance(now_ms);
-        // While the FC flies the mission it flies the current item from
-        // where the vehicle is, however it got there (a ground station's
-        // AUTO or item jump too).
-        let live = match (self.route.origin, self.mission_flying(), self.mission_seq()) {
-            (None, true, Some(s)) => self.origin_here(s, now_ms),
-            _ => None,
-        };
-        let origin = self.route.origin.or(live);
         let gaps = &self.sup.stall.gaps;
         let ahead = legs_of(
             &self.route.feed.items,
             self.fc.home_ne(),
             &|s| gaps.iter().any(|g| g.seq == s),
             self.mission_seq(),
-            origin.as_ref(),
+            self.route.origin.as_ref(),
         );
         let checked = check_legs(&self.obstacles, &ahead.legs, c.required, now_ms);
         let r = &mut self.route;
@@ -305,6 +301,7 @@ impl Pilot {
                 self.route.logged = None;
             }
             self.route.origin = None;
+            self.route.flown = None;
             return;
         }
         // The origin served its item once the FC moved past it.
@@ -314,12 +311,23 @@ impl Pilot {
                 self.route.origin = None;
             }
         }
-        let key = (
-            seq,
-            self.mission_flying(),
-            self.sup.stall.gaps.len(),
-            self.route.origin,
-        );
+        // The FC flies the current item from where the vehicle is when it
+        // enters AUTO or jumps to an item other than the next (whoever
+        // commanded it); item to item it flies from the item before.
+        let flying = self.mission_flying();
+        let last = self.route.flown.replace((flying, seq));
+        if let (true, Some(s)) = (flying, seq) {
+            let entered = last.is_none_or(|(was, p)| !was || p.is_none());
+            let jumped = last
+                .and_then(|(_, p)| p)
+                .is_some_and(|p| s != p && Some(s) != self.next_item(p));
+            if entered || jumped {
+                if let Some(o) = self.origin_here(s, now_ms) {
+                    self.route.origin = Some(o);
+                }
+            }
+        }
+        let key = (seq, flying, self.sup.stall.gaps.len(), self.route.origin);
         let due = self.route.dirty
             || self.route.checked_key != Some(key)
             || self
@@ -344,6 +352,18 @@ impl Pilot {
             .iter()
             .find(|i| i.seq >= o.to_seq && (i.ned.is_some() || i.here))
             .is_some_and(|i| i.seq == s)
+    }
+
+    /// The item the FC flies after item `p` in its own order: the next
+    /// navigation item of the feed.
+    fn next_item(&self, p: u32) -> Option<u32> {
+        self.route
+            .feed
+            .items
+            .iter()
+            .map(|i| i.seq)
+            .filter(|&s| s > p)
+            .min()
     }
 
     /// Item `to_seq` flown from where the vehicle is now, labelled from the
