@@ -149,7 +149,11 @@ fn the_imu_feed_of_the_lidar_pose_is_a_readiness_item() {
         w.now,
     );
     assert_eq!(item(&w), Some((false, Severity::Warn)), "no nav.state yet");
-    w.p.on_feed("nav.state", &json!({"mode": "external_nav", "active_set": 1}), w.now);
+    w.p.on_feed(
+        "nav.state",
+        &json!({"mode": "external_nav", "active_set": 1}),
+        w.now,
+    );
     assert_eq!(item(&w), Some((false, Severity::Block)));
     w.p.on_feed(
         "plugin.world-engine.map_status",
@@ -194,7 +198,11 @@ fn map_status_north_unknown(w: &mut World) {
 fn a_gnss_launch_is_not_held_by_the_lidar_map_heading() {
     use ados_protocol::pilot::Severity;
     let mut w = World::new();
-    w.p.on_feed("nav.state", &json!({"mode": "off", "active_set": null, "gps_fix": 6}), w.now);
+    w.p.on_feed(
+        "nav.state",
+        &json!({"mode": "off", "active_set": null, "gps_fix": 6}),
+        w.now,
+    );
     map_status_north_unknown(&mut w);
     let [imu, heading] = nav_items(&w);
     assert_eq!(imu.map(|i| i.0), Some(true), "the FC IMU reads as waiting");
@@ -202,8 +210,7 @@ fn a_gnss_launch_is_not_held_by_the_lidar_map_heading() {
     assert!(!heading.0 && heading.1 == Severity::Warn, "{heading:?}");
     assert!(heading.2.contains("north_unknown"), "{heading:?}");
     assert!(
-        !w.p
-            .state(w.now)
+        !w.p.state(w.now)
             .readiness
             .iter()
             .any(|r| !r.ok && r.severity == Severity::Block && r.id.starts_with("nav_")),
@@ -217,7 +224,11 @@ fn a_gnss_launch_is_not_held_by_the_lidar_map_heading() {
 fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
     use ados_protocol::pilot::Severity;
     let mut w = World::new();
-    w.p.on_feed("nav.state", &json!({"mode": "external_nav", "active_set": 1}), w.now);
+    w.p.on_feed(
+        "nav.state",
+        &json!({"mode": "external_nav", "active_set": 1}),
+        w.now,
+    );
     map_status_north_unknown(&mut w);
     let [imu, heading] = nav_items(&w);
     assert_eq!(imu.map(|i| (i.0, i.1)), Some((true, Severity::Block)));
@@ -225,7 +236,10 @@ fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
     assert!(!heading.0 && heading.1 == Severity::Block, "{heading:?}");
     // A report without a mode keeps the last one.
     w.p.on_feed("nav.state", &json!({"active_set": 2}), w.now);
-    assert_eq!(nav_items(&w)[1].as_ref().map(|i| i.1), Some(Severity::Block));
+    assert_eq!(
+        nav_items(&w)[1].as_ref().map(|i| i.1),
+        Some(Severity::Block)
+    );
     w.p.on_feed(
         "plugin.world-engine.map_status",
         &json!({"imu_feed": {"state": "ok", "reason": null, "rate_hz": 100.0}}),
@@ -233,7 +247,10 @@ fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
     );
     let [imu, heading] = nav_items(&w);
     assert_eq!(imu.map(|i| i.0), Some(true));
-    assert_eq!(heading, None, "shown only while the map reports a heading state");
+    assert_eq!(
+        heading, None,
+        "shown only while the map reports a heading state"
+    );
 }
 
 fn ekf(flags: EkfStatusFlags, pos_horiz_variance: f32) -> MavMessage {

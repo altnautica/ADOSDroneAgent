@@ -121,7 +121,8 @@ mod tests {
     type Item = (bool, Severity, String);
 
     fn items(t: &NavImuTrack, mode: ControlMode, now: u64) -> [Option<Item>; 2] {
-        t.items(mode, now).map(|r| r.map(|r| (r.ok, r.severity, r.msg)))
+        t.items(mode, now)
+            .map(|r| r.map(|r| (r.ok, r.severity, r.msg)))
     }
 
     fn item(t: &NavImuTrack, mode: ControlMode, now: u64) -> Option<Item> {
@@ -264,8 +265,7 @@ mod tests {
             &json!({"imu_feed": {"state": "lost", "reason": "north_unknown", "rate_hz": 100.0}}),
             0,
         );
-        let severities =
-            |t: &NavImuTrack| items(t, ControlMode::Ados, 0).map(|i| i.map(|i| i.1));
+        let severities = |t: &NavImuTrack| items(t, ControlMode::Ados, 0).map(|i| i.map(|i| i.1));
         let warn = [Some(Severity::Warn), Some(Severity::Warn)];
         let block = [Some(Severity::Block), Some(Severity::Block)];
         assert_eq!(severities(&t), warn, "before any nav.state");
