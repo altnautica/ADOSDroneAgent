@@ -356,7 +356,12 @@ impl Pilot {
         self.failsafe_cause = self.fc_failsafe.then(|| self.fc_mode_cause());
         // A failsafe return the supervisor held and resumed is still the FC's
         // failsafe.
-        if let Some(cause) = self.sup.restore_failsafe.take().filter(|_| fam.is_rtl(mode)) {
+        if let Some(cause) = self
+            .sup
+            .restore_failsafe
+            .take()
+            .filter(|_| fam.is_rtl(mode))
+        {
             self.fc_failsafe = true;
             self.failsafe_cause = Some(cause);
         }

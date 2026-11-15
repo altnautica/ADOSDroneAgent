@@ -257,7 +257,12 @@ fn a_short_lift_after_take_control_pauses_and_fails_safe() {
     // The surface link goes quiet: the link-loss RTH fires.
     let (mut w, mut s) = take_control_and_lift();
     let silent = w.now;
-    fly_until(&mut w, &mut s, |w, _| w.mode == copter::SMART_RTL, |_, _| {});
+    fly_until(
+        &mut w,
+        &mut s,
+        |w, _| w.mode == copter::SMART_RTL,
+        |_, _| {},
+    );
     assert!(w.now - silent <= 10_500, "link loss after its window");
 
     // The battery runs low: the low-battery RTH fires.

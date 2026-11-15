@@ -252,15 +252,7 @@ impl Pilot {
                 let k = RESUME_PROBE_MPS / d[0].hypot(d[1]);
                 let ask = [d[0] * k, d[1] * k];
                 let a_h = self.limits_now(now_ms).a_h;
-                let b = brake_limit(
-                    &self.obstacles,
-                    pos,
-                    [l.vn, l.ve],
-                    ask,
-                    a_h,
-                    margin,
-                    now_ms,
-                );
+                let b = brake_limit(&self.obstacles, pos, [l.vn, l.ve], ask, a_h, margin, now_ms);
                 !b.cut && !b.close
             }
             None => self

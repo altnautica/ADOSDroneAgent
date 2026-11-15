@@ -224,7 +224,14 @@ impl Pilot {
         Some(d)
     }
 
-    fn raise_stall(&mut self, kind: Kind, seq: Option<u32>, d_m: f32, progress_m: f32, now_ms: u64) {
+    fn raise_stall(
+        &mut self,
+        kind: Kind,
+        seq: Option<u32>,
+        d_m: f32,
+        progress_m: f32,
+        now_ms: u64,
+    ) {
         let cfg = &self.settings.pilot;
         let window_s = cfg.stall_window_s;
         let deadline_ms = match kind {
@@ -275,7 +282,11 @@ impl Pilot {
     /// Skip the stalled waypoint: the FC's current item becomes the next one
     /// and AUTO carries on, with the skipped item recorded as a coverage gap.
     /// The last item has no next one: the vehicle returns.
-    pub(in crate::core) fn mission_skip(&mut self, by_operator: bool, now_ms: u64) -> Result<(), String> {
+    pub(in crate::core) fn mission_skip(
+        &mut self,
+        by_operator: bool,
+        now_ms: u64,
+    ) -> Result<(), String> {
         if !self.fc.armed {
             return Err("disarmed".into());
         }

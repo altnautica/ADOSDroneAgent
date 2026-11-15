@@ -96,7 +96,10 @@ fn a_stalled_mission_alerts_holds_and_skips_after_the_countdown() {
         let mut w = stuck_in_auto(3);
         let t0 = w.now;
         w.run(14_800);
-        assert!(w.p.state(w.now).mission_stall.is_none(), "no stall before 15 s");
+        assert!(
+            w.p.state(w.now).mission_stall.is_none(),
+            "no stall before 15 s"
+        );
         assert_eq!(w.set_modes(copter::BRAKE), 0);
         w.run(400);
         let s = w.p.state(w.now);
@@ -109,7 +112,10 @@ fn a_stalled_mission_alerts_holds_and_skips_after_the_countdown() {
         assert!((44.5..=45.0).contains(&in_s), "{in_s}");
         let raised = w.now + 45_000 - (in_s * 1000.0).round() as u64 - t0;
         assert!((14_800..=15_200).contains(&raised), "raised at {raised} ms");
-        assert_eq!(banner_key(&w).as_deref(), Some("pilot.banner.mission_stalled"));
+        assert_eq!(
+            banner_key(&w).as_deref(),
+            Some("pilot.banner.mission_stalled")
+        );
         // BRAKE, then the GUIDED hold as `pilot`.
         assert_eq!(w.set_modes(copter::BRAKE), 1);
         assert_eq!(w.mode, copter::GUIDED);
@@ -118,7 +124,10 @@ fn a_stalled_mission_alerts_holds_and_skips_after_the_countdown() {
         // The countdown runs to the automatic skip at 60 s.
         let skip_at = t0 + 60_000;
         w.run(skip_at - 300 - w.now);
-        assert!(set_currents(&w).is_empty(), "no skip before the countdown ends");
+        assert!(
+            set_currents(&w).is_empty(),
+            "no skip before the countdown ends"
+        );
         w.run(600);
         assert_eq!(set_currents(&w), vec![4]);
         assert_eq!(w.mode, copter::AUTO);
@@ -133,7 +142,10 @@ fn a_stalled_mission_alerts_holds_and_skips_after_the_countdown() {
                 at_ms: s.banner.as_ref().unwrap().until_ms - crate::flows::BANNER_MS
             }]
         );
-        assert_eq!(banner_key(&w).as_deref(), Some("pilot.banner.mission_wp_skipped"));
+        assert_eq!(
+            banner_key(&w).as_deref(),
+            Some("pilot.banner.mission_wp_skipped")
+        );
     });
     assert!(logs.contains("pilot_mission_stall"), "{logs}");
     assert!(logs.contains("pilot_mission_skip"), "{logs}");
@@ -200,7 +212,10 @@ fn two_automatic_skips_in_a_row_then_the_stall_holds_for_the_operator() {
     w.run(15_400);
     let stall = w.p.state(w.now).mission_stall.expect("a third stall");
     assert_eq!(stall.seq, Some(5));
-    assert_eq!(stall.skip_in_s, None, "no countdown after two automatic skips");
+    assert_eq!(
+        stall.skip_in_s, None,
+        "no countdown after two automatic skips"
+    );
     assert_eq!(
         banner_key(&w).as_deref(),
         Some("pilot.banner.mission_stalled_hold")
@@ -216,7 +231,11 @@ fn two_automatic_skips_in_a_row_then_the_stall_holds_for_the_operator() {
 
 #[test]
 fn delay_and_loiter_items_never_stall() {
-    for (cmd, ned) in [(93u16, None), (19, Some([0.5, 0.0, -5.0])), (17, Some([1.0, 0.0, -5.0]))] {
+    for (cmd, ned) in [
+        (93u16, None),
+        (19, Some([0.5, 0.0, -5.0])),
+        (17, Some([1.0, 0.0, -5.0])),
+    ] {
         let mut w = World::new();
         w.airborne(copter::AUTO);
         mission_target(&mut w, 2, 4, cmd, ned);
@@ -238,7 +257,10 @@ fn a_blocked_return_alerts_then_lands_in_place() {
     assert_eq!(stall.kind, "return");
     assert_eq!(stall.seq, None);
     assert_eq!(s.hold_reason.as_deref(), Some("return-blocked"));
-    assert_eq!(banner_key(&w).as_deref(), Some("pilot.banner.return_blocked"));
+    assert_eq!(
+        banner_key(&w).as_deref(),
+        Some("pilot.banner.return_blocked")
+    );
     assert_eq!(w.mode, copter::GUIDED);
     w.run(t0 + 59_800 - w.now);
     assert_eq!(w.set_modes(copter::LAND), 0);
@@ -271,7 +293,10 @@ fn the_return_is_smart_rtl_and_lands_when_the_fc_refuses_it() {
     assert_eq!(w.set_modes(copter::LAND), 1);
     assert_eq!(w.mode, copter::LAND);
     assert_eq!(w.set_modes(copter::RTL), 0);
-    assert_eq!(banner_key(&w).as_deref(), Some("pilot.banner.return_land_fallback"));
+    assert_eq!(
+        banner_key(&w).as_deref(),
+        Some("pilot.banner.return_land_fallback")
+    );
     assert!(logs.contains("pilot_return"), "{logs}");
 
     // No answer and no mode change within 1 s: land.
@@ -301,7 +326,10 @@ fn an_obstacle_ahead_in_auto_brakes_within_one_replan_and_resumes_once_clear() {
     w.vel = [3.0, 0.0, 0.0];
     let ((), logs) = with_logs(|| scan_for(&mut w, &wall_scan(2.0), 220));
     assert_eq!(w.set_modes(copter::BRAKE), 1);
-    assert_eq!(banner_key(&w).as_deref(), Some("pilot.banner.obstacle_close"));
+    assert_eq!(
+        banner_key(&w).as_deref(),
+        Some("pilot.banner.obstacle_close")
+    );
     assert!(logs.contains("pilot_auto_brake"), "{logs}");
     w.vel = [0.0; 3];
     scan_for(&mut w, &wall_scan(2.0), 500);
@@ -335,7 +363,10 @@ fn the_low_battery_countdown_is_announced_and_logged() {
     assert_eq!(b.args["need_pct"], json!(20.0));
     assert_eq!(b.args["in_s"], json!(10));
     assert!(s.rth_countdown_s.is_some());
-    assert!(logs.contains("pilot_battery_reserve") && logs.contains("countdown"), "{logs}");
+    assert!(
+        logs.contains("pilot_battery_reserve") && logs.contains("countdown"),
+        "{logs}"
+    );
     let ((), logs) = with_logs(|| {
         w.p.fc.battery_pct = Some(15.0);
         w.run(10_100);
