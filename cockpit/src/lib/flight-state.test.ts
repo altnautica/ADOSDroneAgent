@@ -35,6 +35,7 @@ const base: ChipFacts = {
   fcFailsafe: false,
   speedCapMps: null,
   positionUnverified: null,
+  speedCapReason: null,
   ageMs: 100,
 };
 

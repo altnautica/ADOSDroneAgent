@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import layout from "../cockpit-spec/layout.json";
 import { parsePilotState, type MissionStall, type PilotState } from "./cockpit-frames";
-import { gapSeqs, missionStallActions, missionStallOverlay, missionStallVoiceKey } from "./mission-stall";
+import { gapSeqs, missionStallActions, missionStallOverlay, missionStallVoiceKey, stallShadowsBanner } from "./mission-stall";
 import { specText } from "./spec-text";
 import { pillAlerts } from "./status-pill";
 
@@ -144,5 +144,22 @@ describe("the stall in the status pill", () => {
   it("drops it with a stale pilot state or no stall", () => {
     expect(pillAlerts({ ...base, pilotAgeMs: null, missionStall: golden.missionStall }).map((a) => a.id)).toEqual(["pilot_not_answering"]);
     expect(pillAlerts({ ...base, pilotAgeMs: 100, missionStall: null })).toEqual([]);
+  });
+});
+
+describe("the stall overlay shadows its banners", () => {
+  const shadowed = ["pilot.banner.mission_stalled", "pilot.banner.mission_stalled_hold", "pilot.banner.return_blocked"];
+
+  it("hides the stall banners while the overlay shows", () => {
+    for (const key of shadowed) expect(stallShadowsBanner(key, golden.missionStall)).toBe(true);
+    expect(stallShadowsBanner(golden.banner?.textKey, golden.missionStall)).toBe(true);
+    expect(stallShadowsBanner("pilot.banner.return_blocked", stall({ kind: "return" }))).toBe(true);
+  });
+
+  it("keeps every banner without a stall, and other banners with one", () => {
+    for (const key of shadowed) expect(stallShadowsBanner(key, null)).toBe(false);
+    expect(stallShadowsBanner("pilot.banner.route_infeasible", golden.missionStall)).toBe(false);
+    expect(stallShadowsBanner("pilot.banner.mission_wp_skipped", golden.missionStall)).toBe(false);
+    expect(stallShadowsBanner(null, golden.missionStall)).toBe(false);
   });
 });
