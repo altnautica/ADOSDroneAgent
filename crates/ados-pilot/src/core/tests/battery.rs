@@ -307,6 +307,7 @@ fn take_control_is_refused_on_every_guarded_block() {
 fn a_smart_rtl_request_is_dropped_by_an_operator_motion_action() {
     for action in ["take_control", "goto", "land"] {
         let mut w = smart_rtl_pending();
+        let before = w.set_modes(copter::LAND);
         let r = if action == "goto" {
             let m = MavMessage::HOME_POSITION(HOME_POSITION_DATA {
                 latitude: 120_000_000,
@@ -322,18 +323,18 @@ fn a_smart_rtl_request_is_dropped_by_an_operator_motion_action() {
             w.action(action)
         };
         assert!(matches!(&r, Reply::Action(a) if a.ok), "{action}: {r:?}");
-        let lands = w.set_modes(copter::LAND);
+        // `land` while the FC holds the refused request: the operator's own
+        // LAND, once; no other action commands one.
+        let own = usize::from(action == "land");
+        assert_eq!(w.set_modes(copter::LAND), before + own, "{action}");
         w.run(3_000);
         assert_eq!(
             w.set_modes(copter::LAND),
-            lands,
+            before + own,
             "{action}: no Land fallback after the operator's action"
         );
-        assert_ne!(w.mode, copter::LAND, "{action}");
         match action {
-            // The pilot lands the vehicle itself: the operator's land, and
-            // no FC LAND above the switch height.
-            "land" => assert!(w.p.landing),
+            "land" => assert_eq!(w.mode, copter::LAND),
             "goto" => assert_eq!(w.p.owner(), Owner::Goto),
             _ => assert_eq!(w.p.owner(), Owner::Pilot),
         }
