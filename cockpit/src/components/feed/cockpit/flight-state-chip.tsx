@@ -5,6 +5,8 @@
 // bar; past it the text ends in an ellipsis and the full text shows on hover
 // (its tooltip) or on a tap, which opens it in a small panel whose press
 // opens the Mode sheet. A tap on a chip that fits opens the Mode sheet.
+// Beside it, a "Confined" badge while the pilot flies the confined-place
+// profile.
 
 import { useRef, useState } from "react";
 
@@ -14,6 +16,7 @@ import { chipButton, chipFullText, chipLines, chipLineTextColor } from "@/lib/ch
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { CHIP_MAX_FRAC, HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { confinedChipText } from "@/shared/hud/route-check";
 import { specText } from "@/shared/hud/spec-text";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -23,6 +26,7 @@ import { useNavStreamStore } from "@/stores/nav-stream-store";
 export function FlightStateChip({ compact = false, fit = false }: { compact?: boolean; fit?: boolean }) {
   const chip = useFlightChip();
   const radioFallback = useNavStreamStore((s) => s.radioFallback);
+  const confined = useNavStreamStore((s) => (s.pilot ? confinedChipText(s.pilot.data) : null));
   const openSheet = useCockpitUiStore((s) => s.openSheet);
   const textRef = useRef<HTMLSpanElement>(null);
   const [fullAt, setFullAt] = useState<DOMRect | null>(null);
@@ -79,6 +83,15 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
           ) : null}
         </span>
       </button>
+      {confined ? (
+        <span
+          data-testid="confined-chip"
+          className="h-[var(--fs-control)] shrink-0 whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] px-[8px] font-semibold leading-[var(--fs-control)]"
+          style={{ color: "var(--fs-text)" }}
+        >
+          {confined}
+        </span>
+      ) : null}
       {button ? (
         <button
           type="button"

@@ -41,10 +41,19 @@ describe("the countdown card on the golden stall frame", () => {
     }
   });
 
+  it("hides the stall's own banner while the stall shows", () => {
+    expect(golden.banner?.textKey).toBe("pilot.banner.mission_stalled");
+    expect(countdownCard(golden, 0, NOW)?.banner).toBeNull();
+    expect(render()).not.toContain('data-testid="countdown-banner"');
+    const blocked = parsePilotState({ ...raw, banner: { text_key: "pilot.banner.return_blocked", args: { in_s: 12 }, until_ms: null }, mission_stall: { kind: "return", seq: null, wp_label: null, since_ms: 1, skip_in_s: 12, window_s: 20 } })!;
+    expect(countdownCard(blocked, 0, NOW)?.banner).toBeNull();
+  });
+
   it("shows the pilot's banner in the spec's words while its slot lasts", () => {
-    expect(countdownCard(golden, 0, NOW)?.banner).toBe("No progress to waypoint 3 · Holding · Skipping in 45 s");
-    expect(render()).toContain('data-testid="countdown-banner"');
-    expect(countdownCard(golden, 0, 1793960003001)?.banner).toBeNull();
+    const unstalled = { ...golden, missionStall: null };
+    expect(countdownCard(unstalled, 0, NOW)?.banner).toBe("No progress to waypoint 3 · Holding · Skipping in 33 s");
+    expect(render(unstalled)).toContain('data-testid="countdown-banner"');
+    expect(countdownCard(unstalled, 0, 1793960003001)).toBeNull();
   });
 
   it("counts the stall down by the frame's age between polls", () => {

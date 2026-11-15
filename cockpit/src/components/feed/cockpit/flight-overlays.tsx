@@ -3,7 +3,9 @@
 // ring, "Sticks are with <surface>" with its hold-to-take-over, the link-loss
 // countdown, the cancellable low-battery RTH countdown, and the persistent
 // mission stall (Skip waypoint, Return, Land here; Land here only for a
-// blocked return). Voice prompts speak handovers, RTH, low battery, a stall,
+// blocked return) with the stall's own banners hidden behind it, and the
+// route-check report while the confined route is too tight. Voice prompts
+// speak handovers, RTH, low battery, a stall,
 // a skipped waypoint and mission-state changes. They stack in
 // the Feed's alert column, under the alert cards and above the layer chips,
 // so none covers another. Everything here reads a fresh pilot frame only: a
@@ -12,6 +14,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { RouteCheckCard } from "@/components/feed/cockpit/route-check-card";
 import { HoldButton } from "@/components/ui/hold-button";
 import { sticksElsewhere, useFreshPilot } from "@/hooks/use-pilot";
 import { useNow } from "@/hooks/use-now";
@@ -19,7 +22,7 @@ import { bannerSeverity, holdMs, launchRunning, launchStepName, lowBatteryLine, 
 import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/shared/hud/link-loss";
-import { missionStallOverlay, type MissionStallButton } from "@/shared/hud/mission-stall";
+import { missionStallOverlay, stallShadowsBanner, type MissionStallButton } from "@/shared/hud/mission-stall";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
 import { severityTextColor } from "@/shared/hud/status-pill";
@@ -88,7 +91,9 @@ export function FlightOverlays() {
   }, [pilot]);
 
   if (!pilot) return null;
-  const banner = visibleBanner(pilot.banner, bannerSeen?.at ?? now, now);
+  // The stall overlay carries the live countdown: its own banners stay
+  // hidden while it shows.
+  const banner = stallShadowsBanner(pilot.banner?.textKey, pilot.missionStall) ? null : visibleBanner(pilot.banner, bannerSeen?.at ?? now, now);
   const elsewhere = sticksElsewhere(pilot);
   const seq = launchRunning(pilot.sequence) ? pilot.sequence : null;
   const stall = missionStallOverlay(pilot.missionStall);
@@ -169,6 +174,7 @@ export function FlightOverlays() {
           {linkLossLine(pilot)}
         </div>
       ) : null}
+      {pilot.routeCheck?.state === "infeasible" ? <RouteCheckCard check={pilot.routeCheck} className="chrome-panel pointer-events-auto w-full max-w-[704px]" /> : null}
       {banner ? (
         <div role="status" data-testid="handover-banner" className="chrome-panel w-full max-w-[704px] px-[14px] py-[8px] text-center text-[16px] font-semibold">
           {banner}

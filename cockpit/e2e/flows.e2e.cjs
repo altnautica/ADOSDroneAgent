@@ -3,9 +3,12 @@
 // a running launch's step and Abort (`sequence`), the Mode sheet's pending
 // pick (`mode-pending`), a tap on a hold control reading "Keep holding"
 // (`hold-hint`), Escape / a press outside / the controller's back closing
-// the topmost sheet (`overlay-close`), and the mission stall overlay from the
+// the topmost sheet (`overlay-close`), the mission stall overlay from the
 // golden stall frame with its actions and the left column's Return home
-// reaching the pilot's `rth` (`mission-stall`).
+// reaching the pilot's `rth` (`mission-stall`), and the confined-place
+// profile from the golden confined frame: the Confined badge, the cap, the
+// route-check report, the stall overlay hiding its own banner and the Launch
+// sheet's place picker (`confined`).
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -15,6 +18,9 @@ const { GROUND_SHEETS, PILOT_AIR, PILOT_GROUND, SHEET, SHOTS, debugOnFail, holdO
 
 const STALL_FRAME = JSON.parse(
   fs.readFileSync(path.join(__dirname, "../../crates/ados-control/tests/fixtures/pilot-frame-stall.json"), "utf8"),
+);
+const CONFINED_FRAME = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "../../crates/ados-control/tests/fixtures/pilot-frame-confined.json"), "utf8"),
 );
 
 /** A stalled pilot (no frame for more than `stale_after_ms`, 2 s) clears
@@ -198,8 +204,56 @@ async function missionStallCase(browser) {
   console.log("mission stall: overlay from the golden frame, Skip/Return/Land send mission_skip/rth/land; Return home sends the pilot's rth");
 }
 
+/** The golden confined frame in the air: the Confined badge beside the chip,
+ *  the confined-near cap on its line, the too-tight route's report with its
+ *  pinch, and the route banner. The golden stall frame: the overlay hides
+ *  the stall's own banner. On the ground, the Launch sheet's place picker
+ *  explains each class with the margin it flies and shows the route check. */
+async function confinedCase(browser) {
+  const config = (page) =>
+    page.route("**/api/config", (route) =>
+      route.fulfill({ contentType: "application/json", body: JSON.stringify({ agent: { name: "bench-drone" }, pilot: { obstacle_margin_m: 0.3, prop_tip_radius_m: 0.377 } }) }),
+    );
+  // The golden banner slots are the frames' own past times; keep them on screen.
+  const air = { ...CONFINED_FRAME, banner: { ...CONFINED_FRAME.banner, until_ms: null } };
+  const sim = { pilot: air, airborne: true };
+  const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800, beforeGoto: config }, sim);
+  const card = page.getByTestId("route-check-card");
+  await debugOnFail(page, "confined", () => card.waitFor({ state: "visible", timeout: 5000 }));
+  assert.equal(await page.getByTestId("confined-chip").innerText(), "Confined");
+  assert.match(await page.getByTestId("flight-state-chip").innerText(), /Near the clearance limit: 0\.5 m\/s max/);
+  assert.match(await card.innerText(), /Route too tight: leg 3→4 has 0\.52 m, needs 0\.58 m/);
+  assert.match(await card.innerText(), /At N 41\.3 m, E -17\.5 m, height 2\.0 m/);
+  assert.match(await page.getByTestId("handover-banner").innerText(), /Route too tight at leg 3→4: 0\.52 m of 0\.58 m/);
+  await page.screenshot({ path: path.join(SHOTS, "confined-air.png") });
+
+  sim.pilot = { ...STALL_FRAME, banner: { ...STALL_FRAME.banner, until_ms: null } };
+  await card.waitFor({ state: "detached", timeout: 3000 });
+  await page.getByTestId("mission-stall-banner").waitFor({ state: "visible", timeout: 3000 });
+  assert.equal(await page.getByTestId("handover-banner").count(), 0, "the stall's own banner hides behind the overlay");
+  await page.screenshot({ path: path.join(SHOTS, "stall-banner-hidden.png") });
+
+  sim.airborne = false;
+  sim.pilot = { ...PILOT_GROUND, mission: { state: "loaded", seq: 0, total: 6 } };
+  await page.getByTestId("mission-stall-banner").waitFor({ state: "detached", timeout: 3000 });
+  await page.getByTestId("left-takeoff").click();
+  await sheetSettled(page);
+  const explain = page.getByTestId("launch-place-explain");
+  assert.equal(await page.locator('[data-place="open"]').getAttribute("aria-checked"), "true");
+  assert.equal(await explain.innerText(), "Open sites: 0.5 m from obstacles.");
+  await page.locator('[data-place="confined"]').click();
+  assert.match(await explain.innerText(), /^Mines, tunnels and rooms: 0\.48 m from walls/);
+  await page.screenshot({ path: path.join(SHOTS, "launch-place.png") });
+  sim.pilot = { ...sim.pilot, place_class: "confined", route_check: CONFINED_FRAME.route_check };
+  await page.locator(SHEET).getByTestId("route-check-card").waitFor({ state: "visible", timeout: 3000 });
+  await page.screenshot({ path: path.join(SHOTS, "launch-route-check.png") });
+  await ctx.close();
+  console.log("confined: badge, cap, route-check report and route banner; stall hides its banner; launch place picker and route check");
+}
+
 runCases({
   "mission-stall": missionStallCase,
+  confined: confinedCase,
   "flow-stale": flowStaleCase,
   sequence: sequenceCase,
   "mode-pending": modePendingCase,

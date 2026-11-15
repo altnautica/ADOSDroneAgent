@@ -4,7 +4,9 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import { CountdownCard } from "@/components/panels/countdown-card";
+import { PlaceCard } from "@/components/panels/place-card";
 import { BATTERY_POLL_MS, useBatteryHealth } from "@/hooks/use-battery-health";
+import { useConfig } from "@/hooks/use-config";
 import { navPilot, useFlightChip } from "@/hooks/use-flight-chip";
 import { HEARTBEAT_POLL_MS, useHeartbeat } from "@/hooks/use-heartbeat";
 import { useNavStatus } from "@/hooks/use-nav-status";
@@ -20,11 +22,13 @@ import { chipTextColor } from "@/lib/chip-color";
 import { countdownCard } from "@/lib/countdown-card";
 import { batteryFixAlertId, freshNavFrames, homePill, homeStatusLines, poseAgeText, type StatusFull } from "@/lib/home-status";
 import { sendPilotAction } from "@/lib/pilot-action";
+import { placeCard } from "@/lib/place-card";
 import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
 import { severityClasses } from "@/shared/format";
 import { BATTERY_FAILSAFE_FIX_KEY, BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
 import { specText } from "@/shared/hud/spec-text";
+import { placeMargins } from "@/shared/place-class";
 import { rerunStep } from "@/shared/setup-wizard/client";
 
 const STATUS_FULL_POLL_MS = 5_000;
@@ -88,12 +92,14 @@ const PILL_TONE = {
 } as const;
 
 /** The countdown card (the pilot's banner, a low-battery return, a mission
- *  stall, each with its actions), the cockpit's status pill and its alert
- *  list, plus the link-loss, AGL, sticks and time-to-reserve lines. */
+ *  stall, each with its actions), the place card (the place-class picker, the
+ *  Confined badge and the route check), the cockpit's status pill and its
+ *  alert list, plus the link-loss, AGL, sticks and time-to-reserve lines. */
 function VehicleStatus() {
   const nav = useNavStatus();
   const heartbeat = useHeartbeat();
   const tel = useVehicleTelemetry();
+  const config = useConfig();
   const battery = useBatteryHealth();
   const statusFull = useResource<StatusFull>("status-full", "/api/status/full", STATUS_FULL_POLL_MS);
   const now = useNow(1_000);
@@ -127,9 +133,11 @@ function VehicleStatus() {
     battery: liveData(battery, BATTERY_POLL_MS, now) ?? null,
   });
   const card = countdownCard(fresh.pilot, inputs.pilotAgeMs ?? 0, now);
+  const place = placeCard(fresh.pilot, placeMargins(config.data));
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="vehicle-status">
       {card ? <CountdownCard card={card} send={sendPilotAction} /> : null}
+      {place ? <PlaceCard card={place} send={sendPilotAction} /> : null}
       <details className="group">
         <summary
           className={cn(

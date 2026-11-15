@@ -2,13 +2,14 @@
 // the operator's way out. It shows the pilot's banner (spec text, while its
 // slot lasts), the low-battery return countdown with Cancel (`rth_cancel`),
 // and the persistent mission stall (`mission-stall`: Skip waypoint, Return,
-// Land here; Land here only for a blocked return). The countdowns read the
-// last polled frame minus its age, so they keep counting between polls. Null
-// with nothing to show.
+// Land here; Land here only for a blocked return). While the stall shows, its
+// own banners stay hidden: the stall carries the live countdown. The
+// countdowns read the last polled frame minus its age, so they keep counting
+// between polls. Null with nothing to show.
 
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { countdownS } from "@/shared/hud/format";
-import { missionStallOverlay, type MissionStallOverlay } from "@/shared/hud/mission-stall";
+import { missionStallOverlay, stallShadowsBanner, type MissionStallOverlay } from "@/shared/hud/mission-stall";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
 
 export interface CountdownButton {
@@ -37,7 +38,7 @@ export function countdownCard(pilot: PilotState | null, ageMs: number, nowMs: nu
   if (!pilot) return null;
   const elapsedS = Math.max(0, ageMs) / 1000;
   const b = pilot.banner;
-  const banner = b && (b.untilMs === null || nowMs <= b.untilMs) ? bannerText(b) : null;
+  const banner = b && (b.untilMs === null || nowMs <= b.untilMs) && !stallShadowsBanner(b.textKey, pilot.missionStall) ? bannerText(b) : null;
   const lowBattery =
     pilot.rthCountdownS !== null
       ? {

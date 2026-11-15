@@ -1,25 +1,32 @@
 // The Launch sheet, opened by the left column's Take off (or a long-press on
-// a map while on the ground, prefilled with that point): the take-off
+// a map while on the ground, prefilled with that point): the place class
+// (open or confined, with the obstacle margin it flies), the take-off
 // altitude, what to do once there (hold, a skill, the loaded mission, or a
 // point), and an optional "when done" action. Holding Launch passes the
-// pre-flight checklist gate (the first arm of a session) and sends the
-// pilot's `launch` action; the sequence's progress (checks → arm → take off →
-// after) shows as a step strip, and Abort brakes to a hold (or disarms while
-// still on the ground). Ranges, defaults and texts come from the spec.
+// pre-flight checklist gate (the first arm of a session), sets a changed place
+// class (`place_class:<class>`) and sends the pilot's `launch` action; the
+// sequence's progress (checks → arm → take off → after) shows as a step
+// strip, and Abort brakes to a hold (or disarms while still on the ground).
+// In the confined class the pilot's route check of the loaded mission shows
+// below the place. Ranges, defaults and texts come from the spec.
 
 import { useEffect, useMemo, useState } from "react";
 
+import { RouteCheckCard } from "@/components/feed/cockpit/route-check-card";
 import { HoldButton } from "@/components/ui/hold-button";
 import { Sheet } from "@/components/ui/sheet";
 import { usePilot } from "@/hooks/use-pilot";
-import { getParam } from "@/lib/api";
+import { getConfig, getParam } from "@/lib/api";
 import { LAUNCH, LAUNCH_STEPS, launchArgs, launchRunning, launchStepText, type LaunchAfter, type WhenDone } from "@/lib/cockpit-flow";
 import { BUILTIN_BY_ID } from "@/lib/cockpit-spec";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { skillVisibleFor } from "@/lib/skills";
 import { cn } from "@/lib/utils";
+import { PLACE_CLASSES, type PlaceClass } from "@/shared/hud/cockpit-frames";
 import { refusalText } from "@/shared/hud/refusal";
+import { placeClassAction, placeClassLabel } from "@/shared/hud/route-check";
 import { specText } from "@/shared/hud/spec-text";
+import { placeExplainLine, placeMargins, type PlaceMargins } from "@/shared/place-class";
 import { abortLaunch, useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { requirePreflight } from "@/stores/preflight-store";
@@ -107,6 +114,10 @@ export function LaunchSheet() {
   const [gotoE, setGotoE] = useState<number | null>(prefill?.e ?? null);
   const [whenDone, setWhenDone] = useState<WhenDone>("none");
   const result = useCockpitUiStore((s) => s.launchRefusal);
+  // Null until the operator picks one: the pilot's own class stands.
+  const [placePick, setPlacePick] = useState<PlaceClass | null>(null);
+  const place = placePick ?? pilot?.placeClass ?? "open";
+  const [margins, setMargins] = useState<PlaceMargins>({ obstacleMarginM: null, propTipRadiusM: null });
 
   // A plane takes off to its own TKOFF_ALT.
   useEffect(() => {
@@ -117,6 +128,16 @@ export function LaunchSheet() {
     });
     return () => ac.abort();
   }, [plane]);
+
+  // The configured obstacle margin and prop-tip radius, for the explain line.
+  useEffect(() => {
+    const ac = new AbortController();
+    getConfig(ac.signal).then(
+      (c) => setMargins(placeMargins(c)),
+      () => {},
+    );
+    return () => ac.abort();
+  }, []);
 
   const behaviors = useMemo(
     () =>
@@ -152,9 +173,10 @@ export function LaunchSheet() {
       });
       const { setLaunchRefusal } = useCockpitUiStore.getState();
       setLaunchRefusal(null);
-      void sendPilotAction("launch", args).then((r) =>
-        setLaunchRefusal(r.ok ? null : specText("flow.launch.refused", { reason: refusalText(r.err) })),
-      );
+      const refused = (r: { ok: boolean; err?: string }) => setLaunchRefusal(r.ok ? null : specText("flow.launch.refused", { reason: refusalText(r.err) }));
+      // The place class first, only when it changes; a refusal stops the launch.
+      const setPlace = pilot && place !== pilot.placeClass ? sendPilotAction(placeClassAction(place)) : Promise.resolve({ ok: true });
+      void setPlace.then((r) => (r.ok ? sendPilotAction("launch", args).then(refused) : refused(r)));
     });
 
   return (
@@ -187,6 +209,28 @@ export function LaunchSheet() {
       <LaunchSteps />
       {result ? <p role="status" className="text-[0.8rem] text-err">{result}</p> : null}
       <div className="flex flex-col gap-[0.6rem] py-[0.4rem]">
+        <div className="flex flex-col gap-[0.3rem]">
+          <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted-foreground">{specText("flow.launch.place_class")}</span>
+          <div className="flex gap-[0.3rem]" role="radiogroup" aria-label={specText("flow.launch.place_class")} data-testid="launch-place">
+            {PLACE_CLASSES.map((c) => (
+              <button
+                key={c}
+                type="button"
+                role="radio"
+                aria-checked={place === c}
+                data-place={c}
+                onClick={() => setPlacePick(c)}
+                className={cn("min-h-[48px] flex-1 rounded-lg border text-[0.85rem] font-semibold", place === c ? "border-primary bg-primary/25" : "border-border")}
+              >
+                {placeClassLabel(c)}
+              </button>
+            ))}
+          </div>
+          <p className="text-[0.78rem] text-muted-foreground" data-testid="launch-place-explain">
+            {placeExplainLine(place, pilot, margins)}
+          </p>
+          {place === "confined" ? <RouteCheckCard check={pilot?.routeCheck ?? null} className="rounded-lg border border-border" /> : null}
+        </div>
         {plane ? (
           <p className="text-[0.82rem] text-muted-foreground">{specText("flow.launch.plane_alt")}</p>
         ) : (
