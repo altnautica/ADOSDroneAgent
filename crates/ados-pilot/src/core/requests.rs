@@ -32,9 +32,12 @@ impl Pilot {
                 Reply::None
             }
             Request::Action(a) => {
-                // Agent-internal sources are not an operator surface: they
-                // must not start the operator link-loss timer.
-                if !matches!(a.src.as_str(), "plugin-host" | "router" | "setup") {
+                // Agent-internal sources are not an operator surface, and
+                // neither is `/api/command` (`api`: one-shot requests from
+                // the terminal UI or a node view, with no link that keeps
+                // talking): none of them starts or refreshes the operator
+                // link-loss timer.
+                if !matches!(a.src.as_str(), "plugin-host" | "router" | "setup" | "api") {
                     self.failsafe.on_surface(now_ms);
                 }
                 let res = self.action(&a.name, a.args.as_ref(), now_ms);

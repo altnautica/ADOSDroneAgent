@@ -387,3 +387,40 @@ fn the_golden_stall_frame_round_trips() {
     assert_eq!(s.mission_stall.unwrap().skip_in_s, Some(32.5));
     assert_eq!(s.mission.unwrap().gaps.len(), 1);
 }
+
+fn api_action(w: &mut World, name: &str) -> Reply {
+    w.req(ados_protocol::pilot::Request::Action(
+        ados_protocol::pilot::ActionReq {
+            name: name.into(),
+            src: "api".into(),
+            args: None,
+            id: None,
+        },
+    ))
+}
+
+#[test]
+fn api_commands_neither_start_nor_hold_off_the_link_loss_timer() {
+    // A one-shot `/api/command` action with no surface link: no link-loss
+    // countdown, and the vehicle keeps its hold.
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    assert!(ok(&api_action(&mut w, "take_control")));
+    w.run(12_000);
+    assert_eq!(w.p.state(w.now).link_loss_in_s, None);
+    assert_eq!(w.mode, copter::GUIDED);
+    assert_eq!(w.p.owner(), Owner::Pilot);
+
+    // A surface that goes quiet still loses its link on time, whatever
+    // `/api/command` sends meanwhile.
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.action("take_control");
+    w.req(ados_protocol::pilot::Request::Hb { src: "mc".into() });
+    for _ in 0..5 {
+        w.run(2000);
+        let _ = api_action(&mut w, "rth_cancel");
+    }
+    w.run(200);
+    assert_eq!(w.mode, copter::SMART_RTL, "the link loss fired at 10 s");
+}
