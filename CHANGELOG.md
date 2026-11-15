@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.1] - 2026-11-16
+
+### Fixed
+
+- Pilot tests: the log capture they assert on now holds every line its own test thread logs. It was a scoped subscriber, and a log callsite that another test thread, with no subscriber, reached first cached its interest as never for every thread, so a capture could miss its line (`a_launch_into_an_infeasible_route_is_refused_naming_the_pinch` failed on the arm64 CI). The capture is now one global subscriber for the test binary, each capture keeping its own thread's lines. Nothing an installed agent does changes: 0.115.1 is 0.115.0's code. The 0.115.0 release build stopped on this test, so 0.115.0 has no GitHub release or PyPI package; its library crates did reach crates.io.
+
 ## [0.115.0] - 2026-11-15
 
 ### Changed
