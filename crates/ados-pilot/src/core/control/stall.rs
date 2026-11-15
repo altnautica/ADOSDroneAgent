@@ -9,10 +9,10 @@
 
 use std::collections::VecDeque;
 
-use ados_protocol::mavlink::ardupilotmega::MavCmd;
 use ados_protocol::pilot::{MissionGap, Owner};
 use serde_json::json;
 
+use super::super::position_check::HOLD_POSITION_UNVERIFIED;
 use super::super::Pilot;
 use super::supervisor::{wp_arg, Resume};
 use crate::flows::banner;
@@ -111,30 +111,47 @@ impl Pilot {
     /// Measure progress on the watched flight and raise, count down and act
     /// on a stall.
     pub(super) fn watch_progress(&mut self, watch: Resume, now_ms: u64) {
+        let (kind, seq) = match watch {
+            Resume::Mission => (Kind::Mission, self.mission.as_ref().and_then(|m| m.seq)),
+            Resume::Return => (Kind::Return, None),
+        };
+        if let Some(a) = &self.sup.stall.active {
+            // The FC moved on by itself (still before the item a skip set
+            // is only the FC catching up): the stall is over.
+            let catching_up = a.seq == self.sup.stall.skip_to && seq < a.seq;
+            if a.kind != kind || a.seq != seq && !catching_up {
+                self.sup.stall.active = None;
+            }
+        }
+        // A raised stall acts at its deadline whatever the position says,
+        // so the countdown on every surface means what it shows.
+        if let Some(a) = self.sup.stall.active.clone() {
+            if a.deadline_ms.is_some_and(|d| now_ms >= d) {
+                match a.kind {
+                    Kind::Mission => {
+                        let _ = self.mission_skip(false, now_ms);
+                    }
+                    Kind::Return => {
+                        tracing::warn!(target: "ados_pilot", reason = "return_blocked", "pilot_return_land");
+                        self.land_in_place(now_ms);
+                    }
+                }
+            }
+            return;
+        }
         let Some(l) = self.fc.fresh_local(now_ms) else {
             return;
         };
         let pos = [l.n, l.e, l.d];
-        let (kind, seq, dist) = match watch {
-            Resume::Mission => {
-                let seq = self.mission.as_ref().and_then(|m| m.seq);
-                (Kind::Mission, seq, self.waypoint_distance(pos))
-            }
-            Resume::Return => (Kind::Return, None, Some(0.0)),
+        let dist = match kind {
+            Kind::Mission => self.waypoint_distance(pos),
+            Kind::Return => Some(0.0),
         };
-        if let Some(a) = &self.sup.stall.active {
-            if a.kind != kind || a.seq != seq {
-                // The FC moved on by itself: the stall is over.
-                self.sup.stall.active = None;
-            }
-        }
         let Some(dist) = dist else {
             // An item without a position, a takeoff or landing, or a loiter
             // inside its radius: no progress is expected.
-            if self.sup.stall.active.is_none() {
-                self.sup.stall.watch = None;
-                self.sup.stall.samples.clear();
-            }
+            self.sup.stall.watch = None;
+            self.sup.stall.samples.clear();
             return;
         };
         let st = &mut self.sup.stall;
@@ -168,20 +185,6 @@ impl Pilot {
             .is_some_and(|s| now_ms.saturating_sub(s.at_ms) >= window_ms)
         {
             st.samples.pop_front();
-        }
-        if let Some(a) = st.active.clone() {
-            if a.deadline_ms.is_some_and(|d| now_ms >= d) {
-                match a.kind {
-                    Kind::Mission => {
-                        let _ = self.mission_skip(false, now_ms);
-                    }
-                    Kind::Return => {
-                        tracing::warn!(target: "ados_pilot", reason = "return_blocked", "pilot_return_land");
-                        self.land_in_place(now_ms);
-                    }
-                }
-            }
-            return;
         }
         let Some(&(_, _, since)) = st.watch.as_ref() else {
             return;
@@ -287,9 +290,13 @@ impl Pilot {
         );
     }
 
-    /// Skip the stalled waypoint: the FC's current item becomes the next one
-    /// and AUTO carries on, with the skipped item recorded as a coverage gap.
-    /// The last item has no next one: the vehicle returns.
+    /// Skip the stalled waypoint: the FC's current item becomes the next one,
+    /// recorded as a coverage gap. The last item has no next one: the
+    /// vehicle returns. AUTO carries on only along a route that keeps the
+    /// clearance and on a position the pilot vouches for: in a confined
+    /// place the legs from where the vehicle is are checked first, and an
+    /// infeasible one holds again (`route-infeasible`); an unverified
+    /// position holds for the operator.
     pub(in crate::core) fn mission_skip(
         &mut self,
         by_operator: bool,
@@ -317,7 +324,7 @@ impl Pilot {
             at_ms: now_ms + self.epoch_offset_ms,
         });
         st.auto_skips = if by_operator { 0 } else { st.auto_skips + 1 };
-        self.end_supervision();
+        st.active = None;
         tracing::info!(target: "ados_pilot", seq, by, "pilot_mission_skip");
         let next = seq + 1;
         self.banner = Some(banner(
@@ -331,14 +338,25 @@ impl Pilot {
             self.set_owner(Owner::FcMode, "rth");
             return Ok(());
         }
-        // MISSION_SET_CURRENT is deprecated; the command form also answers
-        // with an ack.
-        let m = self.tx().command(
-            MavCmd::MAV_CMD_DO_SET_MISSION_CURRENT,
-            [next as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        );
-        self.mav(m);
+        self.set_mission_current(next);
         self.sup.stall.skip_to = Some(next);
+        if self.position_unverified(now_ms).is_some() {
+            // Never flown on an estimate nobody vouches for.
+            self.supervise_hold(Resume::Mission, HOLD_POSITION_UNVERIFIED, now_ms);
+            self.sup.stall.active = Some(Active {
+                kind: Kind::Mission,
+                seq: Some(next),
+                since_ms: now_ms,
+                deadline_ms: None,
+            });
+            tracing::warn!(target: "ados_pilot", seq = next, "pilot_mission_skip_held");
+            return Ok(());
+        }
+        if !self.confined_auto_clear(next, now_ms) {
+            self.hold_route_infeasible(Some(next), now_ms);
+            return Ok(());
+        }
+        self.end_supervision();
         let auto = self.family().auto();
         self.set_mode(auto, now_ms);
         self.set_owner(Owner::MissionFc, "mission_skip");

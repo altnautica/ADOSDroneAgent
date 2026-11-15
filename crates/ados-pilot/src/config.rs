@@ -129,17 +129,22 @@ impl PilotSection {
         }
     }
 
-    /// `margin` held to the class floor: a configured (or skill) margin
-    /// below it never flies.
+    /// `margin` held to the class floor: a skill's margin below it never
+    /// flies.
     pub fn floored_margin_m(&self, margin: f32) -> f32 {
         margin.max(self.margin_floor_m())
     }
 
-    /// The obstacle margin the pilot flies: the configured one, at least
-    /// the class floor.
+    /// The obstacle margin the pilot flies: in a confined place the
     /// propeller-tip radius plus 0.1 m, whatever the
+    /// configured margin; otherwise `obstacle_margin_m`, the open margin, at
+    /// least 0.5 m. The class alone switches between them, so a switch never
+    /// needs the configured margin changed.
     pub fn effective_margin_m(&self) -> f32 {
-        self.floored_margin_m(self.obstacle_margin_m)
+        match (self.place_class, self.prop_tip_radius_m) {
+            (PlaceClass::Confined, Some(r)) => r + CONFINED_TIP_EXTRA_M,
+            _ => self.obstacle_margin_m.max(OPEN_MARGIN_FLOOR_M),
+        }
     }
 }
 
@@ -296,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn the_margin_never_flies_below_the_class_floor() {
+    fn a_confined_place_flies_the_tip_radius_plus_a_tenth() {
         let mut p = PilotSection {
             obstacle_margin_m: 0.3,
             ..PilotSection::default()
@@ -304,34 +309,42 @@ mod tests {
         assert_eq!(p.effective_margin_m(), OPEN_MARGIN_FLOOR_M);
         p.obstacle_margin_m = 1.5;
         assert_eq!(p.effective_margin_m(), 1.5);
+        // Confined: the tip radius plus 0.1 m, whatever the configured open one.
         p.place_class = PlaceClass::Confined;
         p.prop_tip_radius_m = Some(0.377);
-        p.obstacle_margin_m = 0.3;
         assert!((p.effective_margin_m() - 0.477).abs() < 1e-6);
         p.obstacle_margin_m = 0.6;
-        assert_eq!(p.effective_margin_m(), 0.6);
-        // A skill's own margin is held to the floor too.
+        assert!((p.effective_margin_m() - 0.477).abs() < 1e-6);
+        // A skill's own margin is held to the floor, never lowered by it.
         assert!((p.floored_margin_m(0.2) - 0.477).abs() < 1e-6);
-        // Confined without a radius keeps the open floor.
+        assert_eq!(p.floored_margin_m(2.0), 2.0);
+        // Confined without a radius keeps the open margin (the launch is
+        // refused then).
         p.prop_tip_radius_m = None;
-        p.obstacle_margin_m = 0.3;
-        assert_eq!(p.effective_margin_m(), OPEN_MARGIN_FLOOR_M);
+        assert_eq!(p.effective_margin_m(), 0.6);
+        // Back to open: the configured margin again.
+        p.place_class = PlaceClass::Open;
+        p.prop_tip_radius_m = Some(0.377);
+        assert_eq!(p.effective_margin_m(), 0.6);
     }
 
     #[test]
-    fn the_place_class_and_tip_radius_load() {
+    fn the_place_class_switches_without_touching_the_margin() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.yaml");
         std::fs::write(
             &p,
-            "pilot:\n  place_class: confined\n  prop_tip_radius_m: 0.377\n  obstacle_margin_m: 0.48\n",
+            "pilot:\n  place_class: confined\n  prop_tip_radius_m: 0.377\n  obstacle_margin_m: 1.5\n",
         )
         .unwrap();
         let s = Settings::load(&p);
         assert_eq!(s.pilot.place_class, PlaceClass::Confined);
         assert_eq!(s.pilot.prop_tip_radius_m, Some(0.377));
-        assert_eq!(s.pilot.obstacle_margin_m, 0.48);
+        assert!((s.pilot.effective_margin_m() - 0.477).abs() < 1e-6);
         persist(&p, "pilot", "place_class", "open").unwrap();
-        assert_eq!(Settings::load(&p).pilot.place_class, PlaceClass::Open);
+        let s = Settings::load(&p);
+        assert_eq!(s.pilot.place_class, PlaceClass::Open);
+        assert_eq!(s.pilot.obstacle_margin_m, 1.5);
+        assert_eq!(s.pilot.effective_margin_m(), 1.5);
     }
 }

@@ -145,11 +145,21 @@ fn low_battery_flight(posxy: f32, pct: f32) -> World {
 
 #[test]
 fn low_battery_lands_a_gnss_free_copter_and_says_so() {
-    let mut w = low_battery_flight(EXTERNAL_NAV, 19.0);
+    let mut w = low_battery_flight(EXTERNAL_NAV, 19.4);
     w.run(1_000);
     let s = w.p.state(w.now);
     assert_eq!(s.low_battery_action.as_deref(), Some("land"));
     assert!(s.rth_countdown_s.is_some());
+    // The countdown says it will land, never "Returning".
+    assert_eq!(
+        s.banner.as_ref().map(|b| b.text_key.as_str()),
+        Some("pilot.banner.low_battery_land_in")
+    );
+    // Whole percentages on the wire: every surface prints "19%", never
+    // "19.0%".
+    let args = &s.banner.as_ref().expect("banner").args;
+    assert_eq!(args["pct"].as_i64(), Some(19), "{args:?}");
+    assert!(args["need_pct"].is_i64(), "{args:?}");
     w.run(10_000);
     assert_eq!(w.set_modes(copter::RTL), 0, "never RTL without GNSS");
     assert_eq!(
@@ -165,6 +175,8 @@ fn low_battery_lands_a_gnss_free_copter_and_says_so() {
         s.banner.as_ref().map(|b| b.text_key.as_str()),
         Some("pilot.banner.low_battery_land")
     );
+    let args = &s.banner.as_ref().expect("banner").args;
+    assert_eq!(args["pct"].as_i64(), Some(19), "{args:?}");
     assert!(
         s.statustext
             .iter()
@@ -177,7 +189,12 @@ fn low_battery_lands_a_gnss_free_copter_and_says_so() {
 #[test]
 fn low_battery_returns_a_gnss_copter_by_smart_rtl_and_says_so() {
     let mut w = low_battery_flight(GPS, 19.0);
-    w.run(11_000);
+    w.run(1_000);
+    assert_eq!(
+        w.p.state(w.now).banner.map(|b| b.text_key),
+        Some("pilot.banner.low_battery_rth".to_string())
+    );
+    w.run(10_000);
     assert_eq!(w.mode, copter::SMART_RTL);
     assert_eq!(w.set_modes(copter::RTL), 0, "never a plain RTL climb");
     let s = w.p.state(w.now);

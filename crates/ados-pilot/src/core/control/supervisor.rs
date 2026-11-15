@@ -283,6 +283,20 @@ impl Pilot {
         if !clear_since.is_some_and(|t| now_ms.saturating_sub(t) >= RESUME_CLEAR_MS) {
             return;
         }
+        if h.resume == Resume::Mission {
+            // The mission is not flown on an estimate nobody vouches for,
+            // nor (confined) along a route from here that is too tight.
+            if self.position_unverified(now_ms).is_some() {
+                return;
+            }
+            let seq = self.mission.as_ref().and_then(|m| m.seq);
+            if let Some(s) = seq {
+                if !self.confined_auto_clear(s, now_ms) {
+                    self.hold_route_infeasible(seq, now_ms);
+                    return;
+                }
+            }
+        }
         self.end_supervision();
         match h.resume {
             Resume::Mission => {

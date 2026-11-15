@@ -1,177 +1,57 @@
 //! The confined-place profile: the route check of the FC mission against the
 //! live occupancy, the hold before an infeasible leg, and the 0.5 m/s cap near
-//! the clearance limit. Nothing here acts in an `open` place.
+//! the clearance limit ([`cap`]). Nothing here acts in an `open` place.
 //!
 //! The route is the router's mirrored navigation items in the FC's local NED
-//! frame. Every leg between consecutive placed items (a take-off without a
-//! position starts at home) is sampled every [`SAMPLE_STEP_M`] against the
-//! occupancy map ([`crate::obstacles::Obstacles::probe_leg`]): a seen obstacle
-//! closer to a sample than the required clearance makes the leg infeasible;
-//! unseen space that close leaves it unverified. The required clearance is the
-//! effective margin plus max(0.1 m, 3σ), σ being the live horizontal pose
-//! uncertainty.
+//! frame, cut into the legs the FC flies ([`legs::legs_of`]): between
+//! consecutive placed items, skipped items left out, and from the vehicle's
+//! own position to the item the pilot put the FC in AUTO at (after a skip or
+//! a hold ArduPilot flies that item from where the vehicle stands). Each leg
+//! is checked against the occupancy map
+//! ([`crate::obstacles::Obstacles::probe_leg`]) with a conservative
+//! clearance: a seen obstacle closer than the required clearance makes the
+//! leg infeasible; unseen space that close leaves it unverified. An item the
+//! router cannot place (no position), or a mission longer than the feed
+//! carries, leaves the route unverified and named (`unchecked`, `truncated`);
+//! a launch into such a route is refused.
 //!
-//! σ is the planar scan matcher's `sigma_xy_m` on the `plugin.world-engine.pose`
-//! topic. The FC offers no usable figure: ArduCopter never sends
-//! LOCAL_POSITION_NED_COV or ODOMETRY (it only receives ODOMETRY), and
-//! EKF_STATUS_REPORT's `pos_horiz_variance` is a normalised innovation test
-//! ratio, not metres. Without a fresh pose σ the 3σ term is 0.1 m and the route
-//! reads at best unverified.
-//!
-//! In AUTO the FC's waypoint speed is lowered with MAV_CMD_DO_CHANGE_SPEED and
-//! restored to its default (`WP_SPD` m/s, or `WPNAV_SPEED` cm/s on older
-//! firmware) when the cap ends. ArduCopter denies a speed of zero or less
-//! (there is no "back to default" value: `handle_MAV_CMD_DO_CHANGE_SPEED` in
-//! `ArduCopter/GCS_MAVLink_Copter.cpp`), and `ModeAuto::init` clears the
-//! override on every entry to AUTO, so a cap is re-sent after a re-entry and
-//! needs no restore when AUTO ends.
+//! The required clearance is the effective margin plus max(0.1 m, 3σ), σ
+//! being the live horizontal pose uncertainty: the planar scan matcher's
+//! `sigma_xy_m` on the `plugin.world-engine.pose` topic. The FC offers no
+//! usable figure: ArduCopter never sends LOCAL_POSITION_NED_COV or ODOMETRY
+//! (it only receives ODOMETRY), and EKF_STATUS_REPORT's `pos_horiz_variance`
+//! is a normalised innovation test ratio, not metres. When the pose goes
+//! stale the last σ is held for [`SIGMA_HOLD_MS`]; after that it still sets
+//! the clearance (missing σ never lowers it) but the route reads at best
+//! unverified. With no σ ever the 3σ term is 0.1 m and the route reads at
+//! best unverified. So does a position the pilot does not vouch for
+//! ([`super::super::position_check`]).
+
+mod cap;
+mod legs;
 
 use ados_protocol::mavlink::ardupilotmega::MavCmd;
-use ados_protocol::pilot::{wire, Owner, Pinch, PlaceClass, RouteCheck, RouteState, SpeedCap};
-use serde_json::{json, Value};
+use ados_protocol::pilot::{wire, Owner, Pinch, PlaceClass, RouteCheck, RouteState};
+use serde_json::json;
 
 use super::super::Pilot;
 use super::stall::{Active, Kind};
 use super::supervisor::Resume;
 use crate::flows::banner;
-use crate::geo::V2;
-use crate::modes::copter;
-use crate::obstacles::Obstacles;
+
+pub use cap::{Slowed, CONFINED_CAP_MPS};
+#[cfg(test)]
+pub use legs::RouteItem;
+pub use legs::{check_legs, legs_of, route_of, LegCheck, Origin, RouteFeed};
 
 /// `hold_reason` while the vehicle holds before an infeasible leg.
 pub const HOLD_ROUTE_INFEASIBLE: &str = "route-infeasible";
-/// `speed_cap.reason` of the confined cap.
-pub const REASON_CONFINED_NEAR: &str = "confined-near";
-/// The route's sample spacing, metres.
-pub const SAMPLE_STEP_M: f32 = 0.25;
 /// The 3σ term never goes below this, metres.
 pub const MIN_SIGMA_TERM_M: f32 = 0.1;
-/// The cap holds while an obstacle is within the required clearance plus this.
-pub const NEAR_EXTRA_M: f32 = 1.5;
-/// The confined cap, m/s.
-pub const CONFINED_CAP_MPS: f32 = 0.5;
-/// The cap ends only this much further out than it starts, metres.
-const NEAR_RELEASE_M: f32 = 0.25;
+/// A stale pose's last σ still counts this long, ms.
+pub const SIGMA_HOLD_MS: u64 = 5000;
 /// The route is re-checked this often as cells become seen.
 const RECHECK_MS: u64 = 1000;
-/// Seen obstacles this far beyond the required clearance still name the
-/// tightest point.
-const REPORT_EXTRA_M: f32 = 0.5;
-/// MAV_CMD_NAV_TAKEOFF.
-const CMD_TAKEOFF: u16 = 22;
-/// DO_CHANGE_SPEED speed type: ground speed.
-const SPEED_TYPE_GROUND: f32 = 1.0;
-
-/// One mirrored navigation item.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RouteItem {
-    pub seq: u32,
-    pub cmd: u16,
-    pub ned: Option<[f32; 3]>,
-}
-
-/// The `route` of a mission feed payload ([`crate::router_state::mission_of`]).
-pub fn route_items(payload: &Value) -> Vec<RouteItem> {
-    let Some(list) = payload.get("route").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    list.iter()
-        .filter_map(|i| {
-            let seq = u32::try_from(i.get("seq")?.as_u64()?).ok()?;
-            let cmd = u16::try_from(i.get("cmd")?.as_u64()?).ok()?;
-            let ned = i.get("ned").and_then(Value::as_array).and_then(|a| {
-                let v: Vec<f32> = a
-                    .iter()
-                    .filter_map(|x| x.as_f64().map(|x| x as f32))
-                    .collect();
-                (v.len() == 3).then(|| [v[0], v[1], v[2]])
-            });
-            Some(RouteItem { seq, cmd, ned })
-        })
-        .collect()
-}
-
-/// One leg's verdict.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LegCheck {
-    pub from_seq: u32,
-    pub to_seq: u32,
-    pub state: RouteState,
-    /// The tightest sample with a seen obstacle near it: local NED and the
-    /// clearance (m).
-    pub pinch: Option<([f32; 3], f32)>,
-}
-
-/// A leg to check: `(from_seq, from, to_seq, to)`, local NED.
-pub type Leg = (u32, [f32; 3], u32, [f32; 3]);
-
-/// The legs between consecutive placed items. A take-off without a position
-/// starts at `home` at the next item's height.
-pub fn legs_of(items: &[RouteItem], home: V2) -> Vec<Leg> {
-    let mut placed: Vec<(u32, [f32; 3])> = Vec::with_capacity(items.len());
-    let mut takeoff: Option<u32> = None;
-    for it in items {
-        match it.ned {
-            Some(p) => {
-                if let Some(s) = takeoff.take() {
-                    placed.push((s, [home[0], home[1], p[2]]));
-                }
-                placed.push((it.seq, p));
-            }
-            None if it.cmd == CMD_TAKEOFF && placed.is_empty() => takeoff = Some(it.seq),
-            None => {}
-        }
-    }
-    placed
-        .windows(2)
-        .map(|w| (w[0].0, w[0].1, w[1].0, w[1].1))
-        .collect()
-}
-
-/// Check `legs` sampled every `step` m against `obs` with `required` m of
-/// clearance.
-pub fn check_legs(
-    obs: &Obstacles,
-    legs: &[Leg],
-    step: f32,
-    required: f32,
-    now_ms: u64,
-) -> Vec<LegCheck> {
-    legs.iter()
-        .map(|&(from_seq, a, to_seq, b)| {
-            let probe = obs.probe_leg(
-                [a[0], a[1]],
-                [b[0], b[1]],
-                step,
-                required,
-                required + REPORT_EXTRA_M,
-                now_ms,
-            );
-            let pinch = probe.nearest.map(|(k, p, d)| {
-                let len = (b[0] - a[0]).hypot(b[1] - a[1]);
-                let f = if len > 1e-6 {
-                    ((k as f32 * step).min(len) / len).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                ([p[0], p[1], a[2] + f * (b[2] - a[2])], d)
-            });
-            let state = if pinch.is_some_and(|(_, d)| d < required) {
-                RouteState::Infeasible
-            } else if probe.unseen {
-                RouteState::Unverified
-            } else {
-                RouteState::Feasible
-            };
-            LegCheck {
-                from_seq,
-                to_seq,
-                state,
-                pinch,
-            }
-        })
-        .collect()
-}
 
 fn leg_label(from: u32, to: u32) -> String {
     format!("{from}→{to}")
@@ -181,19 +61,37 @@ fn two_dp(v: f32) -> f64 {
     (f64::from(v) * 100.0).round() / 100.0
 }
 
+/// The clearance the route needs now.
+#[derive(Debug, Clone, Copy)]
+pub struct Clearance {
+    pub required: f32,
+    pub margin: f32,
+    /// σ as published: fresh or held, `None` once it aged out.
+    pub sigma: Option<f32>,
+    /// σ is fresh or held and the position is vouched for.
+    pub trusted: bool,
+}
+
 /// The confined-place state.
 #[derive(Debug, Default)]
 pub struct Route {
-    items: Vec<RouteItem>,
+    feed: RouteFeed,
+    /// Where the FC flies the item it was put in AUTO at from.
+    pub origin: Option<Origin>,
     /// The last check of the legs still ahead.
     pub legs: Vec<LegCheck>,
+    /// Items ahead with no position.
+    pub unchecked: Vec<u32>,
     pub required: f32,
     pub margin: f32,
     pub sigma: Option<f32>,
+    pub trusted: bool,
+    /// The last fresh σ and when it arrived.
+    sigma_seen: Option<(f32, u64)>,
     checked_ms: Option<u64>,
     /// What the last check depended on beyond the map: the current item,
-    /// whether the FC flew the mission, and the skipped items.
-    checked_key: Option<(Option<u32>, bool, usize)>,
+    /// whether the FC flew the mission, the skipped items and the origin.
+    checked_key: Option<(Option<u32>, bool, usize, Option<Origin>)>,
     dirty: bool,
     /// The last logged verdict.
     logged: Option<(RouteState, Option<(u32, u32)>)>,
@@ -201,35 +99,50 @@ pub struct Route {
     pub near: bool,
     /// The cap in force and why (`near` or `unverified`).
     pub cap: Option<&'static str>,
-    /// The FC's AUTO speed is lowered.
-    pub fc_slowed: bool,
+    /// The FC flight the cap slowed.
+    pub fc_slowed: Option<Slowed>,
 }
 
 impl Route {
-    /// New mirrored items; a change re-checks at once.
-    pub fn set_items(&mut self, items: Vec<RouteItem>) {
-        if items != self.items {
-            self.items = items;
+    /// A new mission feed; a different route re-checks at once and forgets
+    /// the origin.
+    pub fn set_feed(&mut self, feed: RouteFeed) {
+        if feed != self.feed {
+            if feed.items != self.feed.items {
+                self.origin = None;
+            }
+            self.feed = feed;
             self.dirty = true;
         }
     }
 
-    fn worst(&self) -> Option<&LegCheck> {
-        self.legs.iter().max_by_key(|l| match l.state {
+    fn worst(&self) -> Option<RouteState> {
+        self.legs.iter().map(|l| l.state).max_by_key(|s| match s {
             RouteState::Feasible => 0,
             RouteState::Unverified => 1,
             RouteState::Infeasible => 2,
         })
     }
 
-    /// The overall verdict: the worst leg, and at best unverified while σ is
-    /// unknown.
+    /// The route ahead was not fully checked: an item with no position, a
+    /// mission longer than the feed, or no leg at all.
+    pub fn incomplete(&self) -> bool {
+        !self.unchecked.is_empty() || self.feed.truncated || self.legs.is_empty()
+    }
+
+    /// The overall verdict: the worst leg; at best unverified while the
+    /// route is incomplete or σ or the position is not vouched for. `None`
+    /// with no mission route.
     pub fn state(&self) -> Option<RouteState> {
-        let s = self.worst()?.state;
-        Some(if s == RouteState::Feasible && self.sigma.is_none() {
-            RouteState::Unverified
-        } else {
-            s
+        if self.feed.items.is_empty() {
+            return None;
+        }
+        Some(match self.worst() {
+            Some(RouteState::Infeasible) => RouteState::Infeasible,
+            Some(RouteState::Feasible) if self.trusted && !self.incomplete() => {
+                RouteState::Feasible
+            }
+            _ => RouteState::Unverified,
         })
     }
 
@@ -268,6 +181,8 @@ impl Route {
                 .filter(|l| l.state == RouteState::Unverified)
                 .map(|l| l.to_seq)
                 .collect(),
+            unchecked: self.unchecked.clone(),
+            truncated: self.feed.truncated,
         })
     }
 }
@@ -277,13 +192,27 @@ impl Pilot {
         self.settings.pilot.place_class == PlaceClass::Confined
     }
 
+    /// Keep the last σ with the time its pose arrived: the hold counts from
+    /// the pose, not from when the check last looked.
+    fn note_sigma(&mut self) {
+        if let Some(s) = self.obstacles.last_pose_sigma() {
+            self.route.sigma_seen = Some(s);
+        }
+    }
+
     /// The clearance the route needs: the effective margin plus
-    /// max(0.1, 3σ).
-    fn required_clearance(&self, now_ms: u64) -> (f32, f32, Option<f32>) {
+    /// max(0.1, 3σ), σ fresh, held, or the last one seen.
+    fn required_clearance(&self, now_ms: u64) -> Clearance {
         let margin = self.settings.pilot.effective_margin_m();
-        let sigma = self.obstacles.pose_sigma(now_ms);
-        let term = sigma.map_or(MIN_SIGMA_TERM_M, |s| (3.0 * s).max(MIN_SIGMA_TERM_M));
-        (margin + term, margin, sigma)
+        let seen = self.route.sigma_seen;
+        let held = seen.filter(|(_, at)| now_ms.saturating_sub(*at) <= SIGMA_HOLD_MS);
+        let term = seen.map_or(MIN_SIGMA_TERM_M, |(s, _)| (3.0 * s).max(MIN_SIGMA_TERM_M));
+        Clearance {
+            required: margin + term,
+            margin,
+            sigma: held.map(|(s, _)| s),
+            trusted: held.is_some() && self.position_unverified(now_ms).is_none(),
+        }
     }
 
     /// The FC flies the mission now (any AUTO the pilot watches, launched
@@ -292,33 +221,36 @@ impl Pilot {
         self.supervised() == Some(Resume::Mission) && self.sup.hold.is_none()
     }
 
-    /// The legs still ahead: from the current item on while the FC flies
-    /// the mission, else all; never a leg touching a skipped item (the FC
-    /// does not fly it).
-    fn legs_ahead(&self) -> Vec<Leg> {
-        let gaps = &self.sup.stall.gaps;
-        let from = self
-            .mission
+    /// The current item while the mission runs.
+    fn mission_seq(&self) -> Option<u32> {
+        self.mission
             .as_ref()
             .filter(|m| matches!(m.state.as_str(), "active" | "paused"))
-            .and_then(|m| m.seq);
-        legs_of(&self.route.items, self.fc.home_ne())
-            .into_iter()
-            .filter(|&(f, _, t, _)| !gaps.iter().any(|g| g.seq == f || g.seq == t))
-            .filter(|&(_, _, t, _)| from.is_none_or(|s| t >= s))
-            .collect()
+            .and_then(|m| m.seq)
     }
 
-    /// Check the route now.
+    /// Check the route ahead now: from the current item on while the
+    /// mission runs (from the origin when the pilot put the FC in AUTO),
+    /// else all of it; never through a skipped item.
     pub(in crate::core) fn check_route(&mut self, now_ms: u64) {
-        let (required, margin, sigma) = self.required_clearance(now_ms);
-        let legs = self.legs_ahead();
-        let checked = check_legs(&self.obstacles, &legs, SAMPLE_STEP_M, required, now_ms);
+        self.note_sigma();
+        let c = self.required_clearance(now_ms);
+        let gaps = &self.sup.stall.gaps;
+        let ahead = legs_of(
+            &self.route.feed.items,
+            self.fc.home_ne(),
+            &|s| gaps.iter().any(|g| g.seq == s),
+            self.mission_seq(),
+            self.route.origin.as_ref(),
+        );
+        let checked = check_legs(&self.obstacles, &ahead.legs, c.required, now_ms);
         let r = &mut self.route;
         r.legs = checked;
-        r.required = required;
-        r.margin = margin;
-        r.sigma = sigma;
+        r.unchecked = ahead.unchecked;
+        r.required = c.required;
+        r.margin = c.margin;
+        r.sigma = c.sigma;
+        r.trusted = c.trusted;
         r.checked_ms = Some(now_ms);
         r.dirty = false;
         let state = r.state();
@@ -337,8 +269,10 @@ impl Pilot {
                     leg = leg.as_deref(),
                     ned = ?ned,
                     clearance_m,
-                    required_m = required,
-                    sigma_m = sigma,
+                    required_m = c.required,
+                    sigma_m = c.sigma,
+                    unchecked = ?r.unchecked,
+                    truncated = r.feed.truncated,
                     "pilot_route_check"
                 );
             }
@@ -349,19 +283,32 @@ impl Pilot {
     /// work out the cap.
     pub(super) fn confined_tick(&mut self, now_ms: u64) {
         if !self.confined() {
-            if self.route.fc_slowed || self.route.cap.is_some() || !self.route.legs.is_empty() {
+            if self.route.fc_slowed.is_some()
+                || self.route.cap.is_some()
+                || !self.route.legs.is_empty()
+            {
                 self.release_fc_speed();
                 self.route.legs.clear();
+                self.route.unchecked.clear();
                 self.route.near = false;
                 self.route.cap = None;
                 self.route.logged = None;
             }
+            self.route.origin = None;
             return;
         }
+        // The origin served its item once the FC moved past it.
+        let seq = self.mission_seq();
+        if let Some(o) = self.route.origin {
+            if seq.is_none_or(|s| s > o.to_seq && !self.origin_pending(o, s)) {
+                self.route.origin = None;
+            }
+        }
         let key = (
-            self.mission.as_ref().and_then(|m| m.seq),
+            seq,
             self.mission_flying(),
             self.sup.stall.gaps.len(),
+            self.route.origin,
         );
         let due = self.route.dirty
             || self.route.checked_key != Some(key)
@@ -372,117 +319,52 @@ impl Pilot {
         if due {
             self.route.checked_key = Some(key);
             self.check_route(now_ms);
+        } else {
+            self.note_sigma();
         }
         self.update_cap(now_ms);
     }
 
-    /// The cap: on while an obstacle is within the required clearance plus
-    /// [`NEAR_EXTRA_M`] of the vehicle, and in AUTO along a leg not yet seen.
-    fn update_cap(&mut self, now_ms: u64) {
-        let airborne = self.fc.armed && !self.fc.landed();
-        let (required, _, _) = self.required_clearance(now_ms);
-        let clearance = self
-            .pos_ne(now_ms)
-            .and_then(|p| self.obstacles.grid.clearance(p))
-            .filter(|c| c.is_finite());
-        let limit = required + NEAR_EXTRA_M;
-        let near = airborne
-            && clearance.is_some_and(|c| {
-                if self.route.near {
-                    c <= limit + NEAR_RELEASE_M
-                } else {
-                    c < limit
-                }
-            });
-        self.route.near = near;
-        let seq = self.mission.as_ref().and_then(|m| m.seq);
-        let unverified_leg = self.mission_flying()
-            && self.route.legs.iter().any(|l| {
-                Some(l.to_seq) == seq
-                    && (l.state == RouteState::Unverified || self.route.sigma.is_none())
-            });
-        let cap = if near {
-            Some("near")
-        } else if unverified_leg {
-            Some("unverified")
-        } else {
-            None
-        };
-        if cap != self.route.cap {
-            tracing::info!(
-                target: "ados_pilot",
-                on = cap.is_some(),
-                reason = cap.or(self.route.cap).unwrap_or_default(),
-                clearance_m = clearance,
-                required_m = required,
-                "pilot_confined_cap"
-            );
-            self.route.cap = cap;
-        }
-        self.drive_fc_speed();
+    /// The FC at item `s` still flies the origin's leg: `s` is the first
+    /// placed item at or after the origin's item.
+    fn origin_pending(&self, o: Origin, s: u32) -> bool {
+        self.route
+            .feed
+            .items
+            .iter()
+            .find(|i| i.seq >= o.to_seq && (i.ned.is_some() || i.here))
+            .is_some_and(|i| i.seq == s)
     }
 
-    /// Lower the FC's AUTO speed while the cap holds, restore it after.
-    fn drive_fc_speed(&mut self) {
-        let in_auto = self.fc.custom_mode == copter::AUTO;
-        if self.route.fc_slowed && !in_auto {
-            // AUTO's next entry starts from the default speed.
-            self.route.fc_slowed = false;
+    /// Before the pilot puts the FC in AUTO at item `to_seq`: the FC will
+    /// fly it from where the vehicle is. In a confined place, check the
+    /// route from here; `false` when a leg ahead is infeasible (the caller
+    /// holds instead). Open places always pass.
+    pub(in crate::core) fn confined_auto_clear(&mut self, to_seq: u32, now_ms: u64) -> bool {
+        if !self.confined() {
+            return true;
         }
-        let want = self.route.cap.is_some() && self.mission_flying();
-        if want && !self.route.fc_slowed {
-            let m = self.tx().command(
-                MavCmd::MAV_CMD_DO_CHANGE_SPEED,
-                [
-                    SPEED_TYPE_GROUND,
-                    CONFINED_CAP_MPS,
-                    -1.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                ],
-            );
-            self.mav(m);
-            self.route.fc_slowed = true;
-        } else if !want && self.route.fc_slowed {
-            self.release_fc_speed();
-        }
-    }
-
-    /// Give the FC its default AUTO speed back.
-    fn release_fc_speed(&mut self) {
-        if !self.route.fc_slowed {
-            return;
-        }
-        self.route.fc_slowed = false;
-        if self.fc.custom_mode != copter::AUTO {
-            return;
-        }
-        match self.default_wp_speed() {
-            Some(v) => {
-                let m = self.tx().command(
-                    MavCmd::MAV_CMD_DO_CHANGE_SPEED,
-                    [SPEED_TYPE_GROUND, v, -1.0, 0.0, 0.0, 0.0, 0.0],
-                );
-                self.mav(m);
-            }
-            // Unknown: the slow speed stays until AUTO is entered again.
-            None => tracing::warn!(target: "ados_pilot", "pilot_confined_speed_default_unknown"),
-        }
-    }
-
-    /// The FC's default waypoint speed, m/s.
-    fn default_wp_speed(&self) -> Option<f32> {
-        let p = &self.fc.params;
-        p.get("WP_SPD")
-            .copied()
-            .or_else(|| p.get("WPNAV_SPEED").map(|cms| cms / 100.0))
-            .filter(|v| *v > 0.0)
+        let gaps = &self.sup.stall.gaps;
+        let from_seq = self
+            .route
+            .feed
+            .items
+            .iter()
+            .filter(|i| i.seq < to_seq && !gaps.iter().any(|g| g.seq == i.seq))
+            .map(|i| i.seq)
+            .max()
+            .unwrap_or(to_seq);
+        self.route.origin = self.fc.fresh_local(now_ms).map(|l| Origin {
+            from_seq,
+            to_seq,
+            ned: [l.n, l.e, l.d],
+        });
+        self.check_route(now_ms);
+        self.route.infeasible().is_none()
     }
 
     /// The `route_check` of the published state: only in a confined place
-    /// with a mission of at least one leg.
+    /// with a mission route.
     pub(in crate::core) fn route_check_wire(&self) -> Option<RouteCheck> {
         if self.confined() {
             self.route.wire()
@@ -491,35 +373,26 @@ impl Pilot {
         }
     }
 
-    /// The confined cap for setpoints the pilot flies.
-    pub(in crate::core) fn confined_near(&self) -> bool {
-        self.route.near
-    }
-
-    /// The published cap: the confined one while it holds (the pilot's
-    /// setpoints near a wall, or the FC's AUTO slowed), else none.
-    pub(in crate::core) fn confined_cap_wire(&self, pilot_flown: bool) -> Option<SpeedCap> {
-        let on = if pilot_flown {
-            self.route.near
-        } else {
-            self.route.fc_slowed
-        };
-        on.then(|| SpeedCap::new(REASON_CONFINED_NEAR, CONFINED_CAP_MPS))
-    }
-
     /// While the FC flies the mission: an infeasible leg ahead holds the
-    /// vehicle and asks the operator (the stall flow). A leg ending or
-    /// starting at the current item counts down to its skip; one further on
-    /// holds until the operator answers (skipping the current item would not
-    /// remove it).
+    /// vehicle and asks the operator (the stall flow).
     pub(super) fn route_hold(&mut self, now_ms: u64) {
         if !self.confined() || !self.mission_flying() || self.owner() != Owner::MissionFc {
             return;
         }
+        if self.route.infeasible().is_some() {
+            let seq = self.mission.as_ref().and_then(|m| m.seq);
+            self.hold_route_infeasible(seq, now_ms);
+        }
+    }
+
+    /// Hold before the first infeasible leg with the current item `seq`.
+    /// A leg ending or starting at `seq` counts down to its skip (within the
+    /// automatic-skip budget); one further on holds until the operator
+    /// answers (skipping `seq` would not remove it).
+    pub(super) fn hold_route_infeasible(&mut self, seq: Option<u32>, now_ms: u64) {
         let Some(leg) = self.route.infeasible().copied() else {
             return;
         };
-        let seq = self.mission.as_ref().and_then(|m| m.seq);
         let touches = seq.is_some_and(|s| leg.from_seq == s || leg.to_seq == s);
         let deadline_ms = if touches {
             self.mission_skip_deadline(now_ms)
@@ -558,25 +431,47 @@ impl Pilot {
     }
 
     /// A launch into the mission in a confined place: refused while the
-    /// route is infeasible, naming the leg, the point, its clearance and the
-    /// clearance needed.
+    /// route is infeasible (naming the leg, the point, its clearance and the
+    /// clearance needed), or while an item has no position or the mission
+    /// is longer than the feed (`route_unchecked`, naming them).
     pub(in crate::core) fn route_launch_check(&mut self, now_ms: u64) -> Result<(), String> {
         if !self.confined() {
             return Ok(());
         }
+        self.route.origin = None;
         self.check_route(now_ms);
-        let Some(leg) = self.route.infeasible().copied() else {
-            return Ok(());
-        };
-        tracing::warn!(
-            target: "ados_pilot",
-            reason = "route_infeasible",
-            leg = %leg_label(leg.from_seq, leg.to_seq),
-            ned = ?leg.pinch.map(|(p, _)| p),
-            clearance_m = leg.pinch.map(|(_, d)| d),
-            required_m = self.route.required,
-            "pilot_launch_refused"
+        if let Some(leg) = self.route.infeasible().copied() {
+            tracing::warn!(
+                target: "ados_pilot",
+                reason = "route_infeasible",
+                leg = %leg_label(leg.from_seq, leg.to_seq),
+                ned = ?leg.pinch.map(|(p, _)| p),
+                clearance_m = leg.pinch.map(|(_, d)| d),
+                required_m = self.route.required,
+                "pilot_launch_refused"
+            );
+            return Err("route_infeasible".into());
+        }
+        if !self.route.unchecked.is_empty() || self.route.feed.truncated {
+            tracing::warn!(
+                target: "ados_pilot",
+                reason = "route_unchecked",
+                unchecked = ?self.route.unchecked,
+                truncated = self.route.feed.truncated,
+                "pilot_launch_refused"
+            );
+            return Err("route_unchecked".into());
+        }
+        Ok(())
+    }
+
+    /// Set the FC's current mission item (the command form also answers
+    /// with an ack; MISSION_SET_CURRENT is deprecated).
+    pub(super) fn set_mission_current(&mut self, seq: u32) {
+        let m = self.tx().command(
+            MavCmd::MAV_CMD_DO_SET_MISSION_CURRENT,
+            [seq as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         );
-        Err("route_infeasible".into())
+        self.mav(m);
     }
 }

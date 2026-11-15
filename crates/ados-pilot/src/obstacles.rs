@@ -41,9 +41,6 @@ pub const CLOSING_SMOOTH: f32 = 0.5;
 pub const SCAN_CLOSING_MAX_MPS: f32 = 16.0;
 /// Range noise allowed on top of [`SCAN_CLOSING_MAX_MPS`] per pair, metres.
 pub const SCAN_CLOSING_SLACK_M: f32 = 0.1;
-/// A pose uncertainty older than this is unknown (the pose publishes at
-/// 10 Hz by default).
-pub const POSE_SIGMA_MAX_AGE_MS: u64 = 1000;
 
 /// The 5° sector (of `n`) of a bearing, radians clockwise from north.
 fn sector_of(bearing: f32, n: usize) -> usize {
@@ -164,12 +161,9 @@ impl Obstacles {
         self.offset = Some([local[0] - x as f32, local[1] - y as f32]);
     }
 
-    /// The live horizontal pose uncertainty (one sigma, m): the last pose's
-    /// `sigma_xy_m` while it is at most [`POSE_SIGMA_MAX_AGE_MS`] old.
-    pub fn pose_sigma(&self, now_ms: u64) -> Option<f32> {
+    /// The last pose's `sigma_xy_m` and when it arrived, however old.
+    pub fn last_pose_sigma(&self) -> Option<(f32, u64)> {
         self.pose_sigma
-            .filter(|(_, at)| now_ms.saturating_sub(*at) <= POSE_SIGMA_MAX_AGE_MS)
-            .map(|(s, _)| s)
     }
 
     /// Ingest a `plugin.world-engine.scan` payload.

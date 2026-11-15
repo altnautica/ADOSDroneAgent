@@ -24,8 +24,8 @@ mod supervisor;
 mod vantage_goal;
 pub use brake::*;
 #[cfg(test)]
-pub use route::{check_legs, legs_of};
-pub use route::{route_items, Route, CONFINED_CAP_MPS};
+pub use route::{check_legs, legs_of, Origin, RouteItem};
+pub use route::{route_of, Route, CONFINED_CAP_MPS};
 pub use supervisor::{Resume, Supervisor};
 pub use vantage_goal::HOLD_NO_VANTAGE;
 

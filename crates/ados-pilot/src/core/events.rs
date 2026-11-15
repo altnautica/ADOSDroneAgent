@@ -93,7 +93,7 @@ impl Pilot {
             }
             "mission" => {
                 let m = <Mission as serde::Deserialize>::deserialize(payload).ok();
-                self.route.set_items(super::control::route_items(payload));
+                self.route.set_feed(super::control::route_of(payload));
                 self.on_mission(m, now_ms);
             }
             "nav.state" => {

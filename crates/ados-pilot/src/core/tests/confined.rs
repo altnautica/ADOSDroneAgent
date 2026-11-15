@@ -13,16 +13,16 @@ use crate::modes::copter;
 use crate::obstacles::{encode_tile_for_test, Obstacles};
 
 /// The x500's propeller-tip radius.
-const TIP_M: f32 = 0.377;
+pub(super) const TIP_M: f32 = 0.377;
 /// Its confined margin (tip + 0.1) plus the 0.1 m floor of the 3σ term.
-const REQUIRED_M: f64 = 0.577;
+pub(super) const REQUIRED_M: f64 = 0.577;
 const TILE_SPAN: f32 = 3.2;
 
-fn ok(r: &Reply) -> bool {
+pub(super) fn ok(r: &Reply) -> bool {
     matches!(r, Reply::Action(a) if a.ok)
 }
 
-fn err(r: &Reply) -> Option<String> {
+pub(super) fn err(r: &Reply) -> Option<String> {
     match r {
         Reply::Action(a) => a.err.clone(),
         _ => None,
@@ -32,7 +32,13 @@ fn err(r: &Reply) -> Option<String> {
 /// The occupancy tiles covering `[n0, n1) × [e0, e1)` (local = map frame):
 /// `occ(n, e)` cells occupied, the rest of the rectangle free, cells of the
 /// tiles outside it unseen.
-fn map_payload(n0: f32, n1: f32, e0: f32, e1: f32, occ: &dyn Fn(f32, f32) -> bool) -> Value {
+pub(super) fn map_payload(
+    n0: f32,
+    n1: f32,
+    e0: f32,
+    e1: f32,
+    occ: &dyn Fn(f32, f32) -> bool,
+) -> Value {
     let mut tiles = Vec::new();
     let idx = |v: f32| (v / TILE_SPAN).floor() as i32;
     for ix in idx(n0)..=idx(n1 - 1e-3) {
@@ -56,35 +62,35 @@ fn map_payload(n0: f32, n1: f32, e0: f32, e1: f32, occ: &dyn Fn(f32, f32) -> boo
 
 /// A post 0.2 m square centred 0.6 m east of the line north at `n`: 0.525 m
 /// from it.
-fn post(n: f32) -> impl Fn(f32, f32) -> bool {
+pub(super) fn post(n: f32) -> impl Fn(f32, f32) -> bool {
     move |pn: f32, pe: f32| (pn - n).abs() < 0.1 && (0.5..0.7).contains(&pe)
 }
 
 /// The pose that places the map (map = local) with σ 0.02 m.
-fn seen(w: &mut World) {
+pub(super) fn seen(w: &mut World) {
     let p = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": 0.02});
     w.p.on_feed("plugin.world-engine.pose", &p, w.now);
 }
 
 /// Run `ms` with the pose arriving every 100 ms.
-fn run_seen(w: &mut World, ms: u64) {
+pub(super) fn run_seen(w: &mut World, ms: u64) {
     for _ in 0..ms / 100 {
         seen(w);
         w.run(100);
     }
 }
 
-fn map(w: &mut World, payload: &Value) {
+pub(super) fn map(w: &mut World, payload: &Value) {
     w.p.on_feed("plugin.world-engine.occupancy", payload, w.now);
     seen(w);
 }
 
-/// A confined place for the x500 (margin 0.477 m).
-fn confined(w: &mut World) {
+/// A confined place for the x500 (margin 0.477 m), the open margin left at
+/// its 1.5 m default.
+pub(super) fn confined(w: &mut World) {
     let p = &mut w.p.settings.pilot;
     p.place_class = PlaceClass::Confined;
     p.prop_tip_radius_m = Some(TIP_M);
-    p.obstacle_margin_m = 0.477;
 }
 
 /// The route north along e = 0: items 1–4 at n 2, 10, 20, 25.
@@ -92,7 +98,7 @@ const ROUTE: [(u32, f32); 4] = [(1, 2.0), (2, 10.0), (3, 20.0), (4, 25.0)];
 
 /// The router's snapshot with the route's items in the local frame, the FC
 /// at `seq` in `state`.
-fn mission(w: &mut World, state: &str, seq: u32) {
+pub(super) fn mission(w: &mut World, state: &str, seq: u32) {
     let items: Vec<Value> = ROUTE
         .iter()
         .map(|&(s, n)| {
@@ -112,11 +118,11 @@ fn mission(w: &mut World, state: &str, seq: u32) {
 }
 
 /// The open area n −6.4…32, e −9.6…9.6 with `occ` in it.
-fn area(occ: &dyn Fn(f32, f32) -> bool) -> Value {
+pub(super) fn area(occ: &dyn Fn(f32, f32) -> bool) -> Value {
     map_payload(-6.4, 32.0, -9.6, 9.6, occ)
 }
 
-fn speed_changes(w: &World) -> Vec<f32> {
+pub(super) fn speed_changes(w: &World) -> Vec<f32> {
     w.sent
         .iter()
         .filter_map(|m| match m {
@@ -129,7 +135,7 @@ fn speed_changes(w: &World) -> Vec<f32> {
 }
 
 #[test]
-fn the_route_samples_every_quarter_metre_and_catches_a_pinch_a_metre_step_misses() {
+fn the_clearance_is_measured_to_the_leg_and_to_the_cell_edge() {
     let mut o = Obstacles::new();
     o.ingest_occupancy(&map_payload(-3.2, 12.8, -3.2, 3.2, &post(4.5)));
     o.ingest_pose(
@@ -137,27 +143,30 @@ fn the_route_samples_every_quarter_metre_and_catches_a_pinch_a_metre_step_misses
         Some([0.0, 0.0]),
         0,
     );
-    let legs = [(1, [0.0, 0.0, -5.0], 2, [10.0, 0.0, -5.0])];
     let req = REQUIRED_M as f32;
-    let coarse = crate::core::control::check_legs(&o, &legs, 1.0, req, 0);
-    assert_eq!(coarse[0].state, RouteState::Feasible, "{coarse:?}");
-    let fine = crate::core::control::check_legs(&o, &legs, 0.25, req, 0);
-    assert_eq!(fine[0].state, RouteState::Infeasible, "{fine:?}");
-    let (p, d) = fine[0].pinch.unwrap();
-    assert!((p[0] - 4.5).abs() < 0.01 && p[1].abs() < 1e-3, "{p:?}");
-    assert!((d - 0.5256).abs() < 0.01, "{d}");
+    let legs = [(1, [0.0, 0.0, -5.0], 2, [10.0, 0.0, -5.0])];
+    let r = crate::core::control::check_legs(&o, &legs, req, 0);
+    assert_eq!(r[0].state, RouteState::Infeasible, "{r:?}");
+    let (p, d) = r[0].pinch.unwrap();
+    assert!((p[0] - 4.5).abs() < 0.1 && p[1].abs() < 1e-3, "{p:?}");
+    // The post's nearest cell centre is 0.525 m off the leg; its nearest
+    // possible point is half a cell diagonal (0.035 m) closer.
+    assert!(
+        (d - (0.525 - 0.05 * std::f32::consts::FRAC_1_SQRT_2)).abs() < 1e-3,
+        "{d}"
+    );
     // A leg leaving the map is unverified; one with no obstacle near it is
     // feasible.
     let out = [(1, [0.0, -2.0, -5.0], 2, [20.0, -2.0, -5.0])];
-    let r = crate::core::control::check_legs(&o, &out, 0.25, req, 0);
+    let r = crate::core::control::check_legs(&o, &out, req, 0);
     assert_eq!(r[0].state, RouteState::Unverified);
     let clear = [(1, [0.0, -2.0, -5.0], 2, [10.0, -2.0, -5.0])];
-    let r = crate::core::control::check_legs(&o, &clear, 0.25, req, 0);
+    let r = crate::core::control::check_legs(&o, &clear, req, 0);
     assert_eq!(r[0].state, RouteState::Feasible);
     // No pose offset: the map cannot be placed, everything is unseen.
     let mut o = Obstacles::new();
     o.ingest_occupancy(&map_payload(-3.2, 12.8, -3.2, 3.2, &|_, _| false));
-    let r = crate::core::control::check_legs(&o, &clear, 0.25, req, 0);
+    let r = crate::core::control::check_legs(&o, &clear, req, 0);
     assert_eq!(r[0].state, RouteState::Unverified);
 }
 
@@ -188,7 +197,7 @@ fn confined_without_a_tip_radius_blocks_readiness_and_refuses_the_launch() {
     w.p.settings.pilot.prop_tip_radius_m = Some(TIP_M);
     let it = item(&w).unwrap();
     assert!(it.ok, "{it:?}");
-    assert_eq!(it.msg, "Confined place: 1.50 m from obstacles");
+    assert_eq!(it.msg, "Confined place: 0.48 m from obstacles");
 }
 
 #[test]
@@ -251,8 +260,11 @@ fn a_launch_into_an_infeasible_route_is_refused_naming_the_pinch() {
         assert_eq!(rc.sigma_m, Some(0.02));
         let pinch = rc.pinch.expect("pinch");
         assert_eq!((pinch.from_seq, pinch.to_seq), (2, 3));
-        assert_eq!(pinch.ned, [15.0, 0.0, -5.0]);
-        assert!((pinch.clearance_m - 0.526).abs() < 0.002, "{pinch:?}");
+        assert!((pinch.ned[0] - 15.0).abs() < 0.1, "{pinch:?}");
+        assert_eq!(&pinch.ned[1..], &[0.0, -5.0]);
+        // The cell's nearest possible point: 0.525 m to its centre less half
+        // the 0.05 m cell's diagonal.
+        assert!((pinch.clearance_m - 0.490).abs() < 0.002, "{pinch:?}");
         assert_eq!(pinch.required_m, REQUIRED_M);
         assert!(rc.unverified_legs.is_empty());
     });
@@ -265,7 +277,7 @@ fn a_launch_into_an_infeasible_route_is_refused_naming_the_pinch() {
         "{line}"
     );
     assert!(
-        line.contains("15.0") && line.contains("clearance_m=0.52"),
+        line.contains("[1") && line.contains("clearance_m=0.489"),
         "{line}"
     );
     assert!(line.contains("required_m=0.57"), "{line}");
@@ -283,8 +295,9 @@ fn a_feasible_route_launches_and_reports_feasible() {
     let rc = w.p.state(w.now).route_check.expect("route_check");
     assert_eq!(rc.state, RouteState::Feasible);
     assert_eq!(rc.pinch, None, "no obstacle near the route");
-    // σ unknown: at best unverified.
-    w.run(1200);
+    // The pose stops: its σ is held 5 s, then the route reads at best
+    // unverified.
+    w.run(5200);
     assert_eq!(
         w.p.state(w.now).route_check.unwrap().state,
         RouteState::Unverified
@@ -317,16 +330,20 @@ fn an_infeasible_leg_ahead_holds_a_mission_a_ground_station_started() {
     let b = s.banner.expect("banner");
     assert_eq!(b.text_key, "pilot.banner.route_infeasible");
     assert_eq!(b.args["leg"], "2→3");
-    assert_eq!(b.args["clearance_m"], 0.53);
+    assert_eq!(b.args["clearance_m"], 0.49);
     assert_eq!(b.args["required_m"], 0.58);
-    // The operator skips item 2: the leg 2→3 is never flown, nothing else is
-    // tight, the mission goes on.
+    // The operator skips item 2. The FC would fly from here (0, 0) straight
+    // to item 3 past the same post: the pilot holds again instead, naming
+    // the leg it would fly, and never puts the FC back in AUTO.
     assert!(ok(&w.action("mission_skip")));
-    assert_eq!(w.mode, copter::AUTO);
+    assert_ne!(w.mode, copter::AUTO);
+    assert_eq!(w.set_modes(copter::AUTO), 0);
     mission(&mut w, "active", 3);
     run_seen(&mut w, 1500);
-    assert_eq!(w.p.owner(), Owner::MissionFc);
-    assert_eq!(w.set_modes(copter::BRAKE), 1);
+    assert_eq!(w.p.owner(), Owner::Pilot);
+    let s = w.p.state(w.now);
+    assert_eq!(s.hold_reason.as_deref(), Some("route-infeasible"));
+    assert_eq!(s.banner.expect("banner").args["leg"], "1→3");
 }
 
 #[test]
@@ -489,11 +506,15 @@ fn the_router_route_reaches_the_pilot_in_the_local_frame() {
                   {"seq": 2, "cmd": 16, "frame": 6, "lat_e7": 1, "lon_e7": 1, "alt_m": 5.0,
                    "ned": [10.0, 2.0, -5.0]}]}});
     let m = crate::router_state::mission_of(snapshot);
-    let items = crate::core::control::route_items(&m);
+    let feed = crate::core::control::route_of(&m);
+    let items = feed.items;
     assert_eq!(items.len(), 2);
     assert_eq!((items[0].seq, items[0].cmd, items[0].ned), (1, 22, None));
+    assert!(items[0].here, "latitude and longitude 0");
     assert_eq!(items[1].ned, Some([10.0, 2.0, -5.0]));
+    assert!(!items[1].here);
     // The take-off without a position starts at home.
-    let legs = crate::core::control::legs_of(&items, [1.0, 1.0]);
-    assert_eq!(legs, vec![(1, [1.0, 1.0, -5.0], 2, [10.0, 2.0, -5.0])]);
+    let legs = crate::core::control::legs_of(&items, [1.0, 1.0], &|_| false, None, None);
+    assert_eq!(legs.legs, vec![(1, [1.0, 1.0, -5.0], 2, [10.0, 2.0, -5.0])]);
+    assert!(legs.unchecked.is_empty());
 }

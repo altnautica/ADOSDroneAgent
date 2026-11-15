@@ -81,11 +81,16 @@ impl Pilot {
         let Some(deadline) = self.rth_deadline_ms else {
             let countdown_s = self.settings.pilot.low_battery_countdown_s;
             self.rth_deadline_ms = Some(now_ms + u64::from(countdown_s) * 1000);
+            // The countdown names the action it ends in.
             self.banner = Some(banner(
-                "pilot.banner.low_battery_rth",
+                if land {
+                    "pilot.banner.low_battery_land_in"
+                } else {
+                    "pilot.banner.low_battery_rth"
+                },
                 &[
-                    ("pct", json!(pct.round())),
-                    ("need_pct", json!(low_pct.round())),
+                    ("pct", json!(whole_pct(pct))),
+                    ("need_pct", json!(whole_pct(low_pct))),
                     ("in_s", json!(countdown_s)),
                 ],
                 now_ms,
@@ -155,7 +160,11 @@ impl Pilot {
             crate::batt_failsafe::spec(alert).to_owned(),
             now_ms,
         );
-        self.banner = Some(banner(banner_key, &[("pct", json!(pct))], now_ms));
+        self.banner = Some(banner(
+            banner_key,
+            &[("pct", json!(whole_pct(pct)))],
+            now_ms,
+        ));
     }
 
     /// The operator stopped the low-battery countdown (Cancel, Pause).
@@ -171,4 +180,9 @@ impl Pilot {
             );
         }
     }
+}
+
+/// A battery percentage as the whole number every surface prints.
+fn whole_pct(pct: f32) -> i64 {
+    pct.round() as i64
 }
