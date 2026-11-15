@@ -35,6 +35,7 @@ use ados_protocol::mavlink::ardupilotmega::{
     MISSION_REQUEST_LIST_DATA,
 };
 use ados_protocol::shutdown::Shutdown;
+use ados_swarm::geo::GeoOrigin;
 use bytes::Bytes;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex};
@@ -64,6 +65,49 @@ pub const MAX_ITEMS: usize = 1024;
 /// [`STATE_ITEMS_CAP`] of them.
 pub const NAV_COMMANDS: [u16; 7] = [16, 17, 18, 19, 21, 22, 82];
 pub const STATE_ITEMS_CAP: usize = 256;
+/// The mission commands whose `x`/`y`/`z` are a place to fly to.
+const POSITIONED_COMMANDS: [u16; 8] = [16, 17, 18, 19, 21, 22, 31, 82];
+/// How long the vehicle's own position counts as current for the target:
+/// five samples of the 5 Hz GLOBAL_POSITION_INT stream.
+const POSITION_FRESH: Duration = Duration::from_secs(1);
+
+/// The vehicle's own position, sampled from the state aggregator.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VehiclePosition {
+    /// The last GLOBAL_POSITION_INT.
+    pub global: Option<GlobalFix>,
+    /// The last LOCAL_POSITION_NED `[n, e, d]`, metres, and when it was decoded.
+    pub local: Option<([f64; 3], Instant)>,
+}
+
+/// One GLOBAL_POSITION_INT and when it was decoded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlobalFix {
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub alt_msl_m: f64,
+    /// Above home.
+    pub alt_rel_m: f64,
+    pub at: Instant,
+}
+
+impl VehiclePosition {
+    pub fn of(s: &VehicleState) -> Self {
+        Self {
+            global: s.position_at.map(|at| GlobalFix {
+                lat_deg: s.lat,
+                lon_deg: s.lon,
+                alt_msl_m: s.alt_msl,
+                alt_rel_m: s.alt_rel,
+                at,
+            }),
+            local: s
+                .local_ned
+                .zip(s.local_at)
+                .map(|([n, e, d, ..], at)| ([n, e, d], at)),
+        }
+    }
+}
 
 /// The mirrored mission.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -133,6 +177,7 @@ pub struct MirrorCore {
     armed: bool,
     custom_mode: u32,
     firmware: Option<ArduPilotFirmware>,
+    position: VehiclePosition,
     pub mirror: Mirror,
     fc_capture: Option<Capture>,
     upload_capture: Option<Capture>,
@@ -159,6 +204,7 @@ impl MirrorCore {
             armed: false,
             custom_mode: 0,
             firmware: None,
+            position: VehiclePosition::default(),
             mirror: Mirror::default(),
             fc_capture: None,
             upload_capture: None,
@@ -178,6 +224,11 @@ impl MirrorCore {
     /// The firmware the FC banner named, from the state aggregator.
     pub fn set_firmware(&mut self, fw: Option<ArduPilotFirmware>) {
         self.firmware = fw;
+    }
+
+    /// The vehicle's own position, from the state aggregator.
+    pub fn set_position(&mut self, position: VehiclePosition) {
+        self.position = position;
     }
 
     pub fn table(&self) -> ModeTable {
@@ -490,7 +541,8 @@ impl MirrorCore {
     }
 
     /// The `mission` block of the state snapshot: the mission state plus the
-    /// mirror (`rev`, the navigation items) and `uploads_seen`.
+    /// mirror (`rev`, the navigation items), `uploads_seen`, and the `target`
+    /// at the current `seq`.
     pub fn state_json(&mut self, now: Instant) -> Value {
         let status = self.status(now);
         let mut v = status.to_json();
@@ -513,8 +565,62 @@ impl MirrorCore {
             map.insert("rev".into(), json!(self.mirror.rev));
             map.insert("items".into(), Value::Array(items));
             map.insert("uploads_seen".into(), json!(self.tracker.uploads_seen()));
+            if let Some(target) = self.target_json(status.seq, now) {
+                map.insert("target".into(), target);
+            }
         }
         v
+    }
+
+    /// The mirrored item at MISSION_CURRENT `seq` (`seq`, `cmd`, `ned`,
+    /// `radius_m`), `None` when the mirror holds none there. ArduPilot's home
+    /// slot is not a flown item.
+    fn target_json(&self, seq: Option<u16>, now: Instant) -> Option<Value> {
+        let seq = seq.filter(|s| !(self.table().home_slot() && *s == 0))?;
+        let item = self
+            .mirror
+            .items
+            .get(usize::from(seq))
+            .filter(|i| i.seq == seq)?;
+        let mut target = json!({
+            "seq": seq, "cmd": item.command, "ned": self.item_ned(item, now),
+        });
+        // LOITER_TURNS and LOITER_TO_ALT carry the radius in param3, signed
+        // for the direction; Copter's LOITER_TIME has none.
+        let radius = f64::from(item.param3.abs());
+        if matches!(item.command, 18 | 31) && radius > 0.0 {
+            target["radius_m"] = json!(radius);
+        }
+        Some(target)
+    }
+
+    /// The item's position in the FC's local NED frame (the frame of
+    /// LOCAL_POSITION_NED), placed by its offset from the vehicle's own fresh
+    /// fix. `None` for an item without a position, a zero position (here), a
+    /// terrain or non-global frame, or without a fresh position of both kinds.
+    fn item_ned(&self, item: &ItemInt, now: Instant) -> Option<[f64; 3]> {
+        if !POSITIONED_COMMANDS.contains(&item.command) || (item.x == 0 && item.y == 0) {
+            return None;
+        }
+        let fresh = |at: Instant| now.saturating_duration_since(at) < POSITION_FRESH;
+        let g = self
+            .position
+            .global
+            .filter(|g| fresh(g.at) && (g.lat_deg != 0.0 || g.lon_deg != 0.0))?;
+        let (local, _) = self.position.local.filter(|(_, at)| fresh(*at))?;
+        let vehicle_alt = match item.frame {
+            // MAV_FRAME_GLOBAL(_INT): AMSL.
+            0 | 5 => g.alt_msl_m,
+            // MAV_FRAME_GLOBAL_RELATIVE_ALT(_INT): above home.
+            3 | 6 => g.alt_rel_m,
+            _ => return None,
+        };
+        let off = GeoOrigin::new(g.lat_deg, g.lon_deg, vehicle_alt).to_ned(
+            f64::from(item.x) / 1e7,
+            f64::from(item.y) / 1e7,
+            f64::from(item.z),
+        );
+        Some([local[0] + off.n, local[1] + off.e, local[2] + off.d])
     }
 
     /// The mirror file body ([`MIRROR_FILE`]): the full mirror in
@@ -585,8 +691,12 @@ pub async fn run(
             },
             _ = tick.tick() => {
                 let now = Instant::now();
-                let fw = { state.lock().await.firmware };
+                let (fw, position) = {
+                    let s = state.lock().await;
+                    (s.firmware, VehiclePosition::of(&s))
+                };
                 core.set_firmware(fw);
+                core.set_position(position);
                 let out = core.tick(now);
                 let mission = core.state_json(now);
                 state.lock().await.mission = Some(mission);

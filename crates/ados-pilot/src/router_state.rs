@@ -101,6 +101,28 @@ mod tests {
     }
 
     #[test]
+    fn the_mission_target_survives_mission_of() {
+        let snap = json!({"mission": {"state": "active", "seq": 3, "total": 4,
+            "item_reached": 2, "id": null, "source": "mission_state", "age_ms": 40,
+            "landing_seq": false, "rev": 2, "uploads_seen": 0, "items": [],
+            "target": {"seq": 3, "cmd": 18, "ned": [25.0, 15.0, -10.0], "radius_m": 30.0}}});
+        let m = mission_of(snap);
+        assert_eq!(m["target"]["seq"], 3);
+        let typed: ados_protocol::pilot::Mission = serde_json::from_value(m).unwrap();
+        let target = typed.target.expect("target");
+        assert_eq!((target.seq, target.cmd), (3, 18));
+        assert_eq!(target.ned, Some([25.0, 15.0, -10.0]));
+        assert_eq!(target.radius_m, Some(30.0));
+        // An item without a position.
+        let m = mission_of(json!({"mission": {"state": "active", "seq": 2, "total": 4,
+            "item_reached": 1, "id": null, "source": "mission_state", "age_ms": 40,
+            "landing_seq": false, "target": {"seq": 2, "cmd": 93, "ned": null}}}));
+        let typed: ados_protocol::pilot::Mission = serde_json::from_value(m).unwrap();
+        let target = typed.target.expect("target");
+        assert_eq!((target.cmd, target.ned, target.radius_m), (93, None, None));
+    }
+
+    #[test]
     fn a_mission_before_mission_current_parses_with_null_numbers() {
         let m = mission_of(
             json!({"mission": {"state": "none", "seq": null, "total": null,

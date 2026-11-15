@@ -385,3 +385,179 @@ fn a_seq_past_the_mirror_triggers_one_download() {
     l.adv(200);
     assert!(l.take_sent().is_empty());
 }
+
+// -- target -----------------------------------------------------------------
+
+const VLAT: f64 = 47.0;
+const VLON: f64 = 8.5;
+
+/// `(cmd, frame, lat_e7, lon_e7, alt_m, param3)` of one item.
+type Spot = (u16, u8, i32, i32, f32, f32);
+
+fn e7(deg: f64) -> i32 {
+    (deg * 1e7).round() as i32
+}
+
+/// The item `n` metres north, `e` metres east of the vehicle's fix.
+fn spot(cmd: u16, frame: u8, n: f64, e: f64, alt: f32) -> Spot {
+    let lat = VLAT + n * ados_swarm::geo::M_TO_DEG;
+    let lon = VLON + e * ados_swarm::geo::M_TO_DEG / VLAT.to_radians().cos();
+    (cmd, frame, e7(lat), e7(lon), alt, 0.0)
+}
+
+fn spot_payload(seq: u16, (cmd, frame, lat, lon, alt, p3): Spot) -> Vec<u8> {
+    let mut p = Vec::new();
+    for param in [0f32, 0.0, p3, 0.0] {
+        p.extend_from_slice(&param.to_le_bytes());
+    }
+    p.extend_from_slice(&lat.to_le_bytes());
+    p.extend_from_slice(&lon.to_le_bytes());
+    p.extend_from_slice(&alt.to_le_bytes());
+    p.extend_from_slice(&seq.to_le_bytes());
+    p.extend_from_slice(&cmd.to_le_bytes());
+    p.extend_from_slice(&[GCS.0, GCS.1, frame, 0, 1, 0]);
+    p
+}
+
+/// An armed copter in AUTO mirroring home plus `items` (seq 1 onwards).
+fn flying(items: &[Spot]) -> Link {
+    let mut l = Link::new();
+    l.heartbeat(2, 3, true);
+    let count = items.len() as u16 + 1;
+    l.fc(wire::MSG_MISSION_COUNT, &count_payload(count, GCS));
+    let home = (16, 0, e7(VLAT), e7(VLON), 500.0, 0.0);
+    for (seq, s) in std::iter::once(home)
+        .chain(items.iter().copied())
+        .enumerate()
+    {
+        l.fc(wire::MSG_MISSION_ITEM_INT, &spot_payload(seq as u16, s));
+    }
+    assert_eq!(l.core.mirror.items.len(), usize::from(count));
+    l
+}
+
+/// The vehicle at local (5, 5, -3), 3 m above home and 500 m AMSL, sampled now.
+fn vehicle_here(l: &mut Link) {
+    let at = l.t;
+    l.core.set_position(VehiclePosition {
+        global: Some(GlobalFix {
+            lat_deg: VLAT,
+            lon_deg: VLON,
+            alt_msl_m: 500.0,
+            alt_rel_m: 3.0,
+            at,
+        }),
+        local: Some(([5.0, 5.0, -3.0], at)),
+    });
+}
+
+/// The `target` of the snapshot with MISSION_CURRENT at `seq`.
+fn target_at(l: &mut Link, seq: u16) -> Value {
+    let total = l.core.mirror.items.len() as u16 - 1;
+    l.current(seq, total, 3);
+    let t = l.t;
+    l.core
+        .state_json(t)
+        .get("target")
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn assert_ned(target: &Value, want: [f64; 3]) {
+    let got: Vec<f64> = target["ned"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no ned in {target}"))
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    for (g, w) in got.iter().zip(want) {
+        assert!((g - w).abs() < 0.1, "ned {got:?}, want {want:?}");
+    }
+}
+
+#[test]
+fn the_target_is_the_current_item_in_the_local_frame() {
+    let mut l = flying(&[
+        spot(16, 6, 20.0, 10.0, 10.0),
+        spot(16, 5, 20.0, 10.0, 510.0),
+    ]);
+    vehicle_here(&mut l);
+    // Relative altitude: 10 m above home with the vehicle 3 m above it.
+    let t = target_at(&mut l, 1);
+    assert_eq!((t["seq"].as_u64(), t["cmd"].as_u64()), (Some(1), Some(16)));
+    assert!(t.get("radius_m").is_none());
+    assert_ned(&t, [25.0, 15.0, -10.0]);
+    let typed: ados_protocol::pilot::MissionTarget = serde_json::from_value(t).unwrap();
+    assert_eq!((typed.seq, typed.cmd, typed.radius_m), (1, 16, None));
+    // AMSL: 510 m with the vehicle at 500 m.
+    assert_ned(&target_at(&mut l, 2), [25.0, 15.0, -13.0]);
+}
+
+#[test]
+fn items_without_a_position_have_a_null_ned() {
+    let mut l = flying(&[
+        spot(93, 6, 20.0, 10.0, 10.0),
+        spot(16, 11, 20.0, 10.0, 10.0),
+        (16, 6, 0, 0, 10.0, 0.0),
+        spot(16, 1, 20.0, 10.0, 10.0),
+    ]);
+    vehicle_here(&mut l);
+    // DELAY, a terrain frame, a zero position (here) and a local frame.
+    for (seq, cmd) in [(1, 93), (2, 16), (3, 16), (4, 16)] {
+        let t = target_at(&mut l, seq);
+        assert_eq!(t["cmd"], cmd, "seq {seq}: {t}");
+        assert!(t["ned"].is_null(), "seq {seq}: {t}");
+    }
+}
+
+#[test]
+fn no_fresh_vehicle_position_gives_a_null_ned() {
+    let mut l = flying(&[spot(16, 6, 20.0, 10.0, 10.0)]);
+    assert!(target_at(&mut l, 1)["ned"].is_null());
+    // A global fix alone is not enough.
+    let at = l.t;
+    l.core.set_position(VehiclePosition {
+        global: Some(GlobalFix {
+            lat_deg: VLAT,
+            lon_deg: VLON,
+            alt_msl_m: 500.0,
+            alt_rel_m: 3.0,
+            at,
+        }),
+        local: None,
+    });
+    assert!(target_at(&mut l, 1)["ned"].is_null());
+    // Both, then left to go stale.
+    vehicle_here(&mut l);
+    assert_ned(&target_at(&mut l, 1), [25.0, 15.0, -10.0]);
+    l.adv(1500);
+    assert!(target_at(&mut l, 1)["ned"].is_null());
+}
+
+#[test]
+fn a_seq_without_a_mirrored_item_omits_the_target() {
+    let mut l = flying(&[spot(16, 6, 20.0, 10.0, 10.0)]);
+    vehicle_here(&mut l);
+    assert!(target_at(&mut l, 5).is_null());
+    // ArduPilot's home slot is not a flown item.
+    assert!(target_at(&mut l, 0).is_null());
+    assert!(!target_at(&mut l, 1).is_null());
+}
+
+#[test]
+fn loiter_turns_and_to_alt_carry_their_radius() {
+    let with_p3 = |s: Spot, p3: f32| (s.0, s.1, s.2, s.3, s.4, p3);
+    let mut l = flying(&[
+        with_p3(spot(18, 6, 20.0, 10.0, 10.0), -30.0),
+        with_p3(spot(31, 6, 20.0, 10.0, 10.0), 25.0),
+        with_p3(spot(19, 6, 20.0, 10.0, 10.0), 40.0),
+        spot(18, 6, 20.0, 10.0, 10.0),
+    ]);
+    vehicle_here(&mut l);
+    assert_eq!(target_at(&mut l, 1)["radius_m"], 30.0);
+    let to_alt = target_at(&mut l, 2);
+    assert_eq!(to_alt["radius_m"], 25.0);
+    assert_ned(&to_alt, [25.0, 15.0, -10.0]);
+    assert!(target_at(&mut l, 3).get("radius_m").is_none());
+    assert!(target_at(&mut l, 4).get("radius_m").is_none());
+}
