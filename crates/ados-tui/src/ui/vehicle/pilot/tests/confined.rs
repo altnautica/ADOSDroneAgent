@@ -41,27 +41,29 @@ fn open_frame() -> Value {
 #[test]
 fn the_golden_confined_frame_renders_place_route_check_and_cap() {
     let mut app = app_with_frame(1, confined_frame());
-    let text = draw(&mut app, 160, 60);
-    println!("{text}");
+    // Wide enough for the whole pinch report on the Pilot block's line.
+    let text = draw(&mut app, 220, 60);
     let place = column_rows(&text, "Place     ", 1);
     assert_eq!(place[0], "Place     Confined", "{text}");
     let route = column_rows(&text, "Route     ", 3);
     assert_eq!(
-        route[0], "Route     Route too tight: leg 3→4 has 0.52 m, needs 0.58 m",
+        route[0], "Route     Route too tight: leg 3→4 has 0.52 m",
         "{text}"
     );
+    assert_eq!(route[1].trim_end(), "          needs 0.58 m", "{text}");
     assert!(
-        route[1].ends_with("At N 41.3 m, E -17.5 m, height 2.0 m"),
+        route[2].ends_with("At N 41.3 m, E -17.5 m, height 2.0 m"),
         "{text}"
     );
     assert!(
         text.contains("Near the clearance limit: 0.5 m/s max"),
         "the chip's line carries the cap\n{text}"
     );
-    // The route banner says more than the overlay: it stays beside it.
+    // The route banner stays beside the overlay (the stall banners do not);
+    // its figures are on the Route rows above, the banner line may clip.
     let banner = column_rows(&text, "Banner    ", 1);
     assert!(
-        banner[0].ends_with("Route too tight at leg 3→4: 0.52 m of 0.58 m"),
+        banner[0].starts_with("Banner    Route too tight at leg 3→4: 0.52 m"),
         "{text}"
     );
     assert!(text.contains("Stall     "), "{text}");

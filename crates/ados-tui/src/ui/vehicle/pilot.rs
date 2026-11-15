@@ -154,8 +154,11 @@ fn place_rows(core: &Core, p: &Pilot, place_key: bool, stale: bool) -> Vec<Row> 
             ReportSeverity::Warn => (Style::default().fg(t.warning()), false),
             ReportSeverity::Ok => (t.bright(), false),
         };
+        // The Pilot block is narrow: the report wraps at its clauses too, so
+        // the required clearance is never cut off.
+        let line = report.line.replace(", ", " · ");
         out.extend(
-            phrase_rows(t, "Route", &report.line, style, stale)
+            phrase_rows(t, "Route", &line, style, stale)
                 .into_iter()
                 .map(|(line, _)| (line, keep)),
         );

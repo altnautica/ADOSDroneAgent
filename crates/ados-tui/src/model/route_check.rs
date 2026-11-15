@@ -162,11 +162,6 @@ pub fn route_check_report(rc: &RouteCheck) -> RouteCheckReport {
     }
 }
 
-/// The "Confined" chip text while the class is confined, else `None`.
-pub fn confined_chip_text(place_class: &str) -> Option<String> {
-    (place_class == "confined").then(|| spec_text("chip.confined", &[]))
-}
-
 /// The speed-cap line by its reason (`pilot.speed_cap.<reason>`, dashes as
 /// underscores), or `None` for a reason the spec does not name.
 pub fn speed_cap_line(reason: &str, v_h_mps: f64) -> Option<String> {
@@ -271,8 +266,6 @@ mod tests {
             Some("Near the clearance limit: 0.5 m/s max")
         );
         assert_eq!(speed_cap_line("made-up", 1.0), None);
-        assert_eq!(confined_chip_text("confined").as_deref(), Some("Confined"));
-        assert_eq!(confined_chip_text("open"), None);
         assert_eq!(
             place_command(other_place_class("open")),
             "placeclass_confined"
