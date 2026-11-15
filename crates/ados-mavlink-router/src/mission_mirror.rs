@@ -63,8 +63,10 @@ pub const MIRROR_FILE: &str = "mission-mirror.json";
 pub const MAX_ITEMS: usize = 1024;
 /// The navigation commands the state snapshot carries, at most
 /// [`STATE_ITEMS_CAP`] of them.
-pub const NAV_COMMANDS: [u16; 7] = [16, 17, 18, 19, 21, 22, 82];
+pub const NAV_COMMANDS: [u16; 8] = [16, 17, 18, 19, 21, 22, 31, 82];
 pub const STATE_ITEMS_CAP: usize = 256;
+/// MAV_CMD_DO_CHANGE_SPEED.
+const CMD_DO_CHANGE_SPEED: u16 = 178;
 /// The mission commands whose `x`/`y`/`z` are a place to fly to.
 const POSITIONED_COMMANDS: [u16; 8] = [16, 17, 18, 19, 21, 22, 31, 82];
 /// How long the vehicle's own position counts as current for the target:
@@ -544,16 +546,21 @@ impl MirrorCore {
     /// mirror (`rev`, the navigation items, each with its position in the
     /// FC's local NED frame as the `target` places it), `uploads_seen`, and
     /// the `target` at the current `seq`.
+    /// `items_truncated` is set when more navigation items exist than the
+    /// snapshot carries, and `speeds` lists the horizontal DO_CHANGE_SPEED
+    /// items (`seq`, `mps`).
     pub fn state_json(&mut self, now: Instant) -> Value {
         let status = self.status(now);
         let mut v = status.to_json();
         let home_slot = self.table().home_slot();
-        let items: Vec<Value> = self
-            .mirror
-            .items
-            .iter()
-            .filter(|i| !(home_slot && i.seq == 0))
-            .filter(|i| NAV_COMMANDS.contains(&i.command))
+        let flown = || {
+            self.mirror
+                .items
+                .iter()
+                .filter(move |i| !(home_slot && i.seq == 0))
+        };
+        let nav = || flown().filter(|i| NAV_COMMANDS.contains(&i.command));
+        let items: Vec<Value> = nav()
             .take(STATE_ITEMS_CAP)
             .map(|i| {
                 json!({
@@ -563,9 +570,20 @@ impl MirrorCore {
                 })
             })
             .collect();
+        let truncated = nav().nth(STATE_ITEMS_CAP).is_some();
+        // DO_CHANGE_SPEED: speed type 0 (air) or 1 (ground) is the
+        // horizontal speed on a copter; -1 or 0 changes nothing.
+        let speeds: Vec<Value> = flown()
+            .filter(|i| i.command == CMD_DO_CHANGE_SPEED && i.param1 < 1.5 && i.param2 > 0.0)
+            .map(|i| json!({"seq": i.seq, "mps": i.param2}))
+            .collect();
         if let Value::Object(map) = &mut v {
             map.insert("rev".into(), json!(self.mirror.rev));
             map.insert("items".into(), Value::Array(items));
+            if truncated {
+                map.insert("items_truncated".into(), json!(true));
+            }
+            map.insert("speeds".into(), Value::Array(speeds));
             map.insert("uploads_seen".into(), json!(self.tracker.uploads_seen()));
             if let Some(target) = self.target_json(status.seq, now) {
                 map.insert("target".into(), target);

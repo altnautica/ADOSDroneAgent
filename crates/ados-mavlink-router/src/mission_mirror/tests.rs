@@ -126,6 +126,55 @@ fn state_json_carries_nav_items_without_the_home_slot() {
     assert_eq!(full["items"][0]["command"], 16);
 }
 
+/// A mirrored mission of `cmds` after the home slot; `param1`/`param2` of
+/// every item set to `p12`.
+fn copter_with(cmds: &[u16], p12: [f32; 2]) -> Link {
+    let mut l = Link::new();
+    l.heartbeat(2, 0, false);
+    let n = u16::try_from(cmds.len() + 1).unwrap();
+    l.fc(wire::MSG_MISSION_COUNT, &count_payload(n, GCS));
+    for seq in 0..n {
+        let cmd = if seq == 0 {
+            16
+        } else {
+            cmds[usize::from(seq) - 1]
+        };
+        let mut p = item_payload(seq, GCS, cmd);
+        p[0..4].copy_from_slice(&p12[0].to_le_bytes());
+        p[4..8].copy_from_slice(&p12[1].to_le_bytes());
+        l.fc(wire::MSG_MISSION_ITEM_INT, &p);
+    }
+    l
+}
+
+#[test]
+fn state_json_carries_loiter_to_alt_the_speed_items_and_truncation() {
+    // LOITER_TO_ALT is flown to a place; a ground-speed DO_CHANGE_SPEED is
+    // listed with its speed.
+    let mut l = copter_with(&[16, 178, 31], [1.0, 3.0]);
+    let t = l.t;
+    let v = l.core.state_json(t);
+    let cmds: Vec<u64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["cmd"].as_u64().unwrap())
+        .collect();
+    assert_eq!(cmds, vec![16, 31]);
+    assert_eq!(v["speeds"], serde_json::json!([{"seq": 2, "mps": 3.0}]));
+    assert!(v.get("items_truncated").is_none());
+    // A climb-rate change (type 2) is not a horizontal speed.
+    let mut l = copter_with(&[178], [2.0, 3.0]);
+    let t = l.t;
+    assert_eq!(l.core.state_json(t)["speeds"], serde_json::json!([]));
+    // More navigation items than the snapshot carries.
+    let mut l = copter_with(&[16; STATE_ITEMS_CAP + 1], [0.0, 0.0]);
+    let t = l.t;
+    let v = l.core.state_json(t);
+    assert_eq!(v["items"].as_array().unwrap().len(), STATE_ITEMS_CAP);
+    assert_eq!(v["items_truncated"], true);
+}
+
 #[test]
 fn active_download_retries_a_dropped_item() {
     let mut l = Link::new();
