@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.0] - 2026-11-15
+
 ### Changed
 
 - The ADOS flight-controller profile's battery actions on a multirotor: with GNSS, low = SmartRTL or Land (`BATT_FS_LOW_ACT` 4) and critical = Land (1); on one that may fly without GNSS, Land for both, since a battery RTL climbs to the RTL altitude, into the roof indoors. "May fly without GNSS" means `GPS1_TYPE` (`GPS_TYPE` before ArduCopter 4.7) is 0, `EK3_SRC1_POSXY` is not GPS, or any source set (1–3) positions from a beacon or external nav (4 or 6): vision-nav switches to its external-nav set in flight, and the FC's battery action is fixed. The `fc_profile` readiness item no longer checks `BATT_FS_LOW_ACT` and `BATT_FS_CRT_ACT`; the new `battery_failsafe` item owns them. The setup wizard's `ados_profile` step writes the same values from the same rule, so its fix always settles the item.
