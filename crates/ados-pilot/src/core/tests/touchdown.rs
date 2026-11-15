@@ -271,7 +271,7 @@ fn a_short_lift_after_take_control_pauses_and_fails_safe() {
     let end = w.now + 15_000;
     while w.mode != copter::RTL {
         assert!(w.now < end, "no low-battery RTH");
-        w.req(crate::core::Request::Hb { src: "mc".into() });
+        w.req(ados_protocol::pilot::Request::Hb { src: "mc".into() });
         fly(&mut w, &mut s, 20);
     }
 }
