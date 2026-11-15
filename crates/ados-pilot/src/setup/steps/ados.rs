@@ -2,16 +2,18 @@
 //! with the pilot's readiness check; the battery actions follow
 //! [`crate::batt_failsafe::recommended`], Land for both on a multirotor that
 //! navigates without GNSS), and `ados_intro`: "Meet ADOS Pilot", where the
-//! operator chooses the control mode.
+//! operator chooses the control mode. A changed row the FC reads only at
+//! boot (`OA_TYPE`, `SRTL_POINTS`) reboots the FC before the step is done, as
+//! the battery and frame steps do.
 
 use ados_protocol::pilot::VehicleClass;
 use serde_json::{json, Map, Value};
 
-use crate::fc_profile::{fc_profile, Firmware, ProfileParam};
+use crate::fc_profile::{check_row, fc_profile, Firmware, ProfileParam, RowCheck};
 use crate::setup::fcstate::{Class, Fw};
 use crate::setup::out::Effect;
 use crate::setup::schema::{obj, Action};
-use crate::setup::step::{step_core, writes_settled, ActErr, Cx, Step, StepCore};
+use crate::setup::step::{step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
 
 pub fn firmware(fw: Fw) -> Option<Firmware> {
     match fw {
@@ -33,8 +35,20 @@ pub fn vehicle_class(c: Class) -> VehicleClass {
 pub struct AdosProfile {
     core: StepCore,
     writing: bool,
+    needs_reboot: bool,
+    reboot: Reboot,
     applied: Vec<Value>,
     absent: Vec<Value>,
+}
+
+impl AdosProfile {
+    fn finish(&mut self) {
+        self.core.done(obj([
+            ("applied", Value::Array(std::mem::take(&mut self.applied))),
+            ("absent", Value::Array(std::mem::take(&mut self.absent))),
+            ("rebooted", json!(self.needs_reboot)),
+        ]));
+    }
 }
 
 impl Step for AdosProfile {
@@ -44,6 +58,7 @@ impl Step for AdosProfile {
         self.core = StepCore::default();
         self.writing = false;
         let class = vehicle_class(cx.adapter.class);
+        self.needs_reboot = false;
         let rows: Vec<Value> = firmware(cx.adapter.fw)
             .map(|f| fc_profile(f, class))
             .unwrap_or(&[])
@@ -55,6 +70,20 @@ impl Step for AdosProfile {
     }
 
     fn tick(&mut self, cx: &mut Cx) {
+        if self.reboot.active() {
+            match self.reboot.tick(cx) {
+                Rebooted::Waiting => {}
+                Rebooted::Back => {
+                    self.core.phase_key = None;
+                    self.finish();
+                }
+                Rebooted::Lost => {
+                    self.core.phase_key = None;
+                    self.core.fail("setup.blocker.timeout");
+                }
+            }
+            return;
+        }
         if !self.writing {
             return;
         }
@@ -62,10 +91,12 @@ impl Step for AdosProfile {
             None => {}
             Some(Ok(())) => {
                 self.writing = false;
-                self.core.done(obj([
-                    ("applied", Value::Array(std::mem::take(&mut self.applied))),
-                    ("absent", Value::Array(std::mem::take(&mut self.absent))),
-                ]));
+                if self.needs_reboot {
+                    self.core.phase_key = Some("rebooting".into());
+                    self.reboot.start(cx);
+                } else {
+                    self.finish();
+                }
             }
             Some(Err(names)) => {
                 self.writing = false;
@@ -85,6 +116,7 @@ impl Step for AdosProfile {
         let fw = firmware(cx.adapter.fw).ok_or("unsupported")?;
         self.applied.clear();
         self.absent.clear();
+        self.needs_reboot = false;
         for row in fc_profile(fw, vehicle_class(cx.adapter.class)) {
             let name = std::iter::once(row.name)
                 .chain(row.alt_names.iter().copied())
@@ -92,6 +124,8 @@ impl Step for AdosProfile {
             match name {
                 Some(n) => {
                     let v = row_value(cx, row);
+                    self.needs_reboot |=
+                        row.reboot && check_row(row, |k| cx.params.get(k)) != RowCheck::Ok;
                     cx.params.set(n, v);
                     self.applied.push(json!({"name": n, "value": v}));
                 }

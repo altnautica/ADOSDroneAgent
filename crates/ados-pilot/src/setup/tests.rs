@@ -294,13 +294,23 @@ fn full_ground_copter_flow() {
     s.act(G, "ados_profile", "apply", json!({}));
     s.wait_step("ados_intro", StepState::WaitingUser);
     assert_eq!(s.param("MAV_GCS_SYSID"), 1.0);
-    assert_eq!(s.param("FS_GCS_ENABLE"), 1.0);
+    assert_eq!(s.param("FS_GCS_ENABLE"), 4.0);
     assert_eq!(s.param("FS_GCS_TIMEOUT"), 3.0);
     assert_eq!(s.param("BATT_FS_LOW_ACT"), 4.0);
+    // The fake FC's table carries none of the guided, avoidance or SmartRTL
+    // parameters, so nothing that needs a reboot changed.
     assert_eq!(
         s.result(G, "ados_profile")["absent"],
-        json!(["GUID_TIMEOUT"])
+        json!([
+            "FS_THR_ENABLE",
+            "GUID_TIMEOUT",
+            "OA_TYPE",
+            "AVOID_ENABLE",
+            "SRTL_POINTS",
+            "SRTL_ACCURACY"
+        ])
     );
+    assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(false));
     s.act(G, "ados_intro", "use_ados", json!({}));
     s.run(100);
     assert_eq!(s.e.wizard_state(G), WizardState::Done);
@@ -371,6 +381,72 @@ fn ados_profile_and_readiness_agree_on_a_later_external_nav_set() {
     }
     let r = crate::batt_failsafe::item_for(&fc, ados_protocol::pilot::ControlMode::Ados);
     assert!(r.ok, "{r:?}");
+}
+
+/// The avoidance and return rows of the copter profile, at their targets.
+const RETURN_ROWS: [(&str, f32); 6] = [
+    ("OA_TYPE", 0.0),
+    ("AVOID_ENABLE", 0.0),
+    ("FS_GCS_ENABLE", 4.0),
+    ("FS_THR_ENABLE", 5.0),
+    ("SRTL_POINTS", 500.0),
+    ("SRTL_ACCURACY", 2.0),
+];
+
+/// Runs `ados_profile` on a copter whose table already matches the profile
+/// except for `differ`, and returns the finished sim.
+fn apply_profile(differ: &[(&str, f32)]) -> Sim {
+    let mut p = ap_copter_params();
+    let profile = crate::fc_profile::fc_profile(
+        crate::fc_profile::Firmware::Ardupilot,
+        ados_protocol::pilot::VehicleClass::Multirotor,
+    );
+    for row in profile {
+        p.insert(row.name.into(), row.value);
+    }
+    for (n, v) in RETURN_ROWS.iter().chain(differ) {
+        p.insert((*n).into(), *v);
+    }
+    let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
+    s.e.run_step(G, "ados_profile", s.now);
+    s.wait_step("ados_profile", StepState::WaitingUser);
+    s.act(G, "ados_profile", "apply", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 30_000);
+    assert_eq!(s.step_state(G, "ados_profile"), StepState::Done);
+    for (n, v) in RETURN_ROWS {
+        assert_eq!(s.param(n), v, "{n} written");
+    }
+    assert_eq!(s.result(G, "ados_profile")["absent"], json!([]));
+    s
+}
+
+#[test]
+fn ados_profile_reboots_when_a_boot_time_row_changed() {
+    for differ in [
+        &[("OA_TYPE", 1.0)][..],
+        &[("SRTL_POINTS", 300.0)],
+        &[
+            ("OA_TYPE", 1.0),
+            ("SRTL_POINTS", 300.0),
+            ("AVOID_ENABLE", 7.0),
+        ],
+    ] {
+        let s = apply_profile(differ);
+        assert_eq!(s.fc.reboots, 1, "{differ:?} needs one reboot");
+        assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(true));
+    }
+}
+
+#[test]
+fn ados_profile_skips_the_reboot_for_runtime_rows() {
+    let s = apply_profile(&[
+        ("FS_GCS_ENABLE", 1.0),
+        ("FS_THR_ENABLE", 1.0),
+        ("AVOID_ENABLE", 7.0),
+        ("SRTL_ACCURACY", 1.0),
+    ]);
+    assert_eq!(s.fc.reboots, 0, "runtime rows apply without a reboot");
+    assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(false));
 }
 
 #[test]

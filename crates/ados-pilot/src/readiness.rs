@@ -138,7 +138,12 @@ fn profile_item(fc: &FcState, fw: Firmware, mode: ControlMode) -> Readiness {
     for row in rows {
         match check_row(row, |n| fc.params.get(n).copied()) {
             RowCheck::Ok => {}
-            RowCheck::Absent => unread |= fc.params.is_empty(),
+            RowCheck::Absent => match row.absent_blocks {
+                Some(why) if !fc.params.is_empty() => {
+                    missing.push(format!("{} absent ({why})", row.name))
+                }
+                _ => unread |= fc.params.is_empty(),
+            },
             RowCheck::Mismatch { name, have, want } => {
                 missing.push(format!("{name} {have} (want {want})"))
             }
@@ -182,3 +187,65 @@ pub fn first_block(items: &[Readiness]) -> Option<&Readiness> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ados_protocol::pilot::VehicleClass;
+
+    /// An ArduCopter whose parameters match the whole profile.
+    fn copter() -> FcState {
+        let mut fc = FcState {
+            firmware: Some(Firmware::Ardupilot),
+            ..FcState::default()
+        };
+        for row in fc_profile(Firmware::Ardupilot, VehicleClass::Multirotor) {
+            fc.params.insert(row.name.into(), row.value);
+        }
+        fc
+    }
+
+    fn profile(fc: &FcState) -> Readiness {
+        profile_item(fc, Firmware::Ardupilot, ControlMode::Ados)
+    }
+
+    #[test]
+    fn each_avoidance_and_return_row_blocks_when_it_differs() {
+        assert!(profile(&copter()).ok);
+        for (name, want, wrong) in [
+            ("OA_TYPE", 0.0, 1.0),
+            ("AVOID_ENABLE", 0.0, 7.0),
+            ("FS_GCS_ENABLE", 4.0, 1.0),
+            ("FS_THR_ENABLE", 5.0, 1.0),
+            ("SRTL_POINTS", 500.0, 300.0),
+            ("SRTL_ACCURACY", 2.0, 1.0),
+        ] {
+            let mut fc = copter();
+            assert_eq!(fc.params.get(name), Some(&want), "{name} in the profile");
+            fc.params.insert(name.into(), wrong);
+            let r = profile(&fc);
+            assert!(!r.ok, "{name} {wrong} passes");
+            assert_eq!(r.severity, Severity::Block, "{name}");
+            assert!(
+                r.msg.contains(&format!("{name} {wrong} (want {want})")),
+                "{name}: {}",
+                r.msg
+            );
+        }
+    }
+
+    #[test]
+    fn absent_smartrtl_blocks_while_another_absent_row_is_skipped() {
+        let mut fc = copter();
+        fc.params.remove("GUID_TIMEOUT");
+        fc.params.remove("OA_TYPE");
+        assert!(profile(&fc).ok, "{}", profile(&fc).msg);
+
+        let mut fc = copter();
+        fc.params.remove("SRTL_POINTS");
+        let r = profile(&fc);
+        assert!(!r.ok);
+        assert_eq!(r.severity, Severity::Block);
+        assert!(r.msg.contains("SRTL_POINTS absent"), "{}", r.msg);
+    }
+}

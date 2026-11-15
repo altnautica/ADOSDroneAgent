@@ -3,7 +3,9 @@
 //! One table serves the readiness check (`fc_profile` item) and the setup
 //! wizard's `ados_profile` step. A row whose name and alternative names are all
 //! absent from the FC's parameter table is skipped, not failed: firmware
-//! versions differ in which of these exist.
+//! versions differ in which of these exist. A row with an `absent_blocks`
+//! reason is the exception: its absence means a feature the pilot relies on is
+//! compiled out of the firmware, so readiness fails on it.
 
 use ados_protocol::pilot::VehicleClass;
 use serde::Serialize;
@@ -22,6 +24,10 @@ pub struct ProfileParam {
     /// Names the same parameter carries on other firmware versions.
     pub alt_names: &'static [&'static str],
     pub value: f32,
+    /// Why the row's absence fails readiness; `None` skips an absent row.
+    pub absent_blocks: Option<&'static str>,
+    /// The FC reads the parameter at boot only: a change needs a reboot.
+    pub reboot: bool,
 }
 
 const fn p(name: &'static str, alt_names: &'static [&'static str], value: f32) -> ProfileParam {
@@ -29,17 +35,49 @@ const fn p(name: &'static str, alt_names: &'static [&'static str], value: f32) -
         name,
         alt_names,
         value,
+        absent_blocks: None,
+        reboot: false,
     }
 }
 
+impl ProfileParam {
+    const fn reboots(self) -> Self {
+        ProfileParam {
+            reboot: true,
+            ..self
+        }
+    }
+
+    const fn absent_blocks(self, why: &'static str) -> Self {
+        ProfileParam {
+            absent_blocks: Some(why),
+            ..self
+        }
+    }
+}
+
+/// ArduCopter. The pilot does its own obstacle avoidance, so the FC's path
+/// planner (`OA_TYPE`) and its fence and proximity avoidance (`AVOID_ENABLE`)
+/// stay off: they would fight the pilot's setpoints. Every FC-side return is
+/// SmartRTL with a Land fallback, back along the flown path, never a straight
+/// line through what the pilot flew around.
 const COPTER: &[ProfileParam] = &[
     p("MAV_GCS_SYSID", &["SYSID_MYGCS"], 1.0),
-    p("FS_GCS_ENABLE", &[], 1.0),
+    // 4: SmartRTL or Land.
+    p("FS_GCS_ENABLE", &[], 4.0),
     p("FS_GCS_TIMEOUT", &[], 3.0),
+    // 5: SmartRTL or Land.
+    p("FS_THR_ENABLE", &[], 5.0),
     p("GUID_TIMEOUT", &[], 1.0),
     p("RC_OVERRIDE_TIME", &[], 1.0),
     p("BATT_FS_LOW_ACT", &[], 2.0),
     p("BATT_FS_CRT_ACT", &[], 1.0),
+    p("OA_TYPE", &[], 0.0).reboots(),
+    p("AVOID_ENABLE", &[], 0.0),
+    p("SRTL_POINTS", &[], 500.0)
+        .reboots()
+        .absent_blocks("SmartRTL not in this firmware: no return along the flown path"),
+    p("SRTL_ACCURACY", &[], 2.0),
 ];
 
 const PLANE: &[ProfileParam] = &[

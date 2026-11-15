@@ -55,12 +55,17 @@ impl World {
         let mut p = Pilot::new(Settings::default());
         for (n, v) in [
             ("MAV_GCS_SYSID", 1.0),
-            ("FS_GCS_ENABLE", 1.0),
+            ("FS_GCS_ENABLE", 4.0),
             ("FS_GCS_TIMEOUT", 3.0),
+            ("FS_THR_ENABLE", 5.0),
             ("GUID_TIMEOUT", 1.0),
             ("RC_OVERRIDE_TIME", 1.0),
             ("BATT_FS_LOW_ACT", 2.0),
             ("BATT_FS_CRT_ACT", 1.0),
+            ("OA_TYPE", 0.0),
+            ("AVOID_ENABLE", 0.0),
+            ("SRTL_POINTS", 500.0),
+            ("SRTL_ACCURACY", 2.0),
         ] {
             p.fc.params.insert(n.into(), v);
         }
