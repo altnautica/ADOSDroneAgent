@@ -152,6 +152,11 @@ fn low_battery_lands_a_gnss_free_copter_and_says_so() {
     assert!(s.rth_countdown_s.is_some());
     w.run(10_000);
     assert_eq!(w.set_modes(copter::RTL), 0, "never RTL without GNSS");
+    assert_eq!(
+        w.set_modes(copter::SMART_RTL),
+        0,
+        "never SmartRTL without GNSS"
+    );
     assert!(w.p.landing, "the pilot lands where it is");
     let s = w.p.state(w.now);
     assert_eq!(s.low_battery_action.as_deref(), Some("land"));
@@ -251,4 +256,86 @@ fn a_cancelled_countdown_clears_the_action() {
     w.run(11_000);
     assert!(w.p.state(w.now).low_battery_action.is_none());
     assert!(!w.p.landing);
+}
+
+/// Airborne in LOITER (the FC flies) with every guarded item passing but
+/// `id`, which blocks.
+fn airborne_blocked_on(id: &str) -> World {
+    let (low, crt) = if id == "battery_failsafe" {
+        (0.0, 0.0)
+    } else {
+        (4.0, 1.0)
+    };
+    let mut w = world(low, crt, GPS);
+    if id == "fc_profile" {
+        w.p.fc.params.insert("FS_GCS_ENABLE".into(), 1.0);
+    }
+    w.airborne(copter::LOITER);
+    w.run(100);
+    match id {
+        "position" => no_position(&mut w),
+        // Firmware not identified: the next heartbeat would name it again,
+        // so the action is asked before any tick.
+        "firmware" => w.p.fc.firmware = None,
+        _ => {}
+    }
+    w
+}
+
+#[test]
+fn take_control_is_refused_on_every_guarded_block() {
+    for id in ["firmware", "position", "fc_profile", "battery_failsafe"] {
+        let mut w = airborne_blocked_on(id);
+        let items = w.p.readiness(w.now);
+        for other in ["firmware", "position", "fc_profile", "battery_failsafe"] {
+            let blocks = items
+                .iter()
+                .any(|r| r.id == other && !r.ok && r.severity == Severity::Block);
+            assert_eq!(blocks, other == id, "{id}: {other} {items:?}");
+        }
+        let owner = w.p.owner();
+        let sent = w.sent.len();
+        let r = w.action("take_control");
+        assert_eq!(err(&r), Some(format!("not_ready:{id}").as_str()), "{r:?}");
+        assert_eq!(w.p.owner(), owner, "{id}: nothing changes hands");
+        assert_eq!(w.sent.len(), sent, "{id}: nothing sent to the FC");
+        assert_eq!(w.mode, copter::LOITER);
+    }
+}
+
+#[test]
+fn a_smart_rtl_request_is_dropped_by_an_operator_motion_action() {
+    for action in ["take_control", "goto", "land"] {
+        let mut w = smart_rtl_pending();
+        let r = if action == "goto" {
+            let m = MavMessage::HOME_POSITION(HOME_POSITION_DATA {
+                latitude: 120_000_000,
+                longitude: 770_000_000,
+                ..Default::default()
+            });
+            w.p.on_fc(FC_SYS, FC_COMP, &m, w.now);
+            w.action_args(
+                "goto",
+                serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0}),
+            )
+        } else {
+            w.action(action)
+        };
+        assert!(matches!(&r, Reply::Action(a) if a.ok), "{action}: {r:?}");
+        let lands = w.set_modes(copter::LAND);
+        w.run(3_000);
+        assert_eq!(
+            w.set_modes(copter::LAND),
+            lands,
+            "{action}: no Land fallback after the operator's action"
+        );
+        assert_ne!(w.mode, copter::LAND, "{action}");
+        match action {
+            // The pilot lands the vehicle itself: the operator's land, and
+            // no FC LAND above the switch height.
+            "land" => assert!(w.p.landing),
+            "goto" => assert_eq!(w.p.owner(), Owner::Goto),
+            _ => assert_eq!(w.p.owner(), Owner::Pilot),
+        }
+    }
 }
