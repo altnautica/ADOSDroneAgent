@@ -1,6 +1,7 @@
 //! Readiness items for the navigation sensors: `rangefinder`, `flow`,
-//! `sensor_params`, `lidar` and `nav_imu` ([`crate::nav_imu`]), worded and
-//! graded by `cockpit-spec/sensor-health.json` (`readiness`).
+//! `sensor_params`, `lidar`, `nav_imu` and `nav_heading`
+//! ([`crate::nav_imu`]), worded and graded by
+//! `cockpit-spec/sensor-health.json` (`readiness`).
 //!
 //! The `flow` item doubles as the in-flight flow warning: airborne, a low or
 //! lost flow reads ok until it has lasted `in_flight_flow_warn_ms`, then the
@@ -64,7 +65,7 @@ pub fn items(fc: &FcState, mode: ControlMode, ctx: &SensorCtx, now_ms: u64) -> V
         let msg = &spec().readiness.lidar.absent;
         out.push(item("lidar", false, Severity::Warn, msg));
     }
-    out.extend(ctx.nav_imu.item(mode, now_ms));
+    out.extend(ctx.nav_imu.items(mode, now_ms).into_iter().flatten());
     out
 }
 

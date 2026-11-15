@@ -104,6 +104,9 @@ impl Pilot {
                 if let Some(n) = super::position_check::ExtNav::parse(payload, now_ms) {
                     self.extnav = Some(n);
                 }
+                // Whether the lidar pose is flown on: the `nav_imu` and
+                // `nav_heading` severity.
+                self.nav_imu.on_nav_state(payload);
             }
             CLIENT_MODE_TOPIC => {
                 if let Some(c) = ClientMode::parse(payload) {

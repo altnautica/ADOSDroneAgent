@@ -129,8 +129,11 @@ fn in_flight_flow_warning_appears_after_the_hold_only_airborne() {
     assert_eq!(flow_item(&g), Some((false, s.readiness.flow.low.clone())));
 }
 
+/// The FC IMU feeding the lidar pose blocks a pilot-flown launch while
+/// vision-nav flies external navigation from that pose.
 #[test]
 fn the_imu_feed_of_the_lidar_pose_is_a_readiness_item() {
+    use ados_protocol::pilot::Severity;
     let mut w = World::new();
     let item = |w: &World| {
         w.p.state(w.now)
@@ -145,10 +148,9 @@ fn the_imu_feed_of_the_lidar_pose_is_a_readiness_item() {
         &json!({"imu_feed": {"state": "degraded", "reason": "starved", "rate_hz": 12.0}}),
         w.now,
     );
-    assert_eq!(
-        item(&w),
-        Some((false, ados_protocol::pilot::Severity::Block))
-    );
+    assert_eq!(item(&w), Some((false, Severity::Warn)), "no nav.state yet");
+    w.p.on_feed("nav.state", &json!({"mode": "external_nav", "active_set": 1}), w.now);
+    assert_eq!(item(&w), Some((false, Severity::Block)));
     w.p.on_feed(
         "plugin.world-engine.map_status",
         &json!({"imu_feed": {"state": "ok", "reason": null, "rate_hz": 100.0}}),
@@ -161,6 +163,77 @@ fn the_imu_feed_of_the_lidar_pose_is_a_readiness_item() {
         w.now,
     );
     assert_eq!(item(&w), None);
+}
+
+/// The `nav_imu` and `nav_heading` items: `(ok, severity, msg)` each.
+type NavItems = [Option<(bool, ados_protocol::pilot::Severity, String)>; 2];
+
+fn nav_items(w: &World) -> NavItems {
+    let readiness = w.p.state(w.now).readiness;
+    ["nav_imu", "nav_heading"].map(|id| {
+        readiness
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (r.ok, r.severity, r.msg.clone()))
+    })
+}
+
+fn map_status_north_unknown(w: &mut World) {
+    w.p.on_feed(
+        "plugin.world-engine.map_status",
+        &json!({"imu_feed": {"state": "lost", "reason": "north_unknown", "rate_hz": 100.0}}),
+        w.now,
+    );
+}
+
+/// A GNSS flight with vision-nav's external navigation off: the lidar map's
+/// north is unknown (its pose is lost), the FC IMU feeding it runs at
+/// 100 Hz. The FC IMU is healthy, and a heading state of a pose nothing
+/// fuses holds nothing.
+#[test]
+fn a_gnss_launch_is_not_held_by_the_lidar_map_heading() {
+    use ados_protocol::pilot::Severity;
+    let mut w = World::new();
+    w.p.on_feed("nav.state", &json!({"mode": "off", "active_set": null, "gps_fix": 6}), w.now);
+    map_status_north_unknown(&mut w);
+    let [imu, heading] = nav_items(&w);
+    assert_eq!(imu.map(|i| i.0), Some(true), "the FC IMU reads as waiting");
+    let heading = heading.expect("the map heading is reported");
+    assert!(!heading.0 && heading.1 == Severity::Warn, "{heading:?}");
+    assert!(heading.2.contains("north_unknown"), "{heading:?}");
+    assert!(
+        !w.p
+            .state(w.now)
+            .readiness
+            .iter()
+            .any(|r| !r.ok && r.severity == Severity::Block && r.id.starts_with("nav_")),
+        "a nav item blocks a GNSS launch"
+    );
+}
+
+/// With vision-nav flying external navigation from the lidar pose, the
+/// same unknown north blocks under its own item, never as the FC IMU.
+#[test]
+fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
+    use ados_protocol::pilot::Severity;
+    let mut w = World::new();
+    w.p.on_feed("nav.state", &json!({"mode": "external_nav", "active_set": 1}), w.now);
+    map_status_north_unknown(&mut w);
+    let [imu, heading] = nav_items(&w);
+    assert_eq!(imu.map(|i| (i.0, i.1)), Some((true, Severity::Block)));
+    let heading = heading.expect("the map heading is reported");
+    assert!(!heading.0 && heading.1 == Severity::Block, "{heading:?}");
+    // A report without a mode keeps the last one.
+    w.p.on_feed("nav.state", &json!({"active_set": 2}), w.now);
+    assert_eq!(nav_items(&w)[1].as_ref().map(|i| i.1), Some(Severity::Block));
+    w.p.on_feed(
+        "plugin.world-engine.map_status",
+        &json!({"imu_feed": {"state": "ok", "reason": null, "rate_hz": 100.0}}),
+        w.now,
+    );
+    let [imu, heading] = nav_items(&w);
+    assert_eq!(imu.map(|i| i.0), Some(true));
+    assert_eq!(heading, None, "shown only while the map reports a heading state");
 }
 
 fn ekf(flags: EkfStatusFlags, pos_horiz_variance: f32) -> MavMessage {

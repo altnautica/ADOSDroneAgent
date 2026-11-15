@@ -85,12 +85,18 @@ pub struct NavImuTexts {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct NavHeadingTexts {
+    pub unconfirmed: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ReadinessTexts {
     pub flow: FlowTexts,
     pub rangefinder: RangefinderTexts,
     pub lidar: LidarTexts,
     pub sensor_params: ParamTexts,
     pub nav_imu: NavImuTexts,
+    pub nav_heading: NavHeadingTexts,
 }
 
 #[derive(Debug, Deserialize)]

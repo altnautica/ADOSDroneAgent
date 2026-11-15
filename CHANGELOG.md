@@ -6,12 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pilot readiness: the lidar map's heading state no longer reads as the flight controller's IMU, and neither holds a launch that does not fly on the lidar pose. `nav_imu` reports only the FC IMU feeding the lidar planar pose (`attitude_stand_in`, `stalled`, `starved`, under 40 Hz); the map's `heading_unconfirmed` and `north_unknown`, which the World Engine sends only while that feed measures, read "Lidar map heading not confirmed ({reason})" on a new `nav_heading` item, shown only while the map reports one. Both block a pilot-flown launch in ADOS control mode only while vision-nav flies external navigation from the lidar pose (its last `nav.state` mode is `external_nav`) and warn otherwise. A GNSS survey with external navigation off waited the full readiness timeout on "Waiting for flight controller IMU (north_unknown, 100.0 Hz)" with the FC IMU at 100 Hz. Every surface shows the new item through the readiness list it already renders.
+
 ## [0.114.1] - 2026-11-15
 
 ### Changed
 
 - Internal only: the cockpit frame helpers are split into smaller modules under the size limit (no behaviour change).
-
 ## [0.114.0] - 2026-11-15
 
 ### Added
@@ -23,7 +26,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Pilot: the pilot asks the flight controller for `VISO_TYPE`, so a visual-odometry-only vehicle's relative EKF position passes the `position` readiness item instead of blocking.
-
 ## [0.113.2] - 2026-11-15
 
 ### Changed
