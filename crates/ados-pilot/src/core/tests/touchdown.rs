@@ -267,10 +267,10 @@ fn a_short_lift_after_take_control_pauses_and_fails_safe() {
         ..Default::default()
     });
     w.p.on_fc(FC_SYS, FC_COMP, &low, w.now);
-    // The surface stays linked throughout.
+    // The surface stays linked throughout. A GNSS copter returns by SmartRTL.
     let end = w.now + 15_000;
-    while w.mode != copter::RTL {
-        assert!(w.now < end, "no low-battery RTH");
+    while w.mode != copter::SMART_RTL {
+        assert!(w.now < end, "no low-battery return");
         w.req(ados_protocol::pilot::Request::Hb { src: "mc".into() });
         fly(&mut w, &mut s, 20);
     }

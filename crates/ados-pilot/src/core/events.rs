@@ -213,6 +213,7 @@ impl Pilot {
         self.mission_paused = false;
         self.rth_deadline_ms = None;
         self.low_batt_cancelled = false;
+        self.low_batt_action = None;
         self.hold_reason = None;
         self.fc_failsafe = false;
         self.failsafe_cause = None;
@@ -354,7 +355,9 @@ impl Pilot {
                 &[("mode", json!(name)), ("cause", json!(cause))],
                 now_ms,
             ));
-        } else {
+        } else if !(self.low_batt_action.is_some() && self.mode_is_ours(mode, now_ms)) {
+            // The pilot's own low-battery action keeps its banner: it says
+            // why the FC changed mode.
             let name = fam.mode_name(mode);
             self.banner = Some(banner(
                 "pilot.banner.fc_control",

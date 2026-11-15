@@ -35,6 +35,27 @@ impl Pilot {
             return Err("no_fc".into());
         }
         self.take_superseded(name);
+        // An operator's motion action replaces a low-battery SmartRTL
+        // request still waiting on the FC: its Land fallback never runs over it.
+        if matches!(
+            name.split(':').next(),
+            Some(
+                "pause"
+                    | "rth_cancel"
+                    | "land"
+                    | "rth"
+                    | "kill"
+                    | "resume"
+                    | "take_control"
+                    | "hand_to_fc"
+                    | "goto"
+                    | "launch"
+                    | "control_mode"
+                    | "vtol"
+            )
+        ) {
+            self.low_batt_srtl = None;
+        }
         // An operator safety action always ends a tuning flight first.
         if matches!(name, "pause" | "rth" | "land" | "kill" | "take_control")
             && self.owner() == Owner::Tuning
@@ -87,11 +108,13 @@ impl Pilot {
             "goto" => self.surface_goto(args, now_ms),
             "pause" => {
                 self.rth_deadline_ms = None;
+                self.low_batt_action = None;
                 self.low_batt_cancelled = self.fc.armed;
                 self.do_pause(now_ms)
             }
             "rth_cancel" => {
                 self.rth_deadline_ms = None;
+                self.low_batt_action = None;
                 self.low_batt_cancelled = true;
                 Ok(())
             }
@@ -445,15 +468,20 @@ impl Pilot {
         ));
     }
 
+    /// Take control refuses while any of these items blocks, whatever else
+    /// blocks before it in the list, and names the most basic one: a battery
+    /// failsafe item never hides a missing position estimate.
     fn ready_to_take(&self, now_ms: u64) -> ActionRes {
+        const REFUSES: [&str; 4] = ["firmware", "position", "fc_profile", "battery_failsafe"];
         let items = self.readiness(now_ms);
-        match items.iter().find(|r| {
-            !r.ok && r.severity == ados_protocol::pilot::Severity::Block && r.id != "fc_link"
-        }) {
-            Some(r) if r.id == "fc_profile" || r.id == "firmware" || r.id == "position" => {
-                Err(format!("not_ready:{}", r.id))
-            }
-            _ => Ok(()),
+        let blocks = |id: &str| {
+            items
+                .iter()
+                .any(|r| r.id == id && !r.ok && r.severity == ados_protocol::pilot::Severity::Block)
+        };
+        match REFUSES.iter().find(|id| blocks(id)) {
+            Some(id) => Err(format!("not_ready:{id}")),
+            None => Ok(()),
         }
     }
 

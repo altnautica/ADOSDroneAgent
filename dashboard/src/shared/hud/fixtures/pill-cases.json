@@ -1094,7 +1094,7 @@
     "input": {
       "alerts": [],
       "readiness": [
-        { "id": "battery_failsafe", "ok": false, "severity": "block", "msg": "Battery failsafe does nothing: set low = RTL, critical = Land" }
+        { "id": "battery_failsafe", "ok": false, "severity": "block", "msg": "Battery failsafe does nothing: set low = SmartRTL or Land, critical = Land" }
       ],
       "prearm": [],
       "fc_status": [],
@@ -1106,17 +1106,17 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "Battery failsafe does nothing: set low = RTL, critical = Land",
+      "text": "Battery failsafe does nothing: set low = SmartRTL or Land, critical = Land",
       "count": 1,
       "ids": ["pilot:battery_failsafe"]
     }
   },
   {
-    "name": "battery_failsafe_unknown_warns",
+    "name": "battery_failsafe_unread_warns",
     "input": {
       "alerts": [],
       "readiness": [
-        { "id": "battery_failsafe", "ok": false, "severity": "warn", "msg": "Battery failsafe —: no battery monitor" }
+        { "id": "battery_failsafe", "ok": false, "severity": "warn", "msg": "Reading battery failsafe parameters" }
       ],
       "prearm": [],
       "fc_status": [],
@@ -1128,9 +1128,74 @@
     },
     "expected": {
       "severity": "warning",
-      "text": "Battery failsafe —: no battery monitor",
+      "text": "Reading battery failsafe parameters",
       "count": 1,
       "ids": ["pilot:battery_failsafe"]
+    }
+  },
+  {
+    "name": "low_battery_land_is_one_critical_item",
+    "input": {
+      "alerts": [],
+      "readiness": [],
+      "prearm": [],
+      "fc_status": [
+        { "severity": 2, "text": "Low battery: landing", "age_ms": 500 }
+      ],
+      "storage_pct": 40,
+      "pilot_age_ms": 100,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": [],
+      "low_battery_action": "land"
+    },
+    "expected": {
+      "severity": "critical",
+      "text": "Low battery: landing",
+      "count": 1,
+      "ids": ["low_battery"]
+    }
+  },
+  {
+    "name": "low_battery_rth_reads_returning_home",
+    "input": {
+      "alerts": [],
+      "readiness": [],
+      "prearm": [],
+      "fc_status": [],
+      "storage_pct": 40,
+      "pilot_age_ms": 100,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": [],
+      "low_battery_action": "rth"
+    },
+    "expected": {
+      "severity": "critical",
+      "text": "Low battery: returning home",
+      "count": 1,
+      "ids": ["low_battery"]
+    }
+  },
+  {
+    "name": "low_battery_hidden_while_the_pilot_is_stale",
+    "input": {
+      "alerts": [],
+      "readiness": [],
+      "prearm": [],
+      "fc_status": [],
+      "storage_pct": 40,
+      "pilot_age_ms": null,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": [],
+      "low_battery_action": "land"
+    },
+    "expected": {
+      "severity": "warning",
+      "text": "Pilot not answering",
+      "count": 1,
+      "ids": ["pilot_not_answering"]
     }
   }
 ]

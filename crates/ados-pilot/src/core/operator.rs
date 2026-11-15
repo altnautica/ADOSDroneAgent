@@ -14,16 +14,11 @@ impl Pilot {
             mounts: &self.settings.pilot.fc_sensors,
             nav_imu: &self.nav_imu,
         };
-        let batt = crate::batt_failsafe::BattCtx {
-            nav_set: self.nav_set,
-            ceiling_m: Some(self.settings.pilot.max_alt_agl_m),
-        };
         let mut items = crate::readiness::items(
             &self.fc,
             self.control_mode(),
             self.sessions.owner.is_some(),
             &sensors,
-            &batt,
             now_ms,
         );
         if let Some(v) = &self.setup_needed {

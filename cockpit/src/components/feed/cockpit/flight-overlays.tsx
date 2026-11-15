@@ -109,7 +109,7 @@ export function FlightOverlays() {
           className={`pointer-events-auto flex w-full max-w-[704px] items-center gap-[12px] rounded-[var(--fs-radius)] border px-[14px] py-[8px] text-on-status ${SEVERITY_CLASS[bannerSeverity("low_battery_rth")]}`}
         >
           <div className="flex-1">
-            <div className="text-[16px] font-semibold">{lowBatteryLine(pilot.rthCountdownS)}</div>
+            <div className="text-[16px] font-semibold">{lowBatteryLine(pilot.rthCountdownS, pilot.lowBatteryAction)}</div>
             <div className="text-[12px] opacity-90">{specText("flow.low_battery.cancel_warning")}</div>
           </div>
           <button

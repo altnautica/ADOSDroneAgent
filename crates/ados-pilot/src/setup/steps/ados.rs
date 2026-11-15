@@ -104,10 +104,10 @@ impl Step for AdosProfile {
     }
 }
 
-/// The value to write for a profile row. The FC's active EKF source set is
-/// unknown here, so the boot set (1) stands for it.
+/// The value to write for a profile row, from the same GNSS rule the
+/// `battery_failsafe` readiness item reads, so the fix settles the item.
 fn row_value(cx: &Cx, row: &ProfileParam) -> f32 {
-    let free = crate::batt_failsafe::gnss_free(|n| cx.params.get(n), 1);
+    let free = crate::batt_failsafe::gnss_free(|n| cx.params.get(n));
     crate::batt_failsafe::profile_value(row.name, row.value, vehicle_class(cx.adapter.class), free)
 }
 

@@ -296,7 +296,7 @@ fn full_ground_copter_flow() {
     assert_eq!(s.param("MAV_GCS_SYSID"), 1.0);
     assert_eq!(s.param("FS_GCS_ENABLE"), 1.0);
     assert_eq!(s.param("FS_GCS_TIMEOUT"), 3.0);
-    assert_eq!(s.param("BATT_FS_LOW_ACT"), 2.0);
+    assert_eq!(s.param("BATT_FS_LOW_ACT"), 4.0);
     assert_eq!(
         s.result(G, "ados_profile")["absent"],
         json!(["GUID_TIMEOUT"])
@@ -329,10 +329,10 @@ fn apply_profile(params: std::collections::BTreeMap<String, f32>) -> (f32, f32) 
 
 #[test]
 fn ados_profile_sets_land_on_a_copter_without_gnss() {
-    // GNSS: low = RTL, critical = Land.
+    // GNSS: low = SmartRTL or Land, critical = Land.
     let mut p = ap_copter_params();
     p.insert("EK3_SRC1_POSXY".into(), 3.0);
-    assert_eq!(apply_profile(p), (2.0, 1.0));
+    assert_eq!(apply_profile(p), (4.0, 1.0));
     // External nav as the position source: Land for both, since RTL climbs.
     let mut p = ap_copter_params();
     p.insert("EK3_SRC1_POSXY".into(), 6.0);
@@ -341,6 +341,36 @@ fn ados_profile_sets_land_on_a_copter_without_gnss() {
     let mut p = ap_copter_params();
     p.insert("GPS1_TYPE".into(), 0.0);
     assert_eq!(apply_profile(p), (1.0, 1.0));
+}
+
+/// GPS on the boot set, external nav on a later set (vision-nav switches to
+/// it in flight): the wizard writes Land, the value the readiness item
+/// accepts for that vehicle, so Fix settles the item.
+#[test]
+fn ados_profile_and_readiness_agree_on_a_later_external_nav_set() {
+    let mut p = ap_copter_params();
+    p.insert("EK3_SRC1_POSXY".into(), 3.0);
+    p.insert("EK3_SRC2_POSXY".into(), 6.0);
+    let (low, crt) = apply_profile(p.clone());
+    assert_eq!((low, crt), (1.0, 1.0));
+    let mut fc = crate::fc::FcState {
+        firmware: Some(crate::fc_profile::Firmware::Ardupilot),
+        mav_type: 2,
+        ..Default::default()
+    };
+    for (k, v) in [
+        ("BATT_MONITOR", 4.0),
+        ("BATT_LOW_VOLT", 14.0),
+        ("BATT_CRT_VOLT", 12.8),
+        ("BATT_FS_LOW_ACT", low),
+        ("BATT_FS_CRT_ACT", crt),
+        ("EK3_SRC1_POSXY", 3.0),
+        ("EK3_SRC2_POSXY", 6.0),
+    ] {
+        fc.params.insert(k.into(), v);
+    }
+    let r = crate::batt_failsafe::item_for(&fc, ados_protocol::pilot::ControlMode::Ados);
+    assert!(r.ok, "{r:?}");
 }
 
 #[test]

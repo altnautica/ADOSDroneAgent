@@ -1163,8 +1163,8 @@ fn link_loss_during_a_skill_lease_flies_the_action_and_revokes() {
     assert!(w.revoked.iter().any(|(l, _)| *l == id), "{:?}", w.revoked);
 }
 
-/// Low battery under a skill lease: a 10 s countdown, then RTH, and the
-/// lease ends.
+/// Low battery under a skill lease: a 10 s countdown, then a SmartRTL
+/// return (GNSS), and the lease ends.
 #[test]
 fn low_battery_rth_revokes_a_skill_lease_after_the_countdown() {
     let mut w = World::new();
@@ -1182,7 +1182,7 @@ fn low_battery_rth_revokes_a_skill_lease_after_the_countdown() {
         w.goal(id, 5.0, 0.0);
         w.run(200);
     }
-    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.mode, copter::SMART_RTL);
     assert!(w.p.auth.lease().is_none(), "the lease ended");
     assert!(w.revoked.iter().any(|(l, _)| *l == id), "{:?}", w.revoked);
 }

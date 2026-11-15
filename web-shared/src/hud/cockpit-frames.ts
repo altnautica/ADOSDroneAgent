@@ -187,6 +187,10 @@ export interface PilotState {
    *  wizard's last abort that was not the operator's while the engine still
    *  shows it, or null. */
   setupAbort: string | null;
+  /** The pilot's own low-battery action: `land` (it may fly without GNSS)
+   *  or `rth`, while its countdown runs (`rthCountdownS`) and after it
+   *  fired; null while none. */
+  lowBatteryAction: "land" | "rth" | null;
   /** A horizontal speed cap the pilot applies to every setpoint it flies
    *  (`gnss-denied` while the EKF horizontal source is not GNSS), or null. */
   speedCap: SpeedCap | null;
@@ -270,6 +274,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     fcFailsafe: p.fc_failsafe === true,
     failsafeCause: str(p.failsafe_cause),
     setupAbort: str(p.setup_abort),
+    lowBatteryAction: oneOf(p.low_battery_action, ["land", "rth"] as const),
     speedCap: parseSpeedCap(p.speed_cap),
     sensors: p.sensors ?? null,
     positionUnverified: parsePositionUnverified(p.position_unverified),

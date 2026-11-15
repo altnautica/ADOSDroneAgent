@@ -68,7 +68,6 @@ pub fn items(
     mode: ControlMode,
     controller_live: bool,
     sensors: &crate::sensor_readiness::SensorCtx,
-    batt: &crate::batt_failsafe::BattCtx,
     now_ms: u64,
 ) -> Vec<Readiness> {
     let mut out = Vec::with_capacity(10);
@@ -107,7 +106,7 @@ pub fn items(
     if let Some(fw) = fc.firmware {
         out.push(profile_item(fc, fw, mode));
         if fw == Firmware::Ardupilot {
-            out.push(crate::batt_failsafe::item_for(fc, mode, batt));
+            out.push(crate::batt_failsafe::item_for(fc, mode));
         }
     }
     out.push(position_item(fc, now_ms));

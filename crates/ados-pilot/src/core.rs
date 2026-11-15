@@ -135,6 +135,12 @@ pub struct Pilot {
     take: take::Take,
     rth_deadline_ms: Option<u64>,
     low_batt_cancelled: bool,
+    /// The low-battery action counting down or taken (`land` / `rth`),
+    /// published as `low_battery_action`.
+    low_batt_action: Option<&'static str>,
+    /// The low-battery SmartRTL request awaiting the FC: when it was sent,
+    /// the battery percentage then and the FC mode it was sent in.
+    low_batt_srtl: Option<(u64, f32, u32)>,
     view: ViewDemand,
     scratch: HashMap<String, Scratch>,
     obstacles_ms: u64,
@@ -207,6 +213,8 @@ impl Pilot {
             take: take::Take::default(),
             rth_deadline_ms: None,
             low_batt_cancelled: false,
+            low_batt_action: None,
+            low_batt_srtl: None,
             view: ViewDemand::default(),
             scratch: HashMap::new(),
             obstacles_ms: 0,

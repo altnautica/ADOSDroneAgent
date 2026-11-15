@@ -714,6 +714,25 @@ fn the_pilot_panel_shows_surface_ops_and_the_failsafe_cause() {
 }
 
 #[test]
+fn the_alerts_name_the_pilots_low_battery_action_once_it_fired() {
+    let mut app = live_app();
+    let mut frame = pilot_frame();
+    frame["low_battery_action"] = json!("land");
+    frame["rth_countdown_s"] = json!(4.0);
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(frame.clone(), 100),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(!text.contains("Low battery: landing"), "{text}");
+    frame["rth_countdown_s"] = Value::Null;
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("Low battery: landing"), "{text}");
+}
+
+#[test]
 fn the_chip_reads_the_owning_skills_detail_from_its_plugin() {
     let mut app = live_app();
     land(

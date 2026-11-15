@@ -114,6 +114,8 @@ describe("countdown banners", () => {
     expect(lowBatteryLine(10)).toBe("Low battery: returning home in 10 s");
     expect(lowBatteryLine(0.001)).toBe("Low battery: returning home in 1 s");
     expect(lowBatteryLine(-1)).toBe("Low battery: returning home in 0 s");
+    expect(lowBatteryLine(9.2, "land")).toBe("Low battery: landing in 10 s");
+    expect(lowBatteryLine(9.2, "rth")).toBe("Low battery: returning home in 10 s");
   });
 
   it("name the cause of an FC mode change in words, never the raw code", () => {

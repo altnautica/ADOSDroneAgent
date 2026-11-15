@@ -302,6 +302,12 @@ pub struct PilotState {
     /// unless `fc_failsafe`.
     #[serde(default)]
     pub failsafe_cause: Option<String>,
+    /// The pilot's own low-battery action: `land` (the vehicle may fly
+    /// without GNSS, so it lands where it is) or `rth`. Set while its
+    /// countdown runs (`rth_countdown_s`) and after it fired, until the
+    /// battery recovers or the vehicle is on the ground. Omitted while none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_battery_action: Option<String>,
     /// The FC setup engine's active step id (`autotune`, `first_hover`, …)
     /// while the owner is `tuning`; `None` otherwise.
     #[serde(default)]

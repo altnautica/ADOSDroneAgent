@@ -47,9 +47,12 @@ export function bannerSeverity(id: keyof typeof BANNERS.severity): BannerSeverit
   return BANNERS.severity[id] as BannerSeverity;
 }
 
-/** The low-battery RTH countdown line, whole seconds rounded up. */
-export function lowBatteryLine(rthCountdownS: number): string {
-  return specText("flow.low_battery.title", { in_s: countdownS(rthCountdownS * 1000) });
+/** The low-battery countdown line, whole seconds rounded up: landing when
+ *  the pilot will land (`low_battery_action` `land`), returning home
+ *  otherwise. */
+export function lowBatteryLine(rthCountdownS: number, action: "land" | "rth" | null = null): string {
+  const key = action === "land" ? "flow.low_battery.title_land" : "flow.low_battery.title";
+  return specText(key, { in_s: countdownS(rthCountdownS * 1000) });
 }
 
 /** The voice prompt for a change between two pilot states, or null. */

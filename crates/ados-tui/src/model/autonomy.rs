@@ -189,6 +189,9 @@ pub struct Pilot {
     /// The setup-strings key of the air wizard's last abort that was not the
     /// operator's (`setup.blocker.aborted_<reason>`), while the agent shows it.
     pub setup_abort: Option<String>,
+    /// The pilot's own low-battery action once it fired (`low_battery_action`
+    /// with no countdown running): `land` or `rth`.
+    pub low_battery_action: Option<String>,
     /// The horizontal speed cap (m/s) the pilot applies to every setpoint it
     /// flies (`speed_cap.v_h_mps`, e.g. while GNSS-denied); `None` without one.
     pub speed_cap_mps: Option<f64>,
@@ -425,6 +428,10 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             .and_then(Value::as_str)
             .filter(|k| !k.is_empty())
             .map(str::to_string),
+        low_battery_action: f(d, "rth_countdown_s")
+            .is_none()
+            .then(|| one_of(d, "low_battery_action", &["land", "rth"]))
+            .flatten(),
         speed_cap_mps: d
             .get("speed_cap")
             .filter(|c| c.get("reason").and_then(Value::as_str).is_some())

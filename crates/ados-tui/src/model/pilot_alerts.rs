@@ -53,6 +53,16 @@ pub fn failsafe_text(cause: Option<&str>) -> String {
     spec_text("alert.failsafe", &[("cause", &worded)])
 }
 
+/// The low-battery item's text for `action` (`land`, `rth`); the pilot
+/// announces the same line as a STATUSTEXT.
+pub fn low_battery_text(action: Option<&str>) -> Option<String> {
+    match action {
+        Some("land") => Some(spec_text("alert.low_battery_land", &[])),
+        Some("rth") => Some(spec_text("alert.low_battery_rth", &[])),
+        _ => None,
+    }
+}
+
 /// The pilot holds for a lost controller while armed and airborne. An
 /// unknown arm or landed state is possibly airborne.
 pub fn controller_lost(p: &Pilot) -> bool {
@@ -135,6 +145,10 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
         let text = spec_text(key, &[]);
         push(&mut out, "setup_abort", Severity::Warning, text);
     }
+    let low_battery = fresh.and_then(|p| low_battery_text(p.low_battery_action.as_deref()));
+    if let Some(text) = &low_battery {
+        push(&mut out, "low_battery", Severity::Critical, text.clone());
+    }
     for r in fresh
         .into_iter()
         .flat_map(|p| &p.readiness)
@@ -188,8 +202,9 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
     }
     let fc_start = out.len();
     for s in fresh.into_iter().flat_map(|p| &p.statustext) {
-        // PreArm/Arm lines already arrive through `prearm`.
-        if prearm_body(&s.text).is_some() {
+        // PreArm/Arm lines already arrive through `prearm`; the pilot's own
+        // low-battery line folds into its `low_battery` item.
+        if prearm_body(&s.text).is_some() || low_battery.as_deref() == Some(s.text.as_str()) {
             continue;
         }
         let severity = if s.severity <= 2.0 {
@@ -438,6 +453,7 @@ mod tests {
                 fc_failsafe: i["fc_failsafe"].as_bool() == Some(true),
                 failsafe_cause: i["failsafe_cause"].as_str().map(String::from),
                 setup_abort: i["setup_abort"].as_str().map(String::from),
+                low_battery_action: i["low_battery_action"].as_str().map(String::from),
                 ..Pilot::default()
             };
             let prearm: Option<Vec<String>> = i["prearm"].as_array().map(|a| {

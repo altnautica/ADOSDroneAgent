@@ -7,7 +7,7 @@ const item = (key: string, ok = false) => ({ id: "battery_failsafe", ok, msg: sp
 
 describe("the battery failsafe fix", () => {
   it("is offered on a disarmed vehicle when an action does nothing", () => {
-    for (const k of ["none", "none_confined", "low_none", "low_none_confined", "critical_none", "confined_rtl", "differs", "differs_confined", "differs_low"]) {
+    for (const k of ["none", "none_confined", "low_none", "low_none_confined", "low_none_plane", "critical_none", "confined_rtl", "differs", "differs_confined", "differs_low"]) {
       expect(batteryFailsafeFixable(item(`readiness.battery_failsafe.${k}`), false), k).toBe(true);
     }
   });
@@ -16,8 +16,6 @@ describe("the battery failsafe fix", () => {
     for (const k of ["levels_unset", "no_monitor", "unread"]) {
       expect(batteryFailsafeFixable(item(`readiness.battery_failsafe.${k}`), false), k).toBe(false);
     }
-    const above = specText("readiness.battery_failsafe.rtl_above_ceiling", { rtl_m: 60, ceiling_m: 40 });
-    expect(batteryFailsafeFixable({ id: "battery_failsafe", ok: false, msg: above }, false)).toBe(false);
   });
 
   it("is not offered while armed or with the arm state unknown", () => {

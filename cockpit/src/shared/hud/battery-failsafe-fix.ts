@@ -5,8 +5,8 @@
 // on that item while disarmed. The fix opens Aircraft setup and runs the
 // ground wizard's ADOS profile step, which lists the failsafe profile and
 // writes nothing until the operator applies it.
-// Unset levels, no monitor, an unread state and an RTL above the altitude
-// limit get no fix (the levels belong to the initial tune). Pure.
+// Unset levels, no monitor and an unread state get no fix (the levels and
+// the monitor belong to the initial tune). Pure.
 
 import { specText } from "./spec-text";
 
@@ -24,6 +24,7 @@ const FIXABLE_KEYS = [
   "readiness.battery_failsafe.none_confined",
   "readiness.battery_failsafe.low_none",
   "readiness.battery_failsafe.low_none_confined",
+  "readiness.battery_failsafe.low_none_plane",
   "readiness.battery_failsafe.critical_none",
   "readiness.battery_failsafe.confined_rtl",
   "readiness.battery_failsafe.differs",

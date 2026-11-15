@@ -210,13 +210,7 @@ impl FcState {
                 let end = s.text.iter().position(|&b| b == 0).unwrap_or(s.text.len());
                 let text = String::from_utf8_lossy(&s.text[..end]).trim().to_owned();
                 if !text.is_empty() {
-                    if self.statustext.len() == STATUSTEXT_RING {
-                        self.statustext.pop_front();
-                    }
-                    self.statustext.push_back(Stamped {
-                        v: (s.severity as u8, text),
-                        at_ms: now_ms,
-                    });
+                    self.push_statustext(s.severity as u8, text, now_ms);
                 }
             }
             MavMessage::SYS_STATUS(s) if s.battery_remaining >= 0 => {
@@ -261,6 +255,18 @@ impl FcState {
             _ => {}
         }
         None
+    }
+
+    /// Add a line to the STATUSTEXT ring the surfaces read: an FC line, or
+    /// one of the pilot's own announcements (a low-battery action).
+    pub fn push_statustext(&mut self, severity: u8, text: String, now_ms: u64) {
+        if self.statustext.len() == STATUSTEXT_RING {
+            self.statustext.pop_front();
+        }
+        self.statustext.push_back(Stamped {
+            v: (severity, text),
+            at_ms: now_ms,
+        });
     }
 
     pub fn linked(&self, now_ms: u64) -> bool {

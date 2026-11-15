@@ -253,6 +253,7 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
         fcFailsafe: i.fc_failsafe,
         failsafeCause: i.failsafe_cause,
         setupAbort: i.setup_abort,
+        lowBatteryAction: i.low_battery_action,
         armed: i.armed,
         navSource: i.nav_source as PillInputs["navSource"],
       });
@@ -264,8 +265,15 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
 
 describe("failsafe item", () => {
   it("takes its inputs from the pilot state and words an unknown cause as itself", () => {
-    expect(pilotFailsafe(null)).toEqual({ fcFailsafe: false, failsafeCause: null });
-    expect(pilotFailsafe({ fcFailsafe: true, failsafeCause: "rc_or_failsafe" })).toEqual({ fcFailsafe: true, failsafeCause: "rc_or_failsafe" });
+    expect(pilotFailsafe(null)).toEqual({ fcFailsafe: false, failsafeCause: null, lowBatteryAction: null });
+    expect(pilotFailsafe({ fcFailsafe: true, failsafeCause: "rc_or_failsafe", lowBatteryAction: null, rthCountdownS: null })).toEqual({
+      fcFailsafe: true,
+      failsafeCause: "rc_or_failsafe",
+      lowBatteryAction: null,
+    });
+    // The low-battery item waits for the countdown, which has its own banner.
+    expect(pilotFailsafe({ fcFailsafe: false, failsafeCause: null, lowBatteryAction: "land", rthCountdownS: 4 }).lowBatteryAction).toBe(null);
+    expect(pilotFailsafe({ fcFailsafe: false, failsafeCause: null, lowBatteryAction: "land", rthCountdownS: null }).lowBatteryAction).toBe("land");
     expect(failsafeText("battery")).toBe("Failsafe: battery");
   });
 
