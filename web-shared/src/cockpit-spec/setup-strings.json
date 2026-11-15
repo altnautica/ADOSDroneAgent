@@ -479,6 +479,7 @@
     "pilot.hold_reason.obstacle-data-stale": "Holding: no fresh obstacle data",
     "pilot.hold_reason.position-unverified": "Holding · position unverified",
     "pilot.hold_reason.return-blocked": "Return blocked",
+    "pilot.hold_reason.route-infeasible": "Route too tight",
     "pilot.link_loss_action.hold": "Hold",
     "pilot.link_loss_action.land": "Land",
     "pilot.link_loss_action.loiter": "Hold",
