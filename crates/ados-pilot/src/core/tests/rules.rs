@@ -218,7 +218,7 @@ fn link_loss_triggers_rtl_after_ten_seconds() {
     w.run(5000);
     assert!(w.p.state(w.now).link_loss_in_s.unwrap() <= 5.1);
     w.run(5100);
-    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.mode, copter::SMART_RTL);
     assert_eq!(w.p.owner(), Owner::FcMode);
 }
 
@@ -371,7 +371,7 @@ fn rth_and_land_hand_to_the_fc() {
     w.airborne(copter::GUIDED);
     w.action("take_control");
     w.action("rth");
-    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.mode, copter::SMART_RTL);
     w.run(40);
     assert_eq!(w.p.owner(), Owner::FcMode);
     assert!(w.p.state(w.now).owner_label.starts_with("RTH"));
@@ -642,7 +642,7 @@ fn surface_goto_after_an_operator_rth_flies() {
     w.run(100);
     assert!(matches!(w.action("rth"), Reply::Action(a) if a.ok));
     w.run(100);
-    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.mode, copter::SMART_RTL);
     let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
     assert!(matches!(w.action_args("goto", args), Reply::Action(a) if a.ok));
 }
@@ -1157,7 +1157,7 @@ fn link_loss_during_a_skill_lease_flies_the_action_and_revokes() {
         w.goal(id, 5.0, 0.0);
         w.run(200);
     }
-    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.mode, copter::SMART_RTL);
     assert_eq!(w.p.owner(), Owner::FcMode);
     assert!(w.p.auth.lease().is_none(), "the lease ended");
     assert!(w.revoked.iter().any(|(l, _)| *l == id), "{:?}", w.revoked);

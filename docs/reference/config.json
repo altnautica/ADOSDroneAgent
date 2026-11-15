@@ -2151,6 +2151,16 @@
       "type": "integer"
     },
     {
+      "default": 10,
+      "description": "Low Battery Countdown S",
+      "enum": null,
+      "key": "pilot.low_battery_countdown_s",
+      "maximum": 30,
+      "minimum": 5,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": 120.0,
       "description": "Max Alt Agl M",
       "enum": null,
@@ -2203,6 +2213,56 @@
       "minimum": null,
       "secret": false,
       "type": "string"
+    },
+    {
+      "default": 45,
+      "description": "Return Blocked Land After S",
+      "enum": null,
+      "key": "pilot.return_blocked_land_after_s",
+      "maximum": 300,
+      "minimum": 15,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 2,
+      "description": "Stall Max Auto Skips",
+      "enum": null,
+      "key": "pilot.stall_max_auto_skips",
+      "maximum": 5,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 1.0,
+      "description": "Stall Min Progress M",
+      "enum": null,
+      "key": "pilot.stall_min_progress_m",
+      "maximum": 5.0,
+      "minimum": 0.5,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 45,
+      "description": "Stall Skip After S",
+      "enum": null,
+      "key": "pilot.stall_skip_after_s",
+      "maximum": 300,
+      "minimum": 15,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 15,
+      "description": "Stall Window S",
+      "enum": null,
+      "key": "pilot.stall_window_s",
+      "maximum": 60,
+      "minimum": 10,
+      "secret": false,
+      "type": "integer"
     },
     {
       "default": [],

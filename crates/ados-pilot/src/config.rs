@@ -75,6 +75,20 @@ pub struct PilotSection {
     pub gnss_denied_max_speed_mps: f32,
     /// Horizontal acceleration cap (m/s²) under the same condition.
     pub gnss_denied_max_accel_mps2: f32,
+    /// No progress to a mission waypoint (or on a return) over this window
+    /// raises a stall.
+    pub stall_window_s: u32,
+    /// The progress (m) the window needs.
+    pub stall_min_progress_m: f32,
+    /// A stalled waypoint is skipped this long after the alert.
+    pub stall_skip_after_s: u32,
+    /// After this many automatic skips in a row the vehicle holds for the
+    /// operator.
+    pub stall_max_auto_skips: u32,
+    /// A blocked return lands in place this long after the alert.
+    pub return_blocked_land_after_s: u32,
+    /// The announced countdown before the low-battery action.
+    pub low_battery_countdown_s: u32,
     /// The declared flow and rangefinder mount, checked against the FC's
     /// parameters.
     pub fc_sensors: FcSensors,
@@ -117,6 +131,12 @@ impl Default for PilotSection {
             link_loss_action: LinkLossAction::Rth,
             gnss_denied_max_speed_mps: 2.0,
             gnss_denied_max_accel_mps2: 1.5,
+            stall_window_s: 15,
+            stall_min_progress_m: 1.0,
+            stall_skip_after_s: 45,
+            stall_max_auto_skips: 2,
+            return_blocked_land_after_s: 45,
+            low_battery_countdown_s: 10,
             fc_sensors: FcSensors::default(),
         }
     }

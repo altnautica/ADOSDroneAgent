@@ -2407,6 +2407,13 @@
           "title": "Link Loss S",
           "type": "integer"
         },
+        "low_battery_countdown_s": {
+          "default": 10,
+          "maximum": 30,
+          "minimum": 5,
+          "title": "Low Battery Countdown S",
+          "type": "integer"
+        },
         "max_alt_agl_m": {
           "default": 120.0,
           "maximum": 500.0,
@@ -2444,6 +2451,41 @@
           ],
           "title": "Profile",
           "type": "string"
+        },
+        "return_blocked_land_after_s": {
+          "default": 45,
+          "maximum": 300,
+          "minimum": 15,
+          "title": "Return Blocked Land After S",
+          "type": "integer"
+        },
+        "stall_max_auto_skips": {
+          "default": 2,
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Stall Max Auto Skips",
+          "type": "integer"
+        },
+        "stall_min_progress_m": {
+          "default": 1.0,
+          "maximum": 5.0,
+          "minimum": 0.5,
+          "title": "Stall Min Progress M",
+          "type": "number"
+        },
+        "stall_skip_after_s": {
+          "default": 45,
+          "maximum": 300,
+          "minimum": 15,
+          "title": "Stall Skip After S",
+          "type": "integer"
+        },
+        "stall_window_s": {
+          "default": 15,
+          "maximum": 60,
+          "minimum": 10,
+          "title": "Stall Window S",
+          "type": "integer"
         }
       },
       "title": "PilotConfig",

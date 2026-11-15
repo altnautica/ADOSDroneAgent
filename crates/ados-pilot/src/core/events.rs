@@ -135,6 +135,11 @@ impl Pilot {
                 {
                     self.on_fc_reposition(now_ms);
                 }
+                if a.command == MavCmd::MAV_CMD_DO_SET_MODE
+                    && a.result != MavResult::MAV_RESULT_ACCEPTED
+                {
+                    self.mode_refused(now_ms);
+                }
                 self.take_ack(a, now_ms);
             }
             return;
@@ -217,6 +222,8 @@ impl Pilot {
         self.hold_reason = None;
         self.fc_failsafe = false;
         self.failsafe_cause = None;
+        self.end_supervision();
+        self.drop_return();
         if self
             .launch
             .as_ref()
@@ -284,6 +291,14 @@ impl Pilot {
         let mode = self.fc.custom_mode;
         self.fc_failsafe = false;
         self.failsafe_cause = None;
+        // The supervisor's own BRAKE on the way to its GUIDED hold: the
+        // pilot keeps the vehicle.
+        if mode == crate::modes::copter::BRAKE
+            && self.sup.hold.is_some()
+            && self.mode_is_ours(mode, now_ms)
+        {
+            return;
+        }
         if self.owner() == Owner::Tuning {
             // The setup engine flies its own modes. A return, land or brake it
             // did not command is still the FC's failsafe: recorded here so
@@ -339,6 +354,12 @@ impl Pilot {
         // failsafe (radio, battery, EKF).
         self.fc_failsafe = !operator && fam.is_failsafe_mode(mode);
         self.failsafe_cause = self.fc_failsafe.then(|| self.fc_mode_cause());
+        // A failsafe return the supervisor held and resumed is still the FC's
+        // failsafe.
+        if let Some(cause) = self.sup.restore_failsafe.take().filter(|_| fam.is_rtl(mode)) {
+            self.fc_failsafe = true;
+            self.failsafe_cause = Some(cause);
+        }
         if self.owner() != Owner::FcMode {
             self.set_owner(Owner::FcMode, "fc-mode");
         }
@@ -355,9 +376,15 @@ impl Pilot {
                 &[("mode", json!(name)), ("cause", json!(cause))],
                 now_ms,
             ));
-        } else if !(self.low_batt_action.is_some() && self.mode_is_ours(mode, now_ms)) {
-            // The pilot's own low-battery action keeps its banner: it says
-            // why the FC changed mode.
+        } else if !(self.low_batt_action.is_some() && self.mode_is_ours(mode, now_ms))
+            && !self
+                .banner
+                .as_ref()
+                .is_some_and(|b| b.text_key == "pilot.banner.return_land_fallback")
+        {
+            // The pilot's own low-battery action, or its landing after a
+            // refused return, keeps its banner: it says why the FC changed
+            // mode.
             let name = fam.mode_name(mode);
             self.banner = Some(banner(
                 "pilot.banner.fc_control",

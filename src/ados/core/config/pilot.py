@@ -66,5 +66,18 @@ class PilotConfig(BaseModel):
     # every setpoint it flies while the EKF's horizontal position is not GNSS.
     gnss_denied_max_speed_mps: float = Field(default=2.0, ge=0.5, le=15.0)
     gnss_denied_max_accel_mps2: float = Field(default=1.5, ge=0.5, le=6.0)
+    # A mission waypoint (or a return) that comes less than
+    # ``stall_min_progress_m`` closer in ``stall_window_s`` holds the vehicle
+    # and alerts the operator; with no answer the waypoint is skipped after
+    # ``stall_skip_after_s``, and after ``stall_max_auto_skips`` automatic
+    # skips in a row the vehicle holds until the operator answers. A blocked
+    # return lands in place after ``return_blocked_land_after_s``.
+    stall_window_s: int = Field(default=15, ge=10, le=60)
+    stall_min_progress_m: float = Field(default=1.0, ge=0.5, le=5.0)
+    stall_skip_after_s: int = Field(default=45, ge=15, le=300)
+    stall_max_auto_skips: int = Field(default=2, ge=1, le=5)
+    return_blocked_land_after_s: int = Field(default=45, ge=15, le=300)
+    # The announced countdown before the pilot's low-battery action.
+    low_battery_countdown_s: int = Field(default=10, ge=5, le=30)
     # The declared flow and rangefinder mount; unset parts are not checked.
     fc_sensors: FcSensorsConfig = Field(default_factory=FcSensorsConfig)

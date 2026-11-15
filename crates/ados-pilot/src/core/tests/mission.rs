@@ -65,10 +65,10 @@ fn launched_mission_runs_when_done_rth_once_on_complete() {
         w.run(200);
     }
     assert_eq!(w.mode, copter::AUTO, "nothing before the mission completes");
-    assert_eq!(w.set_modes(copter::RTL), 0);
+    assert_eq!(w.set_modes(copter::SMART_RTL), 0);
     w.mission("complete", 3, 4);
     w.run(100);
-    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.mode, copter::SMART_RTL);
     assert_eq!(w.p.owner(), Owner::FcMode);
     // The router keeps reporting `complete` (latched), and a reconnect starts
     // from an unknown state: the action still ran once.
@@ -79,7 +79,8 @@ fn launched_mission_runs_when_done_rth_once_on_complete() {
     w.p.on_feed("mission", &serde_json::Value::Null, w.now);
     w.mission("complete", 3, 4);
     w.run(100);
-    assert_eq!(w.set_modes(copter::RTL), 1);
+    assert_eq!(w.set_modes(copter::SMART_RTL), 1);
+    assert_eq!(w.set_modes(copter::RTL), 0, "never a straight RTL");
     assert_eq!(w.p.state(w.now).mission.unwrap().state, "complete");
 }
 

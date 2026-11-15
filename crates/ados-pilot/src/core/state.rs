@@ -177,6 +177,7 @@ impl Pilot {
             {
                 m.state = "paused".to_owned();
             }
+            m.gaps = self.sup.stall.gaps.clone();
             m
         });
         s.input_session = self.sessions.owner.clone();
@@ -193,6 +194,7 @@ impl Pilot {
         s.rth_countdown_s = self
             .rth_deadline_ms
             .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0);
+        s.mission_stall = self.mission_stall_wire(now_ms);
         // The pilot flies a surface's point only while it owns motion; in
         // `fc_manual` / `elrs` a surface uses the FC's reposition instead.
         if self.control_mode() == ados_protocol::pilot::ControlMode::Ados {

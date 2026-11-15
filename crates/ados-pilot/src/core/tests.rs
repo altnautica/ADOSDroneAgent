@@ -11,5 +11,6 @@ mod rules;
 mod safety;
 mod sensors;
 mod stale;
+mod supervisor;
 mod take;
 mod touchdown;

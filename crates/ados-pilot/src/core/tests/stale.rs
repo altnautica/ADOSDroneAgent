@@ -300,7 +300,7 @@ fn land_rtl_and_pause_still_act_on_stale_scans() {
     assert_eq!(w.p.owner(), Owner::Pilot);
     assert_eq!(err(&w.action("rth")), None);
     w.run(100);
-    assert_eq!(w.mode, copter::RTL);
+    assert_eq!(w.mode, copter::SMART_RTL);
     assert_eq!(w.p.owner(), Owner::FcMode);
 }
 

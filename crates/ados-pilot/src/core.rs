@@ -134,13 +134,13 @@ pub struct Pilot {
     failsafe_cause: Option<&'static str>,
     take: take::Take,
     rth_deadline_ms: Option<u64>,
+    /// The proximity brake and no-progress rule over FC-flown missions and
+    /// returns, and the return's land fallback.
+    sup: control::Supervisor,
     low_batt_cancelled: bool,
     /// The low-battery action counting down or taken (`land` / `rth`),
     /// published as `low_battery_action`.
     low_batt_action: Option<&'static str>,
-    /// The low-battery SmartRTL request awaiting the FC: when it was sent,
-    /// the battery percentage then and the FC mode it was sent in.
-    low_batt_srtl: Option<(u64, f32, u32)>,
     view: ViewDemand,
     scratch: HashMap<String, Scratch>,
     obstacles_ms: u64,
@@ -212,9 +212,9 @@ impl Pilot {
             failsafe_cause: None,
             take: take::Take::default(),
             rth_deadline_ms: None,
+            sup: control::Supervisor::default(),
             low_batt_cancelled: false,
             low_batt_action: None,
-            low_batt_srtl: None,
             view: ViewDemand::default(),
             scratch: HashMap::new(),
             obstacles_ms: 0,
@@ -262,7 +262,17 @@ impl Pilot {
         self.out.push(Out::Mav(Box::new(m)));
     }
 
+    /// Command an FC mode. Every pilot-initiated mode command is logged with
+    /// the code site that asked for it.
+    #[track_caller]
     fn set_mode(&mut self, mode: u32, now_ms: u64) {
+        let site = std::panic::Location::caller();
+        tracing::info!(
+            target: "ados_pilot",
+            mode = %self.family().mode_name(mode),
+            reason = %format_args!("{}:{}", site.file(), site.line()),
+            "pilot_mode_command"
+        );
         self.own_mode = Some((mode, now_ms));
         let m = self.tx().set_mode(mode);
         self.mav(m);

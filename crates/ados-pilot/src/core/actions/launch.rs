@@ -261,7 +261,7 @@ impl Pilot {
         let _ = if w == "land" {
             self.do_land(now_ms)
         } else {
-            self.do_rth(now_ms)
+            self.do_rth("mission_done", now_ms)
         };
     }
 }

@@ -18,8 +18,11 @@ mod failsafes;
 mod goal_brake;
 mod obstacle_data;
 mod plan;
+mod stall;
+mod supervisor;
 mod vantage_goal;
 pub use brake::*;
+pub use supervisor::{Resume, Supervisor};
 pub use vantage_goal::HOLD_NO_VANTAGE;
 
 /// Takeover: any axis above this for `TAKEOVER_MS`.
@@ -108,6 +111,7 @@ impl Pilot {
             }
             self.replan(now_ms);
         }
+        self.supervise(now_ms);
         self.fly(axes, dt, now_ms);
     }
 

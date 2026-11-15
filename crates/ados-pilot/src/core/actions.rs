@@ -54,7 +54,7 @@ impl Pilot {
                     | "vtol"
             )
         ) {
-            self.low_batt_srtl = None;
+            self.drop_return();
         }
         // An operator safety action always ends a tuning flight first.
         if matches!(name, "pause" | "rth" | "land" | "kill" | "take_control")
@@ -63,6 +63,14 @@ impl Pilot {
             self.exit_tuning(now_ms);
         }
         self.touchdown_refusal(name)?;
+        // An operator answer ends a supervisor hold or stall; a held mission
+        // then waits for `resume`.
+        if matches!(name, "pause" | "take_control" | "hand_to_fc" | "kill")
+            && self.end_supervision() == Some(super::control::Resume::Mission)
+            && matches!(name, "pause" | "take_control")
+        {
+            self.mission_paused = true;
+        }
         if let Some((kind, value)) = name.split_once(':') {
             return self.set_option(kind, value, now_ms);
         }
@@ -104,17 +112,16 @@ impl Pilot {
             ),
             "launch" => self.launch_from_args(args, now_ms),
             "land" => self.do_land(now_ms),
-            "rth" => self.do_rth(now_ms),
+            "rth" => self.do_rth("operator", now_ms),
+            "mission_skip" => self.mission_skip(true, now_ms),
             "goto" => self.surface_goto(args, now_ms),
             "pause" => {
-                self.rth_deadline_ms = None;
-                self.low_batt_action = None;
+                self.cancel_low_battery("pause");
                 self.low_batt_cancelled = self.fc.armed;
                 self.do_pause(now_ms)
             }
             "rth_cancel" => {
-                self.rth_deadline_ms = None;
-                self.low_batt_action = None;
+                self.cancel_low_battery("operator");
                 self.low_batt_cancelled = true;
                 Ok(())
             }
@@ -240,6 +247,7 @@ impl Pilot {
         if is(&m, "complete") || is(&m, "none") {
             self.mission_paused = false;
         }
+        self.sup.stall.on_mission(m.as_ref());
         self.mission = m;
         if completed
             && self
@@ -281,6 +289,7 @@ impl Pilot {
         if !self.fc.armed {
             return Err("disarmed".into());
         }
+        self.end_supervision();
         self.revoke("land");
         let fam = self.family();
         match self.fc.vehicle_class() {
@@ -307,13 +316,14 @@ impl Pilot {
         Ok(())
     }
 
-    pub(super) fn do_rth(&mut self, now_ms: u64) -> ActionRes {
+    /// The return: SmartRTL along the flown path, landing in place when the
+    /// FC cannot fly it. Never a straight RTL on a copter.
+    pub(super) fn do_rth(&mut self, reason: &str, now_ms: u64) -> ActionRes {
         if !self.fc.armed {
             return Err("disarmed".into());
         }
         self.revoke("rth");
-        let m = self.family().rtl();
-        self.set_mode(m, now_ms);
+        self.command_return(reason, now_ms);
         self.set_owner(Owner::FcMode, "rth");
         self.rth_deadline_ms = None;
         Ok(())
