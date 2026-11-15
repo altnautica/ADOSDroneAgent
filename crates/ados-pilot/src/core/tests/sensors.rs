@@ -205,7 +205,7 @@ fn a_gnss_launch_is_not_held_by_the_lidar_map_heading() {
     );
     map_status_north_unknown(&mut w);
     let [imu, heading] = nav_items(&w);
-    assert_eq!(imu.map(|i| i.0), Some(true), "the FC IMU reads as waiting");
+    assert_eq!(imu.map(|i| i.0), Some(true), "the FC IMU reads as healthy");
     let heading = heading.expect("the map heading is reported");
     assert!(!heading.0 && heading.1 == Severity::Warn, "{heading:?}");
     assert!(heading.2.contains("north_unknown"), "{heading:?}");
@@ -251,6 +251,24 @@ fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
         heading, None,
         "shown only while the map reports a heading state"
     );
+}
+
+/// vision-nav gone silent after external navigation: its last mode stands,
+/// so the lidar pose items keep blocking.
+#[test]
+fn a_silent_vision_nav_keeps_external_nav_blocking() {
+    use ados_protocol::pilot::Severity;
+    let mut w = World::new();
+    w.p.on_feed(
+        "nav.state",
+        &json!({"mode": "external_nav", "active_set": 1}),
+        w.now,
+    );
+    w.now += 60_000;
+    map_status_north_unknown(&mut w);
+    let [imu, heading] = nav_items(&w);
+    assert_eq!(imu.map(|i| i.1), Some(Severity::Block));
+    assert_eq!(heading.map(|i| (i.0, i.1)), Some((false, Severity::Block)));
 }
 
 fn ekf(flags: EkfStatusFlags, pos_horiz_variance: f32) -> MavMessage {
