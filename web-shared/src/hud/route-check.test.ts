@@ -27,6 +27,8 @@ const check = (over: Partial<RouteCheck> = {}): RouteCheck => ({
   sigmaM: 0.02,
   pinch: null,
   unverifiedLegs: [],
+  unchecked: [],
+  truncated: false,
   ...over,
 });
 
@@ -40,6 +42,8 @@ describe("the confined frame through the parser", () => {
       sigmaM: 0.02,
       pinch: { fromSeq: 3, toSeq: 4, ned: [41.25, -17.5, -2], clearanceM: 0.52, requiredM: 0.577 },
       unverifiedLegs: [5, 6],
+      unchecked: [],
+      truncated: false,
     });
     expect(confined.speedCap).toEqual({ reason: "confined-near", vHMps: 0.5 });
     expect(confined.holdReason).toBe("route-infeasible");
@@ -54,8 +58,8 @@ describe("the confined frame through the parser", () => {
   it("drops a malformed route check and a malformed pinch", () => {
     expect(parseRouteCheck({ state: "maybe" })).toBeNull();
     expect(parseRouteCheck(null)).toBeNull();
-    const noPinch = parseRouteCheck({ state: "unverified", required_m: 0.6, margin_m: 0.5, sigma_m: null, pinch: { from_seq: 1 }, unverified_legs: [2, "x", 3] });
-    expect(noPinch).toEqual({ state: "unverified", requiredM: 0.6, marginM: 0.5, sigmaM: null, pinch: null, unverifiedLegs: [2, 3] });
+    const noPinch = parseRouteCheck({ state: "unverified", required_m: 0.6, margin_m: 0.5, sigma_m: null, pinch: { from_seq: 1 }, unverified_legs: [2, "x", 3], unchecked: [4, null], truncated: true });
+    expect(noPinch).toEqual({ state: "unverified", requiredM: 0.6, marginM: 0.5, sigmaM: null, pinch: null, unverifiedLegs: [2, 3], unchecked: [4], truncated: true });
   });
 });
 
@@ -95,6 +99,19 @@ describe("the route-check report", () => {
     });
   });
 
+  it("names the waypoints it could not place, then a mission too long to check", () => {
+    expect(routeCheckReport(check({ state: "unverified", unchecked: [3, 5], truncated: true }))!.line).toBe(
+      "Route not fully checked: no position for waypoint 3, 5 · slow near walls",
+    );
+    expect(routeCheckReport(check({ state: "unverified", truncated: true }))!.line).toBe(
+      "Route not fully checked: the mission is too long · slow near walls",
+    );
+    // A pinch outranks what was not checked.
+    expect(routeCheckReport(check({ state: "infeasible", unchecked: [3] }))!.line).toBe(
+      "Route too tight: leg — has — m, needs 0.58 m",
+    );
+  });
+
   it("is null with no route check", () => {
     expect(routeCheckReport(null)).toBeNull();
     expect(routeCheckReport(plain.routeCheck)).toBeNull();
@@ -131,11 +148,11 @@ describe("the place-class picker", () => {
     );
   });
 
-  it("raises the configured margin to the class floor", () => {
+  it("keeps the open margin at 0.5 m or more and makes the confined one the tip radius plus 0.1 m", () => {
     expect(effectiveMarginM("open", null, null)).toBe(1.5);
     expect(effectiveMarginM("open", 0.3, null)).toBe(0.5);
-    expect(effectiveMarginM("confined", 0.3, 0.377)).toBeCloseTo(0.477, 6);
-    expect(effectiveMarginM("confined", 1.0, 0.377)).toBe(1.0);
+    expect(effectiveMarginM("confined", 1.5, 0.377)).toBeCloseTo(0.477, 6);
+    expect(effectiveMarginM("confined", null, 0.377)).toBeCloseTo(0.477, 6);
     expect(effectiveMarginM("confined", 0.6, null)).toBeNull();
   });
 });
@@ -145,5 +162,6 @@ describe("the confined refusals", () => {
     expect(refusalText("route_infeasible")).toBe("Route too tight for the confined profile");
     expect(refusalText("no_prop_radius")).toBe("Set the propeller tip radius for the confined profile");
     expect(refusalText("no_stall")).toBe("No stalled waypoint to skip");
+    expect(refusalText("route_unchecked")).toBe("Route not fully checked: a waypoint has no position, or the mission is too long");
   });
 });
