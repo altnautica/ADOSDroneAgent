@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.114.1] - 2026-11-15
+
+### Changed
+
+- Internal only: the cockpit frame helpers are split into smaller modules under the size limit (no behaviour change).
+
 ## [0.114.0] - 2026-11-15
 
 ### Added
