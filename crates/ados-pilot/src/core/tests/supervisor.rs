@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use ados_protocol::mavlink::ardupilotmega::{MavMessage, MavResult};
+use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, MavResult};
 use ados_protocol::pilot::{MissionGap, Owner};
 use serde_json::{json, Value};
 
@@ -76,11 +76,14 @@ fn stuck_in_auto(seq: u32) -> World {
     w
 }
 
+/// The items the pilot made current (MAV_CMD_DO_SET_MISSION_CURRENT).
 fn set_currents(w: &World) -> Vec<u16> {
     w.sent
         .iter()
         .filter_map(|m| match m {
-            MavMessage::MISSION_SET_CURRENT(d) => Some(d.seq),
+            MavMessage::COMMAND_LONG(c) if c.command == MavCmd::MAV_CMD_DO_SET_MISSION_CURRENT => {
+                Some(c.param1 as u16)
+            }
             _ => None,
         })
         .collect()
@@ -110,7 +113,7 @@ fn a_stalled_mission_alerts_holds_and_skips_after_the_countdown() {
         assert_eq!(stall.window_s, 15.0);
         let in_s = stall.skip_in_s.expect("a countdown");
         assert!((44.5..=45.0).contains(&in_s), "{in_s}");
-        let raised = w.now + 45_000 - (in_s * 1000.0).round() as u64 - t0;
+        let raised = w.now + (in_s * 1000.0).round() as u64 - 45_000 - t0;
         assert!((14_800..=15_200).contains(&raised), "raised at {raised} ms");
         assert_eq!(
             banner_key(&w).as_deref(),

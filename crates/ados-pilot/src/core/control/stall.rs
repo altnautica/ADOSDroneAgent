@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 
-use ados_protocol::mavlink::ardupilotmega::{MavMessage, MISSION_SET_CURRENT_DATA};
+use ados_protocol::mavlink::ardupilotmega::MavCmd;
 use ados_protocol::pilot::{MissionGap, Owner};
 use serde_json::json;
 
@@ -323,12 +323,13 @@ impl Pilot {
             self.set_owner(Owner::FcMode, "rth");
             return Ok(());
         }
-        let tx = self.tx();
-        self.mav(MavMessage::MISSION_SET_CURRENT(MISSION_SET_CURRENT_DATA {
-            seq: u16::try_from(next).unwrap_or(u16::MAX),
-            target_system: tx.sysid,
-            target_component: tx.compid,
-        }));
+        // MISSION_SET_CURRENT is deprecated; the command form also answers
+        // with an ack.
+        let m = self.tx().command(
+            MavCmd::MAV_CMD_DO_SET_MISSION_CURRENT,
+            [next as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        self.mav(m);
         self.sup.stall.skip_to = Some(next);
         let auto = self.family().auto();
         self.set_mode(auto, now_ms);

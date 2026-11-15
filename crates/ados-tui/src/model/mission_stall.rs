@@ -19,15 +19,6 @@ pub enum StallAction {
 }
 
 impl StallAction {
-    /// The pilot action.
-    pub fn pilot_action(self) -> &'static str {
-        match self {
-            Self::Skip => "mission_skip",
-            Self::Return => "rth",
-            Self::Land => "land",
-        }
-    }
-
     /// The `/api/command` name that reaches the pilot action.
     pub fn command(self) -> &'static str {
         match self {
@@ -198,8 +189,6 @@ mod tests {
             vec![StallAction::Skip, StallAction::Return, StallAction::Land]
         );
         assert_eq!(stall_keys(&v), "s Skip waypoint · r Return · l Land here");
-        let names: Vec<_> = v.actions.iter().map(|a| a.pilot_action()).collect();
-        assert_eq!(names, ["mission_skip", "rth", "land"]);
         let cmds: Vec<_> = v.actions.iter().map(|a| a.command()).collect();
         assert_eq!(cmds, ["missionskip", "rtl", "land"]);
     }

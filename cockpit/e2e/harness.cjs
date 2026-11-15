@@ -217,7 +217,8 @@ async function pilotPage(browser, vp, sim, query = "") {
   // button, no longer the "No pilot" placeholder. Checked by element, not by
   // wording, so a change to the spec text cannot turn this wait into a no-op.
   if (sim.pilot) await page.waitForSelector('button[data-testid="flight-state-chip"]', { timeout: 10000 });
-  const skip = page.getByRole("button", { name: "Skip" });
+  // The tour's Skip, by exact name: the mission stall overlay's "Skip waypoint" must not match.
+  const skip = page.getByRole("button", { name: "Skip", exact: true });
   if (await skip.count()) await skip.first().click();
   return { ctx, page };
 }
