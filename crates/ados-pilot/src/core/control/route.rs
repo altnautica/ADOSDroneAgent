@@ -321,7 +321,11 @@ impl Pilot {
             let jumped = last
                 .and_then(|(_, p)| p)
                 .is_some_and(|p| s != p && Some(s) != self.next_item(p));
-            if entered || jumped {
+            // A skipped item is a feed still behind the pilot's own skip:
+            // the FC already flies the next item from the origin the skip
+            // stored.
+            let skipped = self.sup.stall.gaps.iter().any(|g| g.seq == s);
+            if (entered || jumped) && !skipped {
                 if let Some(o) = self.origin_here(s, now_ms) {
                     self.route.origin = Some(o);
                 }

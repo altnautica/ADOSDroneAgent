@@ -163,6 +163,36 @@ fn item_to_item_the_leg_is_checked_from_the_item_before_not_the_vehicle() {
     assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
 }
 
+/// A post 0.3 m west at n 15: on the items' line, clear of the line from
+/// (9, 2) to item 3.
+fn west_post(n: f32, e: f32) -> bool {
+    (n - 15.0).abs() < 0.1 && (-0.4..-0.2).contains(&e)
+}
+
+#[test]
+fn a_skip_keeps_its_origin_while_the_feed_still_reads_the_skipped_item() {
+    let mut w = World::new();
+    confined(&mut w);
+    w.airborne(copter::AUTO);
+    w.pos = [9.0, 2.0, -5.0];
+    w.run(100);
+    map(&mut w, &area(&west_post));
+    route(&mut w, "active", 2, &LINE);
+    run_seen(&mut w, 100);
+    assert_eq!(w.set_modes(copter::BRAKE), 1, "held before 2→3");
+    assert!(ok(&w.action("mission_skip")));
+    assert_eq!(w.mode, copter::AUTO, "the leg from here to 3 is clear");
+    // The FC's AUTO arrives before the feed reports item 3.
+    run_seen(&mut w, 300);
+    route(&mut w, "active", 3, &LINE);
+    run_seen(&mut w, 1500);
+    assert_eq!(w.set_modes(copter::BRAKE), 1, "no second hold");
+    let s = w.p.state(w.now);
+    assert_eq!(s.hold_reason, None);
+    let rc = s.route_check.expect("route_check");
+    assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
+}
+
 #[test]
 fn no_auto_without_the_position_the_leg_from_here_starts_at() {
     // The bridge 1→3 is clear: only the missing position keeps AUTO off.
