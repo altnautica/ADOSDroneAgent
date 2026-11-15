@@ -152,8 +152,10 @@ async function tipsCase(browser) {
       return setItem.call(this, k, v);
     };
     new MutationObserver((_, observer) => {
-      if (!document.querySelector('[data-testid="cockpit-tip"]')) return;
+      const tip = document.querySelector('[data-testid="cockpit-tip"]');
+      if (!tip) return;
       window.__tipTimes.tip = performance.now();
+      window.__tipTimes.tipId = tip.getAttribute("data-tip");
       observer.disconnect();
     }).observe(document, { childList: true, subtree: true });
   });
@@ -162,11 +164,13 @@ async function tipsCase(browser) {
   await page.waitForSelector("[data-zone=status_pill]", { timeout: 10000 });
 
   // (1) The first tip, and no other before it, shows after the first delay
-  // just below the top bar beside the status pill.
-  assert.equal(await tipNow(page), null, "no tip before the first delay");
+  // just below the top bar beside the status pill. Both are read from the
+  // page's own record of the first tip inserted, not from what is on screen
+  // once the pill renders: a slow load can render the pill after the delay.
   const first = await waitTip(page, "status_pill", RULES.first_delay_ms + 3000);
   const times = await page.evaluate(() => window.__tipTimes);
   assert.ok(typeof times.opened === "number" && typeof times.tip === "number", `tip times ${JSON.stringify(times)}`);
+  assert.equal(times.tipId, "status_pill", "the first tip inserted");
   const firstAfter = Math.round(times.tip - times.opened);
   // 50 ms: the store reads its clock just before it saves.
   assert.ok(firstAfter >= RULES.first_delay_ms - 50, `first tip ${firstAfter} ms after the Feed opened`);
