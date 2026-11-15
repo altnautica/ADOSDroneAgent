@@ -2,9 +2,12 @@
 //! good read, with the owning skill's detail from its plugin; and the status
 //! pill's alerts from everything the tab reads.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::app::Core;
+use crate::model::autonomy::MissionStall;
 use crate::model::base_alerts::{base_alerts, BaseInputs};
-use crate::model::flight_state::{chip_inputs, flight_state_chip, ChipContext};
+use crate::model::flight_state::{chip_inputs, flight_state_chip, stale_after_ms, ChipContext};
 use crate::model::nav_source;
 use crate::model::pilot_alerts::{pill_alerts, PillAlert, PillInputs};
 
@@ -27,6 +30,14 @@ impl VehicleTab {
             core.now.saturating_duration_since(at).as_millis() as u64
         });
         age.map_or(u64::MAX, |a| a.saturating_add(since_read))
+    }
+
+    /// The mission stall of a fresh pilot kind: the one the stall keys
+    /// answer. `None` with no stall, or while the pilot kind is stale.
+    pub(super) fn fresh_stall(&self, core: &Core) -> Option<&MissionStall> {
+        let p = self.auto.as_ref()?.pilot.as_ref()?;
+        let fresh = !p.stale && self.aged(core, p.age_ms) < stale_after_ms();
+        fresh.then_some(p.mission_stall.as_ref()).flatten()
     }
 
     /// The status pill's alerts, from the readings the tab holds. Readings
@@ -97,6 +108,9 @@ impl VehicleTab {
                 follow_age_ms: follow.map_or(u64::MAX, |f| self.aged(core, f.age_ms)),
                 alerts: &alerts,
                 gimbal: self.gimbal,
+                now_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64),
             },
         )
     }

@@ -18,6 +18,7 @@ use crate::app::Core;
 use crate::model::autonomy::{Follow, Pilot};
 use crate::model::flight_state::readouts::{bottom_row_agl, link_loss_action_text, link_loss_line};
 use crate::model::flight_state::{avoid_state_text, stale_after_ms, ChipView};
+use crate::model::mission_stall::{banner_text, low_battery_line, stall_keys, stall_view};
 use crate::model::pilot_alerts::{alerts_count_text, PillAlert, Severity};
 use crate::model::spec_text::spec_text;
 use crate::theme::Theme;
@@ -57,6 +58,69 @@ pub struct PilotInputs<'a> {
     pub alerts: &'a [PillAlert],
     /// Whether the gimbal takes rate commands; `None` while unknown.
     pub gimbal: Option<bool>,
+    /// Wall-clock now (epoch ms), for the banner's end time.
+    pub now_ms: u64,
+}
+
+/// The pilot's countdowns and banner, critical first: the mission stall
+/// with the keys that answer it, the low-battery return, then the banner.
+/// Each countdown counts down by the frame's age (`age_ms`) since the pilot
+/// sent it.
+fn countdown_rows(core: &Core, p: &Pilot, age_ms: u64, now_ms: u64, stale: bool) -> Vec<Row> {
+    let t = &core.theme;
+    let elapsed_s = if age_ms == u64::MAX {
+        0.0
+    } else {
+        age_ms as f64 / 1000.0
+    };
+    let critical = Style::default().fg(t.error());
+    let mut out = Vec::new();
+    if let Some(s) = &p.mission_stall {
+        let mut s = s.clone();
+        s.skip_in_s = s.skip_in_s.map(|v| v - elapsed_s);
+        let view = stall_view(&s);
+        let title = format!("{} {}", core.sym.err, view.title);
+        out.extend(phrase_rows(t, "Stall", &title, critical, stale));
+        // The keys answer only a fresh stall.
+        if !stale {
+            let keys = Line::from(vec![
+                Span::styled(format!("{:<LABEL$} ", ""), t.dim()),
+                Span::styled(stall_keys(&view), t.bright()),
+            ]);
+            out.push((keys, true));
+        }
+    }
+    if let Some(s) = p.rth_countdown_s {
+        out.extend(phrase_rows(
+            t,
+            "Battery",
+            &low_battery_line(s - elapsed_s),
+            critical,
+            stale,
+        ));
+    }
+    if let Some(text) = p.banner.as_ref().and_then(|b| banner_text(b, now_ms)) {
+        out.extend(phrase_rows(t, "Banner", &text, t.bright(), stale));
+    }
+    out
+}
+
+/// A `label value` row whose value breaks after each ` · ` phrase onto its
+/// own line under the label, so the narrow Pilot column never cuts off a
+/// countdown. A stale value dims and says so on its last line.
+fn phrase_rows(t: &Theme, label: &str, text: &str, style: Style, stale: bool) -> Vec<Row> {
+    let style = if stale { t.dim() } else { style };
+    let phrases: Vec<&str> = text.split(" · ").collect();
+    let last = phrases.len() - 1;
+    phrases
+        .into_iter()
+        .enumerate()
+        .map(|(n, phrase)| {
+            let head = if n == 0 { label } else { "" };
+            let line = kv(t, head, LABEL, Span::styled(phrase.to_string(), style));
+            (mark_stale(t, line, stale && n == last), true)
+        })
+        .collect()
 }
 
 /// A surface operation the pilot offers, in the spec's words; one the spec
@@ -146,6 +210,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         let value = Span::styled(text, Style::default().fg(t.error()));
         out.push((stale(kv(t, &label, LABEL, value)), true));
     }
+    out.extend(countdown_rows(core, p, i.age_ms, i.now_ms, p_stale));
 
     let mode = [
         p.control_mode

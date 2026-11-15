@@ -188,6 +188,7 @@ pub fn state_label(value: &str) -> String {
 pub mod autonomy;
 pub mod base_alerts;
 pub mod flight_state;
+pub mod mission_stall;
 pub mod nav_source;
 pub mod pilot_alerts;
 pub mod sensor_health;

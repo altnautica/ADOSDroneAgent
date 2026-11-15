@@ -45,6 +45,10 @@ pub enum PageKeys {
     Secret,
     System,
     Ground,
+    /// The Vehicle tab while a fresh mission stall shows.
+    Stall,
+    /// The Vehicle tab while a fresh blocked return shows (Land here only).
+    ReturnStall,
 }
 
 /// Every user command.
@@ -135,6 +139,10 @@ pub enum Command {
     BtScan,
     Approve,
     Reject,
+    // a mission stall
+    StallSkip,
+    StallReturn,
+    StallLand,
 }
 
 /// A key: its code and the modifiers that must be held. SHIFT is ignored for
@@ -308,6 +316,11 @@ pub const BINDINGS: &[Binding] = &[
     b(Page(P::Ground), ch('a'), C::Approve, "a", Some("approve"), "Approve the invite"),
     b(Page(P::Ground), ch('x'), C::Reject, "x", None, "Reject the invite"),
     b(Page(P::Ground), kp(K::Enter), C::Activate, "Enter", Some("select"), "Set primary / pair"),
+    // --- mission stall (Vehicle tab, while a fresh stall shows) ----------
+    b(Page(P::Stall), ch('s'), C::StallSkip, "s", Some("skip wp"), "Skip the stalled waypoint"),
+    b(Page(P::Stall), ch('r'), C::StallReturn, "r", Some("return"), "Return along the flown path"),
+    b(Page(P::Stall), ch('l'), C::StallLand, "l", Some("land"), "Land here"),
+    b(Page(P::ReturnStall), ch('l'), C::StallLand, "l", Some("land"), "Land here"),
     // --- lists -------------------------------------------------------------
     b(List, kp(K::Up), C::Up, "↑↓", Some("move"), "Move"),
     b(List, ch('k'), C::Up, "k", None, "Move up"),

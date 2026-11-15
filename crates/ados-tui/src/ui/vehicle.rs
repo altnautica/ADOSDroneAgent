@@ -1,7 +1,10 @@
 //! Tab 2, Vehicle: attitude, heading, GPS, flight state, altitude and battery
 //! trends, battery packs, the pilot block (the cockpit's flight-state chip,
-//! mission, link loss, height and the status pill's alerts), the autonomy
-//! block, and the sensor/clock row.
+//! the pilot's countdowns and banner, mission, link loss, height and the
+//! status pill's alerts), the autonomy block, and the sensor/clock row. While
+//! a fresh mission stall shows, `s`, `r` and `l` answer it (Skip waypoint,
+//! Return, Land here; Land here only for a blocked return) through
+//! `POST /api/command`, which hands them to the pilot in ADOS control.
 
 use std::time::Instant;
 
@@ -10,16 +13,22 @@ use ratatui::text::Span;
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
+use serde_json::{json, Value};
+
 use crate::api_path::seg;
-use crate::app::{Core, FrameOut, Tab};
-use crate::keymap::{Command, Ctx};
+use crate::app::{Core, FrameOut, Tab, TabId};
+use crate::keymap::{Command, Ctx, PageKeys};
 use crate::model::autonomy::detection::{
     Detection, Seen, DETECTIONS_LATEST_PATH, VISION_STATUS_PATH,
 };
 use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
+use crate::model::mission_stall::{stall_view, StallAction};
 use crate::model::skill_detail::{skill_detail_from_state, skill_state_topic};
+use crate::model::spec_text::spec_text;
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
+use crate::toast::ToastKind;
+use crate::worker::{Purpose, Reply, Request, Route};
 
 mod attitude;
 mod autonomy;
@@ -43,6 +52,26 @@ const HIDDEN_STALE: &str = "no fresh data from the agent · flight readings hidd
 
 /// Where the gimbal says whether it takes rate commands.
 const GIMBAL_RATE_PATH: &str = "/api/v1/gimbal/rate";
+
+/// The command route a stall action goes out on.
+const COMMAND_PATH: &str = "/api/command";
+/// The reply tag of a stall action.
+const STALL_TAG: &str = "stall";
+
+/// The request a stall action sends: `POST /api/command` with the command
+/// that reaches the pilot action, its words carried for the reply's toast.
+pub(crate) fn stall_request(action: StallAction) -> Request {
+    Request::new(
+        "POST",
+        COMMAND_PATH,
+        Route::tab(TabId::Vehicle),
+        Purpose::Page {
+            tag: STALL_TAG,
+            data: json!(action.label()),
+        },
+    )
+    .body(json!({ "cmd": action.command() }))
+}
 
 #[derive(Default)]
 pub struct VehicleTab {
@@ -131,8 +160,12 @@ impl VehicleTab {
 }
 
 impl Tab for VehicleTab {
-    fn ctx(&self, _core: &Core) -> Vec<Ctx> {
-        Vec::new()
+    fn ctx(&self, core: &Core) -> Vec<Ctx> {
+        match self.fresh_stall(core).map(|s| s.kind.as_str()) {
+            Some("return") => vec![Ctx::Page(PageKeys::ReturnStall)],
+            Some(_) => vec![Ctx::Page(PageKeys::Stall)],
+            None => Vec::new(),
+        }
     }
 
     fn subs(&self, _core: &Core) -> Vec<Sub> {
@@ -292,8 +325,48 @@ impl Tab for VehicleTab {
         }
     }
 
-    fn on_command(&mut self, _core: &mut Core, _cmd: Command) -> bool {
-        false
+    fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {
+        let action = match cmd {
+            Command::StallSkip => StallAction::Skip,
+            Command::StallReturn => StallAction::Return,
+            Command::StallLand => StallAction::Land,
+            _ => return false,
+        };
+        // Only a fresh stall that offers this action is answered.
+        let offered = self
+            .fresh_stall(core)
+            .is_some_and(|s| stall_view(s).actions.contains(&action));
+        if offered {
+            core.submit(stall_request(action));
+        }
+        offered
+    }
+
+    fn on_reply(&mut self, core: &mut Core, reply: Reply) {
+        let Purpose::Page {
+            tag: STALL_TAG,
+            data,
+        } = &reply.purpose
+        else {
+            return;
+        };
+        let label = data.as_str().unwrap_or_default();
+        match &reply.result {
+            // The route answers 200 with `status: error` when the pilot
+            // refuses, and the reason in `message`.
+            Ok(v) if v.get("status").and_then(Value::as_str) == Some("ok") => core.toast(
+                ToastKind::Success,
+                format!("{label}: {}", spec_text("mav_result.ACCEPTED", &[])),
+            ),
+            Ok(v) => {
+                let why = v
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused");
+                core.toast(ToastKind::Error, format!("{label}: {why}"));
+            }
+            Err(e) => core.toast_error(label, e),
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, _out: &mut FrameOut) {

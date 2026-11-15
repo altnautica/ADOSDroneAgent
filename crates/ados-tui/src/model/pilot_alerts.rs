@@ -1,14 +1,16 @@
 //! The status pill's alert list, as the shared `status-pill.ts` `pillAlerts`
 //! builds it: the shared base alerts (link, battery, packs, GPS), the agent
-//! not answering, a pilot state too old to trust or the FC's own failsafe,
-//! why the setup wizard aborted, failing readiness items, a lost controller,
-//! failing pre-flight items, a degraded navigation source, the FC's PreArm/Arm
-//! text, its status texts at WARNING or worse, and the on-board storage. The
-//! same rules, ids, texts and order, held to the golden `pill-cases.json`.
+//! not answering, a pilot state too old to trust or the FC's own failsafe, a
+//! mission stall, why the setup wizard aborted, failing readiness items, a
+//! lost controller, failing pre-flight items, a degraded navigation source,
+//! the FC's PreArm/Arm text, its status texts at WARNING or worse, and the
+//! on-board storage. The same rules, ids, texts and order, held to the golden
+//! `pill-cases.json`.
 
 use super::autonomy::Pilot;
 use super::base_alerts::{storage_crit_pct, storage_warn_pct, BaseAlert, Level};
 use super::flight_state::stale_after_ms;
+use super::mission_stall::stall_view;
 use super::nav_source::{NavPill, NavTone};
 use super::spec_text::{has_spec_text, spec_text};
 
@@ -148,6 +150,14 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
     let low_battery = fresh.and_then(|p| low_battery_text(p.low_battery_action.as_deref()));
     if let Some(text) = &low_battery {
         push(&mut out, "low_battery", Severity::Critical, text.clone());
+    }
+    if let Some(s) = fresh.and_then(|p| p.mission_stall.as_ref()) {
+        push(
+            &mut out,
+            "mission_stall",
+            Severity::Critical,
+            stall_view(s).title,
+        );
     }
     for r in fresh
         .into_iter()

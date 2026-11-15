@@ -140,6 +140,30 @@ pub struct PilotMission {
     pub landing_seq: bool,
 }
 
+/// The pilot's banner: a spec text key and its args (values as text), shown
+/// until `until_ms` (wall-clock epoch ms) when the pilot gives one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Banner {
+    pub text_key: String,
+    pub args: Vec<(String, String)>,
+    pub until_ms: Option<u64>,
+}
+
+/// A mission or return that stopped making progress (`mission_stall`): the
+/// vehicle holds and the operator chooses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MissionStall {
+    /// `mission` or `return`.
+    pub kind: String,
+    pub seq: Option<f64>,
+    pub wp_label: Option<String>,
+    pub since_ms: Option<u64>,
+    /// Seconds to the automatic action (skip, or land for a return); `None`
+    /// holds for the operator.
+    pub skip_in_s: Option<f64>,
+    pub window_s: Option<f64>,
+}
+
 /// Who flies the vehicle and how (the `pilot` kind). Enumerated fields hold
 /// only the values the shared parser accepts; anything else reads as absent.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -167,6 +191,12 @@ pub struct Pilot {
     pub link_loss_in_s: Option<f64>,
     pub link_loss_action: Option<String>,
     pub mission: Option<PilotMission>,
+    /// The pilot's banner, while it sends one.
+    pub banner: Option<Banner>,
+    /// Seconds left before the low-battery return, while it counts down.
+    pub rth_countdown_s: Option<f64>,
+    /// A mission or return stalled for the operator, while it lasts.
+    pub mission_stall: Option<MissionStall>,
     /// Height above ground: a fresh downward rangefinder, else the EKF
     /// height above home (`agl_source`).
     pub agl_m: Option<f64>,
@@ -406,6 +436,9 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                 total: f(m, "total"),
                 landing_seq: m.get("landing_seq").and_then(Value::as_bool) == Some(true),
             }),
+        banner: d.get("banner").and_then(banner),
+        rth_countdown_s: f(d, "rth_countdown_s"),
+        mission_stall: d.get("mission_stall").and_then(mission_stall),
         agl_m: f(d, "agl_m"),
         agl_source: one_of(d, "agl_source", &["rangefinder", "home"]),
         sensors: d.get("sensors").and_then(SensorHealth::from_value),
@@ -471,6 +504,39 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
     }
 }
 
+/// A banner with a text key; each arg as text (a JSON string as itself,
+/// anything else in its JSON form, so `45` reads `45`).
+fn banner(b: &Value) -> Option<Banner> {
+    let text_key = b.get("text_key")?.as_str()?.to_string();
+    let args = b
+        .get("args")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, v)| {
+            let text = v.as_str().map_or_else(|| v.to_string(), str::to_string);
+            (k.clone(), text)
+        })
+        .collect();
+    Some(Banner {
+        text_key,
+        args,
+        until_ms: b.get("until_ms").and_then(Value::as_u64),
+    })
+}
+
+/// A stall of a known kind, else `None`.
+fn mission_stall(v: &Value) -> Option<MissionStall> {
+    Some(MissionStall {
+        kind: one_of(v, "kind", &["mission", "return"])?,
+        seq: f(v, "seq"),
+        wp_label: s(v, "wp_label"),
+        since_ms: v.get("since_ms").and_then(Value::as_u64),
+        skip_in_s: f(v, "skip_in_s"),
+        window_s: f(v, "window_s"),
+    })
+}
 /// One FC STATUSTEXT line from the pilot kind; `severity` is MAVLink's
 /// (0 emergency … 4 warning).
 #[derive(Debug, Clone, PartialEq)]

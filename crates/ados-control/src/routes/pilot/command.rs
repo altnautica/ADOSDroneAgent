@@ -28,6 +28,9 @@ pub fn action_for(cmd: &str) -> Option<&'static str> {
         "pausemission" => "pause",
         "resumemission" => "resume",
         "killswitch" => "kill",
+        // A pilot-only action: with no pilot in control the raw command
+        // path has no such command and answers 400.
+        "missionskip" => "mission_skip",
         _ => return None,
     })
 }
@@ -111,6 +114,7 @@ mod tests {
         assert_eq!(action_for("rtl"), Some("rth"));
         assert_eq!(action_for("pausemission"), Some("pause"));
         assert_eq!(action_for("killswitch"), Some("kill"));
+        assert_eq!(action_for("missionskip"), Some("mission_skip"));
         assert_eq!(action_for("mode"), None);
         assert_eq!(action_for("ekfsourceset"), None);
     }
