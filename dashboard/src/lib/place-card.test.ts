@@ -73,7 +73,7 @@ describe("picking a place class", () => {
   it("says why the pilot refused it", async () => {
     const [, confinedOpt] = placeCard(open, margins)!.options;
     expect(await choosePlace(confinedOpt, () => Promise.resolve({ ok: false, err: "no_prop_radius" }))).toBe(
-      "Confined space: Set the propeller tip radius for the confined profile",
+      "Confined space: Set the vehicle's outer radius (props, guards or cage) for the confined profile",
     );
   });
 });

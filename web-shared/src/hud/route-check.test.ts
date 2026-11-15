@@ -160,8 +160,8 @@ describe("the place-class picker", () => {
 describe("the confined refusals", () => {
   it("read through the refusal table", () => {
     expect(refusalText("route_infeasible")).toBe("Route too tight for the confined profile");
-    expect(refusalText("no_prop_radius")).toBe("Set the propeller tip radius for the confined profile");
+    expect(refusalText("no_prop_radius")).toBe("Set the vehicle's outer radius (props, guards or cage) for the confined profile");
     expect(refusalText("no_stall")).toBe("No stalled waypoint to skip");
-    expect(refusalText("route_unchecked")).toBe("Route not fully checked: a waypoint has no position, or the mission is too long");
+    expect(refusalText("route_unchecked")).toBe("Route not fully checked: a waypoint has no position, the mission is too long, or it is not downloaded yet");
   });
 });

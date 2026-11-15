@@ -28,6 +28,7 @@
 //! ([`super::super::position_check`]).
 
 mod cap;
+mod launch;
 mod legs;
 
 use ados_protocol::mavlink::ardupilotmega::MavCmd;
@@ -125,16 +126,17 @@ impl Route {
     }
 
     /// The route ahead was not fully checked: an item with no position, a
-    /// mission longer than the feed, or no leg at all.
+    /// mission longer than the feed, a feed that may not hold the FC's
+    /// mission, or no leg at all.
     pub fn incomplete(&self) -> bool {
-        !self.unchecked.is_empty() || self.feed.truncated || self.legs.is_empty()
+        !self.unchecked.is_empty() || self.feed.truncated || self.feed.stale || self.legs.is_empty()
     }
 
     /// The overall verdict: the worst leg; at best unverified while the
     /// route is incomplete or σ or the position is not vouched for. `None`
-    /// with no mission route.
+    /// with no mission.
     pub fn state(&self) -> Option<RouteState> {
-        if self.feed.items.is_empty() {
+        if self.feed.items.is_empty() && !self.feed.stale {
             return None;
         }
         Some(match self.worst() {
@@ -235,13 +237,21 @@ impl Pilot {
     pub(in crate::core) fn check_route(&mut self, now_ms: u64) {
         self.note_sigma();
         let c = self.required_clearance(now_ms);
+        // While the FC flies the mission it flies the current item from
+        // where the vehicle is, however it got there (a ground station's
+        // AUTO or item jump too).
+        let live = match (self.route.origin, self.mission_flying(), self.mission_seq()) {
+            (None, true, Some(s)) => self.origin_here(s, now_ms),
+            _ => None,
+        };
+        let origin = self.route.origin.or(live);
         let gaps = &self.sup.stall.gaps;
         let ahead = legs_of(
             &self.route.feed.items,
             self.fc.home_ne(),
             &|s| gaps.iter().any(|g| g.seq == s),
             self.mission_seq(),
-            self.route.origin.as_ref(),
+            origin.as_ref(),
         );
         let checked = check_legs(&self.obstacles, &ahead.legs, c.required, now_ms);
         let r = &mut self.route;
@@ -336,14 +346,9 @@ impl Pilot {
             .is_some_and(|i| i.seq == s)
     }
 
-    /// Before the pilot puts the FC in AUTO at item `to_seq`: the FC will
-    /// fly it from where the vehicle is. In a confined place, check the
-    /// route from here; `false` when a leg ahead is infeasible (the caller
-    /// holds instead). Open places always pass.
-    pub(in crate::core) fn confined_auto_clear(&mut self, to_seq: u32, now_ms: u64) -> bool {
-        if !self.confined() {
-            return true;
-        }
+    /// Item `to_seq` flown from where the vehicle is now, labelled from the
+    /// last item before it the FC flew (skipped items left out).
+    fn origin_here(&self, to_seq: u32, now_ms: u64) -> Option<Origin> {
         let gaps = &self.sup.stall.gaps;
         let from_seq = self
             .route
@@ -354,11 +359,31 @@ impl Pilot {
             .map(|i| i.seq)
             .max()
             .unwrap_or(to_seq);
-        self.route.origin = self.fc.fresh_local(now_ms).map(|l| Origin {
+        let l = self.fc.fresh_local(now_ms)?;
+        Some(Origin {
             from_seq,
             to_seq,
             ned: [l.n, l.e, l.d],
-        });
+        })
+    }
+
+    /// AUTO is never commanded on a position the pilot does not vouch for,
+    /// nor in a confined place without the fresh local position the leg from
+    /// here is checked from.
+    pub(in crate::core) fn auto_position_blocked(&self, now_ms: u64) -> bool {
+        self.position_unverified(now_ms).is_some()
+            || (self.confined() && self.fc.fresh_local(now_ms).is_none())
+    }
+
+    /// Before the pilot puts the FC in AUTO at item `to_seq`: the FC will
+    /// fly it from where the vehicle is. In a confined place, check the
+    /// route from here; `false` when a leg ahead is infeasible (the caller
+    /// holds instead). Open places always pass.
+    pub(in crate::core) fn confined_auto_clear(&mut self, to_seq: u32, now_ms: u64) -> bool {
+        if !self.confined() {
+            return true;
+        }
+        self.route.origin = self.origin_here(to_seq, now_ms);
         self.check_route(now_ms);
         self.route.infeasible().is_none()
     }
@@ -428,41 +453,6 @@ impl Pilot {
             skip_in_s = deadline_ms.map(|d| d.saturating_sub(now_ms) / 1000),
             "pilot_route_infeasible_hold"
         );
-    }
-
-    /// A launch into the mission in a confined place: refused while the
-    /// route is infeasible (naming the leg, the point, its clearance and the
-    /// clearance needed), or while an item has no position or the mission
-    /// is longer than the feed (`route_unchecked`, naming them).
-    pub(in crate::core) fn route_launch_check(&mut self, now_ms: u64) -> Result<(), String> {
-        if !self.confined() {
-            return Ok(());
-        }
-        self.route.origin = None;
-        self.check_route(now_ms);
-        if let Some(leg) = self.route.infeasible().copied() {
-            tracing::warn!(
-                target: "ados_pilot",
-                reason = "route_infeasible",
-                leg = %leg_label(leg.from_seq, leg.to_seq),
-                ned = ?leg.pinch.map(|(p, _)| p),
-                clearance_m = leg.pinch.map(|(_, d)| d),
-                required_m = self.route.required,
-                "pilot_launch_refused"
-            );
-            return Err("route_infeasible".into());
-        }
-        if !self.route.unchecked.is_empty() || self.route.feed.truncated {
-            tracing::warn!(
-                target: "ados_pilot",
-                reason = "route_unchecked",
-                unchecked = ?self.route.unchecked,
-                truncated = self.route.feed.truncated,
-                "pilot_launch_refused"
-            );
-            return Err("route_unchecked".into());
-        }
-        Ok(())
     }
 
     /// Set the FC's current mission item (the command form also answers

@@ -115,8 +115,9 @@ impl Pilot {
         if self.fc_failsafe {
             return Err("failsafe".into());
         }
-        // The FC's mission flies on the same unverified estimate.
-        if self.position_unverified(now_ms).is_some() {
+        // The FC's mission flies on the same unverified estimate; in a
+        // confined place the leg from here needs a position to be checked.
+        if self.auto_position_blocked(now_ms) {
             return Err("position_unverified".into());
         }
         if !self.mission_resumable() {

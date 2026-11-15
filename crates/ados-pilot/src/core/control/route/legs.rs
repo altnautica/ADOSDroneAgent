@@ -25,13 +25,17 @@ pub struct RouteItem {
     pub here: bool,
 }
 
-/// The mission feed's route (`route`, `items_truncated`, `speeds` of a
-/// [`crate::router_state::mission_of`] payload).
+/// The mission feed's route (`route`, `items_truncated`, `route_stale`,
+/// `speeds` of a [`crate::router_state::mission_of`] payload).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RouteFeed {
     pub items: Vec<RouteItem>,
     /// The mission has more navigation items than the feed carries.
     pub truncated: bool,
+    /// The FC holds a mission the feed may not carry: the router's mirror
+    /// is missing, being downloaded or disagrees with the FC's count, or no
+    /// navigation item came with a mission present.
+    pub stale: bool,
     /// The mission's horizontal DO_CHANGE_SPEED items: `(seq, m/s)`.
     pub speeds: Vec<(u32, f32)>,
 }
@@ -46,7 +50,7 @@ pub fn route_of(payload: &Value) -> RouteFeed {
             .flatten()
     };
     let seq = |v: &Value| u32::try_from(v.get("seq")?.as_u64()?).ok();
-    let items = list("route")
+    let items: Vec<RouteItem> = list("route")
         .filter_map(|i| {
             let cmd = u16::try_from(i.get("cmd")?.as_u64()?).ok()?;
             let ned = i.get("ned").and_then(Value::as_array).and_then(|a| {
@@ -67,9 +71,15 @@ pub fn route_of(payload: &Value) -> RouteFeed {
     let speeds = list("speeds")
         .filter_map(|s| Some((seq(s)?, s.get("mps")?.as_f64()? as f32)))
         .collect();
+    let flag = |k: &str| payload.get(k).and_then(Value::as_bool) == Some(true);
+    let mission = payload
+        .get("state")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s != "none");
     RouteFeed {
+        stale: mission && (flag("route_stale") || items.is_empty()),
         items,
-        truncated: payload.get("items_truncated").and_then(Value::as_bool) == Some(true),
+        truncated: flag("items_truncated"),
         speeds,
     }
 }

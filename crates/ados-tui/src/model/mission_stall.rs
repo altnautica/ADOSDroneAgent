@@ -182,7 +182,7 @@ mod tests {
             ),
             (
                 "pilot refused launch: no_prop_radius",
-                "Set the propeller tip radius for the confined profile",
+                "Set the vehicle's outer radius (props, guards or cage) for the confined profile",
             ),
             // A code the table does not name, and a template, read as sent.
             (

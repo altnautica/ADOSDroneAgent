@@ -37,9 +37,15 @@ impl Pilot {
         if after == "skill" && skill.is_none() || after == "goto" && goto.is_none() {
             return Err("bad_args".into());
         }
-        // A confined place flies a margin from the propeller tips: without the
-        // radius there is none; a mission is flown only along a route that
-        // keeps it.
+        // A launch into the mission flies all of it: an earlier flight's skips
+        // are forgotten before the route is checked (an airborne launch is
+        // refused below and forgets nothing).
+        if after == "mission" && (!self.fc.armed || self.fc.landed()) {
+            self.sup.stall.new_flight();
+        }
+        // A confined place flies a margin from the vehicle's outer extent:
+        // without the radius there is none; a mission is flown only along a
+        // route that keeps it.
         if self.settings.pilot.place_class == PlaceClass::Confined {
             if self.settings.pilot.prop_tip_radius_m.is_none() {
                 tracing::warn!(target: "ados_pilot", reason = "no_prop_radius", "pilot_launch_refused");

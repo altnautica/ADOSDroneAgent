@@ -285,8 +285,9 @@ impl Pilot {
         }
         if h.resume == Resume::Mission {
             // The mission is not flown on an estimate nobody vouches for,
-            // nor (confined) along a route from here that is too tight.
-            if self.position_unverified(now_ms).is_some() {
+            // nor (confined) without a position or along a route from here
+            // that is too tight.
+            if self.auto_position_blocked(now_ms) {
                 return;
             }
             let seq = self.mission.as_ref().and_then(|m| m.seq);

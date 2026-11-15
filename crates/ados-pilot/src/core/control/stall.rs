@@ -96,10 +96,18 @@ impl Stall {
         }
         let key = (m.id, m.total);
         if self.gaps_of.is_some_and(|k| k != key) {
-            self.gaps.clear();
-            self.auto_skips = 0;
+            self.new_flight();
         }
         self.gaps_of = Some(key);
+    }
+
+    /// A new flight flies the whole mission again: an earlier flight's
+    /// skips neither hide their legs from the route check nor count
+    /// toward the automatic-skip budget.
+    pub fn new_flight(&mut self) {
+        self.gaps.clear();
+        self.auto_skips = 0;
+        self.skip_to = None;
     }
 }
 
@@ -340,8 +348,9 @@ impl Pilot {
         }
         self.set_mission_current(next);
         self.sup.stall.skip_to = Some(next);
-        if self.position_unverified(now_ms).is_some() {
-            // Never flown on an estimate nobody vouches for.
+        if self.auto_position_blocked(now_ms) {
+            // Never flown on an estimate nobody vouches for, nor (confined)
+            // from a position the leg from here cannot be checked from.
             self.supervise_hold(Resume::Mission, HOLD_POSITION_UNVERIFIED, now_ms);
             self.sup.stall.active = Some(Active {
                 kind: Kind::Mission,

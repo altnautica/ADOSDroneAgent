@@ -161,6 +161,7 @@ impl Pilot {
         }
         if !was_armed && self.fc.armed {
             self.touchdown = Default::default();
+            self.sup.stall.new_flight();
         }
         if !was_armed && self.fc.armed && self.owner() == Owner::Idle && !self.in_guided() {
             self.set_owner(Owner::FcMode, "fc-mode");

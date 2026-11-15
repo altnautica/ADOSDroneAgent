@@ -2,6 +2,7 @@
 
 mod battery;
 mod confined;
+mod confined_flight;
 mod confined_route;
 mod fc_failsafe;
 mod handoff;

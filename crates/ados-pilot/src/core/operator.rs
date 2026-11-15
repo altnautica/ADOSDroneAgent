@@ -74,7 +74,8 @@ impl Pilot {
                     p.effective_margin_m()
                 )
             } else {
-                "Confined profile needs the propeller tip radius (pilot.prop_tip_radius_m)".into()
+                "Confined profile needs the vehicle's outer radius: props, guards or cage (pilot.prop_tip_radius_m)"
+                    .into()
             },
         })
     }

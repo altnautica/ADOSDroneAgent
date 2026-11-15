@@ -48,6 +48,9 @@ pub struct World {
     pub lidar: bool,
     /// `goal.status` messages, in order.
     pub goal_status: Vec<GoalStatus>,
+    /// The scripted FC sends LOCAL_POSITION_NED (off: its local position
+    /// goes stale).
+    pub local: bool,
 }
 
 impl World {
@@ -92,6 +95,7 @@ impl World {
             answers: Vec::new(),
             lidar: true,
             goal_status: Vec::new(),
+            local: true,
         };
         w.feed();
         w
@@ -127,9 +131,9 @@ impl World {
         for m in std::mem::take(&mut self.inbox) {
             self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
         }
-        let msgs = vec![
-            self.heartbeat(),
-            MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
+        let mut msgs = vec![self.heartbeat()];
+        if self.local {
+            msgs.push(MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
                 time_boot_ms: 0,
                 x: self.pos[0],
                 y: self.pos[1],
@@ -137,7 +141,9 @@ impl World {
                 vx: self.vel[0],
                 vy: self.vel[1],
                 vz: self.vel[2],
-            }),
+            }));
+        }
+        msgs.extend([
             MavMessage::ATTITUDE(ATTITUDE_DATA {
                 time_boot_ms: 0,
                 roll: self.roll,
@@ -155,7 +161,7 @@ impl World {
                     MavLandedState::MAV_LANDED_STATE_IN_AIR
                 },
             }),
-        ];
+        ]);
         for m in msgs {
             self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
         }

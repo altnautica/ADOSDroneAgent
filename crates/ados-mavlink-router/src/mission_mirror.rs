@@ -399,9 +399,7 @@ impl MirrorCore {
         if mc.state == 0 || mc.total == u16::MAX {
             return;
         }
-        let expect = usize::from(mc.total) + usize::from(self.table().home_slot());
-        let have = self.mirror.items.len();
-        let mismatch = !self.mirror.present || (have != expect && !(mc.total == 0 && have <= 1));
+        let mismatch = self.disagrees_with(mc.total);
         if mismatch && self.last_total != Some(mc.total) {
             self.want_download = true;
         }
@@ -547,8 +545,9 @@ impl MirrorCore {
     /// FC's local NED frame as the `target` places it), `uploads_seen`, and
     /// the `target` at the current `seq`.
     /// `items_truncated` is set when more navigation items exist than the
-    /// snapshot carries, and `speeds` lists the horizontal DO_CHANGE_SPEED
-    /// items (`seq`, `mps`).
+    /// snapshot carries, `route_stale` while the mirror may not hold the FC's
+    /// plan ([`Self::mirror_stale`]), and `speeds` lists the horizontal
+    /// DO_CHANGE_SPEED items (`seq`, `mps`).
     pub fn state_json(&mut self, now: Instant) -> Value {
         let status = self.status(now);
         let mut v = status.to_json();
@@ -583,6 +582,9 @@ impl MirrorCore {
             if truncated {
                 map.insert("items_truncated".into(), json!(true));
             }
+            if self.mirror_stale() {
+                map.insert("route_stale".into(), json!(true));
+            }
             map.insert("speeds".into(), Value::Array(speeds));
             map.insert("uploads_seen".into(), json!(self.tracker.uploads_seen()));
             if let Some(target) = self.target_json(status.seq, now) {
@@ -590,6 +592,24 @@ impl MirrorCore {
             }
         }
         v
+    }
+
+    /// The mirror may not hold the plan the FC flies: none yet, a download
+    /// wanted or under way (a failed one backs off still wanting it), or
+    /// MISSION_CURRENT's `total` disagrees with it.
+    fn mirror_stale(&self) -> bool {
+        if !self.mirror.present || self.want_download || !matches!(self.download, Download::Idle) {
+            return true;
+        }
+        self.last_total.is_some_and(|t| self.disagrees_with(t))
+    }
+
+    /// The mirror is absent, or its item count is not the FC's `total` (plus
+    /// ArduPilot's home slot; an empty plan may still hold the home slot).
+    fn disagrees_with(&self, total: u16) -> bool {
+        let expect = usize::from(total) + usize::from(self.table().home_slot());
+        let have = self.mirror.items.len();
+        !self.mirror.present || (have != expect && !(total == 0 && have <= 1))
     }
 
     /// The mirrored item at MISSION_CURRENT `seq` (`seq`, `cmd`, `ned`,

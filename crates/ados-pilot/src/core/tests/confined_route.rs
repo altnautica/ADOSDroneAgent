@@ -15,17 +15,17 @@ use crate::core::control::{legs_of, Origin, RouteItem};
 use crate::modes::copter;
 
 /// A navigation waypoint `(seq, n, e)` in the local frame at 5 m.
-type Wp = (u32, f32, f32);
+pub(super) type Wp = (u32, f32, f32);
 
 /// The route north along e = 0, as in the confined tests.
-const LINE: [Wp; 4] = [
+pub(super) const LINE: [Wp; 4] = [
     (1, 2.0, 0.0),
     (2, 10.0, 0.0),
     (3, 20.0, 0.0),
     (4, 25.0, 0.0),
 ];
 
-fn item(s: u32, n: f32, e: f32) -> Value {
+pub(super) fn item(s: u32, n: f32, e: f32) -> Value {
     json!({"seq": s, "cmd": 16, "frame": 6, "lat_e7": 1, "lon_e7": 1, "alt_m": 5.0,
            "ned": [n, e, -5.0]})
 }
@@ -33,7 +33,7 @@ fn item(s: u32, n: f32, e: f32) -> Value {
 /// The router's snapshot: `items`, the FC at `seq` in `state`, its target
 /// at `target` (`None`: the router cannot place it), and `extra` mission
 /// fields.
-fn feed(
+pub(super) fn feed(
     w: &mut World,
     state: &str,
     seq: u32,
@@ -55,7 +55,7 @@ fn feed(
     w.collect();
 }
 
-fn route(w: &mut World, state: &str, seq: u32, wps: &[Wp]) {
+pub(super) fn route(w: &mut World, state: &str, seq: u32, wps: &[Wp]) {
     let items = wps.iter().map(|&(s, n, e)| item(s, n, e)).collect();
     let target = wps.iter().find(|w| w.0 == seq).map(|w| [w.1, w.2]);
     feed(w, state, seq, items, target, json!({}));
@@ -63,7 +63,7 @@ fn route(w: &mut World, state: &str, seq: u32, wps: &[Wp]) {
 
 /// A ground station's AUTO in a confined place at item 2 of `wps`, the
 /// vehicle at n 9 on the way, with `occ` mapped: 100 ms later.
-fn flying_to_2(wps: &[Wp], occ: &dyn Fn(f32, f32) -> bool) -> World {
+pub(super) fn flying_to_2(wps: &[Wp], occ: &dyn Fn(f32, f32) -> bool) -> World {
     let mut w = World::new();
     confined(&mut w);
     w.airborne(copter::AUTO);

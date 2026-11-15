@@ -395,6 +395,29 @@ fn total_mismatch_triggers_a_download() {
 }
 
 #[test]
+fn the_snapshot_flags_a_mirror_that_may_not_hold_the_fc_plan() {
+    // No mirror yet.
+    let mut l = Link::new();
+    l.heartbeat(2, 0, false);
+    let t = l.t;
+    assert_eq!(l.core.state_json(t)["route_stale"], true);
+    // Mirrored, and the FC's total agrees: not stale.
+    let mut l = copter_with_mission();
+    l.adv(3100);
+    l.take_sent();
+    l.current(1, 4, 2);
+    l.adv(200);
+    assert!(l.take_sent().is_empty());
+    let t = l.t;
+    assert!(l.core.state_json(t).get("route_stale").is_none());
+    // The FC now holds a longer plan: stale while the download runs.
+    l.current(1, 7, 2);
+    l.adv(200);
+    let t = l.t;
+    assert_eq!(l.core.state_json(t)["route_stale"], true);
+}
+
+#[test]
 fn an_upload_the_router_never_saw_is_fetched_without_total() {
     // ArduPilot 4.4: MISSION_CURRENT carries seq only. The plan was uploaded
     // straight to the FC, so the mirror holds only the empty boot download.
