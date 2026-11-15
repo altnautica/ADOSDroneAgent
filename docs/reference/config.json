@@ -2196,7 +2196,7 @@
       "enum": null,
       "key": "pilot.obstacle_margin_m",
       "maximum": 5.0,
-      "minimum": 0.3,
+      "minimum": 0.5,
       "secret": false,
       "type": "number"
     },
@@ -2229,7 +2229,7 @@
     },
     {
       "default": null,
-      "description": "Prop Tip Radius M",
+      "description": "Outermost rigid extent from the CG in the body x-y plane, metres: the largest of the propeller tips, guards or cage, and rigid mounts (a guarded or caged frame enters the guard radius). The obstacle brake keeps it clear (0.4 m when unset); a confined place requires it and keeps it plus 0.1 m.",
       "enum": null,
       "key": "pilot.prop_tip_radius_m",
       "maximum": 3.0,
