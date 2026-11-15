@@ -3,8 +3,9 @@
 //! the blocked return's landing, the SmartRTL return with its land fallback,
 //! and the announced low-battery countdown.
 
+use std::cell::RefCell;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Once;
 
 use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, MavResult};
 use ados_protocol::pilot::{MissionGap, Owner};
@@ -19,12 +20,21 @@ fn ok(r: &Reply) -> bool {
     matches!(r, Reply::Action(a) if a.ok)
 }
 
-#[derive(Clone, Default)]
-struct LogBuf(Arc<Mutex<Vec<u8>>>);
+thread_local! {
+    /// The log lines `with_logs` is capturing on this thread.
+    static CAPTURED: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
 
-impl Write for LogBuf {
+/// Writes a log line into this thread's capture, when one is running.
+struct ThisThread;
+
+impl Write for ThisThread {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
+        CAPTURED.with_borrow_mut(|c| {
+            if let Some(c) = c {
+                c.extend_from_slice(b);
+            }
+        });
         Ok(b.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -32,24 +42,52 @@ impl Write for LogBuf {
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
-    type Writer = LogBuf;
-    fn make_writer(&'a self) -> LogBuf {
-        self.clone()
-    }
+/// Run `f` with the pilot's log lines captured: the lines at INFO and above
+/// that this thread logs while `f` runs.
+///
+/// The subscriber is the global default, installed once for the test binary,
+/// and each capture keeps its own thread's lines. A scoped subscriber cannot
+/// capture reliably: a callsite caches its interest for every thread when it
+/// is first reached, so a test thread with no subscriber that reaches it first
+/// caches `never`, and the capturing thread's line is then never emitted.
+pub(super) fn with_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let sub = tracing_subscriber::fmt()
+            .with_writer(|| ThisThread)
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::set_global_default(sub)
+            .expect("the pilot tests set no other global subscriber");
+    });
+    // A callsite another thread first reached while the subscriber was being
+    // installed may have cached `never`; recompute every cached interest
+    // against the installed subscriber.
+    tracing::callsite::rebuild_interest_cache();
+    CAPTURED.set(Some(Vec::new()));
+    let r = f();
+    let text = String::from_utf8(CAPTURED.take().unwrap()).unwrap();
+    (r, text)
 }
 
-/// Run `f` with the pilot's log lines captured.
-pub(super) fn with_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
-    let buf = LogBuf::default();
-    let sub = tracing_subscriber::fmt()
-        .with_writer(buf.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::INFO)
-        .finish();
-    let r = tracing::subscriber::with_default(sub, f);
-    let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-    (r, text)
+/// A capture holds the lines its own thread logs, also when another thread,
+/// capturing nothing, reached the line's callsite first; and never that
+/// thread's lines.
+#[test]
+fn a_capture_holds_its_own_lines_whichever_thread_reached_the_callsite_first() {
+    fn probe(n: u32) {
+        tracing::info!(target: "ados_pilot", n, "with_logs_probe");
+    }
+    let ((), logs) = with_logs(|| {
+        std::thread::spawn(|| probe(1)).join().unwrap();
+        probe(2);
+    });
+    let lines: Vec<&str> = logs
+        .lines()
+        .filter(|l| l.contains("with_logs_probe"))
+        .collect();
+    assert!(lines.len() == 1 && lines[0].contains("n=2"), "{logs}");
 }
 
 /// The router's mission state with the active item's target.
