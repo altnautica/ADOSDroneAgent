@@ -7,6 +7,7 @@
 use serde_json::{json, Value};
 
 use super::{app_with_frame, column_rows, command_body};
+use crate::app::Tab;
 use crate::keymap::{Command, Ctx, PageKeys};
 use crate::ui::tests::draw;
 
