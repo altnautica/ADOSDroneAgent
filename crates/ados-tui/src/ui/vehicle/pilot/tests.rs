@@ -281,7 +281,7 @@ fn column_rows(text: &str, prefix: &str, n: usize) -> Vec<String> {
 }
 
 #[test]
-fn the_golden_stall_renders_its_overlay_keys_and_banner() {
+fn the_golden_stall_renders_its_overlay_keys_and_hides_its_banner() {
     let mut app = app_with_frame(1, stall_frame());
     let text = draw(&mut app, 160, 48);
     // `cargo test -- --nocapture` prints the frame (the buffer dump).
@@ -296,10 +296,9 @@ fn the_golden_stall_renders_its_overlay_keys_and_banner() {
         stall[2].ends_with("s Skip waypoint · r Return · l Land here"),
         "{text}"
     );
-    let banner = column_rows(&text, "Banner    ", 3);
-    assert!(banner[0].ends_with("No progress to waypoint 3"), "{text}");
-    assert!(banner[1].ends_with("Holding"), "{text}");
-    assert!(banner[2].ends_with("Skipping in 45 s"), "{text}");
+    // The stall's own banner hides behind the overlay, which carries the
+    // live countdown.
+    assert!(!text.contains("Banner    "), "{text}");
     // The status pill lists it too.
     let block = alert_block(&text);
     assert!(
@@ -500,10 +499,13 @@ fn the_reply_toasts_the_pilot_answer() {
         texts.iter().any(|t| t == "Skip waypoint: Accepted"),
         "{texts:?}"
     );
+    // The pilot's refusal code reads through the refusal table.
     assert!(
         texts
             .iter()
-            .any(|t| t == "Skip waypoint: pilot refused mission_skip: no_fc"),
+            .any(|t| t == "Skip waypoint: No flight controller"),
         "{texts:?}"
     );
 }
+
+mod confined;

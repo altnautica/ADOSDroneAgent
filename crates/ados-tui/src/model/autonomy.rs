@@ -10,6 +10,7 @@
 use serde_json::Value;
 
 use super::flight_state::{stale_after_ms, PILOT_OWNERS};
+use super::route_check::{parse_place_class, parse_route_check, RouteCheck};
 use super::sensor_health::SensorHealth;
 
 pub mod detection;
@@ -228,6 +229,12 @@ pub struct Pilot {
     /// The pilot does not trust the horizontal position; `None` while it
     /// does (or an older agent says nothing).
     pub position_unverified: Option<PositionUnverified>,
+    /// Why the cap (`gnss-denied`, `confined-near`), while one applies.
+    pub speed_cap_reason: Option<String>,
+    /// The operator's place class, `open` or `confined` (absent reads open).
+    pub place_class: String,
+    /// The route check of the loaded mission, while confined.
+    pub route_check: Option<RouteCheck>,
     /// The pilot operations a surface may offer now (`goto`, ...).
     pub surface_ops: Vec<String>,
     /// The arm and landed state; `None` while unknown (the FC is unheard),
@@ -476,6 +483,14 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                 detail: s(p, "detail"),
             })
         }),
+        speed_cap_reason: d
+            .get("speed_cap")
+            .filter(|c| c.get("v_h_mps").and_then(Value::as_f64).is_some())
+            .and_then(|c| c.get("reason"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        place_class: parse_place_class(d),
+        route_check: d.get("route_check").and_then(parse_route_check),
         surface_ops: d
             .get("surface_ops")
             .and_then(Value::as_array)

@@ -8,7 +8,7 @@
 //! and `land` to the pilot's `mission_skip`, `rth` and `land` in ADOS control).
 
 use super::autonomy::{Banner, MissionStall};
-use super::spec_text::{has_spec_text, spec_text};
+use super::spec_text::{has_spec_text, spec_takes_args, spec_text};
 
 /// One action a stall offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,11 +141,61 @@ pub fn banner_text(b: &Banner, now_ms: u64) -> Option<String> {
     Some(spec_text(&b.text_key, &args))
 }
 
+/// The `/api/command` route's refusal (`pilot refused <action>: <code>`) in
+/// the spec's words: the code's `refusal.<code>` text, as every surface reads
+/// it; a code the spec does not name, or a message of another form, reads
+/// as it came.
+pub fn pilot_refusal_text(message: &str) -> String {
+    let code = message
+        .strip_prefix("pilot refused ")
+        .and_then(|rest| rest.split_once(": "))
+        .map(|(_, code)| code.trim().replace(' ', "_"));
+    match code.map(|c| format!("refusal.{c}")) {
+        Some(k) if has_spec_text(&k) && !spec_takes_args(&k) => spec_text(&k, &[]),
+        _ => message.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::autonomy::Autonomy;
     use serde_json::{json, Value};
+
+    #[test]
+    fn a_pilot_refusal_reads_through_the_refusal_table() {
+        let cases = [
+            (
+                "pilot refused mission_skip: no_stall",
+                "No stalled waypoint to skip",
+            ),
+            (
+                "pilot refused place_class:confined: armed",
+                "Armed; disarm first",
+            ),
+            (
+                "pilot refused launch: route_infeasible",
+                "Route too tight for the confined profile",
+            ),
+            (
+                "pilot refused launch: no_prop_radius",
+                "Set the propeller tip radius for the confined profile",
+            ),
+            // A code the table does not name, and a template, read as sent.
+            (
+                "pilot refused launch: made_up",
+                "pilot refused launch: made_up",
+            ),
+            (
+                "pilot refused launch: not_ready",
+                "pilot refused launch: not_ready",
+            ),
+            ("ADOS pilot not reachable", "ADOS pilot not reachable"),
+        ];
+        for (message, text) in cases {
+            assert_eq!(pilot_refusal_text(message), text, "{message}");
+        }
+    }
 
     fn golden() -> Value {
         serde_json::from_str(include_str!(
@@ -228,7 +278,7 @@ mod tests {
         let b = p.banner.as_ref().unwrap();
         assert_eq!(
             banner_text(b, 1_793_960_001_000).as_deref(),
-            Some("No progress to waypoint 3 · Holding · Skipping in 45 s")
+            Some("No progress to waypoint 3 · Holding · Skipping in 33 s")
         );
         assert_eq!(banner_text(b, 1_793_960_003_001), None);
         let cause = Banner {

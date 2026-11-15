@@ -191,6 +191,7 @@ pub mod flight_state;
 pub mod mission_stall;
 pub mod nav_source;
 pub mod pilot_alerts;
+pub mod route_check;
 pub mod sensor_health;
 pub mod skill_detail;
 pub mod spec_text;

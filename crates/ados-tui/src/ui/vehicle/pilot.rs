@@ -1,12 +1,16 @@
 //! The Pilot block from the `pilot` nav kind: the flight-state chip and its
-//! secondary line (the cockpit spec's `flight-state.json`), the control mode
-//! and profile, who holds the sticks, the gimbal, obstacle avoidance, the
-//! mission progress, the link-loss action or countdown, the height above
-//! ground with its source, and the status pill's alerts. Every word is the
-//! cockpit spec's. A row from a stale pilot kind (a failed read, or a kind
-//! past the spec's stale age counting the time since the last good read) is
-//! dim and marked "(stale)". On a short terminal the chip, failsafe, link
-//! loss and alert count stay; the rest is counted as "… N more".
+//! secondary line (the cockpit spec's `flight-state.json`, the speed cap by
+//! its reason), the place class (Open, or Confined with the key that switches
+//! it while disarmed) and the route check of a confined mission with its
+//! tightest point, the control mode and profile, who holds the sticks, the
+//! gimbal, obstacle avoidance, the mission progress, the link-loss action or
+//! countdown, the height above ground with its source, and the status pill's
+//! alerts. The stall overlay hides the stall's own banners while it shows.
+//! Every word is the cockpit spec's. A row from a stale pilot kind (a failed
+//! read, or a kind past the spec's stale age counting the time since the last
+//! good read) is dim and marked "(stale)". On a short terminal the chip,
+//! failsafe, link loss, a confined place, a too-tight route and the alert
+//! count stay; the rest is counted as "… N more".
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -20,6 +24,9 @@ use crate::model::flight_state::readouts::{bottom_row_agl, link_loss_action_text
 use crate::model::flight_state::{avoid_state_text, stale_after_ms, ChipView};
 use crate::model::mission_stall::{banner_text, low_battery_line, stall_keys, stall_view};
 use crate::model::pilot_alerts::{alerts_count_text, PillAlert, Severity};
+use crate::model::route_check::{
+    other_place_class, place_label, route_check_report, stall_shadows_banner, ReportSeverity,
+};
 use crate::model::spec_text::spec_text;
 use crate::theme::Theme;
 use crate::ui::widgets::{kv, kv_text, panel, truncate_line};
@@ -58,6 +65,8 @@ pub struct PilotInputs<'a> {
     pub alerts: &'a [PillAlert],
     /// Whether the gimbal takes rate commands; `None` while unknown.
     pub gimbal: Option<bool>,
+    /// Whether the place key answers now (a fresh, disarmed pilot).
+    pub place_key: bool,
     /// Wall-clock now (epoch ms), for the banner's end time.
     pub now_ms: u64,
 }
@@ -99,8 +108,60 @@ fn countdown_rows(core: &Core, p: &Pilot, age_ms: u64, now_ms: u64, stale: bool)
             stale,
         ));
     }
-    if let Some(text) = p.banner.as_ref().and_then(|b| banner_text(b, now_ms)) {
+    // The stall overlay carries the live countdown: its own banners hide.
+    let banner = p
+        .banner
+        .as_ref()
+        .filter(|b| !stall_shadows_banner(&b.text_key, p.mission_stall.as_ref()));
+    if let Some(text) = banner.and_then(|b| banner_text(b, now_ms)) {
         out.extend(phrase_rows(t, "Banner", &text, t.bright(), stale));
+    }
+    out
+}
+
+/// The place class (Confined in the warning colour, with the key that
+/// switches it while the pilot is disarmed) and, in a confined place with a
+/// mission loaded, the route check and its tightest point. A confined place
+/// and a too-tight route stay on a short terminal.
+fn place_rows(core: &Core, p: &Pilot, place_key: bool, stale: bool) -> Vec<Row> {
+    let t = &core.theme;
+    let confined = p.place_class == "confined";
+    let class = if confined { "confined" } else { "open" };
+    let style = if confined {
+        Style::default().fg(t.warning())
+    } else {
+        t.bright()
+    };
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<LABEL$} ", spec_text("flow.launch.place_class", &[])),
+            t.dim(),
+        ),
+        Span::styled(spec_text(&format!("pilot.place_class.{class}"), &[]), style),
+    ];
+    if place_key {
+        spans.push(Span::styled(" · ", t.dim()));
+        spans.push(Span::styled(
+            format!("c {}", place_label(other_place_class(class))),
+            t.bright(),
+        ));
+    }
+    let mut out = vec![(mark_stale(t, Line::from(spans), stale), confined)];
+    if let Some(rc) = &p.route_check {
+        let report = route_check_report(rc);
+        let (style, keep) = match report.severity {
+            ReportSeverity::Critical => (Style::default().fg(t.error()), true),
+            ReportSeverity::Warn => (Style::default().fg(t.warning()), false),
+            ReportSeverity::Ok => (t.bright(), false),
+        };
+        out.extend(
+            phrase_rows(t, "Route", &report.line, style, stale)
+                .into_iter()
+                .map(|(line, _)| (line, keep)),
+        );
+        if let Some(at) = report.pinch_at {
+            out.push((kv(t, "", LABEL, Span::styled(at, t.bright())), keep));
+        }
     }
     out
 }
@@ -211,6 +272,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         out.push((stale(kv(t, &label, LABEL, value)), true));
     }
     out.extend(countdown_rows(core, p, i.age_ms, i.now_ms, p_stale));
+    out.extend(place_rows(core, p, i.place_key, p_stale));
 
     let mode = [
         p.control_mode

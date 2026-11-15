@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::autonomy::Pilot;
+use super::route_check::speed_cap_line;
 
 pub mod readouts;
 mod words;
@@ -166,6 +167,8 @@ pub struct ChipFacts {
     pub hold_reason: Option<String>,
     /// The pilot's horizontal speed cap in m/s, while one applies.
     pub speed_cap_mps: Option<f64>,
+    /// Why the cap (`gnss-denied`, `confined-near`), while one applies.
+    pub speed_cap_reason: Option<String>,
     pub avoid_state: Option<String>,
     /// The step of a running launch sequence (not `done`, no error).
     pub launch_step: Option<String>,
@@ -313,8 +316,15 @@ pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
             }
             "speed_cap" => {
                 if let Some(v) = f.speed_cap_mps {
+                    // The reason's own spec line; the spec's default line
+                    // for a reason it does not name.
+                    let own = f
+                        .speed_cap_reason
+                        .as_deref()
+                        .and_then(|r| speed_cap_line(r, v));
                     out.push(ChipLine {
-                        text: sec.speed_cap.text.replace("{v}", &cap_text(v)),
+                        text: own
+                            .unwrap_or_else(|| sec.speed_cap.text.replace("{v}", &cap_text(v))),
                         color: sec.speed_cap.color.clone(),
                     });
                 }
@@ -443,6 +453,7 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         control_mode: p.control_mode.clone(),
         hold_reason: p.hold_reason.clone(),
         speed_cap_mps: p.speed_cap_mps,
+        speed_cap_reason: p.speed_cap_reason.clone(),
         avoid_state: p.avoid_state.clone(),
         launch_step: p.launch_step.clone(),
         fc_failsafe: p.fc_failsafe,

@@ -40,6 +40,15 @@ impl VehicleTab {
         fresh.then_some(p.mission_stall.as_ref()).flatten()
     }
 
+    /// The place class of a fresh pilot kind that reports itself disarmed:
+    /// the one the place key switches from. `None` while armed, while the
+    /// arm state is unknown (it may be airborne), or while the kind is stale.
+    pub(super) fn place_offered(&self, core: &Core) -> Option<&str> {
+        let p = self.auto.as_ref()?.pilot.as_ref()?;
+        let fresh = !p.stale && self.aged(core, p.age_ms) < stale_after_ms();
+        (fresh && p.armed == Some(false)).then_some(p.place_class.as_str())
+    }
+
     /// The status pill's alerts, from the readings the tab holds. Readings
     /// hidden as stale feed nothing but the link and agent items.
     pub(super) fn alerts(&self, core: &Core) -> Vec<PillAlert> {
@@ -108,6 +117,7 @@ impl VehicleTab {
                 follow_age_ms: follow.map_or(u64::MAX, |f| self.aged(core, f.age_ms)),
                 alerts: &alerts,
                 gimbal: self.gimbal,
+                place_key: self.place_offered(core).is_some(),
                 now_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as u64),

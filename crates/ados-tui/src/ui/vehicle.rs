@@ -22,7 +22,8 @@ use crate::model::autonomy::detection::{
     Detection, Seen, DETECTIONS_LATEST_PATH, VISION_STATUS_PATH,
 };
 use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
-use crate::model::mission_stall::{stall_view, StallAction};
+use crate::model::mission_stall::{pilot_refusal_text, stall_view, StallAction};
+use crate::model::route_check::{other_place_class, place_command, place_label};
 use crate::model::skill_detail::{skill_detail_from_state, skill_state_topic};
 use crate::model::spec_text::spec_text;
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
@@ -53,24 +54,37 @@ const HIDDEN_STALE: &str = "no fresh data from the agent · flight readings hidd
 /// Where the gimbal says whether it takes rate commands.
 const GIMBAL_RATE_PATH: &str = "/api/v1/gimbal/rate";
 
-/// The command route a stall action goes out on.
+/// The command route a stall or place action goes out on.
 const COMMAND_PATH: &str = "/api/command";
 /// The reply tag of a stall action.
 const STALL_TAG: &str = "stall";
+/// The reply tag of a place-class change.
+const PLACE_TAG: &str = "place";
 
-/// The request a stall action sends: `POST /api/command` with the command
-/// that reaches the pilot action, its words carried for the reply's toast.
-pub(crate) fn stall_request(action: StallAction) -> Request {
+/// `POST /api/command` with `cmd`, its words carried for the reply's toast.
+fn command_request(tag: &'static str, cmd: &str, label: String) -> Request {
     Request::new(
         "POST",
         COMMAND_PATH,
         Route::tab(TabId::Vehicle),
         Purpose::Page {
-            tag: STALL_TAG,
-            data: json!(action.label()),
+            tag,
+            data: json!(label),
         },
     )
-    .body(json!({ "cmd": action.command() }))
+    .body(json!({ "cmd": cmd }))
+}
+
+/// The request a stall action sends: the command that reaches the pilot
+/// action.
+pub(crate) fn stall_request(action: StallAction) -> Request {
+    command_request(STALL_TAG, action.command(), action.label())
+}
+
+/// The request that sets the place class (`placeclass_<class>`, the pilot's
+/// `place_class:<class>`).
+pub(crate) fn place_request(class: &str) -> Request {
+    command_request(PLACE_TAG, &place_command(class), place_label(class))
 }
 
 #[derive(Default)]
@@ -161,11 +175,15 @@ impl VehicleTab {
 
 impl Tab for VehicleTab {
     fn ctx(&self, core: &Core) -> Vec<Ctx> {
-        match self.fresh_stall(core).map(|s| s.kind.as_str()) {
+        let mut ctx = match self.fresh_stall(core).map(|s| s.kind.as_str()) {
             Some("return") => vec![Ctx::Page(PageKeys::ReturnStall)],
             Some(_) => vec![Ctx::Page(PageKeys::Stall)],
             None => Vec::new(),
+        };
+        if self.place_offered(core).is_some() {
+            ctx.push(Ctx::Page(PageKeys::Place));
         }
+        ctx
     }
 
     fn subs(&self, _core: &Core) -> Vec<Sub> {
@@ -326,6 +344,14 @@ impl Tab for VehicleTab {
     }
 
     fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {
+        if cmd == Command::PlaceClass {
+            // Only a fresh pilot that reports itself disarmed is asked.
+            let Some(current) = self.place_offered(core) else {
+                return false;
+            };
+            core.submit(place_request(other_place_class(current)));
+            return true;
+        }
         let action = match cmd {
             Command::StallSkip => StallAction::Skip,
             Command::StallReturn => StallAction::Return,
@@ -344,7 +370,7 @@ impl Tab for VehicleTab {
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
         let Purpose::Page {
-            tag: STALL_TAG,
+            tag: STALL_TAG | PLACE_TAG,
             data,
         } = &reply.purpose
         else {
@@ -362,7 +388,7 @@ impl Tab for VehicleTab {
                 let why = v
                     .get("message")
                     .and_then(Value::as_str)
-                    .unwrap_or("refused");
+                    .map_or_else(|| spec_text("refusal.none", &[]), pilot_refusal_text);
                 core.toast(ToastKind::Error, format!("{label}: {why}"));
             }
             Err(e) => core.toast_error(label, e),

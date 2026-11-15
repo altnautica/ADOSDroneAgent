@@ -49,6 +49,9 @@ pub enum PageKeys {
     Stall,
     /// The Vehicle tab while a fresh blocked return shows (Land here only).
     ReturnStall,
+    /// The Vehicle tab while a fresh pilot reports it is disarmed: the place
+    /// class can change.
+    Place,
 }
 
 /// Every user command.
@@ -143,6 +146,8 @@ pub enum Command {
     StallSkip,
     StallReturn,
     StallLand,
+    // the place class
+    PlaceClass,
 }
 
 /// A key: its code and the modifiers that must be held. SHIFT is ignored for
@@ -321,6 +326,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Page(P::Stall), ch('r'), C::StallReturn, "r", Some("return"), "Return along the flown path"),
     b(Page(P::Stall), ch('l'), C::StallLand, "l", Some("land"), "Land here"),
     b(Page(P::ReturnStall), ch('l'), C::StallLand, "l", Some("land"), "Land here"),
+    b(Page(P::Place), ch('c'), C::PlaceClass, "c", Some("place"), "Switch the place class (open / confined)"),
     // --- lists -------------------------------------------------------------
     b(List, kp(K::Up), C::Up, "↑↓", Some("move"), "Move"),
     b(List, ch('k'), C::Up, "k", None, "Move up"),

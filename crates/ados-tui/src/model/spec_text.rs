@@ -41,6 +41,11 @@ pub fn has_spec_text(key: &str) -> bool {
     STRINGS.contains_key(key)
 }
 
+/// Whether the spec text at `key` is a template that takes `{arg}`s.
+pub fn spec_takes_args(key: &str) -> bool {
+    STRINGS.get(key).is_some_and(|t| t.contains('{'))
+}
+
 /// A string by key with `{arg}` filled; an unknown key reads as itself. A
 /// missing arg fills as empty; `mode` (an FC mode name) reads upper case; a
 /// `source`, `action` or `profile` value that names a key of its own reads as
