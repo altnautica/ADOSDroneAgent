@@ -140,7 +140,10 @@ async function tipsCase(browser) {
   // never opens the pilot link). The page notes, on its own clock, when the
   // Feed opens its tips session (it saves the open count) and when the first
   // tip shows, so the first delay is measured without the test's own
-  // polling lag.
+  // polling lag. The tip time comes from a MutationObserver, which runs in
+  // the same task that inserts the tip: a requestAnimationFrame poll runs a
+  // frame later, and the test's own poll can see the tip inside that frame
+  // and read no tip time at all.
   await page.addInitScript(() => {
     window.__tipTimes = {};
     const setItem = Storage.prototype.setItem;
@@ -148,12 +151,11 @@ async function tipsCase(browser) {
       if (k === "ados-cockpit-tips" && window.__tipTimes.opened === undefined) window.__tipTimes.opened = performance.now();
       return setItem.call(this, k, v);
     };
-    const poll = () => {
-      const t = window.__tipTimes;
-      if (t.tip === undefined && document.querySelector('[data-testid="cockpit-tip"]')) t.tip = performance.now();
-      if (t.tip === undefined) requestAnimationFrame(poll);
-    };
-    requestAnimationFrame(poll);
+    new MutationObserver((_, observer) => {
+      if (!document.querySelector('[data-testid="cockpit-tip"]')) return;
+      window.__tipTimes.tip = performance.now();
+      observer.disconnect();
+    }).observe(document, { childList: true, subtree: true });
   });
   await mockAgent(page);
   await page.goto(BASE);
@@ -164,6 +166,7 @@ async function tipsCase(browser) {
   assert.equal(await tipNow(page), null, "no tip before the first delay");
   const first = await waitTip(page, "status_pill", RULES.first_delay_ms + 3000);
   const times = await page.evaluate(() => window.__tipTimes);
+  assert.ok(typeof times.opened === "number" && typeof times.tip === "number", `tip times ${JSON.stringify(times)}`);
   const firstAfter = Math.round(times.tip - times.opened);
   // 50 ms: the store reads its clock just before it saves.
   assert.ok(firstAfter >= RULES.first_delay_ms - 50, `first tip ${firstAfter} ms after the Feed opened`);
