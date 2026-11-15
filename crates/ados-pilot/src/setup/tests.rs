@@ -395,7 +395,7 @@ const RETURN_ROWS: [(&str, f32); 6] = [
 
 /// Runs `ados_profile` on a copter whose table already matches the profile
 /// except for `differ`, and returns the finished sim.
-fn apply_profile(differ: &[(&str, f32)]) -> Sim {
+fn apply_profile_differing(differ: &[(&str, f32)]) -> Sim {
     let mut p = ap_copter_params();
     let profile = crate::fc_profile::fc_profile(
         crate::fc_profile::Firmware::Ardupilot,
@@ -431,7 +431,7 @@ fn ados_profile_reboots_when_a_boot_time_row_changed() {
             ("AVOID_ENABLE", 7.0),
         ],
     ] {
-        let s = apply_profile(differ);
+        let s = apply_profile_differing(differ);
         assert_eq!(s.fc.reboots, 1, "{differ:?} needs one reboot");
         assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(true));
     }
@@ -439,7 +439,7 @@ fn ados_profile_reboots_when_a_boot_time_row_changed() {
 
 #[test]
 fn ados_profile_skips_the_reboot_for_runtime_rows() {
-    let s = apply_profile(&[
+    let s = apply_profile_differing(&[
         ("FS_GCS_ENABLE", 1.0),
         ("FS_THR_ENABLE", 1.0),
         ("AVOID_ENABLE", 7.0),

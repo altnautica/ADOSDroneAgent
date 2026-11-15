@@ -367,7 +367,12 @@ impl Pilot {
         match battery {
             Some(pct) => {
                 tracing::warn!(target: "ados_pilot", pct, action = "land", taken = "land_no_smart_rtl", "pilot_low_battery_action");
-                self.announce_low_battery("land", "pilot.banner.low_battery_land_no_srtl", pct, now_ms);
+                self.announce_low_battery(
+                    "land",
+                    "pilot.banner.low_battery_land_no_srtl",
+                    pct,
+                    now_ms,
+                );
             }
             None => {
                 self.banner = Some(banner("pilot.banner.return_land_fallback", &[], now_ms));

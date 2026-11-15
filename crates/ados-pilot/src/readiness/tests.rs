@@ -297,3 +297,63 @@ fn any_source_set_without_gnss_decides() {
     assert_eq!(on(4.0).msg, text("differs_confined"));
     assert!(on(1.0).ok);
 }
+
+/// An ArduCopter whose parameters match the whole profile.
+fn copter() -> FcState {
+    let mut fc = FcState {
+        firmware: Some(Firmware::Ardupilot),
+        ..FcState::default()
+    };
+    let rows = crate::fc_profile::fc_profile(
+        Firmware::Ardupilot,
+        ados_protocol::pilot::VehicleClass::Multirotor,
+    );
+    for row in rows {
+        fc.params.insert(row.name.into(), row.value);
+    }
+    fc
+}
+
+fn profile(fc: &FcState) -> Readiness {
+    super::profile_item(fc, Firmware::Ardupilot, ControlMode::Ados)
+}
+
+#[test]
+fn each_avoidance_and_return_row_blocks_when_it_differs() {
+    assert!(profile(&copter()).ok);
+    for (name, want, wrong) in [
+        ("OA_TYPE", 0.0, 1.0),
+        ("AVOID_ENABLE", 0.0, 7.0),
+        ("FS_GCS_ENABLE", 4.0, 1.0),
+        ("FS_THR_ENABLE", 5.0, 1.0),
+        ("SRTL_POINTS", 500.0, 300.0),
+        ("SRTL_ACCURACY", 2.0, 1.0),
+    ] {
+        let mut fc = copter();
+        assert_eq!(fc.params.get(name), Some(&want), "{name} in the profile");
+        fc.params.insert(name.into(), wrong);
+        let r = profile(&fc);
+        assert!(!r.ok, "{name} {wrong} passes");
+        assert_eq!(r.severity, Severity::Block, "{name}");
+        assert!(
+            r.msg.contains(&format!("{name} {wrong} (want {want})")),
+            "{name}: {}",
+            r.msg
+        );
+    }
+}
+
+#[test]
+fn absent_smartrtl_blocks_while_another_absent_row_is_skipped() {
+    let mut fc = copter();
+    fc.params.remove("GUID_TIMEOUT");
+    fc.params.remove("OA_TYPE");
+    assert!(profile(&fc).ok, "{}", profile(&fc).msg);
+
+    let mut fc = copter();
+    fc.params.remove("SRTL_POINTS");
+    let r = profile(&fc);
+    assert!(!r.ok);
+    assert_eq!(r.severity, Severity::Block);
+    assert!(r.msg.contains("SRTL_POINTS absent"), "{}", r.msg);
+}
