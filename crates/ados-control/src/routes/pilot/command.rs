@@ -53,11 +53,22 @@ fn live_control_mode(state: &AppState) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Route `cmd` through the pilot when the pilot owns motion; `None` keeps the
-/// raw COMMAND_LONG path.
+/// Whether `action` goes to the pilot under the live control mode `mode`
+/// (`None`: no fresh pilot state). The flight primitives go only while the
+/// pilot owns motion (`ados`); the place class is a ground setting of the
+/// pilot and goes in every control mode, so long as the pilot is there.
+fn routes_to_pilot(action: &str, mode: Option<&str>) -> bool {
+    match mode {
+        None => false,
+        Some(m) => m == "ados" || action.starts_with("place_class:"),
+    }
+}
+
+/// Route `cmd` through the pilot when the pilot owns motion (or for a
+/// pilot ground setting); `None` keeps the raw COMMAND_LONG path.
 pub async fn via_pilot(state: &AppState, cmd: &str) -> Option<Response> {
     let action = action_for(cmd)?;
-    if live_control_mode(state).as_deref() != Some("ados") {
+    if !routes_to_pilot(action, live_control_mode(state).as_deref()) {
         return None;
     }
     Some(match send_action(action).await {
@@ -125,5 +136,21 @@ mod tests {
         );
         assert_eq!(action_for("mode"), None);
         assert_eq!(action_for("ekfsourceset"), None);
+    }
+
+    #[test]
+    fn the_place_class_reaches_the_pilot_in_every_control_mode() {
+        for mode in ["ados", "fc", "gcs"] {
+            assert!(
+                routes_to_pilot("place_class:confined", Some(mode)),
+                "{mode}"
+            );
+            assert!(routes_to_pilot("place_class:open", Some(mode)), "{mode}");
+        }
+        // A flight primitive only while the pilot owns motion.
+        assert!(routes_to_pilot("rth", Some("ados")));
+        assert!(!routes_to_pilot("rth", Some("fc")));
+        // No fresh pilot state: the raw path.
+        assert!(!routes_to_pilot("place_class:open", None));
     }
 }
