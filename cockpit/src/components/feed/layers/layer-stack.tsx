@@ -145,7 +145,9 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
 
   // Configuration (camera, layers, level, mission, size, cap).
   useEffect(() => {
-    const mission = missionState ? { state: missionState, seq: null, total: null, itemReached: null, id: null, source: null, ageMs: null, landingSeq: false, uploadsSeen: null } : null;
+    const mission = missionState
+      ? { state: missionState, seq: null, total: null, itemReached: null, id: null, source: null, ageMs: null, landingSeq: false, uploadsSeen: null, target: null, gaps: [] }
+      : null;
     engineRef.current!.configure({
       cameraId,
       layers,

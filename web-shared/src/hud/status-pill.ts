@@ -20,8 +20,9 @@
 import layoutJson from "../cockpit-spec/layout.json";
 import tokens from "../cockpit-spec/tokens.json";
 import { BATTERY_CRITICAL_PCT, batteryLowPct, batteryReading, type BatteryHealthInput, type FcBatteryInput } from "./battery";
-import type { FcStatusText, PilotState, ReadinessItem } from "./cockpit-frames";
+import type { FcStatusText, MissionStall, PilotState, ReadinessItem } from "./cockpit-frames";
 import { CHIP_STALE_AFTER_MS } from "./flight-state";
+import { missionStallOverlay } from "./mission-stall";
 import type { NavSourceKind, NavSourceResult } from "./nav-source";
 import { hasSpecText, specText } from "./spec-text";
 
@@ -207,6 +208,10 @@ export interface PillInputs {
   /** The resolved nav source (`resolveNavSource`): a `warn` or `crit` tone
    *  raises one `nav_source_degraded` item. */
   navSource?: Pick<NavSourceResult, "kind" | "quality" | "tone"> | null;
+  /** The fresh pilot state's `mission_stall`: one critical `mission_stall`
+   *  item reading the stall overlay's title. Ignored while the pilot state
+   *  is stale. */
+  missionStall?: MissionStall | null;
 }
 
 /** The pill's failsafe inputs from a pilot state: the FC's own failsafe,
@@ -284,6 +289,10 @@ export function pillAlerts(i: PillInputs): PillAlert[] {
   const lowBattery = pilotStale ? null : lowBatteryText(i.lowBatteryAction);
   if (lowBattery) {
     out.push({ id: "low_battery", source: "battery", severity: "critical", text: lowBattery });
+  }
+  const stall = pilotStale ? null : missionStallOverlay(i.missionStall);
+  if (stall) {
+    out.push({ id: "mission_stall", source: "pilot", severity: stall.severity, text: stall.title });
   }
   for (const r of pilotStale ? [] : i.readiness) {
     if (r.ok) continue;

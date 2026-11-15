@@ -110,12 +110,13 @@ describe("countdown banners", () => {
   });
 
   it("count whole seconds rounded up", () => {
-    expect(lowBatteryLine(9.2)).toBe("Low battery: returning home in 10 s");
-    expect(lowBatteryLine(10)).toBe("Low battery: returning home in 10 s");
-    expect(lowBatteryLine(0.001)).toBe("Low battery: returning home in 1 s");
-    expect(lowBatteryLine(-1)).toBe("Low battery: returning home in 0 s");
+    const line = (s: number) => `Battery reserve reached · Returning along the flown path in ${s} s`;
+    expect(lowBatteryLine(9.2)).toBe(line(10));
+    expect(lowBatteryLine(10)).toBe(line(10));
+    expect(lowBatteryLine(0.001)).toBe(line(1));
+    expect(lowBatteryLine(-1)).toBe(line(0));
     expect(lowBatteryLine(9.2, "land")).toBe("Low battery: landing in 10 s");
-    expect(lowBatteryLine(9.2, "rth")).toBe("Low battery: returning home in 10 s");
+    expect(lowBatteryLine(9.2, "rth")).toBe(line(10));
   });
 
   it("name the cause of an FC mode change in words, never the raw code", () => {

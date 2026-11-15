@@ -191,8 +191,8 @@ describe("status pill sources", () => {
     expect(S["cockpit.status.source.video"]).toBe("Video");
   });
 
-  it("colours both countdowns critical", () => {
-    expect(layout.banners.severity).toEqual({ low_battery_rth: "critical", link_loss: "critical" });
+  it("colours every countdown critical", () => {
+    expect(layout.banners.severity).toEqual({ low_battery_rth: "critical", link_loss: "critical", mission_stalled: "critical", return_blocked: "critical" });
   });
 });
 
