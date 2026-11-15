@@ -30,7 +30,7 @@ impl Pilot {
             let hold = stale_hold.unwrap_or(pos);
             self.stale_hold = Some(hold);
             self.hold_reason = Some(HOLD_OBSTACLE_STALE.into());
-            if self.nav_capped(now_ms) {
+            if self.speed_capped(now_ms) {
                 self.cap_flown([0.0, 0.0], now_ms);
             }
             self.setpoint = Some(hold);
@@ -113,7 +113,7 @@ impl Pilot {
                 hold[1] += push[1] * dt;
                 self.plan_hold = Some(hold);
             }
-            if self.nav_capped(now_ms) {
+            if self.speed_capped(now_ms) {
                 self.cap_flown(push, now_ms);
             }
             self.setpoint = Some(hold);
@@ -139,7 +139,7 @@ impl Pilot {
         });
         let ask = geo::add(vel, geo::scale(to, FC_POS_GAIN));
         let fence = |v: V2| geofence(pos_ne, home, max_dist, v);
-        let (sp_ne, vel) = if self.nav_capped(now_ms) {
+        let (sp_ne, vel) = if self.speed_capped(now_ms) {
             // Capped, a distant position setpoint would let the FC's position
             // loop pull past the cap, so the velocity is flown from the
             // vehicle's own position. The ramp runs first and the brake and

@@ -16,7 +16,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+# The smallest obstacle margin in an open place, and what a confined margin
+# keeps beyond the propeller tips (metres). The pilot holds the margin it flies
+# to the same floor.
+OPEN_MARGIN_FLOOR_M = 0.5
+CONFINED_TIP_EXTRA_M = 0.1
 
 
 class ControlConfig(BaseModel):
@@ -56,7 +62,17 @@ class PilotConfig(BaseModel):
     profile: Literal["cine", "normal", "sport"] = "normal"
     avoid: Literal["brake", "bypass", "off"] = "brake"
     height_ref: Literal["agl", "ekf"] = "agl"
-    obstacle_margin_m: float = Field(default=1.5, ge=0.5, le=5.0)
+    # The schema allows 0.3 m; the place class sets the real floor (the rule
+    # below): 0.5 m in an open place, the propeller-tip radius plus 0.1 m in
+    # a confined one.
+    obstacle_margin_m: float = Field(default=1.5, ge=0.3, le=5.0)
+    # ``open`` or ``confined`` (mines, tunnels, rooms: a margin from the
+    # propeller tips, the mission route check and 0.5 m/s near walls). Chosen
+    # by the operator only.
+    place_class: Literal["open", "confined"] = "open"
+    # The airframe's propeller-tip radius from the CG, metres (x500: 0.377).
+    # A confined place needs it.
+    prop_tip_radius_m: float | None = Field(default=None, gt=0.0, le=3.0)
     max_alt_agl_m: float = Field(default=120.0, ge=5.0, le=500.0)
     max_dist_m: float = Field(default=500.0, ge=20.0, le=10000.0)
     min_agl_fw_m: float = Field(default=30.0, ge=10.0, le=300.0)
@@ -81,3 +97,17 @@ class PilotConfig(BaseModel):
     low_battery_countdown_s: int = Field(default=10, ge=5, le=30)
     # The declared flow and rangefinder mount; unset parts are not checked.
     fc_sensors: FcSensorsConfig = Field(default_factory=FcSensorsConfig)
+
+    @model_validator(mode="after")
+    def _margin_keeps_the_class_floor(self) -> PilotConfig:
+        if self.place_class == "confined" and self.prop_tip_radius_m is not None:
+            floor = self.prop_tip_radius_m + CONFINED_TIP_EXTRA_M
+            where = "pilot.prop_tip_radius_m + 0.1 in a confined place"
+        else:
+            floor = OPEN_MARGIN_FLOOR_M
+            where = "0.5 m in an open place, or with no propeller-tip radius"
+        if self.obstacle_margin_m < floor - 1e-9:
+            raise ValueError(
+                f"pilot.obstacle_margin_m must be at least {floor:.3f} ({where})"
+            )
+        return self

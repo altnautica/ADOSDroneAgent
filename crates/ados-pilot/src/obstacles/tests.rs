@@ -35,7 +35,11 @@ fn occupancy_tiles_land_in_the_local_frame_with_the_pose_offset() {
         &json!({"res_m": 0.05, "tile_cells": 64, "tiles": [{"ix": 0, "iy": 0, "png_b64": b64}]}),
     );
     // Vehicle at map (0,0) is at local (10, 5).
-    o.ingest_pose(&json!({"pose": {"t": [0.0, 0.0, -2.0]}}), Some([10.0, 5.0]));
+    o.ingest_pose(
+        &json!({"pose": {"t": [0.0, 0.0, -2.0]}}),
+        Some([10.0, 5.0]),
+        0,
+    );
     o.rebuild([10.0, 5.0], 0);
     // lx 20 → map north 1.025 m → local 11.025; ly 0 → east 0.025 → 5.025.
     let (i, j) = o.grid.cell([11.025, 5.025]).unwrap();

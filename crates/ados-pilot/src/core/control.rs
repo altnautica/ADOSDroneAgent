@@ -18,10 +18,14 @@ mod failsafes;
 mod goal_brake;
 mod obstacle_data;
 mod plan;
+mod route;
 mod stall;
 mod supervisor;
 mod vantage_goal;
 pub use brake::*;
+#[cfg(test)]
+pub use route::{check_legs, legs_of};
+pub use route::{route_items, Route, CONFINED_CAP_MPS};
 pub use supervisor::{Resume, Supervisor};
 pub use vantage_goal::HOLD_NO_VANTAGE;
 
@@ -111,6 +115,7 @@ impl Pilot {
             }
             self.replan(now_ms);
         }
+        self.confined_tick(now_ms);
         self.supervise(now_ms);
         self.fly(axes, dt, now_ms);
     }
@@ -369,7 +374,7 @@ impl Pilot {
         let max_dist = self.settings.pilot.max_dist_m;
         let obstacles = &self.obstacles;
         let a_h = lim.a_h;
-        let margin = self.settings.pilot.obstacle_margin_m;
+        let margin = self.settings.pilot.effective_margin_m();
         let mut braked: Option<Braked> = None;
         let limit = |v: V2| {
             let v = if brake {

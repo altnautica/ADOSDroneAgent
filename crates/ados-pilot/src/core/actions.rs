@@ -1,7 +1,9 @@
 //! Named actions (C1 `action`) and the `launch` sequence (C10).
 
 use ados_protocol::mavlink::ardupilotmega::MavCmd;
-use ados_protocol::pilot::{AvoidMode, ControlMode, Mission, Owner, Profile, VehicleClass};
+use ados_protocol::pilot::{
+    AvoidMode, ControlMode, Mission, Owner, PlaceClass, Profile, VehicleClass,
+};
 use serde_json::{json, Value};
 
 use super::{Out, Pilot};
@@ -29,7 +31,7 @@ impl Pilot {
         if !self.fc.linked(now_ms)
             && !matches!(
                 name.split(':').next(),
-                Some("profile" | "control_mode" | "avoid")
+                Some("profile" | "control_mode" | "avoid" | "place_class")
             )
         {
             return Err("no_fc".into());
@@ -174,6 +176,23 @@ impl Pilot {
                     key: "avoid",
                     value: value.into(),
                 });
+                Ok(())
+            }
+            "place_class" => {
+                let c: PlaceClass =
+                    serde_json::from_value(json!(value)).map_err(|_| "bad_value")?;
+                // The margin, route check and cap change with the class: never
+                // while the vehicle is armed.
+                if self.fc.armed {
+                    return Err("armed".into());
+                }
+                self.settings.pilot.place_class = c;
+                self.out.push(Out::Persist {
+                    section: "pilot",
+                    key: "place_class",
+                    value: c.as_str().into(),
+                });
+                tracing::info!(target: "ados_pilot", place_class = c.as_str(), "pilot_place_class");
                 Ok(())
             }
             "control_mode" => {

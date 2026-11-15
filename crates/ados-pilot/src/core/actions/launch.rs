@@ -2,7 +2,7 @@
 //! "when done" actions.
 
 use ados_protocol::mavlink::ardupilotmega::MavCmd;
-use ados_protocol::pilot::{Owner, VehicleClass};
+use ados_protocol::pilot::{Owner, PlaceClass, VehicleClass};
 use serde_json::{json, Value};
 
 use super::{ActionRes, SKILL_START_MS, STEP_TIMEOUT_MS};
@@ -36,6 +36,18 @@ impl Pilot {
         });
         if after == "skill" && skill.is_none() || after == "goto" && goto.is_none() {
             return Err("bad_args".into());
+        }
+        // A confined place flies a margin from the propeller tips: without the
+        // radius there is none; a mission is flown only along a route that
+        // keeps it.
+        if self.settings.pilot.place_class == PlaceClass::Confined {
+            if self.settings.pilot.prop_tip_radius_m.is_none() {
+                tracing::warn!(target: "ados_pilot", reason = "no_prop_radius", "pilot_launch_refused");
+                return Err("no_prop_radius".into());
+            }
+            if after == "mission" {
+                self.route_launch_check(now_ms)?;
+            }
         }
         let default_alt = match self.fc.vehicle_class() {
             VehicleClass::Fixedwing => self.fc.params.get("TKOFF_ALT").copied().unwrap_or(50.0),

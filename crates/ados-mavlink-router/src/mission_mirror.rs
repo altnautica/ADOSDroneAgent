@@ -541,8 +541,9 @@ impl MirrorCore {
     }
 
     /// The `mission` block of the state snapshot: the mission state plus the
-    /// mirror (`rev`, the navigation items), `uploads_seen`, and the `target`
-    /// at the current `seq`.
+    /// mirror (`rev`, the navigation items, each with its position in the
+    /// FC's local NED frame as the `target` places it), `uploads_seen`, and
+    /// the `target` at the current `seq`.
     pub fn state_json(&mut self, now: Instant) -> Value {
         let status = self.status(now);
         let mut v = status.to_json();
@@ -558,6 +559,7 @@ impl MirrorCore {
                 json!({
                     "seq": i.seq, "cmd": i.command, "frame": i.frame,
                     "lat_e7": i.x, "lon_e7": i.y, "alt_m": i.z,
+                    "ned": self.item_ned(i, now),
                 })
             })
             .collect();

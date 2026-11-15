@@ -59,13 +59,24 @@ impl Pilot {
         !gnss
     }
 
-    /// The profile's limits, with the cap applied to the horizontal speed
-    /// and acceleration while one is in force.
+    /// Whether any horizontal speed cap is in force on the setpoints the
+    /// pilot flies: the GNSS-denied one, or the confined place's near the
+    /// clearance limit.
+    pub fn speed_capped(&self, now_ms: u64) -> bool {
+        self.nav_capped(now_ms) || self.confined_near()
+    }
+
+    /// The profile's limits, with the caps in force applied: the GNSS-denied
+    /// cap to the horizontal speed and acceleration, the confined cap to the
+    /// speed.
     pub fn limits_now(&self, now_ms: u64) -> Limits {
         let mut l = limits(self.settings.pilot.profile);
         if self.nav_capped(now_ms) {
             l.v_h = l.v_h.min(self.settings.pilot.gnss_denied_max_speed_mps);
             l.a_h = l.a_h.min(self.settings.pilot.gnss_denied_max_accel_mps2);
+        }
+        if self.confined_near() {
+            l.v_h = l.v_h.min(super::control::CONFINED_CAP_MPS);
         }
         l
     }
@@ -77,7 +88,7 @@ impl Pilot {
     /// GNSS.
     pub(super) fn stick_limits(&mut self, axes: [f32; 4], now_ms: u64) -> Limits {
         let mut lim = self.limits_now(now_ms);
-        if self.nav_capped(now_ms) {
+        if self.speed_capped(now_ms) {
             self.mr.shaper.v = geo::clamp_len(self.mr.shaper.v, lim.v_h);
             let most = axes[0].hypot(axes[1]).min(1.0) * lim.v_h;
             if most < geo::norm(self.mr.shaper.v) {
@@ -96,7 +107,7 @@ impl Pilot {
     /// The ramp runs before the brake and the geofence, so their cut flies at
     /// once; the caller records what it flies with [`Pilot::cap_flown`].
     pub(super) fn cap_ramp(&mut self, v: V2, now_ms: u64) -> V2 {
-        if !self.nav_capped(now_ms) {
+        if !self.speed_capped(now_ms) {
             self.cap_vel = None;
             return v;
         }
@@ -117,6 +128,6 @@ impl Pilot {
     /// Record the horizontal velocity flown this tick, braked and fenced:
     /// the next tick's ramp starts from it.
     pub(super) fn cap_flown(&mut self, v: V2, now_ms: u64) {
-        self.cap_vel = self.nav_capped(now_ms).then_some((v, now_ms));
+        self.cap_vel = self.speed_capped(now_ms).then_some((v, now_ms));
     }
 }

@@ -8,6 +8,7 @@
 //! local frame. Scans arrive in body FRD, bins clockwise from the nose.
 
 mod grid;
+mod probe;
 mod project;
 mod tiles;
 
@@ -16,7 +17,10 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 pub use grid::{Grid, CELL_M, GRID_N};
+pub use probe::LegProbe;
 pub use project::{project_camera, Attitude, Scratch};
+#[cfg(test)]
+pub use tiles::encode_for_test as encode_tile_for_test;
 
 use crate::geo::{self, V2};
 
@@ -37,6 +41,9 @@ pub const CLOSING_SMOOTH: f32 = 0.5;
 pub const SCAN_CLOSING_MAX_MPS: f32 = 16.0;
 /// Range noise allowed on top of [`SCAN_CLOSING_MAX_MPS`] per pair, metres.
 pub const SCAN_CLOSING_SLACK_M: f32 = 0.1;
+/// A pose uncertainty older than this is unknown (the pose publishes at
+/// 10 Hz by default).
+pub const POSE_SIGMA_MAX_AGE_MS: u64 = 1000;
 
 /// The 5° sector (of `n`) of a bearing, radians clockwise from north.
 fn sector_of(bearing: f32, n: usize) -> usize {
@@ -80,6 +87,8 @@ pub struct Obstacles {
     /// cannot make it brake late.
     closing: Vec<f32>,
     pub grid: Grid,
+    /// The pose's horizontal one-sigma uncertainty (m) and when it arrived.
+    pose_sigma: Option<(f32, u64)>,
 }
 
 /// Attitude and height used to level a scan.
@@ -131,7 +140,14 @@ impl Obstacles {
 
     /// Ingest a `plugin.world-engine.pose` payload with the FC local position
     /// at the same moment.
-    pub fn ingest_pose(&mut self, payload: &Value, local_ne: Option<V2>) {
+    pub fn ingest_pose(&mut self, payload: &Value, local_ne: Option<V2>, now_ms: u64) {
+        // The planar scan matcher's horizontal one-sigma (`sigma_xy_m`); a
+        // pose without it says nothing about its uncertainty.
+        self.pose_sigma = payload
+            .get("sigma_xy_m")
+            .and_then(Value::as_f64)
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| (s as f32, now_ms));
         let t = payload
             .get("pose")
             .and_then(|p| p.get("t"))
@@ -146,6 +162,14 @@ impl Obstacles {
             return;
         };
         self.offset = Some([local[0] - x as f32, local[1] - y as f32]);
+    }
+
+    /// The live horizontal pose uncertainty (one sigma, m): the last pose's
+    /// `sigma_xy_m` while it is at most [`POSE_SIGMA_MAX_AGE_MS`] old.
+    pub fn pose_sigma(&self, now_ms: u64) -> Option<f32> {
+        self.pose_sigma
+            .filter(|(_, at)| now_ms.saturating_sub(*at) <= POSE_SIGMA_MAX_AGE_MS)
+            .map(|(s, _)| s)
     }
 
     /// Ingest a `plugin.world-engine.scan` payload.

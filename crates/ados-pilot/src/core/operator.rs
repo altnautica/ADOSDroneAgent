@@ -44,7 +44,39 @@ impl Pilot {
                 msg: super::position_check::readiness_msg(&p),
             });
         }
+        if let Some(item) = self.place_class_item() {
+            items.push(item);
+        }
         items
+    }
+
+    /// `place_class`, in a confined place only: the margin is measured from
+    /// the propeller tips, so their radius must be known. It blocks in `ados`
+    /// mode and warns otherwise.
+    fn place_class_item(&self) -> Option<ados_protocol::pilot::Readiness> {
+        let p = &self.settings.pilot;
+        if p.place_class != ados_protocol::pilot::PlaceClass::Confined {
+            return None;
+        }
+        let ok = p.prop_tip_radius_m.is_some();
+        let severity = if ok || self.control_mode() == ControlMode::Ados {
+            ados_protocol::pilot::Severity::Block
+        } else {
+            ados_protocol::pilot::Severity::Warn
+        };
+        Some(ados_protocol::pilot::Readiness {
+            id: "place_class".into(),
+            ok,
+            severity,
+            msg: if ok {
+                format!(
+                    "Confined place: {:.2} m from obstacles",
+                    p.effective_margin_m()
+                )
+            } else {
+                "Confined profile needs the propeller tip radius (pilot.prop_tip_radius_m)".into()
+            },
+        })
     }
 
     /// The warning that the mission state is inferred: an ArduPilot older

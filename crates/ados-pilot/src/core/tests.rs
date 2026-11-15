@@ -1,6 +1,7 @@
 //! Behaviour tests for the pilot rules, against a scripted flight controller.
 
 mod battery;
+mod confined;
 mod fc_failsafe;
 mod handoff;
 mod harness;

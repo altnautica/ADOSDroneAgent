@@ -8,6 +8,10 @@ use base64::Engine as _;
 
 /// The occupied value on the wire.
 pub const OCCUPIED: u8 = 0;
+/// The free value on the wire; every other value but [`OCCUPIED`] is unseen.
+pub const FREE: u8 = 254;
+/// The unseen value on the wire, and of a tile never received.
+pub const UNSEEN: u8 = 205;
 
 #[derive(Debug, Clone)]
 pub struct Tile {
@@ -28,6 +32,16 @@ impl Tile {
                 let (row, col) = (k / n, k % n);
                 (n - 1 - row, col)
             })
+    }
+
+    /// Cells per side.
+    pub fn cells(&self) -> usize {
+        self.cells
+    }
+
+    /// The wire value of tile-local cell `(lx, ly)`.
+    pub fn value(&self, lx: usize, ly: usize) -> u8 {
+        self.px[(self.cells - 1 - lx) * self.cells + ly]
     }
 }
 

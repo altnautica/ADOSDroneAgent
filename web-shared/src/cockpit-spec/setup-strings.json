@@ -537,6 +537,7 @@
     "readiness.item.firmware": "Flight controller firmware",
     "readiness.item.mission_inferred": "Mission state",
     "readiness.item.lidar": "Lidar",
+    "readiness.item.place_class": "Place",
     "readiness.item.position": "Position estimate",
     "readiness.item.position_check": "Position check (nav)",
     "readiness.item.setup_needed": "Aircraft setup",

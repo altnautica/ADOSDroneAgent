@@ -1,0 +1,499 @@
+//! The confined-place profile: the place class and its readiness, the route
+//! check of the FC mission against the live occupancy, the launch refusal, the
+//! hold before an infeasible leg, and the 0.5 m/s cap near the clearance
+//! limit. An open place flies as before.
+
+use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage};
+use ados_protocol::pilot::{Owner, PlaceClass, RouteState};
+use serde_json::{json, Value};
+
+use super::harness::World;
+use crate::core::{Out, Reply};
+use crate::modes::copter;
+use crate::obstacles::{encode_tile_for_test, Obstacles};
+
+/// The x500's propeller-tip radius.
+const TIP_M: f32 = 0.377;
+/// Its confined margin (tip + 0.1) plus the 0.1 m floor of the 3σ term.
+const REQUIRED_M: f64 = 0.577;
+const TILE_SPAN: f32 = 3.2;
+
+fn ok(r: &Reply) -> bool {
+    matches!(r, Reply::Action(a) if a.ok)
+}
+
+fn err(r: &Reply) -> Option<String> {
+    match r {
+        Reply::Action(a) => a.err.clone(),
+        _ => None,
+    }
+}
+
+/// The occupancy tiles covering `[n0, n1) × [e0, e1)` (local = map frame):
+/// `occ(n, e)` cells occupied, the rest of the rectangle free, cells of the
+/// tiles outside it unseen.
+fn map_payload(n0: f32, n1: f32, e0: f32, e1: f32, occ: &dyn Fn(f32, f32) -> bool) -> Value {
+    let mut tiles = Vec::new();
+    let idx = |v: f32| (v / TILE_SPAN).floor() as i32;
+    for ix in idx(n0)..=idx(n1 - 1e-3) {
+        for iy in idx(e0)..=idx(e1 - 1e-3) {
+            let mut px = vec![205u8; 64 * 64];
+            for lx in 0..64 {
+                for ly in 0..64 {
+                    let n = ix as f32 * TILE_SPAN + (lx as f32 + 0.5) * 0.05;
+                    let e = iy as f32 * TILE_SPAN + (ly as f32 + 0.5) * 0.05;
+                    if n >= n0 && n < n1 && e >= e0 && e < e1 {
+                        px[(63 - lx) * 64 + ly] = if occ(n, e) { 0 } else { 254 };
+                    }
+                }
+            }
+            tiles.push(json!({"ix": ix, "iy": iy,
+                "png_b64": encode_tile_for_test(&px, 64, png::FilterType::NoFilter)}));
+        }
+    }
+    json!({"res_m": 0.05, "tile_cells": 64, "tiles": tiles})
+}
+
+/// A post 0.2 m square centred 0.6 m east of the line north at `n`: 0.525 m
+/// from it.
+fn post(n: f32) -> impl Fn(f32, f32) -> bool {
+    move |pn: f32, pe: f32| (pn - n).abs() < 0.1 && (0.5..0.7).contains(&pe)
+}
+
+/// The pose that places the map (map = local) with σ 0.02 m.
+fn seen(w: &mut World) {
+    let p = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": 0.02});
+    w.p.on_feed("plugin.world-engine.pose", &p, w.now);
+}
+
+/// Run `ms` with the pose arriving every 100 ms.
+fn run_seen(w: &mut World, ms: u64) {
+    for _ in 0..ms / 100 {
+        seen(w);
+        w.run(100);
+    }
+}
+
+fn map(w: &mut World, payload: &Value) {
+    w.p.on_feed("plugin.world-engine.occupancy", payload, w.now);
+    seen(w);
+}
+
+/// A confined place for the x500 (margin 0.477 m).
+fn confined(w: &mut World) {
+    let p = &mut w.p.settings.pilot;
+    p.place_class = PlaceClass::Confined;
+    p.prop_tip_radius_m = Some(TIP_M);
+    p.obstacle_margin_m = 0.477;
+}
+
+/// The route north along e = 0: items 1–4 at n 2, 10, 20, 25.
+const ROUTE: [(u32, f32); 4] = [(1, 2.0), (2, 10.0), (3, 20.0), (4, 25.0)];
+
+/// The router's snapshot with the route's items in the local frame, the FC
+/// at `seq` in `state`.
+fn mission(w: &mut World, state: &str, seq: u32) {
+    let items: Vec<Value> = ROUTE
+        .iter()
+        .map(|&(s, n)| {
+            json!({"seq": s, "cmd": 16, "frame": 6, "lat_e7": 1, "lon_e7": 1,
+                              "alt_m": 5.0, "ned": [n, 0.0, -5.0]})
+        })
+        .collect();
+    let target_n = ROUTE.iter().find(|r| r.0 == seq).map_or(0.0, |r| r.1);
+    let snapshot = json!({"armed": w.armed, "mission": {
+        "state": state, "seq": seq, "total": 5, "item_reached": seq.checked_sub(1),
+        "id": null, "source": "mission_state", "age_ms": 100, "landing_seq": false,
+        "rev": 1, "uploads_seen": 0, "items": items,
+        "target": {"seq": seq, "cmd": 16, "ned": [target_n, 0.0, -5.0]}}});
+    let m = crate::router_state::mission_of(snapshot);
+    w.p.on_feed(crate::router_state::MISSION_TOPIC, &m, w.now);
+    w.collect();
+}
+
+/// The open area n −6.4…32, e −9.6…9.6 with `occ` in it.
+fn area(occ: &dyn Fn(f32, f32) -> bool) -> Value {
+    map_payload(-6.4, 32.0, -9.6, 9.6, occ)
+}
+
+fn speed_changes(w: &World) -> Vec<f32> {
+    w.sent
+        .iter()
+        .filter_map(|m| match m {
+            MavMessage::COMMAND_LONG(c) if c.command == MavCmd::MAV_CMD_DO_CHANGE_SPEED => {
+                Some(c.param2)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_route_samples_every_quarter_metre_and_catches_a_pinch_a_metre_step_misses() {
+    let mut o = Obstacles::new();
+    o.ingest_occupancy(&map_payload(-3.2, 12.8, -3.2, 3.2, &post(4.5)));
+    o.ingest_pose(
+        &json!({"pose": {"t": [0.0, 0.0, 0.0]}}),
+        Some([0.0, 0.0]),
+        0,
+    );
+    let legs = [(1, [0.0, 0.0, -5.0], 2, [10.0, 0.0, -5.0])];
+    let req = REQUIRED_M as f32;
+    let coarse = crate::core::control::check_legs(&o, &legs, 1.0, req, 0);
+    assert_eq!(coarse[0].state, RouteState::Feasible, "{coarse:?}");
+    let fine = crate::core::control::check_legs(&o, &legs, 0.25, req, 0);
+    assert_eq!(fine[0].state, RouteState::Infeasible, "{fine:?}");
+    let (p, d) = fine[0].pinch.unwrap();
+    assert!((p[0] - 4.5).abs() < 0.01 && p[1].abs() < 1e-3, "{p:?}");
+    assert!((d - 0.5256).abs() < 0.01, "{d}");
+    // A leg leaving the map is unverified; one with no obstacle near it is
+    // feasible.
+    let out = [(1, [0.0, -2.0, -5.0], 2, [20.0, -2.0, -5.0])];
+    let r = crate::core::control::check_legs(&o, &out, 0.25, req, 0);
+    assert_eq!(r[0].state, RouteState::Unverified);
+    let clear = [(1, [0.0, -2.0, -5.0], 2, [10.0, -2.0, -5.0])];
+    let r = crate::core::control::check_legs(&o, &clear, 0.25, req, 0);
+    assert_eq!(r[0].state, RouteState::Feasible);
+    // No pose offset: the map cannot be placed, everything is unseen.
+    let mut o = Obstacles::new();
+    o.ingest_occupancy(&map_payload(-3.2, 12.8, -3.2, 3.2, &|_, _| false));
+    let r = crate::core::control::check_legs(&o, &clear, 0.25, req, 0);
+    assert_eq!(r[0].state, RouteState::Unverified);
+}
+
+#[test]
+fn confined_without_a_tip_radius_blocks_readiness_and_refuses_the_launch() {
+    let mut w = World::new();
+    w.run(200);
+    let item = |w: &World| {
+        w.p.state(w.now)
+            .readiness
+            .into_iter()
+            .find(|r| r.id == "place_class")
+    };
+    assert_eq!(item(&w), None, "an open place has no place_class item");
+    w.p.settings.pilot.place_class = PlaceClass::Confined;
+    let it = item(&w).expect("place_class item");
+    assert!(!it.ok);
+    assert_eq!(it.severity, ados_protocol::pilot::Severity::Block);
+    assert!(it.msg.contains("pilot.prop_tip_radius_m"), "{}", it.msg);
+    assert_eq!(
+        err(&w.action("arm")).as_deref(),
+        Some("not_ready:place_class")
+    );
+    let r = w.action_args("launch", json!({"after": "hold"}));
+    assert_eq!(err(&r).as_deref(), Some("no_prop_radius"));
+    assert!(!w.armed);
+    // With the radius the item passes and names the margin.
+    w.p.settings.pilot.prop_tip_radius_m = Some(TIP_M);
+    let it = item(&w).unwrap();
+    assert!(it.ok, "{it:?}");
+    assert_eq!(it.msg, "Confined place: 1.50 m from obstacles");
+}
+
+#[test]
+fn the_place_class_action_persists_and_is_refused_while_armed() {
+    let mut w = World::new();
+    w.run(200);
+    let r = w.req_now(ados_protocol::pilot::Request::Action(
+        ados_protocol::pilot::ActionReq {
+            name: "place_class:confined".into(),
+            src: "mc".into(),
+            args: None,
+            id: None,
+        },
+    ));
+    assert!(ok(&r), "{r:?}");
+    assert_eq!(w.p.settings.pilot.place_class, PlaceClass::Confined);
+    let v = serde_json::to_value(w.p.state(w.now)).unwrap();
+    assert_eq!(v["place_class"], "confined");
+    assert_eq!(
+        err(&w.action("place_class:tunnel")).as_deref(),
+        Some("bad_value")
+    );
+    assert!(ok(&w.action("place_class:open")));
+    let v = serde_json::to_value(w.p.state(w.now)).unwrap();
+    assert!(v.get("place_class").is_none(), "open is omitted: {v}");
+    // The persisted value.
+    w.p.on_request(
+        ados_protocol::pilot::Request::Action(ados_protocol::pilot::ActionReq {
+            name: "place_class:confined".into(),
+            src: "mc".into(),
+            args: None,
+            id: None,
+        }),
+        w.now,
+    );
+    let persisted = w.p.drain().into_iter().any(|o| {
+        matches!(o, Out::Persist { section: "pilot", key: "place_class", ref value } if value == "confined")
+    });
+    assert!(persisted);
+    w.airborne(copter::GUIDED);
+    assert_eq!(err(&w.action("place_class:open")).as_deref(), Some("armed"));
+    assert_eq!(w.p.settings.pilot.place_class, PlaceClass::Confined);
+}
+
+#[test]
+fn a_launch_into_an_infeasible_route_is_refused_naming_the_pinch() {
+    let ((), logs) = super::supervisor::with_logs(|| {
+        let mut w = World::new();
+        confined(&mut w);
+        map(&mut w, &area(&post(15.0)));
+        mission(&mut w, "loaded", 0);
+        w.run(200);
+        let r = w.action_args("launch", json!({"after": "mission"}));
+        assert_eq!(err(&r).as_deref(), Some("route_infeasible"));
+        assert!(!w.armed);
+        let rc = w.p.state(w.now).route_check.expect("route_check");
+        assert_eq!(rc.state, RouteState::Infeasible);
+        assert_eq!(rc.required_m, REQUIRED_M);
+        assert_eq!(rc.margin_m, 0.477);
+        assert_eq!(rc.sigma_m, Some(0.02));
+        let pinch = rc.pinch.expect("pinch");
+        assert_eq!((pinch.from_seq, pinch.to_seq), (2, 3));
+        assert_eq!(pinch.ned, [15.0, 0.0, -5.0]);
+        assert!((pinch.clearance_m - 0.526).abs() < 0.002, "{pinch:?}");
+        assert_eq!(pinch.required_m, REQUIRED_M);
+        assert!(rc.unverified_legs.is_empty());
+    });
+    let line = logs
+        .lines()
+        .find(|l| l.contains("pilot_launch_refused"))
+        .unwrap_or_else(|| panic!("{logs}"));
+    assert!(
+        line.contains("route_infeasible") && line.contains("2→3"),
+        "{line}"
+    );
+    assert!(
+        line.contains("15.0") && line.contains("clearance_m=0.52"),
+        "{line}"
+    );
+    assert!(line.contains("required_m=0.57"), "{line}");
+    assert!(logs.contains("pilot_route_check") && logs.contains("infeasible"));
+}
+
+#[test]
+fn a_feasible_route_launches_and_reports_feasible() {
+    let mut w = World::new();
+    confined(&mut w);
+    map(&mut w, &area(&|_, _| false));
+    mission(&mut w, "loaded", 0);
+    w.run(200);
+    assert!(ok(&w.action_args("launch", json!({"after": "mission"}))));
+    let rc = w.p.state(w.now).route_check.expect("route_check");
+    assert_eq!(rc.state, RouteState::Feasible);
+    assert_eq!(rc.pinch, None, "no obstacle near the route");
+    // σ unknown: at best unverified.
+    w.run(1200);
+    assert_eq!(
+        w.p.state(w.now).route_check.unwrap().state,
+        RouteState::Unverified
+    );
+}
+
+#[test]
+fn an_infeasible_leg_ahead_holds_a_mission_a_ground_station_started() {
+    // AUTO comes from a ground station (no pilot launch): the FC flies item 2
+    // with the infeasible leg 2→3 ahead.
+    let mut w = World::new();
+    confined(&mut w);
+    w.airborne(copter::AUTO);
+    assert_eq!(w.p.owner(), Owner::MissionFc);
+    map(&mut w, &area(&post(15.0)));
+    mission(&mut w, "active", 2);
+    run_seen(&mut w, 100);
+    assert_eq!(w.set_modes(copter::BRAKE), 1, "held at once");
+    run_seen(&mut w, 1600);
+    assert_eq!(w.mode, copter::GUIDED);
+    assert_eq!(w.p.owner(), Owner::Pilot);
+    let s = w.p.state(w.now);
+    assert_eq!(s.hold_reason.as_deref(), Some("route-infeasible"));
+    let stall = s.mission_stall.expect("the stall flow");
+    assert_eq!((stall.kind.as_str(), stall.seq), ("mission", Some(2)));
+    let in_s = stall
+        .skip_in_s
+        .expect("a leg from the current item counts down");
+    assert!((43.0..=45.0).contains(&in_s), "{in_s}");
+    let b = s.banner.expect("banner");
+    assert_eq!(b.text_key, "pilot.banner.route_infeasible");
+    assert_eq!(b.args["leg"], "2→3");
+    assert_eq!(b.args["clearance_m"], 0.53);
+    assert_eq!(b.args["required_m"], 0.58);
+    // The operator skips item 2: the leg 2→3 is never flown, nothing else is
+    // tight, the mission goes on.
+    assert!(ok(&w.action("mission_skip")));
+    assert_eq!(w.mode, copter::AUTO);
+    mission(&mut w, "active", 3);
+    run_seen(&mut w, 1500);
+    assert_eq!(w.p.owner(), Owner::MissionFc);
+    assert_eq!(w.set_modes(copter::BRAKE), 1);
+}
+
+#[test]
+fn a_leg_seen_tight_mid_flight_holds_the_mission() {
+    let mut w = World::new();
+    confined(&mut w);
+    w.p.fc.params.insert("WP_SPD".into(), 5.0);
+    w.airborne(copter::AUTO);
+    // Only the first 12.8 m are mapped: the legs past it are unseen.
+    map(&mut w, &map_payload(-6.4, 12.8, -9.6, 9.6, &|_, _| false));
+    mission(&mut w, "active", 2);
+    run_seen(&mut w, 1500);
+    let rc = w.p.state(w.now).route_check.unwrap();
+    assert_eq!(rc.state, RouteState::Unverified);
+    assert_eq!(rc.unverified_legs, vec![3, 4]);
+    assert_eq!(w.set_modes(copter::BRAKE), 0, "unseen is no reason to hold");
+    // The rest of the tunnel is mapped, with the pinch on leg 2→3.
+    map(&mut w, &area(&post(15.0)));
+    run_seen(&mut w, 1200);
+    assert_eq!(w.set_modes(copter::BRAKE), 1);
+    assert_eq!(
+        w.p.state(w.now).hold_reason.as_deref(),
+        Some("route-infeasible")
+    );
+}
+
+#[test]
+fn the_cap_holds_pilot_flown_setpoints_near_a_wall_and_ends_clear_of_it() {
+    let mut w = World::new();
+    confined(&mut w);
+    w.airborne(copter::GUIDED);
+    // A wall 1.5 m east of the vehicle: inside required + 1.5 m.
+    map(&mut w, &area(&|_, e| e >= 1.5));
+    let id = w.lease();
+    let ((), logs) = super::supervisor::with_logs(|| {
+        for _ in 0..6 {
+            seen(&mut w);
+            w.goal(id, 20.0, 0.0);
+            w.run(500);
+        }
+    });
+    let cap = w.p.state(w.now).speed_cap.expect("the confined cap");
+    assert_eq!((cap.reason.as_str(), cap.v_h_mps), ("confined-near", 0.5));
+    let from = w.sent.len();
+    for _ in 0..4 {
+        seen(&mut w);
+        w.goal(id, 20.0, 0.0);
+        w.run(500);
+    }
+    let fast = w.sent[from..].iter().any(|m| {
+        matches!(m, MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) if s.vx.hypot(s.vy) > 0.5 + 1e-3)
+    });
+    assert!(!fast, "a setpoint above 0.5 m/s near the wall");
+    assert!(
+        logs.contains("pilot_confined_cap") && logs.contains("on=true") && logs.contains("near"),
+        "{logs}"
+    );
+    // Clear of the wall (7.5 m west of it): the cap ends.
+    w.pos = [0.0, -6.0, -5.0];
+    for _ in 0..4 {
+        seen(&mut w);
+        w.goal(id, 20.0, -6.0);
+        w.run(500);
+    }
+    assert_eq!(w.p.state(w.now).speed_cap, None);
+    let from = w.sent.len();
+    for _ in 0..4 {
+        seen(&mut w);
+        w.goal(id, 20.0, -6.0);
+        w.run(500);
+    }
+    let fast = w.sent[from..].iter().any(
+        |m| matches!(m, MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) if s.vx.hypot(s.vy) > 1.0),
+    );
+    assert!(fast, "the goal flies at its own speed again");
+}
+
+#[test]
+fn the_fc_mission_is_slowed_near_a_wall_and_restored_clear_of_it() {
+    let mut w = World::new();
+    confined(&mut w);
+    w.p.fc.params.insert("WP_SPD".into(), 5.0);
+    w.airborne(copter::AUTO);
+    // A wall 1.6 m east from n 0 to 6; open beyond.
+    map(&mut w, &area(&|n, e| e >= 1.6 && n < 6.0));
+    mission(&mut w, "active", 2);
+    run_seen(&mut w, 600);
+    assert_eq!(speed_changes(&w), vec![0.5], "slowed once");
+    let c = w.p.state(w.now).speed_cap.expect("cap in AUTO");
+    assert_eq!(c.reason, "confined-near");
+    run_seen(&mut w, 1000);
+    assert_eq!(speed_changes(&w), vec![0.5], "not re-sent");
+    // Past the wall: the FC's default speed comes back.
+    w.pos = [12.0, 0.0, -5.0];
+    run_seen(&mut w, 600);
+    assert_eq!(speed_changes(&w), vec![0.5, 5.0]);
+    assert_eq!(w.p.state(w.now).speed_cap, None);
+    assert_eq!(w.p.owner(), Owner::MissionFc);
+    assert_eq!(w.mode, copter::AUTO);
+}
+
+#[test]
+fn an_open_place_flies_as_before() {
+    // The same flights in an open place, with and without the confined
+    // settings filled in, send the same frames and publish no confined
+    // state.
+    let fly = |radius: Option<f32>| {
+        let mut w = World::new();
+        w.p.settings.pilot.prop_tip_radius_m = radius;
+        w.p.fc.params.insert("WP_SPD".into(), 5.0);
+        w.airborne(copter::AUTO);
+        map(
+            &mut w,
+            &area(&|n, e| post(15.0)(n, e) || (e >= 1.6 && n < 6.0)),
+        );
+        mission(&mut w, "active", 2);
+        run_seen(&mut w, 2000);
+        w.airborne(copter::GUIDED);
+        let id = w.lease();
+        for _ in 0..4 {
+            seen(&mut w);
+            w.goal(id, 20.0, 0.0);
+            w.run(500);
+        }
+        let v = serde_json::to_value(w.p.state(w.now)).unwrap();
+        (w, v)
+    };
+    let (w, v) = fly(None);
+    let (w2, _) = fly(Some(TIP_M));
+    assert_eq!(w.sent, w2.sent);
+    assert!(speed_changes(&w).is_empty());
+    assert_eq!(w.set_modes(copter::BRAKE), 0);
+    assert!(
+        v.get("place_class").is_none() && v.get("route_check").is_none(),
+        "{v}"
+    );
+    assert!(v.get("speed_cap").is_none(), "{v}");
+}
+
+#[test]
+fn the_golden_confined_frame_round_trips() {
+    let text = include_str!("../../../../ados-control/tests/fixtures/pilot-frame-confined.json");
+    let v: Value = serde_json::from_str(text).unwrap();
+    let s: ados_protocol::pilot::PilotState = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&s).unwrap(), v);
+    assert_eq!(s.place_class, PlaceClass::Confined);
+    let rc = s.route_check.unwrap();
+    assert_eq!(rc.state, RouteState::Infeasible);
+    assert_eq!(rc.pinch.unwrap().to_seq, 4);
+    assert_eq!(rc.unverified_legs, vec![5, 6]);
+    assert_eq!(s.speed_cap.unwrap().reason, "confined-near");
+}
+
+#[test]
+fn the_router_route_reaches_the_pilot_in_the_local_frame() {
+    let snapshot = json!({"mission": {"state": "active", "seq": 2, "total": 4,
+        "item_reached": 1, "id": null, "source": "mission_state", "age_ms": 40,
+        "landing_seq": false, "rev": 2, "uploads_seen": 0,
+        "items": [{"seq": 1, "cmd": 22, "frame": 3, "lat_e7": 0, "lon_e7": 0, "alt_m": 5.0, "ned": null},
+                  {"seq": 2, "cmd": 16, "frame": 6, "lat_e7": 1, "lon_e7": 1, "alt_m": 5.0,
+                   "ned": [10.0, 2.0, -5.0]}]}});
+    let m = crate::router_state::mission_of(snapshot);
+    let items = crate::core::control::route_items(&m);
+    assert_eq!(items.len(), 2);
+    assert_eq!((items[0].seq, items[0].cmd, items[0].ned), (1, 22, None));
+    assert_eq!(items[1].ned, Some([10.0, 2.0, -5.0]));
+    // The take-off without a position starts at home.
+    let legs = crate::core::control::legs_of(&items, [1.0, 1.0]);
+    assert_eq!(legs, vec![(1, [1.0, 1.0, -5.0], 2, [10.0, 2.0, -5.0])]);
+}

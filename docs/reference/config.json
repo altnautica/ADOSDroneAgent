@@ -2196,9 +2196,22 @@
       "enum": null,
       "key": "pilot.obstacle_margin_m",
       "maximum": 5.0,
-      "minimum": 0.5,
+      "minimum": 0.3,
       "secret": false,
       "type": "number"
+    },
+    {
+      "default": "open",
+      "description": "Place Class",
+      "enum": [
+        "open",
+        "confined"
+      ],
+      "key": "pilot.place_class",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
     },
     {
       "default": "normal",
@@ -2213,6 +2226,16 @@
       "minimum": null,
       "secret": false,
       "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Prop Tip Radius M",
+      "enum": null,
+      "key": "pilot.prop_tip_radius_m",
+      "maximum": 3.0,
+      "minimum": 0.0,
+      "secret": false,
+      "type": "number|null"
     },
     {
       "default": 45,

@@ -40,7 +40,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
 }
 
 /// Run `f` with the pilot's log lines captured.
-fn with_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+pub(super) fn with_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
     let buf = LogBuf::default();
     let sub = tracing_subscriber::fmt()
         .with_writer(buf.clone())

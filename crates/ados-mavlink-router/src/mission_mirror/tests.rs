@@ -494,6 +494,32 @@ fn the_target_is_the_current_item_in_the_local_frame() {
 }
 
 #[test]
+fn every_snapshot_item_carries_its_local_ned() {
+    let mut l = flying(&[
+        spot(16, 6, 20.0, 10.0, 10.0),
+        spot(16, 6, 30.0, 10.0, 10.0),
+        (19, 6, 0, 0, 10.0, 0.0),
+    ]);
+    // No fresh position of the vehicle: every item's place is unknown.
+    let t = l.t;
+    let v = l.core.state_json(t);
+    assert!(v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i["ned"].is_null()));
+    vehicle_here(&mut l);
+    let t = l.t;
+    let v = l.core.state_json(t);
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_ned(&items[0], [25.0, 15.0, -10.0]);
+    assert_ned(&items[1], [35.0, 15.0, -10.0]);
+    // A zero position (here) has none.
+    assert!(items[2]["ned"].is_null());
+}
+
+#[test]
 fn items_without_a_position_have_a_null_ned() {
     let mut l = flying(&[
         spot(93, 6, 20.0, 10.0, 10.0),

@@ -2438,9 +2438,18 @@
         "obstacle_margin_m": {
           "default": 1.5,
           "maximum": 5.0,
-          "minimum": 0.5,
+          "minimum": 0.3,
           "title": "Obstacle Margin M",
           "type": "number"
+        },
+        "place_class": {
+          "default": "open",
+          "enum": [
+            "open",
+            "confined"
+          ],
+          "title": "Place Class",
+          "type": "string"
         },
         "profile": {
           "default": "normal",
@@ -2451,6 +2460,20 @@
           ],
           "title": "Profile",
           "type": "string"
+        },
+        "prop_tip_radius_m": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 3.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prop Tip Radius M"
         },
         "return_blocked_land_after_s": {
           "default": 45,

@@ -113,6 +113,9 @@ impl Pilot {
         self.settle_brake(now_ms);
         self.watch_progress(watch, now_ms);
         if self.sup.hold.is_none() {
+            self.route_hold(now_ms);
+        }
+        if self.sup.hold.is_none() {
             if let Some(w) = self.supervised() {
                 self.auto_brake(w, now_ms);
             }
@@ -133,6 +136,7 @@ impl Pilot {
                     HOLD_OBSTACLE_CLOSE
                         | super::stall::HOLD_MISSION_STALLED
                         | super::stall::HOLD_RETURN_BLOCKED
+                        | super::route::HOLD_ROUTE_INFEASIBLE
                 )
             )
         {
@@ -210,7 +214,7 @@ impl Pilot {
         let pos = [l.n, l.e];
         let vel = [l.vn, l.ve];
         let a_h = self.limits_now(now_ms).a_h;
-        let margin = self.settings.pilot.obstacle_margin_m;
+        let margin = self.settings.pilot.effective_margin_m();
         let b = brake_limit(&self.obstacles, pos, vel, vel, a_h, margin, now_ms);
         let speed = vel[0].hypot(vel[1]);
         if !(b.close || speed - progress(vel, b.v) > BRAKE_EXCESS_MPS) {
@@ -239,7 +243,7 @@ impl Pilot {
             return false;
         };
         let pos = [l.n, l.e];
-        let margin = self.settings.pilot.obstacle_margin_m + RESUME_EXTRA_M;
+        let margin = self.settings.pilot.effective_margin_m() + RESUME_EXTRA_M;
         let toward = match resume {
             Resume::Mission => self.mission_target_ned().map(|t| [t[0], t[1]]),
             Resume::Return => Some(self.fc.home_ne()),

@@ -67,6 +67,8 @@ pub struct Goal {
     #[serde(default)]
     pub candidates: Option<Candidates>,
     /// The skill's own obstacle margin; `None` uses `pilot.obstacle_margin_m`.
+    /// Either is held to the place class's floor (0.5 m in an open place,
+    /// the propeller-tip radius plus 0.1 m in a confined one).
     #[serde(default)]
     pub margin_m: Option<f32>,
     /// For a `vantage` goal: where the lost subject is predicted to be and

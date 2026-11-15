@@ -224,6 +224,15 @@ impl Pilot {
         Some(d)
     }
 
+    /// When a mission stall skips its item: `stall_skip_after_s` from now,
+    /// or never (the operator answers) after `stall_max_auto_skips`
+    /// automatic skips in a row.
+    pub(super) fn mission_skip_deadline(&self, now_ms: u64) -> Option<u64> {
+        let cfg = &self.settings.pilot;
+        (self.sup.stall.auto_skips < cfg.stall_max_auto_skips)
+            .then(|| now_ms + u64::from(cfg.stall_skip_after_s) * 1000)
+    }
+
     fn raise_stall(
         &mut self,
         kind: Kind,
@@ -235,8 +244,7 @@ impl Pilot {
         let cfg = &self.settings.pilot;
         let window_s = cfg.stall_window_s;
         let deadline_ms = match kind {
-            Kind::Mission if self.sup.stall.auto_skips >= cfg.stall_max_auto_skips => None,
-            Kind::Mission => Some(now_ms + u64::from(cfg.stall_skip_after_s) * 1000),
+            Kind::Mission => self.mission_skip_deadline(now_ms),
             Kind::Return => Some(now_ms + u64::from(cfg.return_blocked_land_after_s) * 1000),
         };
         let (resume, reason) = match kind {

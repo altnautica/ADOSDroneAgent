@@ -31,6 +31,9 @@ pub fn action_for(cmd: &str) -> Option<&'static str> {
         // A pilot-only action: with no pilot in control the raw command
         // path has no such command and answers 400.
         "missionskip" => "mission_skip",
+        // The place class, set from the terminal UI or a planner.
+        "placeclass_open" => "place_class:open",
+        "placeclass_confined" => "place_class:confined",
         _ => return None,
     })
 }
@@ -115,6 +118,11 @@ mod tests {
         assert_eq!(action_for("pausemission"), Some("pause"));
         assert_eq!(action_for("killswitch"), Some("kill"));
         assert_eq!(action_for("missionskip"), Some("mission_skip"));
+        assert_eq!(action_for("placeclass_open"), Some("place_class:open"));
+        assert_eq!(
+            action_for("placeclass_confined"),
+            Some("place_class:confined")
+        );
         assert_eq!(action_for("mode"), None);
         assert_eq!(action_for("ekfsourceset"), None);
     }

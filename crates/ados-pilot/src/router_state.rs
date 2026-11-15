@@ -18,18 +18,35 @@ pub fn socket_path() -> PathBuf {
     ados_protocol::paths::run_dir().join(ados_protocol::paths::STATE_SOCK)
 }
 
-/// The `mission` object of one snapshot, without the mirror's navigation
-/// items, revision and upload counter: the mission state alone. `null` when the
-/// snapshot carries none.
+/// The `mission` object of one snapshot, with the mirror's navigation items
+/// cut down to the route (`route`: each item's `seq`, `cmd` and local `ned`)
+/// and without the revision and upload counter. `null` when the snapshot
+/// carries none.
 pub fn mission_of(mut snapshot: Value) -> Value {
     let mut mission = snapshot
         .get_mut(MISSION_TOPIC)
         .map(Value::take)
         .unwrap_or(Value::Null);
     if let Some(o) = mission.as_object_mut() {
-        o.remove("items");
+        let route: Vec<Value> = o
+            .remove("items")
+            .and_then(|i| match i {
+                Value::Array(a) => Some(a),
+                _ => None,
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| {
+                serde_json::json!({
+                    "seq": i.get("seq").cloned().unwrap_or(Value::Null),
+                    "cmd": i.get("cmd").cloned().unwrap_or(Value::Null),
+                    "ned": i.get("ned").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
         o.remove("rev");
         o.remove("uploads_seen");
+        o.insert("route".into(), Value::Array(route));
     }
     mission
 }

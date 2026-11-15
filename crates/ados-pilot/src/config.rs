@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ados_protocol::pilot::{AvoidMode, ControlMode, Profile};
+use ados_protocol::pilot::{AvoidMode, ControlMode, PlaceClass, Profile};
 use serde::{Deserialize, Serialize};
 
 /// Default agent config path.
@@ -65,6 +65,13 @@ pub struct PilotSection {
     pub avoid: AvoidMode,
     pub height_ref: HeightRef,
     pub obstacle_margin_m: f32,
+    /// The kind of place flown: `open`, or `confined` (a margin from the
+    /// propeller tips, the mission route check and the slow cap near walls).
+    /// The operator's choice only.
+    pub place_class: PlaceClass,
+    /// The airframe's propeller-tip radius from the CG, metres. A confined
+    /// place needs it.
+    pub prop_tip_radius_m: Option<f32>,
     pub max_alt_agl_m: f32,
     pub max_dist_m: f32,
     pub min_agl_fw_m: f32,
@@ -92,6 +99,35 @@ pub struct PilotSection {
     /// The declared flow and rangefinder mount, checked against the FC's
     /// parameters.
     pub fc_sensors: FcSensors,
+}
+
+/// The smallest obstacle margin in an open place, metres.
+pub const OPEN_MARGIN_FLOOR_M: f32 = 0.5;
+/// What a confined margin keeps beyond the propeller tips, metres.
+pub const CONFINED_TIP_EXTRA_M: f32 = 0.1;
+
+impl PilotSection {
+    /// The margin floor of the place class: 0.5 m in an open place, the
+    /// propeller-tip radius plus 0.1 m in a confined one (0.5 m while the
+    /// radius is unknown; the confined launch is refused then).
+    pub fn margin_floor_m(&self) -> f32 {
+        match (self.place_class, self.prop_tip_radius_m) {
+            (PlaceClass::Confined, Some(r)) => r + CONFINED_TIP_EXTRA_M,
+            _ => OPEN_MARGIN_FLOOR_M,
+        }
+    }
+
+    /// `margin` held to the class floor: a configured (or skill) margin
+    /// below it never flies.
+    pub fn floored_margin_m(&self, margin: f32) -> f32 {
+        margin.max(self.margin_floor_m())
+    }
+
+    /// The obstacle margin the pilot flies: the configured one, at least
+    /// the class floor.
+    pub fn effective_margin_m(&self) -> f32 {
+        self.floored_margin_m(self.obstacle_margin_m)
+    }
 }
 
 /// `pilot.fc_sensors`: where the flow module and the downward rangefinder sit,
@@ -124,6 +160,8 @@ impl Default for PilotSection {
             avoid: AvoidMode::Brake,
             height_ref: HeightRef::Agl,
             obstacle_margin_m: 1.5,
+            place_class: PlaceClass::Open,
+            prop_tip_radius_m: None,
             max_alt_agl_m: 120.0,
             max_dist_m: 500.0,
             min_agl_fw_m: 30.0,
@@ -242,5 +280,45 @@ mod tests {
         assert_eq!(flow.pos_m, Some([0.05, 0.0, 0.02]));
         assert_eq!(flow.orient_yaw_cdeg, Some(9000));
         assert_eq!(s.pilot.fc_sensors.rangefinder, None);
+    }
+
+    #[test]
+    fn the_margin_never_flies_below_the_class_floor() {
+        let mut p = PilotSection {
+            obstacle_margin_m: 0.3,
+            ..PilotSection::default()
+        };
+        assert_eq!(p.effective_margin_m(), OPEN_MARGIN_FLOOR_M);
+        p.obstacle_margin_m = 1.5;
+        assert_eq!(p.effective_margin_m(), 1.5);
+        p.place_class = PlaceClass::Confined;
+        p.prop_tip_radius_m = Some(0.377);
+        p.obstacle_margin_m = 0.3;
+        assert!((p.effective_margin_m() - 0.477).abs() < 1e-6);
+        p.obstacle_margin_m = 0.6;
+        assert_eq!(p.effective_margin_m(), 0.6);
+        // A skill's own margin is held to the floor too.
+        assert!((p.floored_margin_m(0.2) - 0.477).abs() < 1e-6);
+        // Confined without a radius keeps the open floor.
+        p.prop_tip_radius_m = None;
+        p.obstacle_margin_m = 0.3;
+        assert_eq!(p.effective_margin_m(), OPEN_MARGIN_FLOOR_M);
+    }
+
+    #[test]
+    fn the_place_class_and_tip_radius_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.yaml");
+        std::fs::write(
+            &p,
+            "pilot:\n  place_class: confined\n  prop_tip_radius_m: 0.377\n  obstacle_margin_m: 0.48\n",
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        assert_eq!(s.pilot.place_class, PlaceClass::Confined);
+        assert_eq!(s.pilot.prop_tip_radius_m, Some(0.377));
+        assert_eq!(s.pilot.obstacle_margin_m, 0.48);
+        persist(&p, "pilot", "place_class", "open").unwrap();
+        assert_eq!(Settings::load(&p).pilot.place_class, PlaceClass::Open);
     }
 }

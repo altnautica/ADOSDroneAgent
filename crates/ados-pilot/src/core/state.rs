@@ -195,6 +195,8 @@ impl Pilot {
             .rth_deadline_ms
             .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0);
         s.mission_stall = self.mission_stall_wire(now_ms);
+        s.place_class = self.settings.pilot.place_class;
+        s.route_check = self.route_check_wire();
         // The pilot flies a surface's point only while it owns motion; in
         // `fc_manual` / `elrs` a surface uses the FC's reposition instead.
         if self.control_mode() == ados_protocol::pilot::ControlMode::Ados {
@@ -239,7 +241,16 @@ impl Pilot {
             )
             && self.fc.vehicle_class() != VehicleClass::Fixedwing
             && !self.fc.vtol_forward();
-        s.speed_cap = applies.then(|| self.nav_cap(now_ms)).flatten();
+        // The confined cap is the slower one: it shows over the GNSS-denied
+        // cap, and also while the FC flies the mission slowed by it.
+        s.speed_cap = if applies {
+            self.confined_cap_wire(true)
+                .or_else(|| self.nav_cap(now_ms))
+        } else if fc_linked && owner == Owner::MissionFc {
+            self.confined_cap_wire(false)
+        } else {
+            None
+        };
         s.sensors = fc_linked.then(|| {
             crate::sensor_health::snapshot(
                 &self.fc.flow_track,

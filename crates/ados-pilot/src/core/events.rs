@@ -22,6 +22,10 @@ const EXTRA_PARAMS: &[&str] = &[
     // The landing speed: `LAND_SPD_MS` (m/s), `LAND_SPEED` (cm/s) before it.
     "LAND_SPD_MS",
     "LAND_SPEED",
+    // The default waypoint speed the confined cap restores in AUTO: `WP_SPD`
+    // (m/s), `WPNAV_SPEED` (cm/s) before it.
+    "WP_SPD",
+    "WPNAV_SPEED",
     // The EKF's horizontal position source per source set (3 = GPS): the
     // GNSS-denied speed cap.
     "EK3_SRC1_POSXY",
@@ -85,10 +89,11 @@ impl Pilot {
             "plugin.world-engine.occupancy" => self.obstacles.ingest_occupancy(payload),
             "plugin.world-engine.pose" => {
                 let pos = self.pos_ne(now_ms);
-                self.obstacles.ingest_pose(payload, pos);
+                self.obstacles.ingest_pose(payload, pos, now_ms);
             }
             "mission" => {
                 let m = <Mission as serde::Deserialize>::deserialize(payload).ok();
+                self.route.set_items(super::control::route_items(payload));
                 self.on_mission(m, now_ms);
             }
             "nav.state" => {

@@ -137,6 +137,8 @@ pub struct Pilot {
     /// The proximity brake and no-progress rule over FC-flown missions and
     /// returns, and the return's land fallback.
     sup: control::Supervisor,
+    /// The confined-place route check and cap ([`control::Route`]).
+    route: control::Route,
     low_batt_cancelled: bool,
     /// The low-battery action counting down or taken (`land` / `rth`),
     /// published as `low_battery_action`.
@@ -213,6 +215,7 @@ impl Pilot {
             take: take::Take::default(),
             rth_deadline_ms: None,
             sup: control::Supervisor::default(),
+            route: control::Route::default(),
             low_batt_cancelled: false,
             low_batt_action: None,
             view: ViewDemand::default(),
@@ -322,12 +325,15 @@ impl Pilot {
         self.fc.ekf_height(now_ms)
     }
 
+    /// The obstacle margin flown: a skill goal's own, else the configured
+    /// one, either held to the place class's floor.
     fn margin(&self) -> f32 {
+        let p = &self.settings.pilot;
         self.auth
             .lease()
             .and_then(|l| l.goal.as_ref())
             .and_then(|g| g.margin_m)
-            .unwrap_or(self.settings.pilot.obstacle_margin_m)
+            .map_or_else(|| p.effective_margin_m(), |m| p.floored_margin_m(m))
     }
 }
 
