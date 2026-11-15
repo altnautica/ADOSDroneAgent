@@ -132,6 +132,7 @@
  ],
  "failsafe_cause": null,
  "setup_step": null,
+ "setup_abort": null,
  "sensors": {
   "flow": {
    "state": "low",

@@ -78,10 +78,15 @@ const WARN_ONLY: &[(&str, f32)] = &[
 /// The rest of the copter ADOS profile, matching.
 const PROFILE_REST: &[(&str, f32)] = &[
     ("MAV_GCS_SYSID", 1.0),
-    ("FS_GCS_ENABLE", 1.0),
+    ("FS_GCS_ENABLE", 4.0),
     ("FS_GCS_TIMEOUT", 3.0),
+    ("FS_THR_ENABLE", 5.0),
     ("GUID_TIMEOUT", 1.0),
     ("RC_OVERRIDE_TIME", 1.0),
+    ("OA_TYPE", 0.0),
+    ("AVOID_ENABLE", 0.0),
+    ("SRTL_POINTS", 500.0),
+    ("SRTL_ACCURACY", 2.0),
 ];
 
 fn with<'a>(base: &[(&'a str, f32)], over: &[(&'a str, f32)]) -> Vec<(&'a str, f32)> {
