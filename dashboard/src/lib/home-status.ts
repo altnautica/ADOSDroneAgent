@@ -121,6 +121,7 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       controllerLost: controllerLost(i.pilot),
       ...pilotFailsafe(i.pilot),
       setupAbort: i.pilot?.setupAbort ?? null,
+      missionStall: i.pilot?.missionStall ?? null,
       preflightFailing: preflightFailing(checks, alerts, armed),
       armed,
       navSource: homeNavSource(i),

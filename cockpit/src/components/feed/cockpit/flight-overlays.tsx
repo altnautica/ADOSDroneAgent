@@ -1,8 +1,10 @@
 // The flow overlays over the video: a running launch sequence with its
 // Abort, the 3 s handover banner, the "Centre sticks to take control" gate
 // ring, "Sticks are with <surface>" with its hold-to-take-over, the link-loss
-// countdown, and the cancellable low-battery RTH countdown. Voice prompts
-// speak handovers, RTH, low battery and mission-state changes. They stack in
+// countdown, the cancellable low-battery RTH countdown, and the persistent
+// mission stall (Skip waypoint, Return, Land here; Land here only for a
+// blocked return). Voice prompts speak handovers, RTH, low battery, a stall,
+// a skipped waypoint and mission-state changes. They stack in
 // the Feed's alert column, under the alert cards and above the layer chips,
 // so none covers another. Everything here reads a fresh pilot frame only: a
 // stalled pilot clears them all (the chip turns LINK instead). Sizes are CSS
@@ -17,9 +19,12 @@ import { bannerSeverity, holdMs, launchRunning, launchStepName, lowBatteryLine, 
 import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/shared/hud/link-loss";
+import { missionStallOverlay, type MissionStallButton } from "@/shared/hud/mission-stall";
+import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
 import { severityTextColor } from "@/shared/hud/status-pill";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
+import { useConfirmStore } from "@/stores/confirm-store";
 import { speak } from "@/stores/voice-store";
 
 /** A countdown banner's colours by its spec severity. */
@@ -28,6 +33,14 @@ const SEVERITY_CLASS: Record<BannerSeverity, string> = {
   warning: "border-warn bg-warn/85",
   critical: "border-err bg-err/85",
 };
+
+/** Send a stall overlay's action; a refusal or a timeout shows on the
+ *  cockpit's ack line. */
+function sendStallAction(b: MissionStallButton): void {
+  void sendPilotAction(b.action).then((r) => {
+    if (!r.ok) useConfirmStore.getState().setAck({ text: `${b.label}: ${refusalText(r.err)}`, kind: "err" });
+  });
+}
 
 function GateRing({ progress }: { progress: number }) {
   const r = 26;
@@ -78,6 +91,7 @@ export function FlightOverlays() {
   const banner = visibleBanner(pilot.banner, bannerSeen?.at ?? now, now);
   const elsewhere = sticksElsewhere(pilot);
   const seq = launchRunning(pilot.sequence) ? pilot.sequence : null;
+  const stall = missionStallOverlay(pilot.missionStall);
 
   return (
     <div className="pointer-events-none flex w-full flex-col items-center gap-[8px] px-[8px] empty:hidden" data-testid="flight-overlays">
@@ -119,6 +133,30 @@ export function FlightOverlays() {
           >
             {specText("flow.low_battery.cancel")}
           </button>
+        </div>
+      ) : null}
+      {stall ? (
+        <div
+          role="alert"
+          data-testid="mission-stall-banner"
+          data-kind={stall.kind}
+          data-severity={stall.severity}
+          className={`pointer-events-auto flex w-full max-w-[704px] flex-wrap items-center gap-[12px] rounded-[var(--fs-radius)] border px-[14px] py-[8px] text-on-status ${SEVERITY_CLASS[stall.severity]}`}
+        >
+          <div className="min-w-[240px] flex-1 text-[16px] font-semibold">{stall.title}</div>
+          <div className="flex gap-[8px]">
+            {stall.actions.map((b) => (
+              <button
+                key={b.action}
+                type="button"
+                onClick={() => sendStallAction(b)}
+                data-testid={`mission-stall-${b.action}`}
+                className="min-h-[48px] rounded-[var(--fs-radius-sm)] border border-on-status px-[14px] font-semibold"
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
         </div>
       ) : null}
       {pilot.linkLossInS !== null ? (

@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
+import { CountdownCard } from "@/components/panels/countdown-card";
 import { BATTERY_POLL_MS, useBatteryHealth } from "@/hooks/use-battery-health";
 import { navPilot, useFlightChip } from "@/hooks/use-flight-chip";
 import { HEARTBEAT_POLL_MS, useHeartbeat } from "@/hooks/use-heartbeat";
@@ -16,7 +17,9 @@ import { useVehicleLiveness } from "@/hooks/use-vehicle-liveness";
 import { useVehicleTelemetry, VEHICLE_TELEMETRY_POLL_MS } from "@/hooks/use-vehicle-telemetry";
 import { liveData } from "@/lib/freshness";
 import { chipTextColor } from "@/lib/chip-color";
+import { countdownCard } from "@/lib/countdown-card";
 import { batteryFixAlertId, freshNavFrames, homePill, homeStatusLines, poseAgeText, type StatusFull } from "@/lib/home-status";
+import { sendPilotAction } from "@/lib/pilot-action";
 import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
 import { severityClasses } from "@/shared/format";
@@ -84,8 +87,9 @@ const PILL_TONE = {
   critical: "border-destructive/60 text-destructive",
 } as const;
 
-/** The cockpit's status pill and its alert list, plus the link-loss, AGL,
- *  sticks and time-to-reserve lines. Read-only: nothing here acknowledges. */
+/** The countdown card (the pilot's banner, a low-battery return, a mission
+ *  stall, each with its actions), the cockpit's status pill and its alert
+ *  list, plus the link-loss, AGL, sticks and time-to-reserve lines. */
 function VehicleStatus() {
   const nav = useNavStatus();
   const heartbeat = useHeartbeat();
@@ -122,8 +126,10 @@ function VehicleStatus() {
     telemetry: liveTelemetry,
     battery: liveData(battery, BATTERY_POLL_MS, now) ?? null,
   });
+  const card = countdownCard(fresh.pilot, inputs.pilotAgeMs ?? 0, now);
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="vehicle-status">
+      {card ? <CountdownCard card={card} send={sendPilotAction} /> : null}
       <details className="group">
         <summary
           className={cn(

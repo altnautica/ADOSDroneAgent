@@ -42,8 +42,8 @@ export function computeAlerts(i: AlertInputs): CockpitAlert[] {
 
 /** The pill inputs the cockpit feeds the shared status-pill rules beyond its
  *  alerts: the pilot frame's age (null with no pilot state), whether the
- *  agent answered its last status poll, a lost controller, and on the ground
- *  the pre-flight checklist's failing items. */
+ *  agent answered its last status poll, a lost controller, a mission stall,
+ *  and on the ground the pre-flight checklist's failing items. */
 export function pillWiring(i: {
   pilot: { at: number; data: PilotState } | null;
   nowMs: number;
@@ -60,6 +60,7 @@ export function pillWiring(i: {
   fcFailsafe: boolean;
   failsafeCause: string | null;
   setupAbort: string | null;
+  missionStall: PilotState["missionStall"];
 } {
   return {
     pilotAgeMs: i.pilot ? Math.max(0, i.nowMs - i.pilot.at) : null,
@@ -67,6 +68,7 @@ export function pillWiring(i: {
     controllerLost: controllerLost(i.pilot?.data ?? null),
     ...pilotFailsafe(i.pilot?.data ?? null),
     setupAbort: i.pilot?.data.setupAbort ?? null,
+    missionStall: i.pilot?.data.missionStall ?? null,
     // Unknown arm state (FC link down) counts as possibly airborne.
     preflightFailing: preflightFailing(i.checks, i.alerts, i.armed),
   };

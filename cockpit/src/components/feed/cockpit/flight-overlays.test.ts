@@ -1,8 +1,12 @@
 // @vitest-environment happy-dom
 // The flight overlays as the real component renders them: tips hold while a
-// launch step, handover, link-loss, low-battery or sticks banner is up and
-// never sit over one, and a refused Abort shows its reason on screen.
+// launch step, handover, link-loss, low-battery, mission stall or sticks
+// banner is up and never sit over one, a refused Abort shows its reason on
+// screen, and the golden stall frame renders its overlay and sends each
+// action.
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createElement, Fragment } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
@@ -25,7 +29,7 @@ vi.mock("@/stores/voice-store", () => ({ speak: () => {} }));
 import { FlightOverlays } from "@/components/feed/cockpit/flight-overlays";
 import { SkillAckLine } from "@/components/feed/skill-picker/skill-picker";
 import { tipAvoidRects } from "@/components/feed/tip-rects";
-import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
@@ -124,5 +128,64 @@ describe("a refused Abort from the flight overlay", () => {
     useCockpitUiStore.setState({ launchRefusal: "old", sheet: null });
     useCockpitUiStore.getState().openSheet("launch");
     expect(useCockpitUiStore.getState().launchRefusal).toBeNull();
+  });
+});
+
+describe("the mission stall overlay", () => {
+  const raw = JSON.parse(
+    readFileSync(path.resolve(__dirname, "../../../../../crates/ados-control/tests/fixtures/pilot-frame-stall.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const golden = parsePilotState(raw)!;
+  const show = (p: PilotState) => useNavStreamStore.setState({ pilot: { data: p, at: Date.now() } });
+  const button = (action: string) => document.querySelector<HTMLButtonElement>(`[data-testid=mission-stall-${action}]`);
+
+  beforeEach(() => {
+    pilotLink.calls.length = 0;
+    pilotLink.result = { ok: true };
+  });
+
+  it("renders the golden stall, critical, with Skip waypoint, Return and Land here", async () => {
+    show(golden);
+    await mount();
+    const el = document.querySelector("[data-testid=mission-stall-banner]");
+    expect(el?.getAttribute("role")).toBe("alert");
+    expect(el?.getAttribute("data-severity")).toBe("critical");
+    expect(el?.textContent).toContain("No progress to waypoint 3 for 15 s · Skipping in 33 s");
+    const buttons = [...(el?.querySelectorAll("button") ?? [])].map((b) => b.textContent);
+    expect(buttons).toEqual(["Skip waypoint", "Return", "Land here"]);
+    expect(alertBannerVisible(document, () => true)).toBe(true);
+  });
+
+  it("sends each action through the pilot link", async () => {
+    show(golden);
+    await mount();
+    for (const action of ["mission_skip", "rth", "land"]) {
+      await act(async () => button(action)?.click());
+    }
+    expect(pilotLink.calls).toEqual(["mission_skip", "rth", "land"]);
+  });
+
+  it("offers Land here only for a blocked return", async () => {
+    show(parsePilotState({ ...raw, mission_stall: { kind: "return", seq: null, wp_label: null, since_ms: 1, skip_in_s: 40.2, window_s: 20 } })!);
+    await mount();
+    expect(document.querySelector("[data-testid=mission-stall-banner]")?.textContent).toContain("Return blocked · Landing in 41 s");
+    expect(button("mission_skip")).toBeNull();
+    expect(button("rth")).toBeNull();
+    await act(async () => button("land")?.click());
+    expect(pilotLink.calls).toEqual(["land"]);
+  });
+
+  it("shows a refused action on the ack line", async () => {
+    pilotLink.result = { ok: false, err: "busy" };
+    show(golden);
+    await mount();
+    await act(async () => button("mission_skip")?.click());
+    expect(useConfirmStore.getState().ack).toEqual({ text: `Skip waypoint: ${refusalText("busy")}`, kind: "err" });
+  });
+
+  it("is gone once the stall clears", async () => {
+    show({ ...golden, missionStall: null });
+    await mount();
+    expect(document.querySelector("[data-testid=mission-stall-banner]")).toBeNull();
   });
 });

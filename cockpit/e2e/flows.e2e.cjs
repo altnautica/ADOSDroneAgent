@@ -2,13 +2,20 @@
 // run). Cases: the flow overlays clearing on a stalled pilot (`flow-stale`),
 // a running launch's step and Abort (`sequence`), the Mode sheet's pending
 // pick (`mode-pending`), a tap on a hold control reading "Keep holding"
-// (`hold-hint`), and Escape / a press outside / the controller's back
-// closing the topmost sheet (`overlay-close`).
+// (`hold-hint`), Escape / a press outside / the controller's back closing
+// the topmost sheet (`overlay-close`), and the mission stall overlay from the
+// golden stall frame with its actions and the left column's Return home
+// reaching the pilot's `rth` (`mission-stall`).
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 
-const { GROUND_SHEETS, PILOT_AIR, PILOT_GROUND, SHEET, SHOTS, debugOnFail, pilotPage, runCases, sheetSettled } = require("./harness.cjs");
+const { GROUND_SHEETS, PILOT_AIR, PILOT_GROUND, SHEET, SHOTS, debugOnFail, holdOn, pilotPage, runCases, sheetSettled } = require("./harness.cjs");
+
+const STALL_FRAME = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "../../crates/ados-control/tests/fixtures/pilot-frame-stall.json"), "utf8"),
+);
 
 /** A stalled pilot (no frame for more than `stale_after_ms`, 2 s) clears
  *  every overlay drawn from its last frame: the low-battery and link-loss
@@ -146,7 +153,53 @@ async function overlayCloseCase(browser) {
   console.log("Escape, a press outside and the controller's back close the topmost sheet first");
 }
 
+/** The golden stall frame shows its persistent overlay next to the
+ *  countdowns; Skip waypoint, Return and Land here send the pilot's
+ *  `mission_skip`, `rth` and `land`; the left column's Return home (held)
+ *  sends the pilot's `rth`, never a MAVLink RTL. */
+async function missionStallCase(browser) {
+  // The banner's slot is the frame's own past time; keep it on screen.
+  const sim = { pilot: { ...STALL_FRAME, banner: { ...STALL_FRAME.banner, until_ms: null } }, airborne: true };
+  const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
+  const overlay = page.getByTestId("mission-stall-banner");
+  await debugOnFail(page, "mission-stall", async () => {
+    await overlay.waitFor({ state: "visible", timeout: 5000 });
+  });
+  assert.match(await overlay.innerText(), /No progress to waypoint 3 for 15 s · Skipping in 33 s/);
+  assert.equal(await overlay.getAttribute("data-severity"), "critical");
+  await page.screenshot({ path: path.join(SHOTS, "mission-stall.png") });
+  const actions = () => sim.sent.filter((f) => f.op === "action").map((f) => f.name);
+  for (const name of ["mission_skip", "rth", "land"]) {
+    await page.getByTestId(`mission-stall-${name}`).click();
+    const deadline = Date.now() + 2000;
+    while (!actions().includes(name) && Date.now() < deadline) await page.waitForTimeout(50);
+  }
+  assert.deepEqual(actions(), ["mission_skip", "rth", "land"]);
+
+  // A blocked return: Land here only.
+  sim.pilot = { ...sim.pilot, mission_stall: { kind: "return", seq: null, wp_label: null, since_ms: 1, skip_in_s: 40.2, window_s: 20 } };
+  await page.getByTestId("mission-stall-banner").filter({ hasText: "Return blocked · Landing in 41 s" }).waitFor({ timeout: 3000 });
+  assert.equal(await page.getByTestId("mission-stall-mission_skip").count(), 0);
+  assert.equal(await page.getByTestId("mission-stall-rth").count(), 0);
+  await page.screenshot({ path: path.join(SHOTS, "return-blocked.png") });
+
+  // The left column's Return home in ADOS control: the pilot's rth.
+  sim.pilot = { ...sim.pilot, mission_stall: null };
+  await page.getByTestId("mission-stall-banner").waitFor({ state: "detached", timeout: 3000 });
+  const before = actions().filter((n) => n === "rth").length;
+  await page.getByTestId("left-rth").click();
+  await sheetSettled(page);
+  await holdOn(page, page.locator(SHEET).getByRole("button", { name: /Hold to confirm/ }), 1900);
+  const deadline = Date.now() + 2000;
+  while (actions().filter((n) => n === "rth").length === before && Date.now() < deadline) await page.waitForTimeout(50);
+  assert.equal(actions().filter((n) => n === "rth").length, before + 1, `Return home sends the pilot's rth (sent ${JSON.stringify(sim.sent)})`);
+  assert.deepEqual(sim.commands, [], "no /api/command RTL beside it");
+  await ctx.close();
+  console.log("mission stall: overlay from the golden frame, Skip/Return/Land send mission_skip/rth/land; Return home sends the pilot's rth");
+}
+
 runCases({
+  "mission-stall": missionStallCase,
   "flow-stale": flowStaleCase,
   sequence: sequenceCase,
   "mode-pending": modePendingCase,

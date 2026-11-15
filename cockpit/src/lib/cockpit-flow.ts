@@ -8,6 +8,7 @@ import { BANNERS } from "@/lib/cockpit-spec";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { countdownS } from "@/shared/hud/format";
+import { missionStallVoiceKey } from "@/shared/hud/mission-stall";
 import { refusalText } from "@/shared/hud/refusal";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
 import { STORAGE_CRIT_PCT, STORAGE_WARN_PCT } from "@/shared/hud/status-pill";
@@ -55,8 +56,11 @@ export function lowBatteryLine(rthCountdownS: number, action: "land" | "rth" | n
   return specText(key, { in_s: countdownS(rthCountdownS * 1000) });
 }
 
-/** The voice prompt for a change between two pilot states, or null. */
+/** The voice prompt for a change between two pilot states, or null. A new
+ *  mission stall, blocked return or skipped waypoint speaks first. */
 export function voicePrompt(prev: PilotState | null, next: PilotState): string | null {
+  const stallKey = missionStallVoiceKey(prev, next);
+  if (stallKey) return specText(stallKey);
   if (next.banner && next.banner.textKey !== prev?.banner?.textKey) {
     if (next.banner.textKey === "pilot.banner.ados_control" || next.banner.textKey === "pilot.banner.ados_engaged") {
       return specText("voice.ados_control");
