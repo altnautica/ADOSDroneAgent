@@ -3833,6 +3833,38 @@
           "title": "Class Labels",
           "type": "array"
         },
+        "crop_input_size": {
+          "anyOf": [
+            {
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Crop Input Size"
+        },
+        "crop_model_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Crop Model Path"
+        },
+        "full_frame_hz": {
+          "default": 2.0,
+          "minimum": 0,
+          "title": "Full Frame Hz",
+          "type": "number"
+        },
         "head": {
           "default": "",
           "title": "Head",
@@ -3877,13 +3909,13 @@
           "title": "Priority"
         },
         "rate_hz": {
-          "default": 3.0,
+          "default": 10.0,
           "minimum": 0,
           "title": "Rate Hz",
           "type": "number"
         },
         "threads": {
-          "default": 1,
+          "default": 2,
           "maximum": 4294967295,
           "minimum": 1,
           "title": "Threads",

@@ -584,3 +584,24 @@ def test_the_migration_is_not_undone_by_the_next_config_write(tmp_path):
     reloaded = MavlinkConfig(**mem["mavlink"])
     rewritten = _yaml.safe_load(_yaml.safe_dump(reloaded.model_dump()))
     assert rewritten["ws_proxy_enforce_auth"] is True
+
+
+def test_the_detector_model_defaults_and_crop_keys_match_the_engine():
+    # The settings surfaces read the model's defaults for a node with no
+    # explicit value: they must be the engine's own (10 Hz, 2 threads, whole
+    # frame at 2 Hz while following), and the crop-pass keys must be part of
+    # the model and survive a dump.
+    from ados.core.config.system import VisionDetectorConfig
+
+    det = VisionDetectorConfig(
+        model_id="det",
+        model_path="/m.onnx",
+        crop_model_path="/m320.onnx",
+        crop_input_size=320,
+    )
+    dumped = yaml.safe_load(yaml.safe_dump(det.model_dump()))
+    assert dumped["rate_hz"] == 10.0
+    assert dumped["threads"] == 2
+    assert dumped["full_frame_hz"] == 2.0
+    assert dumped["crop_model_path"] == "/m320.onnx"
+    assert dumped["crop_input_size"] == 320

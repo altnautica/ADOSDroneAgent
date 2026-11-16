@@ -37,12 +37,21 @@ class VisionDetectorConfig(BaseModel):
     head: str = ""
     class_labels: list[str] = Field(default_factory=list)
     # Target inference rate per camera; 0 runs on every captured frame.
-    rate_hz: float = Field(default=3.0, ge=0)
+    rate_hz: float = Field(default=10.0, ge=0)
     # Higher runs first when several models are due at once.
     priority: int | None = Field(default=None, ge=0, le=U8_MAX)
     # Inference threads (ONNX Runtime intra-op; inter-op is one, and neither
     # spin-waits).
-    threads: int = Field(default=1, ge=1, le=U32_MAX)
+    threads: int = Field(default=2, ge=1, le=U32_MAX)
+    # The model the crop pass around a designated subject runs, when not the
+    # detector itself (the same detector at a smaller input).
+    crop_model_path: str | None = None
+    # The crop model's square input size; unset is the detector's input size,
+    # or the size a self-describing model file states.
+    crop_input_size: int | None = Field(default=None, ge=0, le=U32_MAX)
+    # While a designated subject is tracked on its crop, how often the whole
+    # frame runs; 0 runs it on every batch.
+    full_frame_hz: float = Field(default=2.0, ge=0)
 
 
 class VisionReidConfig(BaseModel):

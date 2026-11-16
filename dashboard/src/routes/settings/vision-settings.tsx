@@ -12,7 +12,10 @@ import { visionBackendOptions } from "@/lib/vision-backends";
 import { detectionDemandOptions } from "@/lib/vision-demand";
 
 /** The detector's per-camera rate when `detector.rate_hz` is absent. */
-const DEFAULT_DETECTOR_RATE_HZ = 3;
+const DEFAULT_DETECTOR_RATE_HZ = 10;
+
+/** The detector's inference threads when `detector.threads` is absent. */
+const DEFAULT_DETECTOR_THREADS = 2;
 
 /** The depth model's threads when `depth.threads` is absent. */
 const DEFAULT_DEPTH_THREADS = 2;
@@ -187,7 +190,7 @@ export function VisionSettings() {
                       id="vision-detector-threads"
                       label={t("settingsMore.vision.detectorThreadsLabel")}
                       hint={t("settingsMore.vision.detectorThreadsHint")}
-                      value={vision.detector.threads}
+                      value={vision.detector.threads ?? DEFAULT_DETECTOR_THREADS}
                       integer
                       min={1}
                     />
