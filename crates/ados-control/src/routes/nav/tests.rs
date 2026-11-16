@@ -95,6 +95,31 @@ fn scans_and_the_lidar_status_reach_the_lidar_view() {
     assert!(hub.latest(NavKind::Scan).is_some());
 }
 
+/// Scans that keep arriving with nothing in them are a lidar that sees
+/// nothing, never a healthy one: `GET /api/v1/sensors` judges them
+/// `no_returns` without a pilot, and one return ends it.
+#[test]
+fn scans_without_a_return_read_no_returns_on_the_sensors_route() {
+    use crate::routes::sensing::health::{lidar_state, THRESHOLDS};
+    let hub = NavHub::new();
+    let scan = |ranges: Vec<f64>| {
+        json!({"frame": "body_frd", "angle_start_rad": 0.0,
+               "angle_increment_rad": std::f64::consts::TAU / 360.0, "ranges_m": ranges})
+    };
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(1300) {
+        hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 1, scan(vec![0.0; 360]));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(lidar_state(&hub.lidar_view(), &THRESHOLDS), "no_returns");
+    let mut one = vec![0.0; 360];
+    one[90] = 3.2;
+    hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 1, scan(one));
+    // One return ends it (the rate over real sleeps may read degraded).
+    assert_ne!(lidar_state(&hub.lidar_view(), &THRESHOLDS), "no_returns");
+    assert_eq!(hub.lidar_view().empty_ms, None);
+}
+
 #[test]
 fn every_routed_topic_is_subscribed() {
     for topic in EXPORT_TOPICS {

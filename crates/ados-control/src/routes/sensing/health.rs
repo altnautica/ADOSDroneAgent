@@ -32,6 +32,7 @@ pub(crate) struct Thresholds {
     pub lidar_min_hz: f64,
     pub lidar_max_hz: f64,
     pub lidar_lost_ms: u64,
+    pub lidar_no_returns_ms: u64,
     pub camera_stale_ms: u64,
     pub camera_lost_ms: u64,
 }
@@ -51,6 +52,7 @@ pub(crate) static THRESHOLDS: LazyLock<Thresholds> = LazyLock::new(|| {
         lidar_min_hz: f(&t["lidar"]["min_hz"]),
         lidar_max_hz: f(&t["lidar"]["max_hz"]),
         lidar_lost_ms: u(&t["lidar"]["lost_ms"]),
+        lidar_no_returns_ms: u(&t["lidar"]["no_returns_ms"]),
         camera_stale_ms: u(&t["camera"]["stale_ms"]),
         camera_lost_ms: u(&t["camera"]["lost_ms"]),
     }
@@ -176,7 +178,12 @@ pub(crate) fn health_body(
     let lidar = pilot
         .and_then(|(s, age)| {
             let v = s.get("lidar")?;
-            let mut l = pilot_block(v, &["ok", "degraded", "lost", "absent"], &["rate_hz"], age)?;
+            let mut l = pilot_block(
+                v,
+                &["ok", "degraded", "lost", "no_returns", "absent"],
+                &["rate_hz"],
+                age,
+            )?;
             let health = v
                 .get("health")
                 .and_then(Value::as_str)
@@ -227,9 +234,10 @@ fn pilot_block(
 /// The lidar verdict without a pilot, by the pilot's own rules: `lost` when
 /// the driver reports it disconnected (with or without a device) or the scans
 /// stopped for `lost_ms`; `absent` before any scan (even while the driver
-/// reports it connected); `degraded` when a measured rate is off the band or
-/// the driver reports a warning or error; `ok` otherwise (too few scans to
-/// measure a rate is not off the band).
+/// reports it connected); `no_returns` when the scans keep arriving but none
+/// for `no_returns_ms` returned a surface; `degraded` when a measured rate is
+/// off the band or the driver reports a warning or error; `ok` otherwise (too
+/// few scans to measure a rate is not off the band).
 pub(crate) fn lidar_state(v: &LidarView, t: &Thresholds) -> &'static str {
     let status = v.status.as_ref();
     if status.is_some_and(|s| !s.connected) {
@@ -247,7 +255,9 @@ pub(crate) fn lidar_state(v: &LidarView, t: &Thresholds) -> &'static str {
     let unhealthy = status
         .and_then(|s| s.health.as_deref())
         .is_some_and(|h| h == "warning" || h == "error");
-    if off_rate || unhealthy {
+    if v.empty_ms.is_some_and(|e| e >= t.lidar_no_returns_ms) {
+        "no_returns"
+    } else if off_rate || unhealthy {
         "degraded"
     } else {
         "ok"

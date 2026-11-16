@@ -46,22 +46,51 @@ pub struct LidarView {
     pub rate_hz: Option<f64>,
     /// Milliseconds since the last scan; `None` when none has arrived.
     pub age_ms: Option<u64>,
+    /// Milliseconds since the first of the scans that have carried no return
+    /// (no range above [`MIN_RETURN_M`]); `None` while the newest scan
+    /// returned a surface, or before any scan.
+    pub empty_ms: Option<u64>,
     /// The driver's report, only while fresh.
     pub status: Option<LidarStatus>,
 }
 
-/// The arrivals and the driver status.
+/// A scan bin at or under this range returned nothing (the pilot's rule).
+pub const MIN_RETURN_M: f64 = 0.05;
+
+/// The bins of a `plugin.world-engine.scan` payload that returned a surface.
+pub fn scan_returns(payload: &Value) -> usize {
+    payload
+        .get("ranges_m")
+        .and_then(Value::as_array)
+        .map_or(0, |ranges| {
+            ranges
+                .iter()
+                .filter_map(Value::as_f64)
+                .filter(|r| r.is_finite() && *r > MIN_RETURN_M)
+                .count()
+        })
+}
+
+/// The arrivals, their returns and the driver status.
 #[derive(Debug, Default)]
 pub(crate) struct LidarWatch {
     scans: VecDeque<Instant>,
     last_scan: Option<Instant>,
+    /// The first scan of the current run without a return.
+    empty_since: Option<Instant>,
     status: Option<(LidarStatus, Instant)>,
 }
 
 impl LidarWatch {
-    pub(crate) fn on_scan(&mut self, now: Instant) {
+    /// One scan arrived with `returns` bins that returned a surface.
+    pub(crate) fn on_scan(&mut self, returns: usize, now: Instant) {
         self.scans.push_back(now);
         self.last_scan = Some(now);
+        if returns > 0 {
+            self.empty_since = None;
+        } else {
+            self.empty_since.get_or_insert(now);
+        }
         self.prune(now);
     }
 
@@ -93,6 +122,7 @@ impl LidarWatch {
         LidarView {
             rate_hz,
             age_ms: self.last_scan.and_then(ms),
+            empty_ms: self.empty_since.and_then(ms),
             status: self
                 .status
                 .as_ref()
@@ -113,7 +143,7 @@ mod tests {
         let mut w = LidarWatch::default();
         assert_eq!(w.view(t0), LidarView::default());
         for i in 0..30 {
-            w.on_scan(t0 + Duration::from_millis(100 * i));
+            w.on_scan(1, t0 + Duration::from_millis(100 * i));
         }
         let v = w.view(t0 + Duration::from_millis(2950));
         let rate = v.rate_hz.unwrap();

@@ -40,7 +40,7 @@ static STATES: LazyLock<BTreeMap<String, BTreeMap<String, Entry>>> = LazyLock::n
 
 const FLOW_STATES: [&str; 4] = ["ok", "low", "lost", "absent"];
 const RANGE_STATES: [&str; 4] = ["ok", "out_of_range", "lost", "absent"];
-const LIDAR_STATES: [&str; 4] = ["ok", "degraded", "lost", "absent"];
+const LIDAR_STATES: [&str; 5] = ["ok", "degraded", "lost", "no_returns", "absent"];
 const CAMERA_STATES: [&str; 3] = ["live", "stale", "lost"];
 
 /// The placeholder for a missing value, as the shared formatter writes it.
@@ -303,6 +303,12 @@ mod tests {
             &serde_json::json!({"state": "degraded", "rate_hz": 4.0}),
         );
         assert_eq!(s.lidar_word().tone, Tone::Caution);
+        // Scanning with nothing returned: amber, never the ready tone.
+        let empty = sensors_with("lidar", &serde_json::json!({"state": "no_returns"}));
+        assert_eq!(
+            (empty.lidar_word().text.as_str(), empty.lidar_word().tone),
+            ("Lidar no returns", Tone::Caution)
+        );
         assert_eq!(s.flow_word().tone, Tone::Neutral);
         let lost = sensors_with("range", &serde_json::json!({"state": "lost"}));
         assert_eq!(lost.range_word().tone, Tone::Fault);

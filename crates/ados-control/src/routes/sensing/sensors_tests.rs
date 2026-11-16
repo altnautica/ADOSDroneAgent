@@ -5,6 +5,7 @@ use std::time::Duration;
 const NO_LIDAR: LidarView = LidarView {
     rate_hz: None,
     age_ms: None,
+    empty_ms: None,
     status: None,
 };
 
@@ -308,6 +309,7 @@ fn a_scanning_rig_lidar_lists_its_measured_rate_not_idle() {
     let scanning = LidarView {
         rate_hz: Some(9.8),
         age_ms: Some(40),
+        empty_ms: None,
         status: Some(LidarStatus {
             device: Some("/dev/ttyUSB0".into()),
             connected: true,

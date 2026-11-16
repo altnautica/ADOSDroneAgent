@@ -149,6 +149,7 @@ fn the_lidar_verdict_follows_the_spec_thresholds() {
     let v = |rate: Option<f64>, age: Option<u64>, s: Option<LidarStatus>| LidarView {
         rate_hz: rate,
         age_ms: age,
+        empty_ms: None,
         status: s,
     };
     let cases = [
@@ -182,6 +183,29 @@ fn the_lidar_verdict_follows_the_spec_thresholds() {
         (v(Some(10.0), Some(500), None), "lost"),
         (v(Some(10.0), Some(501), None), "lost"),
         (v(Some(10.0), Some(80), status(false, None)), "lost"),
+        // Scanning at the full rate with nothing returned since the hold.
+        (
+            LidarView {
+                empty_ms: Some(t.lidar_no_returns_ms),
+                ..v(Some(10.0), Some(80), status(true, Some("good")))
+            },
+            "no_returns",
+        ),
+        (
+            LidarView {
+                empty_ms: Some(t.lidar_no_returns_ms - 1),
+                ..v(Some(10.0), Some(80), status(true, Some("good")))
+            },
+            "ok",
+        ),
+        // Stopped scanning is lost, whatever came before.
+        (
+            LidarView {
+                empty_ms: Some(5000),
+                ..v(Some(10.0), Some(600), None)
+            },
+            "lost",
+        ),
     ];
     for (view, want) in cases {
         assert_eq!(lidar_state(&view, t), want, "{view:?}");
@@ -200,6 +224,7 @@ fn the_lidar_reads_the_pilot_verdict_whenever_a_fresh_pilot_frame_carries_one() 
     let connected_no_scan = LidarView {
         rate_hz: None,
         age_ms: None,
+        empty_ms: None,
         status: Some(LidarStatus {
             device: Some("/dev/ttyUSB0".into()),
             connected: true,
@@ -218,6 +243,16 @@ fn the_lidar_reads_the_pilot_verdict_whenever_a_fresh_pilot_frame_carries_one() 
         h["lidar"],
         json!({"state": "lost", "rate_hz": null, "health": "error", "age_ms": 940})
     );
+    // The pilot's no-returns verdict passes through, never reread as absent.
+    let seeing_nothing = json!({"owner": "pilot", "sensors": {
+        "lidar": {"state": "no_returns", "rate_hz": 10.0, "health": "good", "age_ms": 60}}});
+    let inputs = HealthInputs {
+        pilot: Some((seeing_nothing, 40)),
+        lidar: connected_no_scan.clone(),
+        config_text: String::new(),
+    };
+    let h = health_body(&p, &inputs, SystemTime::now(), 0);
+    assert_eq!(h["lidar"]["state"], "no_returns");
     // A stale pilot frame no longer speaks: the local fallback, pilot rules.
     let inputs = HealthInputs {
         pilot: Some((frame, PILOT_FRESH_MS + 1)),

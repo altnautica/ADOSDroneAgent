@@ -332,7 +332,8 @@ impl NavHub {
         match route(topic, publisher) {
             Routed::Latest(kind) => {
                 if kind == NavKind::Scan {
-                    self.inner.lock().lidar.on_scan(Instant::now());
+                    let returns = super::lidar_watch::scan_returns(&payload);
+                    self.inner.lock().lidar.on_scan(returns, Instant::now());
                 }
                 self.store_latest(kind, ts_ms, payload)
             }
