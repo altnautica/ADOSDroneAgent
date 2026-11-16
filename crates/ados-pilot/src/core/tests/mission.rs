@@ -49,7 +49,7 @@ fn launched_into_mission(when_done: Option<&str>) -> World {
     }
     assert!(ok(&w.action_args("launch", args)));
     w.mission("loaded", 0, 4);
-    w.run(3000);
+    w.fly_takeoff(30_000);
     assert!(w.armed);
     assert_eq!(w.mode, copter::AUTO);
     assert_eq!(w.p.owner(), Owner::MissionFc);

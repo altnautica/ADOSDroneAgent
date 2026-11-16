@@ -225,6 +225,30 @@ pub struct Sequence {
     /// `hold`, `skill`, `mission` or `goto`.
     pub after: String,
     pub error: Option<String>,
+    /// The supervised lift-off, from its spool-up until it hands over in
+    /// the air (or stops on the ground); omitted while the launch runs none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liftoff: Option<Liftoff>,
+}
+
+/// The supervised lift-off: the pilot levels the airframe on the ground with
+/// its trim loaded into the FC's rate loop, then lifts off level.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Liftoff {
+    /// `spool` (motors spinning up), `level` (loading the trim on the
+    /// ground), `probe` (finding the trim on the ground: first flight on
+    /// this airframe), `lift`, `climb` (clear of the ground, level),
+    /// `done` (handed over) or `stopped` (stopped on the ground; `text`
+    /// says why).
+    pub phase: String,
+    /// What the phase means in the operator's words, e.g. "Levelling on the
+    /// ground", "Lifting off", "Stopped: nose-heavy by about 35 mm, move
+    /// the battery back".
+    pub text: String,
+    /// `learned` (the trim this airframe flew with before) or `probe`.
+    pub trim: String,
+    /// Tilt from the resting attitude, degrees.
+    pub tilt_deg: f64,
 }
 
 /// A transient full-width announcement.

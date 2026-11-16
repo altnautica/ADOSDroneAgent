@@ -2526,6 +2526,11 @@
           "minimum": 10,
           "title": "Stall Window S",
           "type": "integer"
+        },
+        "supervised_liftoff": {
+          "default": true,
+          "title": "Supervised Liftoff",
+          "type": "boolean"
         }
       },
       "title": "PilotConfig",

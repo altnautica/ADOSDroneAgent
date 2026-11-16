@@ -53,6 +53,12 @@ impl Pilot {
             items.push(item);
         }
         items.extend(self.no_rc_items());
+        if let Some(item) = self.airframe.readiness(&self.fc) {
+            items.push(item);
+        }
+        if let Some(item) = self.liftoff_switch_item() {
+            items.push(item);
+        }
         items
     }
 

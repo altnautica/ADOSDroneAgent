@@ -186,6 +186,7 @@ impl Pilot {
             step: l.step.as_str().to_owned(),
             after: l.after.clone(),
             error: l.error.clone(),
+            liftoff: Self::liftoff_view(l),
         });
         s.banner = self.banner.clone().map(|b| ados_protocol::pilot::Banner {
             until_ms: b.until_ms + self.epoch_offset_ms,

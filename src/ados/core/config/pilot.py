@@ -113,3 +113,8 @@ class PilotConfig(BaseModel):
     low_battery_countdown_s: int = Field(default=10, ge=5, le=30)
     # The declared flow and rangefinder mount; unset parts are not checked.
     fc_sensors: FcSensorsConfig = Field(default_factory=FcSensorsConfig)
+    # A multirotor launch on ArduPilot lifts off under the pilot: the
+    # airframe's trim loaded into the FC's rate loop on the ground, then a
+    # level lift-off. False sends the FC's own take-off instead (a
+    # field-validation switch, shown on every surface while off).
+    supervised_liftoff: bool = True

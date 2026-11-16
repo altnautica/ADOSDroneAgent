@@ -61,6 +61,15 @@ pub struct World {
     pub fly: bool,
     /// The `seq` of the next stick frame [`World::input`] sends.
     pub seq: u32,
+    /// The airframe a supervised lift-off flies (balanced unless a test
+    /// sets one), and whether it drives the world (from the first attitude
+    /// target until the launch leaves its take-off step).
+    pub af: crate::liftoff::sim::Airframe,
+    pub af_engaged: bool,
+    /// The scripted FC echoes PARAM_SET (off: the writes are lost).
+    pub answers_params: bool,
+    /// The scripted FC streams PID_TUNING and SERVO_OUTPUT_RAW while armed.
+    pub rates_stream: bool,
 }
 
 /// A scan with one return, `range_m` away in body bin `bin` (degrees
@@ -103,6 +112,11 @@ impl World {
             ("AVOID_ENABLE", 0.0),
             ("SRTL_POINTS", 500.0),
             ("SRTL_ACCURACY", 2.0),
+            // ArduPilot defaults: the supervised lift-off sets its bits.
+            ("GUID_OPTIONS", 0.0),
+            ("GCS_PID_MASK", 0.0),
+            ("MOT_THST_HOVER", 0.5),
+            ("FRAME_CLASS", 1.0),
         ] {
             p.fc.params.insert(n.into(), v);
         }
@@ -133,6 +147,10 @@ impl World {
             local: true,
             fly: false,
             seq: 1,
+            af: crate::liftoff::sim::Airframe::balanced(),
+            af_engaged: false,
+            answers_params: true,
+            rates_stream: true,
         };
         w.feed();
         w
@@ -215,6 +233,7 @@ impl World {
             });
             self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
         }
+        self.feed_airframe();
         if let Some(fix) = self.gps_fix {
             let fix_type = match fix {
                 0 => GpsFixType::GPS_FIX_TYPE_NO_GPS,
@@ -256,6 +275,7 @@ impl World {
             if self.now.is_multiple_of(100) {
                 self.p.state_published();
             }
+            self.step_airframe(20);
         }
     }
 
@@ -295,6 +315,7 @@ impl World {
 
     /// The scripted FC obeys mode, arm and takeoff commands.
     fn apply(&mut self, m: &MavMessage) {
+        self.apply_airframe(m);
         if let MavMessage::COMMAND_LONG(c) = m {
             match c.command {
                 MavCmd::MAV_CMD_DO_SET_MODE => self.set_mode(c.param2 as u32),

@@ -1,5 +1,6 @@
 //! Behaviour tests for the pilot rules, against a scripted flight controller.
 
+mod airframe_world;
 mod battery;
 mod bore_return;
 mod closing;
@@ -11,6 +12,7 @@ mod extnav_settle;
 mod fc_failsafe;
 mod handoff;
 mod harness;
+mod liftoff;
 mod mission;
 mod nav_cap;
 mod no_rc;

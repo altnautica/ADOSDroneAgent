@@ -302,7 +302,9 @@ fn a_take_off_waits_for_the_fc_to_finish_its_land() {
     assert!(w.p.touchdown.floor_d.is_none());
     w.run(1500);
     assert_eq!(w.mode, copter::GUIDED);
-    assert!(w.commands(MavCmd::MAV_CMD_NAV_TAKEOFF, None) > 0);
+    // The take-off began: the supervised lift-off is spooling.
+    let lo = w.p.state(w.now).sequence.and_then(|s| s.liftoff);
+    assert!(lo.is_some(), "{lo:?}");
 }
 
 #[test]

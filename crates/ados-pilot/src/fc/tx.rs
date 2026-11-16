@@ -1,9 +1,9 @@
 //! The frames the pilot sends to the FC.
 
 use ados_protocol::mavlink::ardupilotmega::{
-    MavAutopilot, MavCmd, MavFrame, MavMessage, MavModeFlag, MavParamType, MavState, MavType,
-    PositionTargetTypemask, COMMAND_INT_DATA, COMMAND_LONG_DATA, HEARTBEAT_DATA,
-    MANUAL_CONTROL_DATA, PARAM_REQUEST_READ_DATA, PARAM_SET_DATA,
+    AttitudeTargetTypemask, MavAutopilot, MavCmd, MavFrame, MavMessage, MavModeFlag, MavParamType,
+    MavState, MavType, PositionTargetTypemask, COMMAND_INT_DATA, COMMAND_LONG_DATA, HEARTBEAT_DATA,
+    MANUAL_CONTROL_DATA, PARAM_REQUEST_READ_DATA, PARAM_SET_DATA, SET_ATTITUDE_TARGET_DATA,
     SET_POSITION_TARGET_LOCAL_NED_DATA,
 };
 
@@ -54,6 +54,35 @@ impl Tx {
             target_system: self.sysid,
             target_component: self.compid,
             coordinate_frame: MavFrame::MAV_FRAME_LOCAL_NED,
+        })
+    }
+
+    /// An attitude (roll, pitch, yaw in rad) and a collective thrust
+    /// (0..1), body rates ignored. ArduPilot reads `thrust` as thrust only
+    /// with `GUID_OPTIONS` bit 3 set; without it, as a climb rate.
+    pub fn attitude_target(&self, roll: f32, pitch: f32, yaw: f32, thrust: f32) -> MavMessage {
+        let (sr, cr) = (roll / 2.0).sin_cos();
+        let (sp, cp) = (pitch / 2.0).sin_cos();
+        let (sy, cy) = (yaw / 2.0).sin_cos();
+        let q = [
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ];
+        let ignore_rates = AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE
+            | AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE
+            | AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE;
+        MavMessage::SET_ATTITUDE_TARGET(SET_ATTITUDE_TARGET_DATA {
+            time_boot_ms: 0,
+            q,
+            body_roll_rate: 0.0,
+            body_pitch_rate: 0.0,
+            body_yaw_rate: 0.0,
+            thrust: thrust.clamp(0.0, 1.0),
+            target_system: self.sysid,
+            target_component: self.compid,
+            type_mask: ignore_rates,
         })
     }
 

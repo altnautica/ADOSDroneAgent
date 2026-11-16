@@ -95,6 +95,7 @@ impl Pilot {
                 error: None,
                 step_ms: now_ms,
                 cmd: None,
+                supervised: None,
             },
             now_ms,
         )
@@ -106,6 +107,9 @@ impl Pilot {
             step: LaunchStep::Arm,
             step_ms: now_ms,
             cmd: None,
+            supervised: self
+                .supervised_liftoff_applies()
+                .then(crate::liftoff::Supervision::default),
             ..l
         };
         // A deliberate take-off ends a touchdown.
@@ -147,11 +151,24 @@ impl Pilot {
         }
     }
 
-    /// While disarmed: select the launch mode, then arm once the FC reports
-    /// it; each command re-sent at most once a second.
+    /// While disarmed: set the FC up for a supervised lift-off, select the
+    /// launch mode, then arm once the FC reports it; each command re-sent at
+    /// most once a second.
     fn arm_for_launch(&mut self, l: &mut Launch, now_ms: u64) {
         if self.fc.armed {
             return;
+        }
+        if l.error.is_some() {
+            return;
+        }
+        match self.liftoff_prepared(l, now_ms) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                l.error = Some(e);
+                l.step_ms = now_ms;
+                return;
+            }
         }
         let arm = self.fc.custom_mode == self.launch_mode();
         if l.cmd
@@ -197,6 +214,9 @@ impl Pilot {
                 } else {
                     self.arm_for_launch(&mut l, now_ms);
                 }
+            }
+            LaunchStep::Takeoff if l.supervised.is_some() => {
+                self.drive_supervised_takeoff(&mut l, elapsed, now_ms);
             }
             LaunchStep::Takeoff => {
                 let height = self.agl(now_ms).unwrap_or(0.0);
@@ -245,22 +265,35 @@ impl Pilot {
             }
         }
         if let Some(e) = &l.error {
+            // A lift-off stopped on the ground has spun down and disarmed
+            // (or handed the FC its Land): no hold is flown over it.
+            let stopped = l
+                .supervised
+                .as_ref()
+                .and_then(|s| s.liftoff.as_ref())
+                .is_some_and(|lo| lo.stopped().is_some());
+            let reason = Self::liftoff_view(&l)
+                .filter(|v| v.phase == "stopped")
+                .map(|v| v.text)
+                .or_else(|| crate::liftoff::error_text(e).map(str::to_owned))
+                .unwrap_or_else(|| e.clone());
             self.banner = Some(banner(
                 "pilot.banner.launch_failed",
-                &[("reason", json!(e))],
+                &[("reason", json!(reason))],
                 now_ms,
             ));
-            if self.fc.armed && !self.fc.landed() {
+            if self.fc.armed && !self.fc.landed() && !stopped {
                 self.brake_hold(None);
             }
-            if l.step == LaunchStep::Done || elapsed > 5000 {
+            // From the step's start, or from the error where it restarts it.
+            if l.step == LaunchStep::Done || now_ms.saturating_sub(l.step_ms) > 5000 {
                 return;
             }
         }
         self.launch = Some(l);
     }
 
-    fn launch_after(&mut self, l: &mut Launch, now_ms: u64) {
+    pub(super) fn launch_after(&mut self, l: &mut Launch, now_ms: u64) {
         let fam = self.family();
         match l.after.as_str() {
             "mission" => {

@@ -2311,6 +2311,16 @@
       "type": "integer"
     },
     {
+      "default": true,
+      "description": "Supervised Liftoff",
+      "enum": null,
+      "key": "pilot.supervised_liftoff",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": [],
       "description": "Adapters",
       "enum": null,

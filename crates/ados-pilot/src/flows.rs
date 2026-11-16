@@ -264,6 +264,9 @@ pub struct Launch {
     /// The arming step's last command: `(true, t)` arm, `(false, t)` the
     /// launch mode, so each is re-sent at most once a second.
     pub cmd: Option<(bool, u64)>,
+    /// The supervised lift-off (an ArduPilot multirotor with
+    /// `pilot.supervised_liftoff`); `None`: the FC's own take-off.
+    pub supervised: Option<crate::liftoff::Supervision>,
 }
 
 #[cfg(test)]

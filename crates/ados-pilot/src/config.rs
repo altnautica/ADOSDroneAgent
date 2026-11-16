@@ -109,6 +109,11 @@ pub struct PilotSection {
     /// The declared flow and rangefinder mount, checked against the FC's
     /// parameters.
     pub fc_sensors: FcSensors,
+    /// A multirotor launch on ArduPilot lifts off under the pilot: the
+    /// airframe's trim loaded into the FC's rate loop on the ground, then a
+    /// level lift-off. `false` sends the FC's own take-off instead (a
+    /// field-validation switch, shown on every surface while off).
+    pub supervised_liftoff: bool,
 }
 
 /// The smallest obstacle margin in an open place, metres.
@@ -235,6 +240,7 @@ impl Default for PilotSection {
             stall_return_after_s: 45,
             low_battery_countdown_s: 10,
             fc_sensors: FcSensors::default(),
+            supervised_liftoff: true,
         }
     }
 }

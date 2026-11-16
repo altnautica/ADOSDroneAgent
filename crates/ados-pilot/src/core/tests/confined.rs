@@ -390,7 +390,12 @@ fn a_feasible_route_launches_and_reports_feasible() {
         json!({"after": "mission", "alt_m": 5.0})
     )));
     // At the legs' height they are judged, and clear.
-    run_seen(&mut w, 3000);
+    for _ in 0..200 {
+        if w.pos[2] == -5.0 {
+            break;
+        }
+        run_seen(&mut w, 100);
+    }
     assert_eq!(w.pos[2], -5.0);
     let rc = w.p.state(w.now).route_check.expect("route_check");
     assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");

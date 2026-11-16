@@ -13,6 +13,7 @@
 //! MAVLink socket, the `pilot.v1` socket, the plugin event export and the
 //! router's state socket (mission state).
 
+pub mod airframe;
 pub mod authority;
 pub mod batt_failsafe;
 pub mod config;
@@ -27,6 +28,7 @@ pub mod flows;
 pub mod geo;
 pub mod ipc;
 pub mod link_watch;
+pub mod liftoff;
 pub mod model;
 pub mod modes;
 pub mod nav_imu;

@@ -241,6 +241,13 @@ impl Pilot {
         // Under either RC declaration: the fence rows are read in advance.
         let mut names: Vec<&str> = crate::no_rc::all_names(fw, class)
             .chain(EXTRA_PARAMS.iter().copied())
+            .chain(
+                ardupilot
+                    .then_some(crate::liftoff::PARAMS)
+                    .unwrap_or_default()
+                    .iter()
+                    .copied(),
+            )
             .chain(batt.iter().chain(batt_legacy).copied())
             .chain(sensors.iter().map(String::as_str))
             .collect();
@@ -275,11 +282,16 @@ impl Pilot {
         self.failsafe_cause = None;
         self.end_supervision();
         self.drop_return();
-        if self
-            .launch
-            .as_ref()
-            .is_some_and(|l| l.step != crate::flows::LaunchStep::Arm)
-        {
+        // A lift-off that stopped on the ground disarmed it on purpose: the
+        // launch stays a few seconds more so every surface shows why.
+        if self.launch.as_ref().is_some_and(|l| {
+            l.step != crate::flows::LaunchStep::Arm
+                && !l
+                    .supervised
+                    .as_ref()
+                    .and_then(|s| s.liftoff.as_ref())
+                    .is_some_and(|lo| lo.stopped().is_some())
+        }) {
             self.launch = None;
         }
     }

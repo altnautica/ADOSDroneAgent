@@ -12,6 +12,7 @@ use crate::fc_profile::Firmware;
 
 mod ekf;
 pub mod extnav;
+pub mod rates;
 mod tx;
 pub use ekf::EkfPosition;
 pub use tx::{heartbeat, Tx};
@@ -114,6 +115,8 @@ pub struct FcState {
     pub boot_ms: u32,
     /// Counts FC reboots seen (boot time running backwards, or a new sysid).
     pub boot_epoch: u32,
+    /// The FC's roll and pitch rate loop and its motor outputs.
+    pub rates: rates::Rates,
 }
 
 impl FcState {
@@ -284,6 +287,12 @@ impl FcState {
                     r.chan18_raw,
                 ];
                 self.rc = Some(Stamped { v, at_ms: now_ms });
+            }
+            MavMessage::PID_TUNING(p) if self.from_fc(sysid, compid) => {
+                self.rates.on_pid(p, now_ms);
+            }
+            MavMessage::SERVO_OUTPUT_RAW(s) if self.from_fc(sysid, compid) => {
+                self.rates.on_servo(s, now_ms);
             }
             _ => {}
         }

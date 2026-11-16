@@ -401,7 +401,7 @@ fn takeoff_arms_climbs_and_holds() {
     w.run(500);
     assert!(w.armed);
     assert_eq!(w.mode, copter::GUIDED);
-    w.run(1500);
+    w.fly_takeoff(20_000);
     assert_eq!(w.p.owner(), Owner::Pilot);
     assert_eq!(w.p.state(w.now).sequence.unwrap().step, "done");
 }

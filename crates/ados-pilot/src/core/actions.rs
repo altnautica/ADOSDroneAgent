@@ -19,6 +19,7 @@ type ActionRes = Result<(), String>;
 
 mod goto;
 mod launch;
+mod liftoff;
 mod mission;
 
 /// Pilot actions a ground surface may send beyond the safety set.
@@ -61,6 +62,12 @@ impl Pilot {
             && self.owner() == Owner::Tuning
         {
             self.exit_tuning(now_ms);
+        }
+        // An operator stop while a lift-off is still on the ground spins it
+        // down and disarms: there is nothing to hold or land yet.
+        if matches!(name, "pause" | "land" | "rth" | "take_control") && self.liftoff_operator_stop()
+        {
+            return Ok(());
         }
         self.touchdown_refusal(name)?;
         // An operator answer ends a supervisor hold or stall; a held mission
@@ -107,6 +114,7 @@ impl Pilot {
                     error: None,
                     step_ms: now_ms,
                     cmd: None,
+                    supervised: None,
                 },
                 now_ms,
             ),

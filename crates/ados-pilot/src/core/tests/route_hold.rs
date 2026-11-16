@@ -392,7 +392,7 @@ fn a_launched_mission_holds_and_resumes_through_the_same_code() {
     let t0 = w.now;
     while w.set_modes(copter::AUTO) == 0 {
         run_seen(&mut w, 100);
-        assert!(w.now < t0 + 10_000, "never in AUTO");
+        assert!(w.now < t0 + 30_000, "never in AUTO");
     }
     // At flight height the post is judged; held once confirmed.
     mission(&mut w, "active", 2);

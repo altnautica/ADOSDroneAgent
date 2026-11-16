@@ -106,6 +106,7 @@ impl Pilot {
             self.out.push(Out::Revoked(r));
             self.brake_hold(Some("lease-revoked"));
         }
+        self.airframe.tick(&self.fc, now_ms);
         self.drive_launch(now_ms);
         self.track_touchdown(now_ms);
         let axes = self.stick_axes();
