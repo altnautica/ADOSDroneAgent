@@ -179,6 +179,12 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             .or_else(|| d.get("input_src").and_then(Value::as_str))
             .filter(|l| !l.is_empty())
             .map(str::to_string),
+        profile_limits: d
+            .get("profile_limits")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        stick: d
+            .get("stick")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         age_ms,
         stale,
     }

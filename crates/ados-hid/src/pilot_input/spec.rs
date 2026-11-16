@@ -282,7 +282,10 @@ mod tests {
         }
         for profile in ["cine", "normal", "sport"] {
             let state = &s.lightbar.profile_states[profile];
-            assert!(s.lightbar.states.contains_key(state), "profile state {state}");
+            assert!(
+                s.lightbar.states.contains_key(state),
+                "profile state {state}"
+            );
         }
         // Every feedback class is a rumble pattern, and each rule plays its class.
         let classes = [
@@ -295,7 +298,12 @@ mod tests {
             assert!(!rules.is_empty(), "{class}");
             for r in rules {
                 assert_eq!(r.rumble, class, "rule {}", r.id);
-                assert_eq!(r.field.is_none(), r.on == Trigger::StateLost, "rule {}", r.id);
+                assert_eq!(
+                    r.field.is_none(),
+                    r.on == Trigger::StateLost,
+                    "rule {}",
+                    r.id
+                );
             }
         }
         assert!(!s.locked_actions.is_empty());

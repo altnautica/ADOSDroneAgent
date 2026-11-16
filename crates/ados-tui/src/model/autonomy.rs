@@ -289,6 +289,12 @@ pub struct Pilot {
     pub landed: Option<bool>,
     /// Who holds the sticks: the input session's label, else its source.
     pub input_label: Option<String>,
+    /// The limits the operator's sticks fly at now; `None` from an older
+    /// agent.
+    pub profile_limits: Option<ados_protocol::pilot::ProfileLimits>,
+    /// The operator's sticks on the latest stick tick, while they own the
+    /// vehicle.
+    pub stick: Option<ados_protocol::pilot::StickCommand>,
     /// The kind's age when read; `None` when the route did not say.
     pub age_ms: Option<u64>,
     pub stale: bool,

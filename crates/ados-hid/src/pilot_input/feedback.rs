@@ -378,12 +378,25 @@ mod tests {
 
     #[test]
     fn the_light_bar_shows_the_profile_while_the_sticks_fly() {
-        for (profile, want) in [("cine", "pilot_cine"), ("normal", "pilot_normal"), ("sport", "pilot_sport")] {
-            assert_eq!(view(flying(json!({"profile": profile}))).lightbar_state(1500), want);
+        for (profile, want) in [
+            ("cine", "pilot_cine"),
+            ("normal", "pilot_normal"),
+            ("sport", "pilot_sport"),
+        ] {
+            assert_eq!(
+                view(flying(json!({"profile": profile}))).lightbar_state(1500),
+                want
+            );
         }
         // Other motion owners keep the plain pilot colour; state colours keep priority.
-        assert_eq!(view(flying(json!({"owner": "goto"}))).lightbar_state(1500), "pilot");
-        assert_eq!(view(flying(json!({"profile": "sport", "rth_countdown_s": 5}))).lightbar_state(1500), "low_battery");
+        assert_eq!(
+            view(flying(json!({"owner": "goto"}))).lightbar_state(1500),
+            "pilot"
+        );
+        assert_eq!(
+            view(flying(json!({"profile": "sport", "rth_countdown_s": 5}))).lightbar_state(1500),
+            "low_battery"
+        );
         assert_eq!(lightbar_rgb("pilot_cine", 0), [0x64, 0xFF, 0xDA]);
         assert_eq!(lightbar_rgb("pilot_sport", 0), [0xFF, 0x6D, 0x00]);
         assert_eq!(lightbar_rgb("pilot_normal", 0), lightbar_rgb("pilot", 0));
@@ -412,7 +425,9 @@ mod tests {
         assert_eq!(alert(Some(&capped), Some(&capped)), None);
         let held = flying(json!({"hold_reason": "obstacle-close"}));
         assert_eq!(alert(Some(&a), Some(&held)), Some(Alert::Warning));
-        let warn = flying(json!({"readiness": [{"id": "gps", "ok": false, "severity": "warn", "msg": ""}]}));
+        let warn = flying(
+            json!({"readiness": [{"id": "gps", "ok": false, "severity": "warn", "msg": ""}]}),
+        );
         assert_eq!(alert(Some(&a), Some(&warn)), Some(Alert::Warning));
     }
 
@@ -428,11 +443,15 @@ mod tests {
         assert_eq!(alert(Some(&link), Some(&link_later)), None);
         let fs = flying(json!({"fc_failsafe": true, "owner": "fc_mode", "fc_mode": 6}));
         assert_eq!(alert(Some(&a), Some(&fs)), Some(Alert::Critical));
-        let block = flying(json!({"readiness": [{"id": "ekf", "ok": false, "severity": "block", "msg": ""}]}));
+        let block = flying(
+            json!({"readiness": [{"id": "ekf", "ok": false, "severity": "block", "msg": ""}]}),
+        );
         assert_eq!(alert(Some(&a), Some(&block)), Some(Alert::Critical));
         // A failing block item on the ground is only a pre-flight item.
         let a_ground = flying(json!({"armed": false}));
-        let block_ground = flying(json!({"armed": false, "readiness": [{"id": "ekf", "ok": false, "severity": "block", "msg": ""}]}));
+        let block_ground = flying(
+            json!({"armed": false, "readiness": [{"id": "ekf", "ok": false, "severity": "block", "msg": ""}]}),
+        );
         assert_eq!(alert(Some(&a_ground), Some(&block_ground)), None);
         // The pilot state going stale is critical; the first state after it earns nothing.
         assert_eq!(alert(Some(&a), None), Some(Alert::Critical));

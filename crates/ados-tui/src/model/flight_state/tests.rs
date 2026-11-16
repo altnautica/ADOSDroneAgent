@@ -28,6 +28,7 @@ fn chip_cases() {
             eta_s: i["ar_eta_s"].as_f64(),
             mode_detail: i["mode_detail"].as_str().map(str::to_string),
             complete_age_ms: i["complete_age_ms"].as_f64(),
+            ..ChipContext::default()
         };
         let age = i["pilot_age_ms"].as_u64().expect("pilot_age_ms");
         let facts = chip_inputs(&pilot_of(&i["pilot"]), age, &ctx)

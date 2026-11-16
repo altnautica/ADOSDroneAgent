@@ -49,6 +49,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Shared stick golden vectors (`cockpit-spec/stick-golden.json`): raw stick positions in, conditioned axes out, for both stick modes and the deadzone edge, checked by the ground-station controller's and the cockpit's tests.
 - Flight-state chip (cockpit and dashboard): while the sticks fly it names the profile with its horizontal limit ("Pilot · Normal · 7 m/s max"), and the dashboard adds the horizontal and vertical speed. A stick input older than 100 ms shows its age, and the nearest obstacle shows its distance under twice the obstacle margin, in the warning colour, then in the critical colour inside the margin. The words are spec strings (`chip.stick.*`).
 - Cockpit on-screen sticks draw the deadzone as a ring around each pad's centre, sized from the deadzone setting.
+- `ados-tui` Pilot block: a Limits row (horizontal, climb, descent and yaw limits and the stop distance the sticks fly at) and, while the sticks fly, a Stick row (asked against flying speed, vertical speed, yaw rate, braking); its chip reads the same stick parts as the cockpit's.
 
 ### Changed
 

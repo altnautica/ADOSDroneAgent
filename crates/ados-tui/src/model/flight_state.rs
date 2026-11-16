@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 
 use super::autonomy::Pilot;
 use super::route_check::speed_cap_line;
+use super::spec_text::spec_text;
 
 pub mod readouts;
 mod words;
@@ -78,6 +79,37 @@ struct Conditional {
     color: String,
 }
 
+/// A part worded by a spec string (`setup-strings.json`).
+#[derive(Debug, Deserialize)]
+struct Keyed {
+    text_key: String,
+}
+
+/// The obstacle clearance part: shown under `near_factor` × the margin.
+#[derive(Debug, Deserialize)]
+struct Clearance {
+    text_key: String,
+    near_factor: f64,
+    near_color: String,
+    inside_margin_color: String,
+}
+
+/// The late stick input part.
+#[derive(Debug, Deserialize)]
+struct InputAge {
+    text_key: String,
+    over_ms: f64,
+    color: String,
+}
+
+/// A speed part, shown only while `owner` flies.
+#[derive(Debug, Deserialize)]
+struct SpeedPart {
+    text_key: String,
+    owner: String,
+    color: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct Secondary {
     order: Vec<String>,
@@ -87,6 +119,11 @@ struct Secondary {
     avoid_state: BTreeMap<String, Option<Styled>>,
     hold_reason: Styled,
     control_mode: BTreeMap<String, String>,
+    profile_limit: Keyed,
+    clearance: Clearance,
+    input_age: InputAge,
+    h_speed: SpeedPart,
+    v_speed: SpeedPart,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +214,17 @@ pub struct ChipFacts {
     /// The pilot's position-unverified label key (its `detail` when the spec
     /// labels it, else its `reason`); `None` while the position is trusted.
     pub position_unverified: Option<String>,
+    /// The horizontal limit the sticks fly at (m/s), from `profile_limits`.
+    pub profile_limit_mps: Option<f64>,
+    /// The vehicle's horizontal and vertical (+ up) speed (m/s), when the
+    /// surface passes them.
+    pub h_speed_mps: Option<f64>,
+    pub v_speed_mps: Option<f64>,
+    /// Age of the stick frame the pilot flew last (ms), while the sticks fly.
+    pub stick_input_age_ms: Option<f64>,
+    /// The nearest obstacle (m) and the margin the pilot keeps (m).
+    pub min_clearance_m: Option<f64>,
+    pub margin_m: Option<f64>,
     /// Age of the pilot state in ms.
     pub age_ms: u64,
 }
@@ -213,6 +261,10 @@ pub struct ChipContext {
     /// The running skill's detail line; used only while a skill owns.
     pub mode_detail: Option<String>,
     pub complete_age_ms: Option<f64>,
+    /// The vehicle's horizontal and vertical (+ up) speed (m/s) for the
+    /// chip's speed parts; `None` on a surface that shows them elsewhere.
+    pub h_speed_mps: Option<f64>,
+    pub v_speed_mps: Option<f64>,
 }
 
 /// JavaScript's `Math.round`: halves round up.
@@ -298,9 +350,10 @@ pub fn control_mode_text(mode: &str) -> String {
         .unwrap_or_else(|| word_label(mode))
 }
 
-/// The secondary line, in the spec's order: FC failsafe, the pilot's speed
-/// cap, a mission the pilot holds paused, hold reason, avoidance state,
-/// control mode.
+/// The secondary line, in the spec's order: FC failsafe, the obstacle
+/// clearance, a late stick input, the pilot's speed cap, a mission the pilot
+/// holds paused, hold reason, avoidance state, control mode, then the
+/// horizontal and vertical speed while the sticks fly.
 pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
     let sec = &SPEC.secondary;
     let mut out = Vec::new();
@@ -311,6 +364,49 @@ pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
                     out.push(ChipLine {
                         text: sec.fc_failsafe.text.clone(),
                         color: sec.fc_failsafe.color.clone(),
+                    });
+                }
+            }
+            "clearance" => {
+                let c = &sec.clearance;
+                if let (Some(m), Some(margin)) =
+                    (f.min_clearance_m, f.margin_m.filter(|m| *m > 0.0))
+                {
+                    if m < c.near_factor * margin {
+                        let color = if m <= margin {
+                            &c.inside_margin_color
+                        } else {
+                            &c.near_color
+                        };
+                        out.push(ChipLine {
+                            text: spec_text(
+                                &c.text_key,
+                                &[("m", &format!("{:.1}", js_round(m * 10.0) / 10.0))],
+                            ),
+                            color: color.clone(),
+                        });
+                    }
+                }
+            }
+            "input_age" => {
+                let a = &sec.input_age;
+                if let Some(ms) = f.stick_input_age_ms.filter(|ms| *ms > a.over_ms) {
+                    out.push(ChipLine {
+                        text: spec_text(&a.text_key, &[("ms", &(js_round(ms) as i64).to_string())]),
+                        color: a.color.clone(),
+                    });
+                }
+            }
+            "h_speed" | "v_speed" => {
+                let (s, v) = if part == "h_speed" {
+                    (&sec.h_speed, f.h_speed_mps)
+                } else {
+                    (&sec.v_speed, f.v_speed_mps)
+                };
+                if let (true, Some(v)) = (f.owner == s.owner, v) {
+                    out.push(ChipLine {
+                        text: spec_text(&s.text_key, &[("v", &signed1(v))]),
+                        color: s.color.clone(),
                     });
                 }
             }
@@ -461,6 +557,16 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
             Some(d) if SPEC.position_unverified_labels.contains_key(d) => d.clone(),
             _ => u.reason.clone(),
         }),
+        profile_limit_mps: p.profile_limits.map(|l| f64::from(l.v_h_mps)),
+        h_speed_mps: ctx.h_speed_mps,
+        v_speed_mps: ctx.v_speed_mps,
+        stick_input_age_ms: p.stick.map(|s| f64::from(s.input_age_ms)),
+        min_clearance_m: p.min_clearance_m,
+        margin_m: p
+            .profile_limits
+            .map(|l| f64::from(l.margin_m))
+            .filter(|m| *m > 0.0)
+            .or_else(|| p.route_check.as_ref().and_then(|r| r.margin_m)),
         age_ms,
         owner,
     })
@@ -470,6 +576,15 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
 /// surface prints it.
 fn cap_text(v: f64) -> String {
     format!("{}", (v * 10.0).round() / 10.0)
+}
+
+/// One signed decimal, never "-0.0" (the shared `fmtSigned1`).
+fn signed1(v: f64) -> String {
+    if v.abs() < 0.05 {
+        "0.0".into()
+    } else {
+        format!("{v:.1}")
+    }
 }
 
 #[cfg(test)]

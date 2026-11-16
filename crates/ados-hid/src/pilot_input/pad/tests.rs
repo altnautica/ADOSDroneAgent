@@ -154,7 +154,9 @@ fn sticks_match_the_shared_golden_vectors() {
     let default_dz = golden["deadzone"].as_f64().unwrap() as f32;
     assert_eq!(default_dz, ds4().conditioning.radial_deadzone);
     let cases = golden["cases"].as_array().unwrap();
-    assert!(cases.iter().any(|c| c["mode"] == "mode1") && cases.iter().any(|c| c["mode"] == "mode2"));
+    assert!(
+        cases.iter().any(|c| c["mode"] == "mode1") && cases.iter().any(|c| c["mode"] == "mode2")
+    );
     for c in cases {
         let f = |k: &str| c["raw"][k].as_f64().unwrap() as f32;
         let st = PadState {

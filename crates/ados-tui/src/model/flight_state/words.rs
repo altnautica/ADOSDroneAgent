@@ -93,6 +93,13 @@ pub(super) fn fill(template: &str, f: &ChipFacts) -> String {
             "eta" => fmt_eta(f.eta_s),
             "fc_mode_name_upper" => f.fc_mode_name.as_deref().unwrap_or("—").to_uppercase(),
             "step" => launch_step_name(f.launch_step.as_deref()),
+            "profile_limit" => match f.profile_limit_mps {
+                Some(v) => spec_text(
+                    &SPEC.secondary.profile_limit.text_key,
+                    &[("v", &format!("{}", (v * 10.0).round() / 10.0))],
+                ),
+                None => String::new(),
+            },
             "position_unverified_label" => match f.position_unverified.as_deref() {
                 None => String::new(),
                 Some(k) => SPEC

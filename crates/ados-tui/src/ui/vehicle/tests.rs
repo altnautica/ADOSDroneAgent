@@ -1093,3 +1093,51 @@ fn the_chip_shows_the_gnss_denied_cap() {
     let text = draw(&mut app, 160, 48);
     assert!(text.contains("GNSS-denied: 2 m/s max"), "{text}");
 }
+
+#[test]
+fn the_pilot_panel_shows_the_stick_limits_and_command() {
+    let mut app = live_app();
+    let mut frame = pilot_frame();
+    frame["owner"] = json!("pilot");
+    frame["skill"] = Value::Null;
+    frame["profile_limits"] = json!({
+        "profile": "normal", "v_h_mps": 7.0, "v_up_mps": 2.5, "v_down_mps": 1.5, "yaw_dps": 90.0,
+        "a_acc_mps2": 2.0, "a_brk_mps2": 2.5, "jerk_mps3": 5.0, "a_v_mps2": 1.0, "yaw_dps2": 180.0,
+        "expo_h": 0.25, "expo_v": 0.3, "expo_yaw": 0.2, "stop_m": 12.6, "margin_m": 1.5
+    });
+    frame["stick"] = json!({
+        "ask_ne_mps": [3.0, 4.0], "ask_vz_mps": 0.0, "ask_yaw_dps": 0.0, "v_ne_mps": [2.4, 1.8],
+        "a_ne_mps2": [1.0, 0.0], "vz_mps": -0.5, "yaw_rate_dps": 30.0, "braking": true,
+        "input_age_ms": 160, "input_seq": 9
+    });
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 200, 48);
+    let limits = crate::model::spec_text::spec_text(
+        "pilot.limits.line",
+        &[
+            ("v_h", "7"),
+            ("v_up", "2.5"),
+            ("v_down", "1.5"),
+            ("yaw", "90"),
+            ("stop", "12.6"),
+        ],
+    );
+    let stick = crate::model::spec_text::spec_text(
+        "pilot.stick.line",
+        &[
+            ("ask", "5.0"),
+            ("sent", "3.0"),
+            ("vz", "-0.5"),
+            ("yaw", "30"),
+        ],
+    );
+    let chip = crate::model::spec_text::spec_text("chip.stick.limit", &[("v", "7")]);
+    let age = crate::model::spec_text::spec_text("chip.stick.input_age", &[("ms", "160")]);
+    // The narrow column breaks a row after each ` · ` phrase.
+    for want in [limits.as_str(), stick.as_str(), chip.as_str(), age.as_str()]
+        .iter()
+        .flat_map(|s| s.split(" · "))
+    {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+}

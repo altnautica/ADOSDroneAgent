@@ -103,6 +103,9 @@ impl VehicleTab {
                 complete_age_ms: self
                     .complete_at
                     .map(|at| core.now.saturating_duration_since(at).as_millis() as f64),
+                // The Pilot block's Stick row shows the speeds the pilot flies.
+                h_speed_mps: None,
+                v_speed_mps: None,
             };
             chip_inputs(p, age_ms, &ctx).map(|facts| flight_state_chip(&facts))
         });

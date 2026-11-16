@@ -318,6 +318,42 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
     let label = spec_text("cockpit.row.mode", &[]);
     out.push((stale(kv_text(t, &label, LABEL, mode)), false));
 
+    // The limits the sticks fly at now and, while they fly, what they ask
+    // against the shaped speed the pilot sends.
+    if let Some(l) = &p.profile_limits {
+        let n = |v: f32| format!("{}", (f64::from(v) * 10.0).round() / 10.0);
+        let text = spec_text(
+            "pilot.limits.line",
+            &[
+                ("v_h", &n(l.v_h_mps)),
+                ("v_up", &n(l.v_up_mps)),
+                ("v_down", &n(l.v_down_mps)),
+                ("yaw", &n(l.yaw_dps)),
+                ("stop", &n(l.stop_m)),
+            ],
+        );
+        let label = spec_text("cockpit.row.limits", &[]);
+        out.extend(phrase_rows(t, &label, &text, t.bright(), p_stale));
+    }
+    if let Some(s) = &p.stick {
+        let h = |v: [f32; 2]| format!("{:.1}", f64::from(v[0]).hypot(f64::from(v[1])));
+        let mut text = spec_text(
+            "pilot.stick.line",
+            &[
+                ("ask", &h(s.ask_ne_mps)),
+                ("sent", &h(s.v_ne_mps)),
+                ("vz", &format!("{:.1}", s.vz_mps)),
+                ("yaw", &format!("{:.0}", s.yaw_rate_dps)),
+            ],
+        );
+        if s.braking {
+            text.push_str(" · ");
+            text.push_str(&spec_text("pilot.stick.braking", &[]));
+        }
+        let label = spec_text("cockpit.row.stick", &[]);
+        out.extend(phrase_rows(t, &label, &text, t.bright(), p_stale));
+    }
+
     // The operations the pilot offers a surface now (`goto` is Fly Here).
     let ops = p
         .surface_ops
