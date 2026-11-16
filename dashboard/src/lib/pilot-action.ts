@@ -184,7 +184,15 @@ export function sendPilotAction(name: string): Promise<ActionResult> {
       url: () => `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${PILOT_STREAM_PATH}`,
     });
     const page = link;
-    window.addEventListener("pagehide", () => page.close(), { once: true });
+    // Closed for good; a page restored from the back-forward cache dials anew.
+    window.addEventListener(
+      "pagehide",
+      () => {
+        page.close();
+        if (link === page) link = null;
+      },
+      { once: true },
+    );
   }
   return link.send(name);
 }

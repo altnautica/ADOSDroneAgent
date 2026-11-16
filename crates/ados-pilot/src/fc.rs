@@ -129,6 +129,7 @@ impl FcState {
                 }
                 if self.sysid != 0 && self.sysid != sysid {
                     self.boot_epoch += 1;
+                    self.rc = None;
                 }
                 self.sysid = sysid;
                 self.compid = compid;
@@ -153,6 +154,9 @@ impl FcState {
                 if self.from_fc(sysid, compid) {
                     if a.time_boot_ms.saturating_add(REBOOT_BACKSTEP_MS) < self.boot_ms {
                         self.boot_epoch += 1;
+                        // A rebooted FC's RC frames start over: the last
+                        // boot's channels say nothing about a receiver now.
+                        self.rc = None;
                     }
                     self.boot_ms = a.time_boot_ms;
                 }

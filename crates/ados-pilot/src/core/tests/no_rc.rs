@@ -452,7 +452,8 @@ fn an_fc_reboot_clears_the_rc_seen_latch() {
     });
     w.run(100);
     assert!(!item(&w, "rc_seen").unwrap().ok);
-    w.p.fc.rc = None;
+    // The last boot's channels stay put: a rebooted FC with no receiver sends
+    // no channel to replace them.
     let now = w.now;
     w.p.on_fc(fc, comp, &attitude(600_000), now);
     // The harness's FC then reports boot time 0, 600 s back: a reboot.
