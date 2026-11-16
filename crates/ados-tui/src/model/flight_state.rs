@@ -16,12 +16,13 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::autonomy::Pilot;
-use super::route_check::speed_cap_line;
-use super::spec_text::spec_text;
 
 pub mod readouts;
+mod secondary;
 mod words;
 
+pub use secondary::chip_secondary;
+use secondary::{Clearance, InputAge, Keyed, SpeedPart};
 use words::{fill, word_label};
 
 /// The spec file, byte for byte.
@@ -76,37 +77,6 @@ struct Conditional {
     #[serde(rename = "match")]
     when: Map<String, Value>,
     text: String,
-    color: String,
-}
-
-/// A part worded by a spec string (`setup-strings.json`).
-#[derive(Debug, Deserialize)]
-struct Keyed {
-    text_key: String,
-}
-
-/// The obstacle clearance part: shown under `near_factor` × the margin.
-#[derive(Debug, Deserialize)]
-struct Clearance {
-    text_key: String,
-    near_factor: f64,
-    near_color: String,
-    inside_margin_color: String,
-}
-
-/// The late stick input part.
-#[derive(Debug, Deserialize)]
-struct InputAge {
-    text_key: String,
-    over_ms: f64,
-    color: String,
-}
-
-/// A speed part, shown only while `owner` flies.
-#[derive(Debug, Deserialize)]
-struct SpeedPart {
-    text_key: String,
-    owner: String,
     color: String,
 }
 
@@ -350,117 +320,6 @@ pub fn control_mode_text(mode: &str) -> String {
         .unwrap_or_else(|| word_label(mode))
 }
 
-/// The secondary line, in the spec's order: FC failsafe, the obstacle
-/// clearance, a late stick input, the pilot's speed cap, a mission the pilot
-/// holds paused, hold reason, avoidance state, control mode, then the
-/// horizontal and vertical speed while the sticks fly.
-pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
-    let sec = &SPEC.secondary;
-    let mut out = Vec::new();
-    for part in &sec.order {
-        match part.as_str() {
-            "fc_failsafe" => {
-                if f.fc_failsafe {
-                    out.push(ChipLine {
-                        text: sec.fc_failsafe.text.clone(),
-                        color: sec.fc_failsafe.color.clone(),
-                    });
-                }
-            }
-            "clearance" => {
-                let c = &sec.clearance;
-                if let (Some(m), Some(margin)) =
-                    (f.min_clearance_m, f.margin_m.filter(|m| *m > 0.0))
-                {
-                    if m < c.near_factor * margin {
-                        let color = if m <= margin {
-                            &c.inside_margin_color
-                        } else {
-                            &c.near_color
-                        };
-                        out.push(ChipLine {
-                            text: spec_text(
-                                &c.text_key,
-                                &[("m", &format!("{:.1}", js_round(m * 10.0) / 10.0))],
-                            ),
-                            color: color.clone(),
-                        });
-                    }
-                }
-            }
-            "input_age" => {
-                let a = &sec.input_age;
-                if let Some(ms) = f.stick_input_age_ms.filter(|ms| *ms > a.over_ms) {
-                    out.push(ChipLine {
-                        text: spec_text(&a.text_key, &[("ms", &(js_round(ms) as i64).to_string())]),
-                        color: a.color.clone(),
-                    });
-                }
-            }
-            "h_speed" | "v_speed" => {
-                let (s, v) = if part == "h_speed" {
-                    (&sec.h_speed, f.h_speed_mps)
-                } else {
-                    (&sec.v_speed, f.v_speed_mps)
-                };
-                if let (true, Some(v)) = (f.owner == s.owner, v) {
-                    out.push(ChipLine {
-                        text: spec_text(&s.text_key, &[("v", &signed1(v))]),
-                        color: s.color.clone(),
-                    });
-                }
-            }
-            "speed_cap" => {
-                if let Some(v) = f.speed_cap_mps {
-                    // The reason's own spec line; the spec's default line
-                    // for a reason it does not name.
-                    let own = f
-                        .speed_cap_reason
-                        .as_deref()
-                        .and_then(|r| speed_cap_line(r, v));
-                    out.push(ChipLine {
-                        text: own
-                            .unwrap_or_else(|| sec.speed_cap.text.replace("{v}", &cap_text(v))),
-                        color: sec.speed_cap.color.clone(),
-                    });
-                }
-            }
-            "mission_paused_line" => {
-                let line = &sec.mission_paused_line;
-                if matches(&line.when, f) {
-                    out.push(ChipLine {
-                        text: fill(&line.text, f),
-                        color: line.color.clone(),
-                    });
-                }
-            }
-            "hold_reason" => {
-                if let Some(reason) = &f.hold_reason {
-                    out.push(ChipLine {
-                        text: hold_reason_label(reason),
-                        color: sec.hold_reason.color.clone(),
-                    });
-                }
-            }
-            "avoid_state" => {
-                if let Some(line) = f.avoid_state.as_deref().and_then(avoid_state_text) {
-                    out.push(line);
-                }
-            }
-            "control_mode" => {
-                if let Some(mode) = &f.control_mode {
-                    out.push(ChipLine {
-                        text: control_mode_text(mode),
-                        color: "fc".into(),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 fn button_of(rule: &Rule, f: &ChipFacts) -> Option<&'static str> {
     let name = match &rule.button_if {
         Some(alt) if matches(&alt.when, f) => Some(alt.button.as_str()),
@@ -570,21 +429,6 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         age_ms,
         owner,
     })
-}
-
-/// The cap in m/s with at most one decimal (1.5 → "1.5", 2 → "2"), as every
-/// surface prints it.
-fn cap_text(v: f64) -> String {
-    format!("{}", (v * 10.0).round() / 10.0)
-}
-
-/// One signed decimal, never "-0.0" (the shared `fmtSigned1`).
-fn signed1(v: f64) -> String {
-    if v.abs() < 0.05 {
-        "0.0".into()
-    } else {
-        format!("{v:.1}")
-    }
 }
 
 #[cfg(test)]
