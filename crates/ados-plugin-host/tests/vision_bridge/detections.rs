@@ -16,6 +16,7 @@ fn sample_batch(frame_id: u64) -> DetectionBatch {
         ts_ms: 1_700_000_000_000 + frame_id as i64,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: vec![Detection {
             bbox: Some(BoundingBox {
                 x: frame_id as f32,

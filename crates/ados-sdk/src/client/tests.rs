@@ -44,6 +44,7 @@ fn batch_for(camera_id: &str) -> ados_protocol::framebus::DetectionBatch {
         mount_pitch_deg: None,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: Vec::new(),
     }
 }

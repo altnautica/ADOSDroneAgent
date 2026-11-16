@@ -507,6 +507,7 @@ mod tests {
             ts_ms: 0,
             frame_width: 0,
             frame_height: 0,
+            crop_window: None,
             detections: vec![],
         };
         let args = publish_detection_args(&batch).unwrap();

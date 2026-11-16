@@ -109,8 +109,8 @@ pub struct CameraDemandStatus {
     pub detecting: bool,
     #[serde(default)]
     pub leases: Vec<DemandLeaseStatus>,
-    /// Detector batches on which the engine also ran the detector on a crop
-    /// around the designated track (since the engine started).
+    /// Detector batches on which the engine ran the detector on a crop around
+    /// the designated track (since the engine started).
     #[serde(default)]
     pub crop_runs: u64,
     /// Of those, the batches on which the crop found a box of the designated
@@ -122,6 +122,49 @@ pub struct CameraDemandStatus {
     /// attitude at the two frames' exposures), since the engine started.
     #[serde(default)]
     pub turn_moves: u64,
+    /// Where the camera's detector batches spend their time. All zero from an
+    /// older engine or before the first batch.
+    #[serde(default)]
+    pub batches: DetectorBatchStatus,
+}
+
+/// Where one camera's detector batches spend their time: counts since the
+/// engine started, and exponentially weighted means (weight 0.2 per batch) in
+/// microseconds, zero until the stage first runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectorBatchStatus {
+    /// Batches published.
+    #[serde(default)]
+    pub batches: u64,
+    /// Of those, the batches that ran the whole frame (the rest ran only the
+    /// crop around a designated subject).
+    #[serde(default)]
+    pub full_frame_runs: u64,
+    /// Capture to the start of the batch: the frame's wait for the detector.
+    #[serde(default)]
+    pub frame_age_us: u64,
+    /// The whole-frame pass.
+    #[serde(default)]
+    pub full_frame_us: u64,
+    /// The crop pass.
+    #[serde(default)]
+    pub crop_us: u64,
+    /// Within a batch's passes, resizing into the model input, as the backend
+    /// measures it (zero from a backend that does not).
+    #[serde(default)]
+    pub preprocess_us: u64,
+    /// Within a batch's passes, the model runs.
+    #[serde(default)]
+    pub inference_us: u64,
+    /// Within a batch's passes, decoding the output into boxes.
+    #[serde(default)]
+    pub decode_us: u64,
+    /// Re-id embeddings and the tracker.
+    #[serde(default)]
+    pub track_us: u64,
+    /// Capture to publish on `vision.detection`.
+    #[serde(default)]
+    pub capture_to_publish_us: u64,
 }
 
 /// One consumer's live lease on a camera.
@@ -221,6 +264,18 @@ mod tests {
                         crop_runs: 9,
                         crop_hits: 7,
                         turn_moves: 5,
+                        batches: DetectorBatchStatus {
+                            batches: 40,
+                            full_frame_runs: 8,
+                            frame_age_us: 9_000,
+                            full_frame_us: 110_000,
+                            crop_us: 31_000,
+                            preprocess_us: 2_500,
+                            inference_us: 28_000,
+                            decode_us: 300,
+                            track_us: 1_200,
+                            capture_to_publish_us: 45_000,
+                        },
                     },
                 )]),
             }),

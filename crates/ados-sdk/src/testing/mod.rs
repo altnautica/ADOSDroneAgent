@@ -315,6 +315,7 @@ mod tests {
             ts_ms: 1,
             frame_width: 640,
             frame_height: 480,
+            crop_window: None,
             detections: vec![Detection {
                 bbox: Some(BoundingBox {
                     x: 0.0,

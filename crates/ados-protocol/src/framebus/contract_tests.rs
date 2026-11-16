@@ -75,6 +75,7 @@ fn detection_batch_round_trips() {
         ts_ms: 1_700_000_000_000,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: vec![Detection {
             bbox: Some(BoundingBox {
                 x: 12.0,
@@ -122,11 +123,12 @@ fn detection_batch_camera_geometry_and_sensor_time_round_trip_and_are_omitted_wh
         mount_pitch_deg: None,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: vec![],
     };
     let bytes = bare.to_msgpack().unwrap();
     let keys = msgpack_keys(&bytes);
-    for absent in ["ts_sensor_ms", "hfov_deg", "mount_pitch_deg"] {
+    for absent in ["ts_sensor_ms", "hfov_deg", "mount_pitch_deg", "crop_window"] {
         assert!(!keys.iter().any(|k| k == absent), "{absent} on the wire");
     }
     assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), bare);
@@ -137,6 +139,12 @@ fn detection_batch_camera_geometry_and_sensor_time_round_trip_and_are_omitted_wh
         ts_sensor_ms: Some(42_123),
         hfov_deg: Some(87.0),
         mount_pitch_deg: Some(-15.0),
+        crop_window: Some(BoundingBox {
+            x: 400.0,
+            y: 200.0,
+            width: 100.0,
+            height: 100.0,
+        }),
         ..bare
     };
     let bytes = full.to_msgpack().unwrap();
@@ -145,6 +153,7 @@ fn detection_batch_camera_geometry_and_sensor_time_round_trip_and_are_omitted_wh
     assert_eq!(json["ts_sensor_ms"], 42_123);
     assert_eq!(json["hfov_deg"], 87.0);
     assert_eq!(json["mount_pitch_deg"], -15.0);
+    assert_eq!(json["crop_window"]["width"], 100.0);
     assert_eq!(
         serde_json::from_value::<DetectionBatch>(json).unwrap(),
         full
@@ -166,6 +175,7 @@ fn detection_rejects_a_future_version() {
         ts_ms: 0,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: vec![],
     };
     let bytes = batch.to_msgpack().unwrap();

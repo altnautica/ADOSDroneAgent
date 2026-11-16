@@ -320,6 +320,7 @@ fn batch(frame_id: u64) -> DetectionBatch {
         ts_ms: 1_700_000_000_000,
         frame_width: 4,
         frame_height: 4,
+        crop_window: None,
         detections: Vec::new(),
     }
 }

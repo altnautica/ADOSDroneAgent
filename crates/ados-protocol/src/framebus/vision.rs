@@ -263,6 +263,18 @@ pub struct DetectionBatch {
     pub frame_width: u32,
     #[serde(default)]
     pub frame_height: u32,
+    /// Set on a batch that ran only the crop pass around a designated
+    /// subject, not the whole frame: the window looked in, in frame pixels
+    /// (the same space as the boxes, `frame_width` x `frame_height`). The
+    /// batch's detections cover only that window; what lies outside it was
+    /// last seen on the camera's latest batch without a `crop_window` (a
+    /// whole-frame batch). A consumer drawing the scene keeps that batch's
+    /// boxes whose centre lies outside the window until the next whole-frame
+    /// batch, or 1 s after their own batch's `ts_ms`, whichever comes first.
+    /// `None` on a whole-frame batch (with or without a crop beside it) and
+    /// from a producer that predates the field: the batch covers the frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop_window: Option<BoundingBox>,
     pub detections: Vec<Detection>,
 }
 

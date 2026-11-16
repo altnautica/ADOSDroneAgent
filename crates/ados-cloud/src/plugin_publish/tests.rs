@@ -43,6 +43,7 @@ fn batch_json(v: u16) -> Vec<u8> {
         mount_pitch_deg: None,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: vec![Detection {
             bbox: Some(BoundingBox {
                 x: 1.0,

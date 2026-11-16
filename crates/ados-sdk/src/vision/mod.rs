@@ -253,6 +253,7 @@ impl VisionClient {
             ts_ms: (frame.descriptor.ts_ns / 1_000_000) as i64,
             frame_width: frame.descriptor.width,
             frame_height: frame.descriptor.height,
+            crop_window: None,
             detections: vec![detection],
         };
         self.publish_detection(&batch).await

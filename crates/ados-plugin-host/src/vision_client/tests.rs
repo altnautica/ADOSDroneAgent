@@ -268,6 +268,7 @@ async fn detection_batches_fan_out_to_a_subscriber() {
         ts_ms: 1,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: vec![],
     };
     let bytes = batch.to_msgpack().unwrap();
