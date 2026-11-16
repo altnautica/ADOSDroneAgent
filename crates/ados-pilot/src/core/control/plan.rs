@@ -355,7 +355,15 @@ impl Pilot {
     /// walks the hold point.
     fn hard_stop_hold(&mut self, pos: [f32; 3], yaw: f32, ask: Ask, dt: f32, now_ms: u64) {
         let pos_ne = [pos[0], pos[1]];
-        self.goal_ref = None;
+        // A shaped stop's hold point is its reference, which may lead the
+        // vehicle by up to the leash: the hard stop holds where the vehicle
+        // is, at the hold's altitude.
+        if self.goal_ref.take().is_some() {
+            if let Some(h) = self.plan_hold.as_mut() {
+                h[0] = pos[0];
+                h[1] = pos[1];
+            }
+        }
         let push = geofence(
             pos_ne,
             self.fc.home_ne(),
@@ -411,7 +419,7 @@ impl Pilot {
     /// it on the goal limits ([`approach`]). On a detour, and for a vantage
     /// goal, the pilot flies its path toward the target with no feed-forward:
     /// a commanded velocity then only sets the speed (at least
-    /// [`DETOUR_MIN_MPS`]).
+    /// [`DETOUR_MIN_MPS`]), and a commanded stop stays a stop.
     fn goal_ask(&self, goal: Option<&Goal>, to: V2, gl: &GoalLimits, dt: f32) -> V2 {
         let a_dec = APPROACH_DECEL_SHARE * gl.a_h;
         let detour = self.plan.state == AvoidState::Detour
@@ -423,6 +431,7 @@ impl Pilot {
         let command = g.vel_mode == VelMode::Command;
         match (command, detour) {
             (true, false) => gv,
+            (true, true) if geo::norm(gv) < 1e-3 => [0.0, 0.0],
             (true, true) => approach(to, a_dec, geo::norm(gv).max(DETOUR_MIN_MPS), dt),
             (false, false) => geo::add(gv, approach(to, a_dec, f32::INFINITY, dt)),
             (false, true) => approach(to, a_dec, f32::INFINITY, dt),

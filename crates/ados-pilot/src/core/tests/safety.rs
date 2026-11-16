@@ -804,6 +804,66 @@ fn a_pushing_goto_hold_keeps_its_altitude() {
     );
 }
 
+/// Walls `d` east and `d` west of the vehicle (yaw 0), nothing ahead: the
+/// pushes away from them cancel.
+fn sides_scan(d: f32) -> Value {
+    let ranges: Vec<f32> = (0..360)
+        .map(|i| {
+            let s = (i as f32).to_radians().sin();
+            let r = if s.abs() > 1e-3 { d / s.abs() } else { 0.0 };
+            if r <= 12.0 {
+                r
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    json!({"frame": "body_frd", "angle_start_rad": 0.0,
+           "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
+}
+
+/// A goto at 1 m/s is blocked by a wall: its shaped stop's hold point is
+/// the reference, which runs ahead of a vehicle that lags its setpoint.
+/// Walls then come inside the hard-stop distance on both sides, their
+/// pushes cancelling: the hard stop holds where the vehicle is. Before, it
+/// held at the shaped stop's reference, ahead of the vehicle, and the FC's
+/// position loop pulled the vehicle forward while hard-stopped.
+#[test]
+fn a_hard_stop_after_a_shaped_stop_holds_at_the_vehicle() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.vel = [1.0, 0.0, 0.0];
+    w.req(Request::Goto {
+        n: 20.0,
+        e: 0.0,
+        d: -5.0,
+        yaw: None,
+    });
+    scan_for(&mut w, &wall_scan(4.0), 600);
+    assert_eq!(w.p.state(w.now).hold_reason.as_deref(), Some("blocked"));
+    let lead = w.last_setpoint().unwrap().x - w.pos[0];
+    assert!(lead > 0.2, "the shaped stop's reference leads by {lead:.2} m");
+    w.vel = [0.0; 3];
+    let mut held = None;
+    for _ in 0..10 {
+        scan_for(&mut w, &sides_scan(0.8), 20);
+        if w.p.state(w.now).hold_reason.as_deref() == Some(HOLD_OBSTACLE_CLOSE) {
+            held = w.last_setpoint().cloned();
+            break;
+        }
+    }
+    let sp = held.expect("the hard stop holds");
+    assert!(
+        (sp.x - w.pos[0]).abs() < 0.05 && (sp.y - w.pos[1]).abs() < 0.05,
+        "hard stop holds at ({:.2}, {:.2}), the vehicle at ({:.2}, {:.2})",
+        sp.x,
+        sp.y,
+        w.pos[0],
+        w.pos[1]
+    );
+    assert!((sp.z + 5.0).abs() < 0.05, "hold altitude {}", sp.z);
+}
+
 #[test]
 fn stick_brake_reports_avoid_state_and_hard_stop() {
     let mut w = World::new();
@@ -1099,6 +1159,39 @@ fn a_follow_far_behind_routes_around_clutter_toward_its_subject() {
     assert!(geo::norm(ask) > 0.5, "asks {ask:?} with a goal 20 m ahead");
     let end = s.plan_ned.last().copied().unwrap_or_default();
     assert!(end[0] > 16.0, "the plan ends at {end:?}, short of the goal");
+}
+
+/// The same clutter, the follow holding: its goal asks a commanded zero
+/// velocity (`vel_mode` command) at a point the planner can reach only by
+/// a detour. A commanded stop stays a stop. Before, the detour flew toward
+/// the point at the detour's least speed (1 m/s).
+#[test]
+fn a_commanded_stop_on_a_detour_stays_still() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.pos = [0.0, 0.0, -5.0];
+    w.agl = Some(5.0);
+    let id = w.lease();
+    let mut goal = follow_goal([20.0, 0.0, -5.0], [0.0, 0.0]);
+    goal.vel_mode = ados_protocol::pilot::VelMode::Command;
+    goal.subject_ne = Some([26.0, 0.0]);
+    goal.candidates = Some(Candidates {
+        ring_center_ne: [26.0, 0.0],
+        radius_m: 6.0,
+        angle_deg: 180.0,
+        angle_span_deg: 90.0,
+    });
+    let mut fastest = 0.0f32;
+    for _ in 0..15 {
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: goal.clone(),
+        });
+        scan_for(&mut w, &row_scan(5.0, 3.0), 200);
+        fastest = fastest.max(geo::norm(fc_ask(&w, [0.0, 0.0])));
+    }
+    assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Detour);
+    assert!(fastest < 0.05, "a commanded stop flew up to {fastest:.2} m/s");
 }
 
 #[test]
