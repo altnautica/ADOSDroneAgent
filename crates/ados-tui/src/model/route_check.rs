@@ -283,7 +283,7 @@ mod tests {
         };
         assert_eq!(
             route_check_report(&unseen).line,
-            "Route not seen yet · slow near walls"
+            "Route checked in flight at each leg's height · slow near walls"
         );
         assert_eq!(route_check_report(&unseen).severity, ReportSeverity::Warn);
         // Items with no position, then a mission longer than the feed, are

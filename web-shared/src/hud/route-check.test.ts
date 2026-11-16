@@ -96,7 +96,7 @@ describe("the route-check report", () => {
       state: "unverified",
       severity: "warn",
       title: "Route check",
-      line: "Route not seen yet · slow near walls",
+      line: "Route checked in flight at each leg's height · slow near walls",
       pinchAt: null,
     });
   });
