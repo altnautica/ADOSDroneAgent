@@ -41,21 +41,14 @@ impl VisionEngine {
         self.move_track_with_camera(desc).await;
         let plan = self.plan_batch(model_id, desc).await;
         let mut infer_ms = 0.0;
+        let mut ran_whole = plan.whole;
         let mut detections = if plan.whole {
-            let pass = self
-                .run_pass(model_id, frame, desc.width, desc.height, desc.format, None)
-                .await?;
-            let dets = pass.result?;
-            times.full_frame_ms = Some(pass.latency_ms);
-            times.add_stages(pass.stages);
-            infer_ms += pass.latency_ms;
-            dets
+            self.run_whole_pass(model_id, desc, frame, &mut times, &mut infer_ms)
+                .await?
         } else {
             Vec::new()
         };
         if let Some(crop) = &plan.crop {
-            // A failed crop pass costs only the crop: whatever the whole frame
-            // found still publishes.
             match self.run_crop_pass(model_id, desc, frame, crop).await {
                 Ok((found, ms, stages)) => {
                     times.crop_ms = Some(ms);
@@ -67,6 +60,17 @@ impl VisionEngine {
                 }
                 Err(e) => {
                     tracing::warn!(model = %crop.model_id, camera = %desc.camera_id, error = %e, "designated_crop_infer_failed");
+                    // A failed crop pass costs only the crop: whatever the
+                    // whole frame found still publishes, and a crop-only
+                    // batch runs the whole frame instead, so a failing crop
+                    // never reads as an empty window to the tracker or an
+                    // overlay.
+                    if !ran_whole {
+                        detections = self
+                            .run_whole_pass(model_id, desc, frame, &mut times, &mut infer_ms)
+                            .await?;
+                        ran_whole = true;
+                    }
                 }
             }
         }
@@ -101,19 +105,37 @@ impl VisionEngine {
         };
         times.track_ms = track_start.elapsed().as_secs_f32() * 1000.0;
         let mut batch = self.detection_batch(model_id, desc, detections);
-        if !plan.whole {
+        if !ran_whole {
             batch.crop_window = plan.crop.as_ref().map(|c| c.window);
         }
         self.publish_detection(batch.clone());
         times.capture_to_publish_ms = ms_since(desc.ts_ns);
         let now_ms = (ados_protocol::framebus::mono_ns() / 1_000_000) as i64;
-        // A batch whose only pass failed measured nothing: a 0 would drag the
-        // detector's latency towards a figure no batch took.
-        if plan.whole || times.crop_ms.is_some() {
-            self.record_timing(model_id, infer_ms, now_ms).await;
-        }
+        // Every published batch ran a pass that measured: a failed crop-only
+        // pass fell back to the whole frame, and a failed whole frame returned.
+        self.record_timing(model_id, infer_ms, now_ms).await;
         self.note_batch(desc, &times);
         Ok(batch)
+    }
+
+    /// The whole-frame pass of a batch: its detections, with its time on
+    /// `times` and added to the batch's inference time `infer_ms`.
+    async fn run_whole_pass(
+        &self,
+        model_id: &str,
+        desc: &FrameDescriptor,
+        frame: &[u8],
+        times: &mut super::batch_times::BatchTimes,
+        infer_ms: &mut f32,
+    ) -> Result<Vec<Detection>> {
+        let pass = self
+            .run_pass(model_id, frame, desc.width, desc.height, desc.format, None)
+            .await?;
+        let dets = pass.result?;
+        times.full_frame_ms = Some(pass.latency_ms);
+        times.add_stages(pass.stages);
+        *infer_ms += pass.latency_ms;
+        Ok(dets)
     }
 
     /// Run the camera's single-object tracker over `detections` and return the

@@ -178,12 +178,17 @@ fn frame_with(boxes: &[(BoundingBox, [u8; 3])]) -> Vec<u8> {
     f
 }
 
+/// The capture interval the frames are stamped at: one detector batch at the
+/// 3 Hz the tracker's per-step settings stand for, so each frame advances the
+/// timed tracker one step, as these scripts count.
+const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / 3;
+
 fn desc(frame_id: u64) -> ados_protocol::framebus::FrameDescriptor {
     ados_protocol::framebus::FrameDescriptor {
         v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
         camera_id: "cam".into(),
         frame_id,
-        ts_ns: frame_id,
+        ts_ns: frame_id * FRAME_INTERVAL_NS,
         ts_sensor_ns: None,
         exposure_ns: None,
         trigger_seq: None,

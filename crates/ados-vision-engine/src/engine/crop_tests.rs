@@ -148,10 +148,21 @@ struct CliffBackend {
     log: Arc<std::sync::Mutex<Vec<(u32, u32)>>>,
 }
 
+/// A model that loads but fails every run (a crop model exported at an input
+/// its config does not state).
+struct BrokenDetector;
+
+impl LoadedModel for BrokenDetector {
+    fn infer(&self, _: &[u8], _: u32, _: u32, _: FrameFormat) -> Result<Vec<Detection>> {
+        Err(anyhow!("input shape mismatch"))
+    }
+}
+
 impl VisionBackend for CliffBackend {
     fn load(&self, meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
         Ok(match meta.kind {
             ModelKind::Tracking => Box::new(ColourReid),
+            _ if meta.id.ends_with(".broken") => Box::new(BrokenDetector),
             _ => Box::new(CliffDetector {
                 calls: self.calls.clone(),
                 log: self.log.clone(),
@@ -727,4 +738,39 @@ fn merge_keeps_one_box_per_subject() {
     );
     assert_eq!(dets.len(), 2);
     assert_eq!(dets[0].confidence, 0.7);
+}
+
+/// A crop model that loads but fails every run costs only the crop: each
+/// batch it would have run alone runs the whole frame instead, so no batch
+/// reads as an empty window and the lock holds.
+#[tokio::test]
+async fn a_crop_model_that_fails_every_run_falls_back_to_the_whole_frame() {
+    let (e, _) = follow_engine().await;
+    e.register_model(model("det.broken", ModelKind::Detection, 320, 320))
+        .await
+        .unwrap();
+    e.configure_crop_primary("det", Some("det.broken".into()), 500_000_000);
+    let at = |i: u64| desc_at(i, 1_000_000_000 + i * 100_000_000);
+    let walker = |i: u64| bbox([600.0 + i as f32 * 4.0, 300.0, 70.0, 200.0]);
+    let first = e
+        .infer_and_publish("det", &at(0), &frame_with(&walker(0)))
+        .await
+        .unwrap();
+    let id = e.designate("main", &first.detections[0]).await.unwrap();
+    for i in 1..12 {
+        let batch = e
+            .infer_and_publish("det", &at(i), &frame_with(&walker(i)))
+            .await
+            .unwrap();
+        assert_eq!(batch.crop_window, None, "frame {i}: {batch:?}");
+        if i >= 2 {
+            assert!(
+                batch
+                    .detections
+                    .iter()
+                    .any(|d| d.track_id == Some(id) && d.lock_state == Some(LockState::Locked)),
+                "frame {i}: {batch:?}"
+            );
+        }
+    }
 }
