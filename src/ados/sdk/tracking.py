@@ -1,7 +1,7 @@
 """Shared locked-target behaviour primitives for target-driven plugins.
 
 A plugin that follows the vision engine's operator-designated target — Follow-Me,
-the gimbal aim loop, a future ActiveTrack — subscribes to the detection stream and
+the gimbal aim loop, a future subject tracking mode — subscribes to the detection stream and
 must apply one safety gate:
 
 * adopt only the engine-designated + tracked target, never pick its own;

@@ -84,7 +84,7 @@ class _CameraClient:
     handle is opened.
 
     The ``get_frame`` method is the building block for vision behaviors
-    that run as plugins (Follow Me, ActiveTrack, Precision Landing).
+    that run as plugins (Follow Me, subject tracking, Precision Landing).
     It returns the latest frame on the supervisor's behalf — the
     plugin polls at its own desired rate and the supervisor enforces
     a host-side cap so a runaway plugin cannot DOS the camera pipeline.
