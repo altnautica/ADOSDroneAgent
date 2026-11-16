@@ -51,7 +51,11 @@ impl Pilot {
                 tracing::warn!(target: "ados_pilot", reason = "no_prop_radius", "pilot_launch_refused");
                 return Err("no_prop_radius".into());
             }
+            // The route is checked only on a launch nothing more basic
+            // refuses: without a position the router places no item, and
+            // the refusal names the missing position, not the route.
             if after == "mission" {
+                self.launch_refusal(true, now_ms)?;
                 self.route_launch_check(now_ms)?;
             }
         }
@@ -85,6 +89,24 @@ impl Pilot {
     }
 
     pub(super) fn start_launch(&mut self, l: Launch, now_ms: u64) -> ActionRes {
+        self.launch_refusal(l.step == LaunchStep::Checks || !self.fc.armed, now_ms)?;
+        let mut l = Launch {
+            step: LaunchStep::Arm,
+            step_ms: now_ms,
+            cmd: None,
+            ..l
+        };
+        // A deliberate take-off ends a touchdown.
+        self.touchdown = Default::default();
+        self.arm_for_launch(&mut l, now_ms);
+        self.launch = Some(l);
+        Ok(())
+    }
+
+    /// Why a launch is refused before anything is sent: airborne, in an FC
+    /// failsafe, with the position unverified, or (`ready`) while a
+    /// blocking readiness item fails.
+    fn launch_refusal(&self, ready: bool, now_ms: u64) -> ActionRes {
         if self.fc.armed && !self.fc.landed() {
             return Err("airborne".into());
         }
@@ -96,19 +118,9 @@ impl Pilot {
         if self.position_unverified(now_ms).is_some() {
             return Err("position_unverified".into());
         }
-        if l.step == LaunchStep::Checks || !self.fc.armed {
+        if ready {
             self.ready_to_arm(now_ms)?;
         }
-        let mut l = Launch {
-            step: LaunchStep::Arm,
-            step_ms: now_ms,
-            cmd: None,
-            ..l
-        };
-        // A deliberate take-off ends a touchdown.
-        self.touchdown = Default::default();
-        self.arm_for_launch(&mut l, now_ms);
-        self.launch = Some(l);
         Ok(())
     }
 

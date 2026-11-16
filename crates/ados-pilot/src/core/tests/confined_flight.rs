@@ -1,8 +1,9 @@
 //! The confined route across flights and feeds: a mission the router has
-//! not mirrored (or mirrored stale) is never launched unchecked, a new
-//! flight checks the legs an earlier one skipped, the leg from the vehicle
-//! is checked however the FC entered AUTO, and no AUTO is commanded without
-//! the position that leg starts from.
+//! not mirrored (or mirrored stale) is never launched unchecked, a launch
+//! without a position is refused for the position, a new flight checks the
+//! legs an earlier one skipped, the leg from the vehicle is checked however
+//! the FC entered AUTO, and no AUTO is commanded without the position that
+//! leg starts from.
 
 use ados_protocol::pilot::RouteState;
 use serde_json::json;
@@ -45,6 +46,39 @@ fn a_mission_the_feed_may_not_hold_refuses_the_launch() {
     run_seen(&mut w, 200);
     let rc = w.p.state(w.now).route_check.expect("route_check");
     assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
+}
+
+#[test]
+fn a_launch_without_a_position_names_the_position_not_the_route() {
+    let mut w = World::new();
+    confined(&mut w);
+    assert!(ok(&w.action("control_mode:ados")));
+    map(&mut w, &area(&|_, _| false));
+    // The FC sends no local position (its EKF is between estimates) for
+    // longer than one stays fresh, so the router places none of the
+    // mission's items.
+    w.local = false;
+    let unplaced = |s: u32, cmd: u32| {
+        json!({"seq": s, "cmd": cmd, "frame": 6, "lat_e7": 1, "lon_e7": 1, "alt_m": 5.0,
+               "ned": null})
+    };
+    let items = vec![unplaced(1, 22), unplaced(3, 16), unplaced(4, 16)];
+    feed(&mut w, "loaded", 0, items, None, json!({}));
+    run_seen(&mut w, 2000);
+    let rc = w.p.state(w.now).route_check.expect("route_check");
+    assert_eq!(rc.unchecked, vec![3, 4]);
+    let r = w.action_args("launch", json!({"after": "mission"}));
+    assert_eq!(err(&r).as_deref(), Some("not_ready:position"));
+    assert!(!w.armed);
+    // The position is back and the router places the items: the route is
+    // checked whole and the launch goes ahead.
+    w.local = true;
+    let items = LINE.iter().map(|&(s, n, e)| item(s, n, e)).collect();
+    feed(&mut w, "loaded", 0, items, None, json!({}));
+    run_seen(&mut w, 200);
+    let rc = w.p.state(w.now).route_check.expect("route_check");
+    assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
+    assert!(ok(&w.action_args("launch", json!({"after": "mission"}))));
 }
 
 /// Item 2 sits 2 m east: a post 0.5 m off the leg 2→3 is 1.5 m off the
