@@ -51,6 +51,14 @@ def build(yolox_src: Path, checkpoint: Path):  # noqa: ANN201 - torch types are 
     from torch import nn
 
     sys.path.insert(0, str(yolox_src))
+    # yolox.utils imports training-only packages (torchvision, cv2); the
+    # inference graph needs only its meshgrid, so the package is stubbed.
+    import types
+
+    utils = types.ModuleType("yolox.utils")
+    utils.meshgrid = lambda *t: torch.meshgrid(*t, indexing="ij")
+    utils.bboxes_iou = utils.cxcywh2xyxy = utils.visualize_assign = None
+    sys.modules["yolox.utils"] = utils
     from yolox.models import YOLOPAFPN, YOLOX, YOLOXHead
 
     in_channels = [256, 512, 1024]
