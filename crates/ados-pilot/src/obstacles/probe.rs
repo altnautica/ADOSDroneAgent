@@ -165,7 +165,9 @@ impl Obstacles {
                 out.first_tight = Some((t, q));
             }
         };
-        for h in self.hits(now_ms) {
+        // A return over the flight slice is no pinch on a leg flown in it
+        // (a roof a nose-up scan reaches); the brake still reads it.
+        for h in self.hits(now_ms).iter().filter(|h| !h.overhead) {
             seen_obstacle(h.ne, 0.0, Bar::NOW, &mut out);
         }
         let Some(off) = self.offset else {

@@ -10,6 +10,7 @@ mod harness;
 mod mission;
 mod nav_cap;
 mod no_returns;
+mod overhead;
 mod position_check;
 mod route_hold;
 mod route_sigma;

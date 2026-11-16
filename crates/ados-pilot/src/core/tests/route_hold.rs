@@ -246,15 +246,12 @@ fn a_roof_a_nose_up_scan_reaches_is_no_obstacle_on_the_legs_ahead() {
     let rc = w.p.state(w.now).route_check.expect("route_check");
     assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
     assert_eq!(w.set_modes(copter::BRAKE), 0);
+    // The brake still reads it: an obstacle over the slice, not a pinch.
     let hits = w.p.obstacles.hits(w.now);
+    let roof: Vec<_> = hits.iter().filter(|h| h.range_m < 7.5).collect();
     assert!(
-        !hits.is_empty() && hits.iter().all(|h| h.range_m > 7.5),
+        roof.len() == 1 && roof[0].overhead && (roof[0].ne[0] - 6.98).abs() < 0.05,
         "{hits:?}"
-    );
-    // It still bounds what the beam saw free, for the brake.
-    assert_eq!(
-        w.p.obstacles.horizon_near([7.0, 0.0], 0.1, w.now).count(),
-        1
     );
     // Level, the same return is a wall at flight height on the leg.
     w.pitch = 0.0;
@@ -280,7 +277,11 @@ fn the_brake_still_stops_for_a_wall_approached_nose_up() {
     w.vel = [2.0, 0.0, 0.0];
     w.run(200);
     let hits = w.p.obstacles.hits(w.now);
-    assert!(hits.iter().all(|h| h.range_m > 7.5), "{hits:?}");
+    let wall_hits: Vec<_> = hits.iter().filter(|h| h.range_m < 7.5).collect();
+    assert!(
+        wall_hits.len() == 21 && wall_hits.iter().all(|h| h.overhead),
+        "{hits:?}"
+    );
     assert_eq!(w.set_modes(copter::BRAKE), 1, "braked short of the wall");
     assert_eq!(held(&w).as_deref(), Some("obstacle-close"));
 }

@@ -38,19 +38,17 @@ pub const FRAME_TOP_M: f32 = 0.03;
 /// Half the height of the flight slice the planar scan stands for: the
 /// airframe's top ([`FRAME_TOP_M`]) plus the confined margin's 0.1 m past
 /// the airframe ([`crate::config::CONFINED_TIP_EXTRA_M`]). A return levelled
-/// higher than this over the scan plane met something over the slice (a
-/// tunnel roof a nose-up scan reaches): like the ground it only bounds what
-/// the beam saw free (the horizon), and is no obstacle. The brake's speed
-/// caps count horizon points as they count obstacles; only the hard stop
-/// and the push, which act inside the margin, read obstacles alone. A
-/// tilted beam lifts a wall over the slice only at tan θ > `SLICE_HALF_M` /
-/// range: past 16.5° inside the 0.44 m a vehicle at the 0.5 m/s confined cap
-/// needs to stop, past 23° inside a 0.30 m confined margin (a 5-inch quad),
-/// all outside the confined pitch envelope; and the tilt lifting a wall
-/// ahead is the one slowing the vehicle toward it. Nothing below the plane
-/// is cut this way: the body, guards and props sit under it, so a return
-/// there is collision geometry. The route check judges a leg only where it
-/// runs within this of the scan plane.
+/// higher than this over the scan plane met something over the slice: a
+/// tunnel roof a nose-up scan reaches, or the upper part of a tall obstacle
+/// the brake's own nose-up pitch lifts the beam onto. Every safety reader
+/// (the hard stop, the push, the closing speed, the brake's speed caps)
+/// keeps it as an obstacle: a false one there only brakes earlier, and a
+/// pitch of 2° already lifts a column 4 m ahead over the slice. Only the
+/// route check's feasibility ignores it ([`Hit::overhead`]), where a roof
+/// read as a wall beside the leg made a phantom pinch. Nothing below the
+/// plane is set apart this way: the body, guards and props sit under it,
+/// so a return there is collision geometry. The route check judges a leg
+/// only where it runs within this of the scan plane.
 pub const SLICE_HALF_M: f32 = FRAME_TOP_M + crate::config::CONFINED_TIP_EXTRA_M;
 /// Scans older than this are not used.
 pub const SCAN_MAX_AGE_MS: u64 = 500;
@@ -103,6 +101,9 @@ pub struct Hit {
     pub range_m: f32,
     /// Local NED horizontal position.
     pub ne: V2,
+    /// Levelled more than [`SLICE_HALF_M`] over the scan plane. An obstacle
+    /// to every safety reader; only the route check's feasibility skips it.
+    pub overhead: bool,
 }
 
 /// The obstacle model.
@@ -115,10 +116,9 @@ pub struct Obstacles {
     offset: Option<V2>,
     hits: Vec<Hit>,
     /// Where each bin of the current scan stops seeing without an obstacle:
-    /// the floor where a tilted beam meets it, a surface over the flight
-    /// slice ([`SLICE_HALF_M`]), or [`SCAN_HORIZON_M`] when it returns
-    /// nothing. Nothing beyond is known free, so the stick brake treats
-    /// these points as possible obstacles.
+    /// the floor where a tilted beam meets it, or [`SCAN_HORIZON_M`] when
+    /// it returns nothing. Nothing beyond is known free, so the stick brake
+    /// treats these points as possible obstacles.
     horizon: Vec<V2>,
     /// When the current scan arrived (`None`: no scan yet).
     scan_ms: Option<u64>,
@@ -244,7 +244,7 @@ impl Obstacles {
             }
             match level_return(r, theta, level, pos_ne) {
                 (hit, false) => self.hits.push(hit),
-                (off_slice, true) => self.horizon.push(off_slice.ne),
+                (ground, true) => self.horizon.push(ground.ne),
             }
         }
         self.update_closing(level.yaw, now_ms);
