@@ -323,6 +323,7 @@ impl Pilot {
             origin.as_ref(),
         );
         let plane_d = self.fc.fresh_local(now_ms).map(|l| l.d);
+        let fresh = self.obstacle_data_state(now_ms).is_none();
         let checked = check_legs(&self.obstacles, &ahead.legs, c.required, plane_d, now_ms);
         let r = &mut self.route;
         r.legs = checked;
@@ -339,7 +340,13 @@ impl Pilot {
             r.clear_since = None;
         } else {
             r.infeasible_since = None;
-            r.clear_since.get_or_insert(now_ms);
+            // Only checks on fresh obstacle data count toward a resume: a
+            // stale scan shows none of the pinches it found.
+            if fresh {
+                r.clear_since.get_or_insert(now_ms);
+            } else {
+                r.clear_since = None;
+            }
         }
         let pinch = r.pinch().map(|(l, p, d)| ((l.from_seq, l.to_seq), p, d));
         let key = state.map(|s| (s, pinch.map(|(k, _, _)| k)));
@@ -559,10 +566,14 @@ impl Pilot {
         let Some(leg) = self.route.infeasible().copied() else {
             return;
         };
-        let near = leg
-            .tight
-            .or(leg.pinch.map(|(p, _)| [p[0], p[1]]))
-            .is_none_or(|p| self.in_reach(p, now_ms));
+        // Where the leg turns tight, or its pinch: the tight stretch may
+        // start behind the vehicle while the pinch lies ahead.
+        let pinch = leg.pinch.map(|(p, _)| [p[0], p[1]]);
+        let near = (leg.tight.is_none() && pinch.is_none())
+            || [leg.tight, pinch]
+                .into_iter()
+                .flatten()
+                .any(|p| self.in_reach(p, now_ms));
         if near || self.route.infeasible_for(ROUTE_HOLD_CONFIRM_MS) {
             let seq = self.mission.as_ref().and_then(|m| m.seq);
             self.hold_route_infeasible(seq, now_ms);

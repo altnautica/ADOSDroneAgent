@@ -164,9 +164,12 @@ fn a_route_hold_resumes_only_on_fresh_obstacle_data() {
     run_seen(&mut w, 6000);
     assert_eq!(w.set_modes(copter::AUTO), before.0, "no AUTO on stale scans");
     assert_ne!(w.mode, copter::AUTO);
-    // Scans again: resumed once the dwell passes.
+    // Scans again: the stale checks never counted, so the full dwell runs
+    // from the first fresh one.
     w.lidar = true;
-    run_seen(&mut w, 4500);
+    run_seen(&mut w, 1500);
+    assert_eq!(w.set_modes(copter::AUTO), before.0, "not before the dwell");
+    run_seen(&mut w, 3000);
     assert_resumed(&w, before);
 }
 
