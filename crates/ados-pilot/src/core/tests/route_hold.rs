@@ -368,7 +368,8 @@ fn an_unverified_leg_within_reach_slows_the_fc() {
     assert!(speed_changes(&w).is_empty(), "6 m short: out of reach");
     w.pos = [9.0, 0.0, -5.0];
     run_seen(&mut w, 600);
-    assert_eq!(speed_changes(&w), vec![0.5]);
+    // An 11° climb judged 0.65 m ahead: the crawl ([`sloped_leg`]).
+    assert_eq!(speed_changes(&w), vec![0.2]);
     let cap = w.p.state(w.now).speed_cap.expect("cap");
     assert_eq!(cap.reason, "confined-near");
 }

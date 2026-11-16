@@ -17,6 +17,7 @@ mod route_sigma;
 mod rules;
 mod safety;
 mod sensors;
+mod sloped_leg;
 mod stale;
 mod stall_return;
 mod supervisor;

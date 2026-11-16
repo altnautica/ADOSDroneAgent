@@ -15,18 +15,35 @@ use crate::flows::banner;
 use crate::geo::{self, V2};
 use ados_protocol::pilot::Owner;
 
+/// How far a vehicle at `v` m/s flies before a hold that waited stopped it:
+/// for [`ROUTE_HOLD_CONFIRM_MS`] (as long as a pinch can wait for the next
+/// check, `RECHECK_MS`, before any check sees it) and the FC's response
+/// (`BRAKE_LAG_S`) at `v`, then braking at `a` m/s².
+pub(super) fn stop_m(v: f32, a: f32) -> f32 {
+    let t = ROUTE_HOLD_CONFIRM_MS as f32 / 1000.0 + BRAKE_LAG_S;
+    v * t + v * v / (2.0 * a)
+}
+
+/// The fastest speed whose [`stop_m`] fits in `d` metres (0 when none
+/// does): the positive root of `v·T + v²/2a = d`.
+pub(super) fn speed_stopping_within(d: f32, a: f32) -> f32 {
+    let t = ROUTE_HOLD_CONFIRM_MS as f32 / 1000.0 + BRAKE_LAG_S;
+    if d <= 0.0 {
+        return 0.0;
+    }
+    a * (-t + (t * t + 2.0 * d / a).sqrt())
+}
+
 impl Pilot {
     /// Where the vehicle is and how far it could fly before it stopped were
-    /// a hold to wait out [`ROUTE_HOLD_CONFIRM_MS`]: at the faster of its
-    /// speed now and the confined cap the wait holds the FC to, for the wait
-    /// and the FC's response (`BRAKE_LAG_S`), then braking at the profile's
-    /// horizontal acceleration. `None` without a fresh position.
+    /// a hold to wait out [`ROUTE_HOLD_CONFIRM_MS`] ([`stop_m`]): at the
+    /// faster of its speed now and the confined cap the wait holds the FC
+    /// to, braking at the profile's horizontal acceleration. `None` without
+    /// a fresh position.
     fn stop_reach(&self, now_ms: u64) -> Option<(V2, f32)> {
         let l = self.fc.fresh_local(now_ms)?;
         let v = l.vn.hypot(l.ve).max(CONFINED_CAP_MPS);
-        let a = self.limits_now(now_ms).a_h;
-        let t = ROUTE_HOLD_CONFIRM_MS as f32 / 1000.0 + BRAKE_LAG_S;
-        Some(([l.n, l.e], v * t + v * v / (2.0 * a)))
+        Some(([l.n, l.e], stop_m(v, self.limits_now(now_ms).a_h)))
     }
 
     /// The vehicle could come within the required clearance of `p` (local

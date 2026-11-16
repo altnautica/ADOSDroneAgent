@@ -143,8 +143,11 @@ pub struct Route {
     logged: Option<(RouteState, Option<(u32, u32)>)>,
     /// An obstacle is near the clearance limit (the pilot-flown cap).
     pub near: bool,
-    /// The cap in force and why (`near`, `infeasible` or `unverified`).
+    /// The cap in force and why (`near`, `infeasible`, `sloped` or
+    /// `unverified`).
     pub cap: Option<&'static str>,
+    /// The speed the cap holds the FC to, m/s.
+    pub cap_mps: f32,
     /// The FC flight the cap slowed.
     pub fc_slowed: Option<Slowed>,
 }
