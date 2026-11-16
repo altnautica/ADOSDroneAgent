@@ -35,7 +35,31 @@ pub struct ProfileParam {
     /// In a confined place the row accepts any value above 0 and at most
     /// this one instead of `value`.
     pub confined_max: Option<f32>,
+    /// In an open place the row accepts any value in this band (`value`
+    /// is written when it is outside); a confined place does not check it.
+    pub open_band: Option<(f32, f32)>,
 }
+
+/// `ATC_INPUT_TC` for camera flight in an open place, seconds: 0.15-0.2.
+///
+/// ArduCopter (fe92274, `AC_AttitudeControl`) defaults to 0.10 ("crisp";
+/// range 0-1 s, 0.15 is ArduPlane's "medium"): the attitude target follows
+/// a new lean demand with that time constant, so every change of commanded
+/// acceleration the pilot's shaper did not smooth (an FC position
+/// correction, a brake cut) tilts the body, and the fixed camera, within
+/// 0.1 s. 0.15-0.2 rounds those edges. The cost is a slower response to a
+/// brake cut: about 0.05-0.1 s more lag, inside the 0.8 s [`BRAKE_LAG_S`]
+/// the brake plans for (measured 0.5-0.6 s at 0.10), so the open stopping
+/// budget holds. `PSC_NE_JERK` keeps its 5 m/s³ default: the pilot's goal
+/// shaper already holds goal flight to 1.2-5 m/s³ by profile
+/// ([`crate::model::goal_limits`]), while the FC's jerk limit sets how fast
+/// a brake cut bites (at 2.5 m/s³ the FC would take 1.2 s instead of 0.6 s
+/// to unwind 3 m/s² of acceleration, past [`BRAKE_LAG_S`]). A confined place
+/// keeps the FC's own value: its stops 0.1 m beyond the propeller tips were
+/// flown and scored at the crisp default only.
+///
+/// [`BRAKE_LAG_S`]: crate::core::control::BRAKE_LAG_S
+pub const OPEN_INPUT_TC_S: (f32, f32) = (0.15, 0.2);
 
 /// The largest `SRTL_ACCURACY` a confined place accepts, metres: 0.2.
 ///
@@ -64,6 +88,7 @@ const fn p(name: &'static str, alt_names: &'static [&'static str], value: f32) -
         absent_blocks: None,
         reboot: false,
         confined_max: None,
+        open_band: None,
     }
 }
 
@@ -89,10 +114,19 @@ impl ProfileParam {
         }
     }
 
+    const fn open_within(self, band: (f32, f32)) -> Self {
+        ProfileParam {
+            open_band: Some(band),
+            ..self
+        }
+    }
+
     /// What the row wants in `place`.
     pub fn want(&self, place: PlaceClass) -> Want {
-        match (place, self.confined_max) {
-            (PlaceClass::Confined, Some(max)) => Want::Within(max),
+        match (place, self.confined_max, self.open_band) {
+            (PlaceClass::Confined, Some(max), _) => Want::Within(max),
+            (PlaceClass::Confined, None, Some(_)) => Want::Any,
+            (_, _, Some((lo, hi))) => Want::Between(lo, hi),
             _ => Want::Exactly(self.value),
         }
     }
@@ -100,11 +134,13 @@ impl ProfileParam {
     /// The value the setup wizard writes in `place` over `have`: `have`
     /// itself when it already satisfies the row there.
     pub fn value_in(&self, place: PlaceClass, have: Option<f32>) -> f32 {
-        match self.want(place) {
+        let want = self.want(place);
+        match want {
             Want::Exactly(v) => v,
-            Want::Within(max) => have
-                .filter(|h| Want::Within(max).accepts(*h))
-                .unwrap_or(max),
+            Want::Within(max) => have.filter(|h| want.accepts(*h)).unwrap_or(max),
+            Want::Between(..) | Want::Any => {
+                have.filter(|h| want.accepts(*h)).unwrap_or(self.value)
+            }
         }
     }
 }
@@ -116,6 +152,10 @@ pub enum Want {
     Exactly(f32),
     /// Above 0 and at most this.
     Within(f32),
+    /// From the first to the second, inclusive.
+    Between(f32, f32),
+    /// Whatever the FC has.
+    Any,
 }
 
 impl Want {
@@ -123,6 +163,8 @@ impl Want {
         match self {
             Want::Exactly(want) => (v - want).abs() < 0.01,
             Want::Within(max) => v > 0.0 && v <= max + 1e-4,
+            Want::Between(lo, hi) => v >= lo - 1e-4 && v <= hi + 1e-4,
+            Want::Any => true,
         }
     }
 }
@@ -132,6 +174,8 @@ impl fmt::Display for Want {
         match self {
             Want::Exactly(v) => write!(f, "{v}"),
             Want::Within(max) => write!(f, "> 0 and ≤ {max} in a confined place"),
+            Want::Between(lo, hi) => write!(f, "{lo} to {hi}"),
+            Want::Any => write!(f, "any value"),
         }
     }
 }
@@ -160,6 +204,8 @@ const COPTER: &[ProfileParam] = &[
     // A confined place takes a tighter accuracy (see
     // CONFINED_SRTL_ACCURACY_MAX_M); an open one the firmware default.
     p("SRTL_ACCURACY", &[], 2.0).confined_at_most(CONFINED_SRTL_ACCURACY_MAX_M),
+    // A softer attitude input for the fixed camera (see OPEN_INPUT_TC_S).
+    p("ATC_INPUT_TC", &[], OPEN_INPUT_TC_S.0).open_within(OPEN_INPUT_TC_S),
 ];
 
 const PLANE: &[ProfileParam] = &[
@@ -322,5 +368,34 @@ mod tests {
             "> 0 and ≤ 0.2 in a confined place"
         );
         assert_eq!(Want::Exactly(2.0).to_string(), "2");
+    }
+
+    /// Camera flight in an open place wants the softer attitude input:
+    /// ArduCopter's crisp 0.10 default fails, 0.15-0.2 passes and is kept,
+    /// and the wizard writes 0.15 over anything else. A confined place keeps
+    /// whatever the FC has.
+    #[test]
+    fn an_open_place_wants_a_soft_attitude_input_and_a_confined_one_keeps_its_own() {
+        let row = COPTER
+            .iter()
+            .find(|r| r.name == "ATC_INPUT_TC")
+            .expect("the copter profile has an ATC_INPUT_TC row");
+        let check = |place, v: f32| check_row(row, place, |_| Some(v));
+        for ok in [0.15, 0.18, 0.2] {
+            assert_eq!(check(PlaceClass::Open, ok), RowCheck::Ok, "{ok}");
+        }
+        for wrong in [0.0, 0.1, 0.25, 0.5] {
+            assert!(
+                matches!(check(PlaceClass::Open, wrong), RowCheck::Mismatch { .. }),
+                "{wrong}"
+            );
+        }
+        for any in [0.05, 0.1, 0.15, 0.5] {
+            assert_eq!(check(PlaceClass::Confined, any), RowCheck::Ok, "{any}");
+        }
+        assert_eq!(row.value_in(PlaceClass::Open, Some(0.1)), 0.15);
+        assert_eq!(row.value_in(PlaceClass::Open, Some(0.18)), 0.18);
+        assert_eq!(row.value_in(PlaceClass::Open, None), 0.15);
+        assert_eq!(row.value_in(PlaceClass::Confined, Some(0.1)), 0.1);
     }
 }
