@@ -379,7 +379,9 @@ fn an_obstacle_ahead_in_auto_brakes_within_one_replan_and_resumes_once_clear() {
     // The wall stays: the hold stays.
     scan_for(&mut w, &wall_scan(2.0), 4000);
     assert_eq!(w.mode, copter::GUIDED);
-    // Clear for 3 s: the mission resumes in AUTO from the same item.
+    // Clear for 3 s (the wall gone, the lidar still seeing a surface far
+    // behind): the mission resumes in AUTO from the same item.
+    w.scan_ranges = super::harness::surface_behind(8.0);
     w.run(2900);
     assert_eq!(w.mode, copter::GUIDED);
     w.run(400);

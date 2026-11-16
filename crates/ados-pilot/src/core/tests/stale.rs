@@ -373,8 +373,9 @@ fn a_vehicle_with_no_lidar_flies_its_sticks_with_avoidance_unavailable() {
     });
     w.run(200);
     assert_eq!(w.p.owner(), Owner::Pilot, "a goto started with no lidar");
-    // A lidar that comes up: once its scan rate is measured (a 2 s window),
-    // avoidance is on and Fly Here works.
+    // A lidar that comes up seeing a surface: once its scan rate is measured
+    // (a 2 s window), avoidance is on and Fly Here works.
+    w.scan_ranges = super::harness::surface_behind(8.0);
     w.lidar = true;
     w.run(2500);
     assert_eq!(lidar_item(&w), Some((true, true)));

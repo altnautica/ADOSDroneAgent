@@ -143,7 +143,12 @@ fn lidar(ctx: &SensorCtx, mode: ControlMode, now_ms: u64) -> Readiness {
     match ctx.lidar.state(now_ms) {
         LidarState::Ok => item("lidar", true, lost_sev, &t.ok),
         LidarState::Degraded => item("lidar", false, Severity::Warn, &t.degraded),
-        LidarState::Lost | LidarState::Absent => item("lidar", false, lost_sev, &t.lost),
+        // Open air reads all-empty too, so on its own it only warns; where
+        // an empty scan is not believable the pilot holds instead
+        // (`empty_scan_unbelievable`).
+        LidarState::NoReturns => item("lidar", false, Severity::Warn, &t.no_returns),
+        // Lost, absent, and any later state: not a sensor to fly on.
+        _ => item("lidar", false, lost_sev, &t.lost),
     }
 }
 

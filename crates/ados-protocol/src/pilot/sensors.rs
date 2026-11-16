@@ -30,14 +30,19 @@ pub enum RangeState {
     Absent,
 }
 
-/// Scanning lidar state.
+/// Scanning lidar state. Non-exhaustive: later states stay additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LidarState {
     Ok,
     /// Scan rate outside the spec band, or the driver reports warning/error.
     Degraded,
     Lost,
+    /// Scans keep arriving but none for the spec's `no_returns_ms` carried a
+    /// return: the lidar is scanning and sees nothing (open air, or a
+    /// blocked or failed sensor), so its empty bins are not free space.
+    NoReturns,
     #[default]
     Absent,
 }

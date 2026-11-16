@@ -9,6 +9,7 @@ mod handoff;
 mod harness;
 mod mission;
 mod nav_cap;
+mod no_returns;
 mod position_check;
 mod rules;
 mod safety;

@@ -31,6 +31,27 @@ pub const SCAN_MAX_AGE_MS: u64 = 500;
 /// How far the planar scan sees along a bin without a return (the 12 m
 /// planar lidar; the sector display marches the grid as far).
 pub const SCAN_HORIZON_M: f32 = 12.0;
+/// A scan bin at or under this range returned nothing.
+pub const MIN_RETURN_M: f32 = 0.05;
+/// Neighbouring returns (in bearing order) this close are one unbroken
+/// surface when measuring how wide it is ([`Obstacles::nearest_surface`]).
+pub const SURFACE_GAP_M: f32 = 0.5;
+
+/// The bins of a `plugin.world-engine.scan` payload that returned a surface
+/// (a finite range above [`MIN_RETURN_M`]), whatever its frame.
+pub fn scan_returns(payload: &Value) -> usize {
+    payload
+        .get("ranges_m")
+        .and_then(Value::as_array)
+        .map_or(0, |ranges| {
+            ranges
+                .iter()
+                .filter_map(Value::as_f64)
+                .filter(|r| r.is_finite() && *r as f32 > MIN_RETURN_M)
+                .count()
+        })
+}
+
 /// Weight of the newest scan pair in the smoothed closing speed (a lidar
 /// range is good to ±30 mm 3σ, so one 0.1 s pair alone is ±0.4 m/s).
 pub const CLOSING_SMOOTH: f32 = 0.5;
@@ -190,7 +211,7 @@ impl Obstacles {
         for (i, r) in ranges.iter().enumerate() {
             let r = r.as_f64().unwrap_or(0.0) as f32;
             let theta = start + inc as f32 * i as f32;
-            if r <= 0.05 || !r.is_finite() {
+            if r <= MIN_RETURN_M || !r.is_finite() {
                 let far = geo::body_to_ned(
                     SCAN_HORIZON_M * theta.cos(),
                     SCAN_HORIZON_M * theta.sin(),
@@ -222,6 +243,48 @@ impl Obstacles {
     /// A scan arrived at some point since start: an obstacle sensor exists.
     pub fn scan_seen(&self) -> bool {
         self.scan_ms.is_some()
+    }
+
+    /// The current scan's nearest return that is not the floor, horizontal
+    /// metres; `None` when it has none.
+    #[cfg(test)]
+    pub fn nearest_hit_m(&self) -> Option<f32> {
+        self.hits.iter().map(|h| h.range_m).reduce(f32::min)
+    }
+
+    /// The current scan's nearest non-floor return as (horizontal range,
+    /// local NE position, extent). The extent is the length of the unbroken
+    /// run of returns through it: walking outward by bearing from the
+    /// nearest return until neighbours are more than [`SURFACE_GAP_M`]
+    /// apart. A wall, a car or a room around the vehicle reads metres long;
+    /// a pole, a person, a drone, or several of them apart, read short.
+    pub fn nearest_surface(&self) -> Option<(f32, V2, f32)> {
+        let n = self.hits.len();
+        let (i0, near) = self
+            .hits
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.range_m.total_cmp(&b.1.range_m))?;
+        // The hits are in bearing order and the scan wraps at the nose:
+        // walk `step` (1 or n - 1) at most `max` neighbours, returning the
+        // run's length and how many it took.
+        let walk = |step: usize, max: usize| {
+            let (mut at, mut len, mut taken) = (i0, 0.0, 0);
+            while taken < max {
+                let next = (at + step) % n;
+                let gap = geo::dist(self.hits[at].ne, self.hits[next].ne);
+                if gap > SURFACE_GAP_M {
+                    break;
+                }
+                len += gap;
+                taken += 1;
+                at = next;
+            }
+            (len, taken)
+        };
+        let (fwd, taken) = walk(1, n - 1);
+        let (back, _) = walk(n - 1, n - 1 - taken);
+        Some((near.range_m, near.ne, fwd + back))
     }
 
     /// Range rate of each world sector's nearest return between the previous

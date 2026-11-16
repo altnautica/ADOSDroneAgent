@@ -71,18 +71,34 @@ impl Pilot {
     pub fn on_feed(&mut self, topic: &str, payload: &serde_json::Value, now_ms: u64) {
         match topic {
             "plugin.world-engine.scan" => {
-                self.lidar.on_scan(now_ms);
-                let Some(pos) = self.pos_ne(now_ms) else {
+                let returns = crate::obstacles::scan_returns(payload);
+                self.lidar.on_scan(returns, now_ms);
+                let Some(ned) = self.pos(now_ms) else {
                     return;
                 };
                 let att = self.fc.fresh_attitude(now_ms).unwrap_or_default();
+                let tilt = [att.roll, att.pitch];
+                if returns == 0 && self.empty_scan_unbelievable(ned, tilt) {
+                    // Not open air: keep the last scan's obstacles and let
+                    // them age to stale rather than read this one as free.
+                    return;
+                }
                 let level = crate::obstacles::Level {
                     roll: att.roll,
                     pitch: att.pitch,
                     yaw: att.yaw,
                     agl: self.agl(now_ms),
                 };
-                self.obstacles.ingest_scan(payload, level, pos, now_ms);
+                self.obstacles
+                    .ingest_scan(payload, level, [ned[0], ned[1]], now_ms);
+                if self.obstacles.scan_age_ms(now_ms) == Some(0) {
+                    match self.obstacles.nearest_surface() {
+                        Some((range_m, ne, extent_m)) => {
+                            self.lidar.on_surface(ned, tilt, range_m, ne, extent_m)
+                        }
+                        None => self.lidar.on_no_surface(),
+                    }
+                }
             }
             "plugin.world-engine.lidar" => self.lidar.on_status(payload, now_ms),
             "plugin.world-engine.map_status" => self.nav_imu.on_status(payload, now_ms),
@@ -162,6 +178,7 @@ impl Pilot {
         if !was_armed && self.fc.armed {
             self.touchdown = Default::default();
             self.sup.stall.new_flight();
+            self.lidar.new_flight();
         }
         if !was_armed && self.fc.armed && self.owner() == Owner::Idle && !self.in_guided() {
             self.set_owner(Owner::FcMode, "fc-mode");

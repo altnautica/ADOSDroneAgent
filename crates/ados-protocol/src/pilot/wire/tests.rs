@@ -282,6 +282,13 @@ fn sensors_serialise_with_the_contract_shape() {
     );
     let back: PilotState = serde_json::from_value(v).unwrap();
     assert_eq!(back, s);
+    // A scanning lidar that sees nothing has its own word.
+    assert_eq!(
+        serde_json::to_value(LidarState::NoReturns).unwrap(),
+        "no_returns"
+    );
+    let back: LidarState = serde_json::from_value(serde_json::json!("no_returns")).unwrap();
+    assert_eq!(back, LidarState::NoReturns);
 }
 
 #[test]

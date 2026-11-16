@@ -7,7 +7,7 @@ use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage};
 use ados_protocol::pilot::{Owner, PlaceClass, RouteState};
 use serde_json::{json, Value};
 
-use super::harness::World;
+use super::harness::{wall, World};
 use crate::core::{Out, Reply};
 use crate::modes::copter;
 use crate::obstacles::{encode_tile_for_test, Obstacles};
@@ -86,11 +86,14 @@ pub(super) fn map(w: &mut World, payload: &Value) {
 }
 
 /// A confined place for the x500 (margin 0.477 m), the open margin left at
-/// its 1.5 m default.
+/// its 1.5 m default. A confined place has walls, so the lidar sees one
+/// 8 m to the left (west, off the routes north along e = 0): an empty scan
+/// there is not obstacle data.
 pub(super) fn confined(w: &mut World) {
     let p = &mut w.p.settings.pilot;
     p.place_class = PlaceClass::Confined;
     p.prop_tip_radius_m = Some(TIP_M);
+    w.scan_ranges = wall(270, 8.0);
 }
 
 /// The route north along e = 0: items 1–4 at n 2, 10, 20, 25.

@@ -190,7 +190,7 @@ fn lidar_item_by_state_mode_and_avoidance() {
     );
     let mut now = 100;
     while now <= 2500 {
-        l.on_scan(now);
+        l.on_scan(90, now);
         now += 100;
     }
     let now = now - 100;
@@ -225,6 +225,19 @@ fn lidar_item_by_state_mode_and_avoidance() {
         find(&run(&f, ControlMode::Ados, &only, true, 0), "lidar"),
         Some((false, Severity::Block, t.lost.clone()))
     );
+    // Scanning with nothing returned: a warning in every mode, never ok.
+    let mut empty = LidarTrack::default();
+    let mut now = 100;
+    while now <= 2500 {
+        empty.on_scan(0, now);
+        now += 100;
+    }
+    for mode in [ControlMode::Ados, ControlMode::FcManual] {
+        assert_eq!(
+            find(&run(&f, mode, &empty, true, now - 100), "lidar"),
+            Some((false, Severity::Warn, t.no_returns.clone()))
+        );
+    }
 }
 
 #[test]

@@ -16,6 +16,26 @@ pub const RATE_WINDOW_MS: u64 = 2000;
 /// A lidar status report older than this no longer speaks for the driver
 /// (the capture service publishes it at 1 Hz).
 pub const LIDAR_STATUS_STALE_MS: u64 = 3000;
+/// A surface the lidar saw stays in its reach while the vehicle has moved
+/// less than the planar horizon less the surface's range less this, ...
+pub const SURFACE_REACH_MARGIN_M: f32 = 1.0;
+/// ... and the scan plane has moved less than this up or down at the
+/// surface: the vehicle's climb or descent plus the tilt change (roll or
+/// pitch) projected out to the surface's range.
+pub const SURFACE_REACH_DOWN_M: f32 = 0.5;
+/// A surface counts once this many consecutive ingested scans returned it
+/// in the same place ([`SURFACE_STILL_M`]) and at least
+/// [`SURFACE_MIN_EXTENT_M`] wide: one stray return (rain, dust, an insect)
+/// or something small and moving (a person, another drone) is not a
+/// surface whose disappearance means the lidar went blind.
+pub const SURFACE_CONFIRM_SCANS: u32 = 3;
+/// The nearest return's world position moving less than this from the
+/// previous scan's is the same surface (the nearest point of a wall slides
+/// along it as the vehicle flies by; 3 m/s at 10 Hz is 0.3 m).
+pub const SURFACE_STILL_M: f32 = 0.5;
+/// The narrowest surface that counts: walls, buildings, hedges, cars and
+/// trees are wider; poles, people, drones and birds are not.
+pub const SURFACE_MIN_EXTENT_M: f32 = 2.0;
 
 /// Arrival times over the rate window.
 #[derive(Debug, Clone, Default)]
@@ -170,18 +190,128 @@ pub struct LidarStatus {
     pub at_ms: u64,
 }
 
-/// The scanning lidar: scan arrivals and the driver's status report.
+/// Where the vehicle was (local NED) and how it was tilted (roll, pitch,
+/// radians) when a scan last returned a surface that is not the floor, and
+/// that surface's horizontal range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceFix {
+    pub at_ned: [f32; 3],
+    pub tilt: [f32; 2],
+    pub range_m: f32,
+}
+
+/// The scanning lidar: scan arrivals, their returns, and the driver's status
+/// report. A scan arriving says the lidar is scanning, never that it sees
+/// anything, so the returns are tracked apart from the arrivals.
 #[derive(Debug, Clone, Default)]
 pub struct LidarTrack {
     arrivals: Arrivals,
     last_scan_ms: Option<u64>,
     status: Option<LidarStatus>,
+    /// The first scan of the current run without a return; `None` while the
+    /// newest scan returned something.
+    empty_since_ms: Option<u64>,
+    /// The last surface confirmed since the vehicle last armed.
+    surface: Option<SurfaceFix>,
+    /// The surface the newest ingested scans returned (the previous one's
+    /// world NE) and in how many of them in a row, until confirmed.
+    candidate: Option<([f32; 2], u32)>,
+    /// The scan plane's shift at the surface from the tilt change, judged at
+    /// the first empty scan of the current run and kept until a return: the
+    /// pilot's own braking tilts the vehicle, and must not release a hold.
+    empty_tilt_shift_m: Option<f32>,
 }
 
 impl LidarTrack {
-    pub fn on_scan(&mut self, now_ms: u64) {
+    /// One scan with `returns` bins that returned a surface.
+    pub fn on_scan(&mut self, returns: usize, now_ms: u64) {
         self.last_scan_ms = Some(now_ms);
         self.arrivals.push(now_ms);
+        if returns > 0 {
+            self.empty_since_ms = None;
+            self.empty_tilt_shift_m = None;
+        } else {
+            self.empty_since_ms.get_or_insert(now_ms);
+        }
+    }
+
+    /// How old the newest scan is, ms, whether or not it was obstacle data.
+    pub fn scan_age_ms(&self, now_ms: u64) -> Option<u64> {
+        self.last_scan_ms.map(|t| now_ms.saturating_sub(t))
+    }
+
+    /// An ingested scan taken at `at_ned`, tilted `tilt` (roll, pitch),
+    /// returned a surface (not the floor), the nearest `range_m` away
+    /// horizontally at world `ne`, `extent_m` wide. It counts once
+    /// [`SURFACE_CONFIRM_SCANS`] scans in a row returned it, still and wide
+    /// enough.
+    pub fn on_surface(
+        &mut self,
+        at_ned: [f32; 3],
+        tilt: [f32; 2],
+        range_m: f32,
+        ne: [f32; 2],
+        extent_m: f32,
+    ) {
+        if extent_m < SURFACE_MIN_EXTENT_M {
+            self.candidate = None;
+            return;
+        }
+        let n = match self.candidate {
+            Some((prev, n)) if (ne[0] - prev[0]).hypot(ne[1] - prev[1]) < SURFACE_STILL_M => n + 1,
+            _ => 1,
+        };
+        let candidate = (ne, n);
+        self.candidate = Some(candidate);
+        if candidate.1 >= SURFACE_CONFIRM_SCANS {
+            self.surface = Some(SurfaceFix {
+                at_ned,
+                tilt,
+                range_m,
+            });
+        }
+    }
+
+    /// An ingested scan returned no surface but the floor, if anything.
+    pub fn on_no_surface(&mut self) {
+        self.candidate = None;
+    }
+
+    /// The vehicle armed: what the lidar saw before no longer counts as
+    /// seen this flight.
+    pub fn new_flight(&mut self) {
+        self.surface = None;
+        self.candidate = None;
+    }
+
+    /// The last surface confirmed this flight (or since start, before the
+    /// first arm).
+    pub fn surface(&self) -> Option<SurfaceFix> {
+        self.surface
+    }
+
+    /// For an empty scan from `ned` tilted `tilt`: the last surface
+    /// confirmed this flight must still be in the scan. The vehicle has
+    /// moved less than the planar horizon less its range less
+    /// [`SURFACE_REACH_MARGIN_M`], and the scan plane at the surface has
+    /// moved less than [`SURFACE_REACH_DOWN_M`] up or down: the height change
+    /// now, plus the roll or pitch change over the distance to it as judged
+    /// at the first empty scan of the run. A surface it flew away from,
+    /// climbed above or was tilted off when the returns stopped says nothing
+    /// about an empty scan.
+    pub fn surface_in_reach(&mut self, ned: [f32; 3], tilt: [f32; 2]) -> bool {
+        let Some(s) = self.surface else {
+            return false;
+        };
+        let moved = (ned[0] - s.at_ned[0]).hypot(ned[1] - s.at_ned[1]);
+        let reach = moved + s.range_m;
+        let tilt_shift = *self.empty_tilt_shift_m.get_or_insert_with(|| {
+            let d_tilt = (tilt[0] - s.tilt[0]).abs().max((tilt[1] - s.tilt[1]).abs());
+            // Clamped short of 90°, where the tangent turns over.
+            reach * d_tilt.min(1.5).tan()
+        });
+        reach < crate::obstacles::SCAN_HORIZON_M - SURFACE_REACH_MARGIN_M
+            && (ned[2] - s.at_ned[2]).abs() + tilt_shift < SURFACE_REACH_DOWN_M
     }
 
     pub fn on_status(&mut self, payload: &serde_json::Value, now_ms: u64) {
@@ -230,6 +360,12 @@ impl LidarTrack {
         let unhealthy = status
             .and_then(|s| s.health)
             .is_some_and(|h| matches!(h, LidarDriverHealth::Warning | LidarDriverHealth::Error));
+        if self
+            .empty_since_ms
+            .is_some_and(|s| now_ms.saturating_sub(s) >= t.no_returns_ms)
+        {
+            return LidarState::NoReturns;
+        }
         if off_rate || unhealthy {
             LidarState::Degraded
         } else {

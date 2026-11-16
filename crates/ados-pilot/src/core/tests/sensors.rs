@@ -67,8 +67,9 @@ fn the_flow_module_s_own_frames_are_not_the_fc_s_flow() {
 #[test]
 fn the_lidar_reports_through_scans_and_its_status_topic() {
     let mut w = World::without_lidar();
+    // A scan that returned a surface: one with none reads `no_returns`.
     let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
-                      "angle_increment_rad": 0.1, "ranges_m": []});
+                      "angle_increment_rad": 0.1, "ranges_m": [4.0]});
     w.p.on_feed(
         "plugin.world-engine.lidar",
         &json!({"v": 1, "device": "/dev/ttyUSB0", "connected": true, "health": "good",

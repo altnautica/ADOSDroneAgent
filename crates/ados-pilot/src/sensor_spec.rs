@@ -25,6 +25,8 @@ pub struct LidarThresholds {
     pub min_hz: f64,
     pub max_hz: f64,
     pub lost_ms: u64,
+    /// Scans without a return for this long: the lidar sees nothing.
+    pub no_returns_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +69,8 @@ pub struct LidarTexts {
     pub ok: String,
     pub degraded: String,
     pub lost: String,
+    /// Scanning, but no scan for `no_returns_ms` carried a return.
+    pub no_returns: String,
     /// No lidar expected while obstacle avoidance is on.
     pub absent: String,
 }

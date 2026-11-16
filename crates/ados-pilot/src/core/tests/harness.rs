@@ -43,14 +43,41 @@ pub struct World {
     /// Answers to deferred actions, by token.
     pub answers: Vec<(u64, ActionResult)>,
     /// The lidar scans: whenever the pilot's scan is 100 ms old (a test feeds
-    /// none of its own), an open-space scan (no returns) arrives. Off: no scan
+    /// none of its own), a scan of `scan_ranges` arrives. Off: no scan
     /// arrives at all.
     pub lidar: bool,
+    /// The ranges of the scan `lidar` sends, 360 one-degree body bins;
+    /// all 0 (no returns: open space) unless a test sets them.
+    pub scan_ranges: Vec<f32>,
     /// `goal.status` messages, in order.
     pub goal_status: Vec<GoalStatus>,
     /// The scripted FC sends LOCAL_POSITION_NED (off: its local position
     /// goes stale).
     pub local: bool,
+}
+
+/// A scan with one return, `range_m` away in body bin `bin` (degrees
+/// clockwise from the nose): something small, a pole or a person.
+pub fn one_return(bin: usize, range_m: f32) -> Vec<f32> {
+    let mut r = vec![0.0; 360];
+    r[bin] = range_m;
+    r
+}
+
+/// A scan of a wall `range_m` away across body bins `bin` ± 10 (at 8 m,
+/// 2.8 m wide).
+pub fn wall(bin: usize, range_m: f32) -> Vec<f32> {
+    let mut r = vec![0.0; 360];
+    for d in 0..=20 {
+        r[(bin + 360 + d - 10) % 360] = range_m;
+    }
+    r
+}
+
+/// A scan of a wall `range_m` straight behind: a surface the lidar sees,
+/// out of the way of flight ahead.
+pub fn surface_behind(range_m: f32) -> Vec<f32> {
+    wall(180, range_m)
 }
 
 impl World {
@@ -94,6 +121,7 @@ impl World {
             inbox: Vec::new(),
             answers: Vec::new(),
             lidar: true,
+            scan_ranges: vec![0.0; 360],
             goal_status: Vec::new(),
             local: true,
         };
@@ -197,9 +225,9 @@ impl World {
             .scan_age_ms(self.now)
             .is_none_or(|a| a >= 100);
         if self.lidar && due {
-            let open = serde_json::json!({"frame": "body_frd", "angle_start_rad": 0.0,
-                "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": vec![0.0; 360]});
-            self.p.on_feed("plugin.world-engine.scan", &open, self.now);
+            let scan = serde_json::json!({"frame": "body_frd", "angle_start_rad": 0.0,
+                "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": self.scan_ranges});
+            self.p.on_feed("plugin.world-engine.scan", &scan, self.now);
         }
     }
 

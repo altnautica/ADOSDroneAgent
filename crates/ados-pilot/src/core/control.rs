@@ -320,8 +320,17 @@ impl Pilot {
         let agl = self.agl(now_ms);
         // Unknown obstacles: the sticks ask nothing (a landing still
         // descends), and with no scans there is nothing to push away from.
+        // Scans that arrive empty where a surface should be leave the
+        // vertical stick live: climbing or descending out of the scan plane
+        // is how that resolves, and the planar lidar never braked it.
         let stale = self.obstacle_data_stale(now_ms);
-        let mut axes = if stale { [0.0; 4] } else { axes };
+        let mut axes = if !stale {
+            axes
+        } else if self.stale_on_empty_scans(now_ms) {
+            [0.0, 0.0, axes[2], 0.0]
+        } else {
+            [0.0; 4]
+        };
         if self.landing {
             axes = [axes[0], axes[1], -1.0, axes[3]];
             if agl.is_some_and(|a| a < LAND_SWITCH_AGL_M) {
