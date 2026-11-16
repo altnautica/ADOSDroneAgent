@@ -56,3 +56,14 @@ describe("pad rumble from pilot-state changes", () => {
     expect(alert(ground, { ...ground, readiness: [{ id: "ekf", ok: false, severity: "block", msg: "" }] })).toBeNull();
   });
 });
+
+describe("takeover", () => {
+  it("is another surface replacing the session, never the operator's own sticks resuming", () => {
+    const released = flying({ input_session: null });
+    expect(alert(released, a)).toBeNull();
+    expect(alert(a, released)).toBeNull();
+    expect(alert(a, flying({ input_session: { src: "gs", session: 8, label: "Ground station" } }))).toBe("mode_change");
+    expect(alert(a, flying({ input_session: { src: "mc", session: 7, label: "MC" } }))).toBe("mode_change");
+    expect(alert(a, flying({ input_session: { src: "gs", session: 7, label: "Renamed" } }))).toBeNull();
+  });
+});

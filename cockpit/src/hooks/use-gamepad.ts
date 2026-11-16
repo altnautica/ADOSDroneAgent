@@ -28,9 +28,8 @@ import { padDisplayName, padKindOf } from "@/lib/pad/art";
 import { conditionSticks } from "@/lib/pad/conditioning";
 import { BUTTON_INDEX } from "@/lib/pad/ds4-map";
 import type { EngineContext } from "@/lib/pad/gesture-engine";
-import { playPattern } from "@/lib/pad/rumble";
+import { PilotFeedback, playPattern } from "@/lib/pad/rumble";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
-import { feedbackAlert } from "@/shared/hud/pilot-feedback";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { specText } from "@/shared/hud/spec-text";
 import { overlayOpen } from "@/stores/cockpit-ui-store";
@@ -171,22 +170,15 @@ export function useGamepad(): GamepadState {
     window.addEventListener("gamepadconnected", onConnect);
     window.addEventListener("gamepaddisconnected", onDisconnect);
 
-    // Rumble from the spec's feedback rules over the raw pilot frames; a
-    // pilot state that goes stale is a lost state (critical), and the first
-    // frame after it earns nothing.
-    let lastRaw: unknown = null;
-    const feedback = (next: unknown) => {
-      const pattern = feedbackAlert(lastRaw, next);
-      lastRaw = next;
-      if (pattern) playPattern(lastPad, pattern);
-    };
+    // Rumble from the spec's feedback rules over the fresh raw pilot frames.
+    const feedback = new PilotFeedback((pattern) => playPattern(lastPad, pattern));
     const offPilot = useNavStreamStore.subscribe((s, prev) => {
-      if (s.pilotRaw !== prev.pilotRaw && s.pilotRaw !== null) feedback(s.pilotRaw);
+      if (s.pilotRaw !== prev.pilotRaw && s.pilotRaw !== null && s.pilot) feedback.frame(s.pilotRaw, s.pilot.at, Date.now());
     });
 
     const poll = () => {
       raf = requestAnimationFrame(poll);
-      if (lastRaw !== null && !pilotFresh(useNavStreamStore.getState().pilot?.at, Date.now())) feedback(null);
+      feedback.tick(useNavStreamStore.getState().pilot?.at, Date.now());
       const pad = activePad(preferred);
       lastPad = pad;
       if ((pad != null) !== wasConnected) {

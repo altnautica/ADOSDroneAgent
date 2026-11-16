@@ -174,6 +174,15 @@ fn fires(rule: &FeedbackRule, prev: Option<&Value>, next: Option<&Value>) -> boo
         Trigger::NewValue => !b.is_null() && a != b,
         Trigger::Entered => a != b && rule.values.contains(b),
         Trigger::Appeared => a.is_null() && !b.is_null(),
+        Trigger::Replaced => {
+            !a.is_null()
+                && !b.is_null()
+                && if rule.keys.is_empty() {
+                    a != b
+                } else {
+                    rule.keys.iter().any(|k| at(a, k) != at(b, k))
+                }
+        }
         Trigger::NewItem => {
             let before = matching_keys(rule, a);
             matching_keys(rule, b).iter().any(|k| !before.contains(k))
@@ -374,6 +383,21 @@ mod tests {
             s[k] = v.clone();
         }
         s
+    }
+
+    #[test]
+    fn takeover_is_another_session_never_the_own_sticks_resuming() {
+        let a = flying(json!({}));
+        let released = flying(json!({"input_session": null}));
+        assert_eq!(alert(Some(&released), Some(&a)), None);
+        assert_eq!(alert(Some(&a), Some(&released)), None);
+        let next = flying(
+            json!({"input_session": {"src": "gs", "session": 8, "label": "Ground station"}}),
+        );
+        assert_eq!(alert(Some(&a), Some(&next)), Some(Alert::ModeChange));
+        let renamed =
+            flying(json!({"input_session": {"src": "gs", "session": 7, "label": "Renamed"}}));
+        assert_eq!(alert(Some(&a), Some(&renamed)), None);
     }
 
     #[test]

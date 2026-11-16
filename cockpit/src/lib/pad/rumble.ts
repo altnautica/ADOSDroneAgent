@@ -2,9 +2,38 @@
 // (`dual-rumble`): 1 × 80 ms on a mode change, 2 short on a warning,
 // 3 × 300 ms on a critical, single pulses for the hold ramp and the RTH
 // countdown. Which pattern a pilot-state change earns is the shared feedback
-// table (`@/shared/hud/pilot-feedback`).
+// table (`@/shared/hud/pilot-feedback`), driven by `PilotFeedback`.
 
 import { RUMBLE, type RumblePulses } from "@/lib/pad/ds4-map";
+import { feedbackAlert } from "@/shared/hud/pilot-feedback";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
+
+/** Runs the feedback table over the pilot frames a surface receives: each
+ *  frame against the previous one, and a pilot state gone stale as a lost
+ *  state (critical, once; the first frame after it earns nothing). */
+export class PilotFeedback {
+  private last: unknown = null;
+
+  constructor(private readonly play: (pattern: RumblePattern) => void) {}
+
+  private feed(next: unknown): void {
+    const pattern = feedbackAlert(this.last, next);
+    this.last = next;
+    if (pattern) this.play(pattern);
+  }
+
+  /** A pilot frame received at `atMs` (wall clock), read at `nowMs`. A
+   *  frame already stale (the HTTP fallback hands back the last one every
+   *  poll) is no news and never re-arms the lost-state rumble. */
+  frame(raw: unknown, atMs: number, nowMs: number): void {
+    if (pilotFresh(atMs, nowMs)) this.feed(raw);
+  }
+
+  /** Each poll: the newest frame's receipt time, or undefined with none. */
+  tick(atMs: number | undefined, nowMs: number): void {
+    if (this.last !== null && !pilotFresh(atMs, nowMs)) this.feed(null);
+  }
+}
 
 export type RumblePattern = "mode_change" | "warning" | "critical";
 

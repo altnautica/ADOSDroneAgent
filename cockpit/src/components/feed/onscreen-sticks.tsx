@@ -23,7 +23,9 @@ import { useInputStore } from "@/stores/input-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 const PAD_PX = STICK_PAD_PX;
-const KNOB_PX = 44;
+/** The knob's diameter; its centre travels `PAD_PX - STICK_KNOB_PX` across. */
+export const STICK_KNOB_PX = 44;
+const KNOB_PX = STICK_KNOB_PX;
 
 type Side = "l" | "r";
 
@@ -43,9 +45,9 @@ export function OnscreenSticks() {
 export function ThumbPads() {
   const touches = useRef<Record<Side, Touch | null>>({ l: null, r: null });
   const [knobs, setKnobs] = useState<Record<Side, Stick>>({ l: [0, 0], r: [0, 0] });
-  // A thumb at the pad's rim is full stick, so the deadzone is that share of
-  // the pad's diameter.
-  const ringPx = useControlsStore((s) => s.deadzone) * PAD_PX;
+  // The knob's centre at the end of its travel is full stick, so the
+  // deadzone is that share of the travel's diameter, around the knob's centre.
+  const ringPx = useControlsStore((s) => s.deadzone) * (PAD_PX - KNOB_PX);
 
   useEffect(() => {
     const streamer = new PilotStreamer({ send: sendPilotInput, release: releasePilotInput });
@@ -131,12 +133,6 @@ export function ThumbPads() {
         >
           <div
             aria-hidden
-            data-testid={`onscreen-stick-deadzone-${side}`}
-            className="pointer-events-none absolute rounded-full border border-dashed border-hud-hair-2"
-            style={{ width: ringPx, height: ringPx, left: PAD_PX / 2 - ringPx / 2, top: PAD_PX / 2 - ringPx / 2 }}
-          />
-          <div
-            aria-hidden
             className="absolute rounded-full border border-hud-hair-2 bg-hud-glass-strong"
             style={{
               width: KNOB_PX,
@@ -144,6 +140,12 @@ export function ThumbPads() {
               left: PAD_PX / 2 - KNOB_PX / 2 + (knobs[side][0] * (PAD_PX - KNOB_PX)) / 2,
               top: PAD_PX / 2 - KNOB_PX / 2 + (knobs[side][1] * (PAD_PX - KNOB_PX)) / 2,
             }}
+          />
+          <div
+            aria-hidden
+            data-testid={`onscreen-stick-deadzone-${side}`}
+            className="pointer-events-none absolute rounded-full border border-dashed border-hud-hair-2"
+            style={{ width: ringPx, height: ringPx, left: PAD_PX / 2 - ringPx / 2, top: PAD_PX / 2 - ringPx / 2 }}
           />
         </div>
       ))}

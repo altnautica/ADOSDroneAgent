@@ -94,6 +94,7 @@ pub enum Trigger {
     NewValue,
     Entered,
     Appeared,
+    Replaced,
     NewItem,
     StateLost,
 }
@@ -112,6 +113,9 @@ pub struct FeedbackRule {
     pub where_: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub key: Option<String>,
+    /// Dotted paths inside the field a `replaced` rule compares.
+    #[serde(default)]
+    pub keys: Vec<String>,
     #[serde(default)]
     pub armed_only: bool,
     pub rumble: String,
