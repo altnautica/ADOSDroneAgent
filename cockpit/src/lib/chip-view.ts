@@ -5,7 +5,7 @@
 import { openAircraftSetup } from "@/lib/aircraft-setup";
 import { runCockpitAction } from "@/lib/cockpit-actions";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
-import type { ChipView } from "@/shared/hud/flight-state";
+import { CHIP_COMPACT_PARTS, type ChipView } from "@/shared/hud/flight-state";
 import { specText } from "@/shared/hud/spec-text";
 import { severityTextColor } from "@/shared/hud/status-pill";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
@@ -27,10 +27,12 @@ export function chipButton(button: ChipView["button"]): { label: string; run: ()
 }
 
 /** The chip's secondary line, plus the reduced-rate note while the nav
- *  stream has fallen back to the radio. */
-export function chipLines(chip: ChipView, radioFallback: boolean): { text: string; color: string }[] {
-  const lines = chip.secondary.map((l) => ({ text: l.text, color: l.color }));
-  if (radioFallback) lines.push({ text: specText("nav.reduced_rate"), color: CHROME_TOKENS.severity_warning });
+ *  stream has fallen back to the radio. The compact face keeps only the
+ *  parts the sticks need: clearance, a late input, the speeds. */
+export function chipLines(chip: ChipView, radioFallback: boolean, compact = false): { text: string; color: string }[] {
+  const parts = compact ? chip.secondary.filter((l) => CHIP_COMPACT_PARTS[l.id]) : chip.secondary;
+  const lines = parts.map((l) => ({ text: l.text, color: l.color }));
+  if (radioFallback && !compact) lines.push({ text: specText("nav.reduced_rate"), color: CHROME_TOKENS.severity_warning });
   return lines;
 }
 

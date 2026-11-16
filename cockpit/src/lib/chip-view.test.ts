@@ -37,16 +37,23 @@ describe("the flight-state chip", () => {
   });
 
   it("adds the reduced-rate line while the nav stream rides the radio", () => {
-    const chip: ChipView = { ruleId: "x", text: "PILOT · NORMAL", color: "#fff", dim: false, button: null, secondary: [{ text: "ADOS PILOT", color: "#aaa" }] };
+    const chip: ChipView = { ruleId: "x", text: "PILOT · NORMAL", color: "#fff", dim: false, button: null, secondary: [{ id: "control_mode", text: "ADOS PILOT", color: "#aaa" }] };
     expect(chipLines(chip, false).map((l) => l.text)).toEqual(["ADOS PILOT"]);
     expect(chipLines(chip, true).map((l) => l.text)).toEqual(["ADOS PILOT", "Reduced update rate (radio)"]);
     expect(chipFullText(chip.text, chipLines(chip, true))).toBe("Flight state: PILOT · NORMAL · ADOS PILOT · Reduced update rate (radio)");
   });
 
+  it("keeps the stick parts on the compact face and drops the rest", () => {
+    const secondary = ["clearance", "input_age", "hold_reason", "control_mode", "h_speed", "v_speed"].map((id) => ({ id, text: id, color: "#aaa" }));
+    const chip: ChipView = { ruleId: "x", text: "Normal · 7 m/s", color: "#fff", dim: false, button: null, secondary };
+    expect(chipLines(chip, true, true).map((l) => l.text)).toEqual(["clearance", "input_age", "h_speed", "v_speed"]);
+    expect(chipLines(chip, false).map((l) => l.text)).toEqual(secondary.map((l) => l.text));
+  });
+
   it("renders the shared view's failsafe and paused-mission lines and their buttons", () => {
     for (const [name, label] of [["pilot_holds_paused_mission", "Resume"], ["launching_takeoff", "Abort"], ["fc_failsafe_rtl_reads_failsafe_first", null]] as const) {
       const e = expected(name);
-      const chip: ChipView = { ruleId: e.rule, text: e.text, color: "#fff", dim: e.dim, button: e.button, secondary: e.secondary.map((text) => ({ text, color: "#aaa" })) };
+      const chip: ChipView = { ruleId: e.rule, text: e.text, color: "#fff", dim: e.dim, button: e.button, secondary: e.secondary.map((text) => ({ id: "x", text, color: "#aaa" })) };
       expect(chipButton(chip.button)?.label ?? null, name).toBe(label);
       expect(chipLines(chip, false).map((l) => l.text), name).toEqual(e.secondary);
     }

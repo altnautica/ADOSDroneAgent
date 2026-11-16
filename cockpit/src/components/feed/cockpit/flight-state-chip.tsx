@@ -46,6 +46,7 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
 
   const button = chipButton(chip.button);
   const lines = chipLines(chip, radioFallback);
+  const shown = compact ? chipLines(chip, radioFallback, true) : lines;
   const full = chipFullText(chip.text, lines);
   const truncated = () => textRef.current !== null && textRef.current.scrollWidth > textRef.current.clientWidth + 1;
 
@@ -71,9 +72,9 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
         <span aria-hidden data-testid="flight-state-chip-dot" className="h-[6px] w-[6px] shrink-0 rounded-full" style={{ background: chip.color }} />
         <span ref={textRef} className="min-w-0 truncate whitespace-nowrap tracking-[0.02em]" style={{ color: "var(--fs-text)" }}>
           <span className="chrome-chip-text">{chip.text}</span>
-          {!compact && lines.length > 0 ? (
+          {shown.length > 0 ? (
             <span className="font-normal" data-testid="flight-state-chip-lines">
-              {lines.map((l, i) => (
+              {shown.map((l, i) => (
                 <span key={i} style={{ color: chipLineTextColor(l.color) }}>
                   {" · "}
                   {l.text}
