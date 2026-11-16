@@ -48,6 +48,9 @@ impl Pilot {
         if let Some(item) = self.place_class_item() {
             items.push(item);
         }
+        if let Some(item) = self.extnav_settle_item(now_ms) {
+            items.push(item);
+        }
         items
     }
 

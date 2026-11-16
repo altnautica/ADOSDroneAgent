@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::LazyLock;
 
-use ados_protocol::pilot::PositionUnverified;
+use ados_protocol::pilot::{ControlMode, PlaceClass, PositionUnverified, Readiness, Severity};
 
 use super::Pilot;
 use crate::geo::V2;
@@ -46,6 +46,22 @@ pub const REASON_FLOW_DISAGREES: &str = "flow_disagrees";
 pub const REASON_EXTNAV_LOST: &str = "extnav_lost";
 pub const REASON_EXTNAV_DEGRADED: &str = "extnav_degraded";
 pub const REASON_EXTNAV_STALE: &str = "extnav_stale";
+
+/// Readiness id of the confined external-navigation launch settle.
+pub const EXTNAV_SETTLE_ID: &str = "extnav_settle";
+/// How long the FC's local velocity must stay within
+/// [`crate::fc::extnav::STILL_MPS`] after its EKF starts using external
+/// navigation before a confined launch, ms. That start makes the EKF ring
+/// in velocity: in a simulated tunnel flight the ring reached 0.19 m/s with
+/// a period near 6 s, and 4.6 s on, at lift-off, it still read −0.027 m/s
+/// against a still vehicle; the climb then drifted 0.09 m. On a flight
+/// whose start rang at 0.02 m/s and read −0.005 at lift-off the climb
+/// drifted 0.013 m: the climb carries about 3 s of the error, so 0.01 m/s
+/// keeps it near 0.03 m. A ring of that period stays within 0.01 m/s for
+/// 2 s around a zero crossing only below 0.012 m/s, so 2 s still tells a
+/// settled estimate from a ring passing through zero; a room start that
+/// settled at once passed 2.4 s after it.
+pub const EXTNAV_SETTLE_MS: u64 = 2000;
 
 /// vision-nav `health_reason`s that make a `degraded` external position
 /// unverified. A `degraded` without one of these (a corridor flown on good
@@ -270,6 +286,56 @@ impl Pilot {
             }
             _ => {}
         }
+    }
+
+    /// `extnav_settle`, in a confined place whose active EKF source set takes
+    /// its horizontal position from external navigation, on the ground: a
+    /// launch waits until the FC's local velocity has stayed within
+    /// [`crate::fc::extnav::STILL_MPS`] for [`EXTNAV_SETTLE_MS`] since the EKF
+    /// began using external navigation. Blocks in `ados` mode, warns
+    /// otherwise.
+    pub(super) fn extnav_settle_item(&self, now_ms: u64) -> Option<Readiness> {
+        if self.settings.pilot.place_class != PlaceClass::Confined
+            || (self.fc.armed && !self.fc.landed())
+        {
+            return None;
+        }
+        let from_extnav = match self.posxy_param() {
+            Some(v) => (v - POSXY_EXTNAV).abs() < 0.5,
+            None => self
+                .extnav
+                .as_ref()
+                .is_some_and(|n| n.mode == "external_nav"),
+        };
+        if !from_extnav {
+            return None;
+        }
+        let ok = self
+            .fc
+            .extnav
+            .still_for_ms(now_ms)
+            .is_some_and(|ms| ms >= EXTNAV_SETTLE_MS);
+        let severity = if self.control_mode() == ControlMode::Ados {
+            Severity::Block
+        } else {
+            Severity::Warn
+        };
+        let msg = match self.fc.fresh_local(now_ms) {
+            _ if ok => "External navigation settled".to_owned(),
+            Some(l) => format!(
+                "External navigation settling: {:.2} m/s, needs {} m/s for {} s",
+                l.vn.hypot(l.ve),
+                crate::fc::extnav::STILL_MPS,
+                EXTNAV_SETTLE_MS / 1000
+            ),
+            None => "External navigation settling: no velocity from the FC".to_owned(),
+        };
+        Some(Readiness {
+            id: EXTNAV_SETTLE_ID.into(),
+            ok,
+            severity,
+            msg,
+        })
     }
 }
 

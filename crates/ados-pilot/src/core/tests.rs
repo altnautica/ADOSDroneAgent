@@ -4,6 +4,7 @@ mod battery;
 mod confined;
 mod confined_flight;
 mod confined_route;
+mod extnav_settle;
 mod fc_failsafe;
 mod handoff;
 mod harness;

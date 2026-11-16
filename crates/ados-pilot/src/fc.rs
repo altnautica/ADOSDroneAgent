@@ -14,6 +14,7 @@ use ados_protocol::pilot::VehicleClass;
 use crate::fc_profile::Firmware;
 
 mod ekf;
+pub mod extnav;
 pub use ekf::EkfPosition;
 
 /// Velocity plus yaw rate (C2 "moving").
@@ -100,6 +101,8 @@ pub struct FcState {
     pub ekf: Option<Stamped<EkfPosition>>,
     /// The FC's OPTICAL_FLOW.
     pub flow: Option<Stamped<Flow>>,
+    /// The EKF's start on external navigation and the stillness since.
+    pub extnav: extnav::ExtNavStart,
 }
 
 impl FcState {
@@ -151,6 +154,7 @@ impl FcState {
                     vd: p.vz,
                 };
                 self.local = Some(Stamped { v, at_ms: now_ms });
+                self.extnav.on_local(p.vx, p.vy, now_ms);
             }
             // The FC re-emits its flow module's flow and range; a bridge may
             // also forward the module's own raw frames (its own sysid), which
@@ -206,10 +210,13 @@ impl FcState {
                 self.home_global =
                     Some([f64::from(h.latitude) / 1e7, f64::from(h.longitude) / 1e7]);
             }
-            MavMessage::STATUSTEXT(s) if (s.severity as u8) <= STATUSTEXT_MIN_SEVERITY => {
+            MavMessage::STATUSTEXT(s) => {
                 let end = s.text.iter().position(|&b| b == 0).unwrap_or(s.text.len());
                 let text = String::from_utf8_lossy(&s.text[..end]).trim().to_owned();
-                if !text.is_empty() {
+                if self.from_fc(sysid, compid) {
+                    self.extnav.on_text(&text, now_ms);
+                }
+                if !text.is_empty() && (s.severity as u8) <= STATUSTEXT_MIN_SEVERITY {
                     self.push_statustext(s.severity as u8, text, now_ms);
                 }
             }
