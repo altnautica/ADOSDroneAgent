@@ -40,16 +40,20 @@ pub const SUBJECT_HARD_ZONE_M: f32 = 1.0;
 /// this long, seconds: a tracker's jitter on a standing subject reads as
 /// little motion.
 pub const SUBJECT_VEL_SMOOTH_S: f32 = 0.5;
-/// Goals further apart than this give no velocity: it restarts from zero.
+/// Goals further apart than this give no velocity: it restarts from zero
+/// (the subject stays named, so the brake stays armed).
 const SUBJECT_VEL_GAP_MS: u64 = 500;
 /// A subject stepping faster than this between goals, m/s, is no person
 /// moving but a new subject (a re-designation or a re-acquisition): it is
 /// named afresh, its velocity restarting from zero.
 pub const SUBJECT_JUMP_MPS: f32 = 8.0;
+/// The step is judged over at least this long, seconds (a skill's 10 Hz
+/// goal period): two goals arriving close together never read as a jump.
+const SUBJECT_JUMP_MIN_S: f32 = 0.1;
 /// No braking for the subject, soft or hard, until this long after it is
-/// named (its first goal after none, a restart of its velocity, a step
-/// faster than [`SUBJECT_JUMP_MPS`], a new lease or owner): the tracker's
-/// acquisition settles first. The climb clear does not wait.
+/// named (its first goal after none, a step faster than
+/// [`SUBJECT_JUMP_MPS`], a new lease or owner): the tracker's acquisition
+/// settles first. The climb clear does not wait.
 pub const SUBJECT_ARM_MS: u64 = 3000;
 /// The vehicle climbs clear once the subject is within this of the kept
 /// distance, metres.
@@ -63,7 +67,8 @@ pub const SUBJECT_CLEAR_M: f32 = 1.0;
 
 /// What the pilot keeps of the subject across ticks: the lease whose goals
 /// named it, the latest subject and its goal's arrival, its smoothed
-/// velocity, when it was named, and whether the vehicle is climbing clear.
+/// velocity, when it was named, and, while the vehicle climbs clear, the
+/// ground's down position taken when the climb began.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SubjectTrack {
     lease_id: Option<u64>,
@@ -71,6 +76,7 @@ pub struct SubjectTrack {
     vel: V2,
     named_ms: u64,
     climbing: bool,
+    ground_d: Option<f32>,
 }
 
 /// One tick's subject: where it is, the horizontal distance kept from it
@@ -113,26 +119,29 @@ impl Pilot {
                 ..SubjectTrack::default()
             };
         }
-        let raw = match t.last {
-            Some((prev, prev_ms)) if at_ms > prev_ms && at_ms - prev_ms <= SUBJECT_VEL_GAP_MS => {
-                let dt = (at_ms - prev_ms) as f32 / 1000.0;
-                Some((geo::scale(geo::sub(ne, prev), 1.0 / dt), dt))
-            }
-            _ => None,
-        };
-        match (t.last, raw) {
-            (Some((_, prev_ms)), _) if at_ms == prev_ms => {}
-            (_, Some((raw, dt))) if geo::norm(raw) <= SUBJECT_JUMP_MPS => {
-                let k = (dt / SUBJECT_VEL_SMOOTH_S).min(1.0);
-                t.vel = geo::add(t.vel, geo::scale(geo::sub(raw, t.vel), k));
-                t.last = Some((ne, at_ms));
-            }
-            _ => {
+        match t.last {
+            Some((_, prev_ms)) if at_ms == prev_ms => {}
+            None => {
                 t.vel = [0.0, 0.0];
-                t.last = Some((ne, at_ms));
                 t.named_ms = at_ms;
             }
+            Some((prev, prev_ms)) => {
+                let dt_ms = at_ms.saturating_sub(prev_ms);
+                let dt = dt_ms as f32 / 1000.0;
+                let step = geo::dist(ne, prev);
+                if step > SUBJECT_JUMP_MPS * dt.max(SUBJECT_JUMP_MIN_S) {
+                    t.vel = [0.0, 0.0];
+                    t.named_ms = at_ms;
+                } else if dt_ms == 0 || dt_ms > SUBJECT_VEL_GAP_MS {
+                    t.vel = [0.0, 0.0];
+                } else {
+                    let raw = geo::scale(geo::sub(ne, prev), 1.0 / dt);
+                    let k = (dt / SUBJECT_VEL_SMOOTH_S).min(1.0);
+                    t.vel = geo::add(t.vel, geo::scale(geo::sub(raw, t.vel), k));
+                }
+            }
         }
+        t.last = Some((ne, at_ms));
         let armed = now_ms >= t.named_ms + SUBJECT_ARM_MS;
         let body = self.settings.pilot.body_radius_m();
         let keep = SUBJECT_BODY_RADIUS_M
@@ -140,19 +149,24 @@ impl Pilot {
             + SUBJECT_MARGIN_M
             + (SUBJECT_SIGMAS * sigma.unwrap_or(0.0).max(0.0)).min(SUBJECT_SIGMA_MAX_M);
         let d = geo::dist([pos[0], pos[1]], ne);
+        let agl = self.agl(now_ms);
         let t = &mut self.subject_track;
         if d < keep + SUBJECT_CLIMB_ZONE_M {
             t.climbing = true;
         } else if d > keep + SUBJECT_CLIMB_ZONE_M + SUBJECT_CLIMB_HYST_M {
             t.climbing = false;
+            t.ground_d = None;
+        }
+        // The ground is taken once, when the climb begins (or when a height
+        // above ground first reads during it): a rangefinder stuck low then
+        // raises the setpoint once, never a climb that follows the vehicle up.
+        if t.climbing && t.ground_d.is_none() {
+            t.ground_d = agl.map(|a| pos[2] + a);
         }
         let vel = t.vel;
-        let floor_d = if t.climbing {
-            let floor = SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M;
-            self.agl(now_ms).map(|a| pos[2] + a - floor)
-        } else {
-            None
-        };
+        let floor_d = t
+            .ground_d
+            .map(|g| g - (SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M));
         let subject = Subject {
             ne,
             keep,
@@ -270,15 +284,16 @@ impl Pilot {
     }
 }
 
-/// `v` with its part along `u` held to at most `cap` (and `v_cap` toward),
-/// its sideways part kept within what `v_cap` leaves; motion away along `u`
-/// is never cut. With whether `v_cap` cut the sideways part.
+/// `v` with its part along `u` held to at most `cap` and to `v_cap` either
+/// way, its sideways part kept within what `v_cap` leaves. With whether
+/// `v_cap` cut it.
 fn hold_along(v: V2, u: V2, cap: f32, v_cap: f32) -> (V2, bool) {
     let toward = geo::dot(v, u);
-    let along = toward.min(cap).min(v_cap);
+    let held = toward.min(cap);
+    let along = held.clamp(-v_cap, v_cap);
     let side = geo::sub(v, geo::scale(u, toward));
     let room = (v_cap * v_cap - along * along).max(0.0).sqrt();
-    let capped = geo::norm(side) > room + 1e-3;
+    let capped = geo::norm(side) > room + 1e-3 || held < -v_cap;
     (
         geo::add(geo::scale(u, along), geo::clamp_len(side, room)),
         capped,

@@ -294,12 +294,13 @@ impl Pilot {
     }
 
     /// One shaped tick toward `want`: the brakes' caps at the goal
-    /// acceleration slow it first (the obstacle brake's
-    /// [`Pilot::soft_brake`], the subject brake's [`Pilot::subject_soft`]),
+    /// acceleration slow it first (the subject brake's
+    /// [`Pilot::subject_soft`], then the obstacle brake's [`Pilot::soft_brake`]),
     /// the shaper holds its acceleration and jerk, then the safety limits
-    /// cut what it flies at once: the speed cap, the obstacle brake on the
-    /// profile's stick acceleration ([`Pilot::goal_brake`]), the subject
-    /// brake on the same acceleration ([`Pilot::subject_cut`]) and the
+    /// cut what it flies at once: the speed cap, the subject brake on the
+    /// profile's stick acceleration ([`Pilot::subject_cut`]), the obstacle
+    /// brake on the same acceleration ([`Pilot::goal_brake`]), last so a
+    /// back-away from the subject never flies into an obstacle, and the
     /// geofence. Moves the reference point on the velocity flown and returns
     /// that velocity.
     fn fly_shaped(
@@ -316,14 +317,15 @@ impl Pilot {
             r.ask,
             geo::scale(geo::sub(want, r.ask), (s.dt / ASK_SMOOTH_S).min(1.0)),
         );
-        let (mut want, by) = self.soft_brake(s.pos, r.ask, s.gl.a_h, now_ms);
-        *limits |= by;
+        let mut want = r.ask;
         if let Some(subject) = &s.subject {
             if let Some(held) = self.subject_soft(subject, s.pos, want, s.gl.a_h, s.v_cap, now_ms) {
                 *limits |= limit::SUBJECT;
                 want = held;
             }
         }
+        let (want, by) = self.soft_brake(s.pos, want, s.gl.a_h, now_ms);
+        *limits |= by;
         let mut v = r.sh.track(want, s.gl.a_h, s.gl.jerk, s.dt);
         if geo::dist(v, want) > SHAPER_REPORT_MPS {
             *limits |= limit::SHAPER;
@@ -339,15 +341,6 @@ impl Pilot {
         } else {
             leash(geo::add(r.p, geo::scale(v, s.dt)), s.pos)
         };
-        let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
-        if let Some((braked, by)) = self.goal_brake(s.pos, fc_ask, s.v_cap, s.speed_by, now_ms) {
-            // At the vehicle's own position the FC's position loop adds
-            // nothing: it flies the braked velocity.
-            *limits |= by;
-            v = braked;
-            p = s.pos;
-            r.cut(p, v);
-        }
         if let Some(subject) = &s.subject {
             let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
             if let Some((cut, slide_capped)) =
@@ -363,6 +356,15 @@ impl Pilot {
                 p = s.pos;
                 r.cut(p, v);
             }
+        }
+        let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
+        if let Some((braked, by)) = self.goal_brake(s.pos, fc_ask, s.v_cap, s.speed_by, now_ms) {
+            // At the vehicle's own position the FC's position loop adds
+            // nothing: it flies the braked velocity.
+            *limits |= by;
+            v = braked;
+            p = s.pos;
+            r.cut(p, v);
         }
         let fenced = geofence(s.pos, s.home, s.max_dist, v);
         if geo::dist(fenced, v) > 1e-3 {

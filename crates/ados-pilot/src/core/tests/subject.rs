@@ -5,9 +5,9 @@
 //! climbs clear over them while near. With avoidance off: the brake needs no
 //! obstacle sensor.
 
-use ados_protocol::pilot::{Goal, GoalKind, Request, VelMode};
+use ados_protocol::pilot::{AvoidMode, Goal, GoalKind, Request, VelMode};
 
-use super::harness::World;
+use super::harness::{wall, World};
 use super::shaping::{fly_for, flying, peak_acc_jerk, A_MAX, JERK};
 use crate::core::control::stop_cap;
 
@@ -149,41 +149,78 @@ fn inside_the_kept_distance_the_vehicle_backs_away() {
     }
 }
 
-/// For 3 s after a subject is first named, and again after its goals
-/// stopped for more than 0.5 s, the brake holds off: a subject named 1 m
-/// away is not pushed from until then.
+/// For 3 s after a subject is first named the brake holds off: a subject
+/// named 1 m away is not pushed from until then.
 #[test]
 fn the_brake_waits_three_seconds_after_the_subject_is_named() {
     let (mut w, id) = flying();
     let subject = [w.pos[0] + 1.0, w.pos[1]];
-    let hold = |w: &mut World, ms: u64| {
-        let t0 = w.now;
-        while w.now < t0 + ms {
-            if (w.now - t0).is_multiple_of(100) {
-                send(w, id, follow(0.0, Some(subject), -5.0));
-            }
-            w.run(20);
-            assert!(!subject_cut(w), "braked {} ms after naming", w.now - t0);
-            assert!(setpoint(w).0[0].abs() < 1e-3, "moved");
-        }
-    };
-    hold(&mut w, ARM_MS - 100);
-    fly_for(&mut w, id, 300, |_, _| follow(0.0, Some(subject), -5.0));
-    assert!(setpoint(&w).0[0] < -0.1, "not backing away once armed");
-    assert!(subject_cut(&w));
-    // The goals stop for 0.6 s: the subject's velocity restarts, and with
-    // it the wait.
-    w.run(600);
-    w.vel = [0.0; 3];
-    let subject = [w.pos[0] + 1.0, w.pos[1]];
     let t0 = w.now;
-    while w.now < t0 + ARM_MS - 200 {
+    while w.now < t0 + ARM_MS - 100 {
         if (w.now - t0).is_multiple_of(100) {
             send(&mut w, id, follow(0.0, Some(subject), -5.0));
         }
         w.run(20);
-        assert!(!subject_cut(&w), "braked {} ms after the gap", w.now - t0);
+        assert!(!subject_cut(&w), "braked {} ms after naming", w.now - t0);
+        assert!(setpoint(&w).0[0].abs() < 1e-3, "moved");
     }
+    fly_for(&mut w, id, 300, |_, _| follow(0.0, Some(subject), -5.0));
+    assert!(setpoint(&w).0[0] < -0.1, "not backing away once armed");
+    assert!(subject_cut(&w));
+}
+
+/// Once armed the brake stays armed through a slow goal stream (one goal
+/// every 0.9 s, which the lease allows) and through goals that arrive
+/// bunched together: only the subject's velocity restarts after a gap, and
+/// a small step between bunched goals is no new subject.
+#[test]
+fn slow_or_bunched_goals_keep_the_brake_armed() {
+    let (mut w, id, _) = armed_at(1.0);
+    for _ in 0..4 {
+        let near = [w.pos[0] + 1.0, w.pos[1]];
+        send(&mut w, id, follow(0.0, Some(near), -5.0));
+        w.run(20);
+        assert!(subject_cut(&w), "disarmed after a goal gap");
+        assert!(setpoint(&w).0[0] < -0.1, "not backing away after a gap");
+        w.run(880);
+    }
+    for _ in 0..4 {
+        let near = [w.pos[0] + 1.0, w.pos[1]];
+        send(&mut w, id, follow(0.0, Some(near), -5.0));
+        w.run(20);
+        let nearer = [near[0] - 0.3, near[1]];
+        send(&mut w, id, follow(0.0, Some(nearer), -5.0));
+        w.run(20);
+        assert!(subject_cut(&w), "disarmed by bunched goals");
+        assert!(setpoint(&w).0[0] < -0.1, "not backing away");
+        w.run(60);
+    }
+}
+
+/// Backing away from a subject never flies into an obstacle behind: the
+/// obstacle brake has the last word over the subject brake's cut. A
+/// subject closing at 1 m/s pins the vehicle against a wall 3 m behind,
+/// and the vehicle holds outside the obstacle margin rather than reversing
+/// into it.
+#[test]
+fn the_back_away_stops_for_an_obstacle_behind() {
+    let (mut w, id, _) = armed_at(4.0);
+    w.p.settings.pilot.avoid = AvoidMode::Brake;
+    let wall_n = w.pos[0] - 3.0;
+    let start = w.pos[0] + 4.0;
+    let mut nearest = f32::INFINITY;
+    let t0 = w.now;
+    while w.now < t0 + 4_500 {
+        let range = w.pos[0] - wall_n;
+        nearest = nearest.min(range);
+        w.scan_ranges = wall(180, range);
+        if (w.now - t0).is_multiple_of(100) {
+            let s = start - 1.0 * (w.now - t0) as f32 / 1000.0;
+            send(&mut w, id, follow(0.0, Some([s, 0.0]), -5.0));
+        }
+        w.run(20);
+    }
+    assert!(nearest >= 1.4, "backed within {nearest:.2} m of the wall");
 }
 
 /// A subject that steps faster than 8 m/s between goals (a re-designation
@@ -368,4 +405,89 @@ fn following_a_subject_walking_away_is_not_cut() {
     let gap = s - w.pos[0];
     assert!((gap - 3.0).abs() < 0.3, "{gap:.2} m behind");
     assert!((w.vel[0] - WALK).abs() < 0.1, "flying {:.2}", w.vel[0]);
+}
+
+/// A rangefinder stuck low under a vehicle climbing clear of the subject:
+/// the ground is taken when the climb begins, so the setpoint rises once to
+/// the floor over it and stays there as the vehicle climbs, never a climb
+/// that follows the vehicle up.
+#[test]
+fn a_stuck_low_rangefinder_raises_the_climb_floor_once() {
+    let (mut w, id) = flying();
+    w.pos[2] = -1.5;
+    w.agl = Some(1.5);
+    let s = [w.pos[0] + 3.5, w.pos[1]];
+    for _ in 0..20 {
+        fly_for(&mut w, id, 200, |_, _| follow(0.0, Some(s), -1.5));
+        // The vehicle reaches the setpoint's height; the reading does not
+        // move.
+        w.pos[2] = setpoint(&w).1;
+    }
+    let d = setpoint(&w).1;
+    assert!((d + FLOOR_AGL).abs() < 0.01, "setpoint d {d:.2}");
+}
+
+/// Goals that arrive bunched by transport jitter (5 ms, then 95 ms apart),
+/// the tracker's 20 Hz step of a subject walking at 1.5 m/s between them,
+/// keep the brake armed: the step is judged over at least a goal period.
+#[test]
+fn jittered_goal_arrivals_keep_the_brake_armed() {
+    let (mut w, id, subject) = armed_at(1.0);
+    // Past the arming delay before the jitter starts.
+    w.run(40);
+    let tick = |w: &mut World, ms: u64| {
+        w.now += ms;
+        w.feed();
+        w.p.tick(w.now);
+        w.collect();
+    };
+    let mut s = subject;
+    for i in 0..20 {
+        s[0] -= 0.075;
+        send(&mut w, id, follow(0.0, Some(s), -5.0));
+        tick(&mut w, if i % 2 == 0 { 1 } else { 19 });
+        assert!(subject_cut(&w), "disarmed at goal {i}");
+        w.now += if i % 2 == 0 { 4 } else { 76 };
+    }
+}
+
+/// Under the GNSS-denied speed cap a subject walking onto the vehicle at
+/// 4 m/s is backed away from at no more than the cap: the back-away is
+/// held to the goal's speed limit like any other velocity.
+#[test]
+fn the_back_away_keeps_the_nav_cap() {
+    const CAP: f32 = 2.0;
+    let mut w = World::new();
+    w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
+    w.p.fc.params.insert("EK3_SRC2_POSXY".into(), 6.0);
+    w.p.settings.pilot.avoid = AvoidMode::Off;
+    w.airborne(crate::modes::copter::GUIDED);
+    w.fly = true;
+    let ext_nav = |w: &mut World| {
+        w.p.on_feed(
+            "nav.state",
+            &serde_json::json!({"active_set": 2, "gps_fix": 0}),
+            w.now,
+        );
+    };
+    ext_nav(&mut w);
+    let id = w.lease();
+    let start = w.pos[0] + 12.0;
+    let mut fastest: f32 = 0.0;
+    let mut braked = false;
+    let t0 = w.now;
+    while w.now < t0 + 6_000 {
+        if (w.now - t0).is_multiple_of(500) {
+            ext_nav(&mut w);
+        }
+        if (w.now - t0).is_multiple_of(100) {
+            let s = start - 4.0 * (w.now - t0) as f32 / 1000.0;
+            send(&mut w, id, follow(0.0, Some([s, 0.0]), -5.0));
+        }
+        w.run(20);
+        fastest = fastest.max(setpoint(&w).0[0].hypot(setpoint(&w).0[1]));
+        braked |= subject_cut(&w);
+    }
+    assert!(braked, "never braked");
+    assert!(fastest <= CAP + 1e-3, "flew {fastest:.2} m/s under the cap");
 }
