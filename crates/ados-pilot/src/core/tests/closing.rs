@@ -315,6 +315,11 @@ fn delivery_jitter_does_not_scale_a_range_rate() {
         let t = 100 * k as u64;
         let d = 2.0 - 0.05 * k as f32;
         o.ingest_scan(&stamped(d, t), LEVEL, [0.0; 2], SCAN_CLOSING_MAX_MPS, *at);
+        if k == 3 {
+            // Four scans delivered 50 ms apart: by arrival, 1 m/s.
+            let c = o.scan_closing([1.0, 0.0], *at);
+            assert!((c - 0.5).abs() < 0.03, "closing {c} after four scans");
+        }
     }
     // Straight ahead (an oblique sector's range falls by 1/cos as much).
     let c = o.scan_closing([1.0, 0.0], 1400);
