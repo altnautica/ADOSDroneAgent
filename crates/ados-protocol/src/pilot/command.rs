@@ -1,15 +1,18 @@
-//! What the pilot commanded on its latest goal tick, and a shadow planner's
-//! command: onboard diagnostics for logs and replays.
+//! What the pilot commanded on its latest goal or stick tick, and a shadow
+//! planner's command: onboard diagnostics for logs and replays.
 
 use serde::{Deserialize, Serialize};
+
+use super::state::{ProfileLimits, StickCommand};
 
 /// The frame of every position and velocity in [`PilotCommand`] and
 /// [`ShadowCommand`], and of `goal_ned`, `plan_ned` and `setpoint_ned`: the
 /// flight controller's local NED (metres from its EKF origin).
 pub const FRAME_FC_LOCAL_NED: &str = "fc_local_ned";
 
-/// What the pilot asked and flew on its latest control tick of a skill goal
-/// or a goto, and which limits cut it since the previous frame.
+/// What the pilot asked and flew on its latest control tick of a skill goal,
+/// a goto or the operator's sticks, and which limits cut it since the
+/// previous frame.
 /// Diagnostics for logs and replays: it rides the pilot socket and the nav
 /// stream, never the radio downlink.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +58,14 @@ pub struct PilotCommand {
     /// previous frame, first seen first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hold_reasons: Vec<String>,
+    /// On a stick tick: what the sticks asked and the shaped reference sent,
+    /// with the input age of the frame flown. Omitted on a goal tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stick: Option<StickCommand>,
+    /// On a stick tick: the limits the sticks flew at. Omitted on a goal
+    /// tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_limits: Option<ProfileLimits>,
 }
 
 /// The [`PilotCommand::limits`] codes, in the order the pilot applies them:
@@ -126,6 +137,8 @@ impl PilotCommand {
             v_cap_mps: 0.0,
             limits: Vec::new(),
             hold_reasons: Vec::new(),
+            stick: None,
+            profile_limits: None,
         }
     }
 }

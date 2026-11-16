@@ -372,6 +372,80 @@ fn command_and_shadow_are_omitted_until_set_and_round_trip() {
 }
 
 #[test]
+fn profile_limits_and_stick_are_omitted_until_set_and_round_trip() {
+    use crate::pilot::{PilotCommand, PilotState, Profile, ProfileLimits, StickCommand};
+    let mut s = PilotState::default();
+    let v = serde_json::to_value(&s).unwrap();
+    assert!(
+        v.get("profile_limits").is_none() && v.get("stick").is_none(),
+        "{v}"
+    );
+    let lim = ProfileLimits {
+        profile: Profile::Normal,
+        v_h_mps: 7.0,
+        v_up_mps: 2.5,
+        v_down_mps: 1.5,
+        yaw_dps: 90.0,
+        a_acc_mps2: 2.0,
+        a_brk_mps2: 2.5,
+        jerk_mps3: 5.0,
+        a_v_mps2: 1.0,
+        yaw_dps2: 180.0,
+        expo_h: 0.25,
+        expo_v: 0.3,
+        expo_yaw: 0.2,
+        stop_m: ProfileLimits::stop_distance_m(7.0, 2.5, 5.0),
+        margin_m: 2.0,
+    };
+    let stick = StickCommand {
+        ask_ne_mps: [7.0, 0.0],
+        ask_vz_mps: 0.5,
+        ask_yaw_dps: -10.0,
+        v_ne_mps: [3.0, 0.0],
+        a_ne_mps2: [2.0, 0.0],
+        vz_mps: 0.25,
+        yaw_rate_dps: -5.0,
+        braking: false,
+        input_age_ms: 24,
+        input_seq: 1234,
+    };
+    s.profile_limits = Some(lim);
+    s.stick = Some(stick);
+    let mut c = PilotCommand::new(1_700_000_000_123);
+    c.stick = Some(stick);
+    c.profile_limits = Some(lim);
+    s.command = Some(c);
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["profile_limits"]["profile"], "normal");
+    assert_eq!(v["profile_limits"]["a_brk_mps2"], 2.5);
+    assert_eq!(v["stick"]["input_seq"], 1234);
+    assert_eq!(v["stick"]["ask_ne_mps"], serde_json::json!([7.0, 0.0]));
+    assert_eq!(v["command"]["stick"]["braking"], false);
+    assert_eq!(v["command"]["profile_limits"]["yaw_dps2"], 180.0);
+    let back: PilotState = serde_json::from_value(v).unwrap();
+    assert_eq!(back, s);
+    // A goal tick's command carries neither.
+    let v = serde_json::to_value(PilotCommand::new(1)).unwrap();
+    assert!(
+        v.get("stick").is_none() && v.get("profile_limits").is_none(),
+        "{v}"
+    );
+}
+
+#[test]
+fn the_stop_distance_is_the_kinematic_one() {
+    use crate::pilot::ProfileLimits;
+    // Release from full speed at each profile's brake and jerk.
+    let cine = ProfileLimits::stop_distance_m(3.0, 2.0, 4.0);
+    let normal = ProfileLimits::stop_distance_m(7.0, 2.5, 5.0);
+    let sport = ProfileLimits::stop_distance_m(10.0, 2.5, 5.0);
+    assert!((cine - 3.45).abs() < 1e-4, "{cine}");
+    assert!((normal - 12.6).abs() < 1e-4, "{normal}");
+    assert!((sport - 24.0).abs() < 1e-4, "{sport}");
+    assert_eq!(ProfileLimits::stop_distance_m(0.0, 2.5, 5.0), 0.0);
+}
+
+#[test]
 fn a_vantage_goal_decodes_with_its_spec_and_hypotheses() {
     let frame = serde_json::json!({
         "op": "goal", "lease_id": 4,
