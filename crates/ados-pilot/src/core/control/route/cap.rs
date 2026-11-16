@@ -81,19 +81,18 @@ impl Pilot {
         // item with no position, past the end of the feed, or σ or the
         // position not vouched for). Until the mission feed names the item
         // there is no leg to judge.
-        let unverified_leg = flying
-            && seq.is_some()
-            && (self
-                .route
-                .legs
-                .iter()
-                .find(|l| Some(l.to_seq) == seq)
-                .is_none_or(|l| l.state == RouteState::Unverified || !self.route.trusted)
-                || self
+        let unverified_leg =
+            flying
+                && seq.is_some()
+                && (self
                     .route
                     .legs
                     .iter()
-                    .any(|l| l.state == RouteState::Unverified && self.leg_in_reach(l, now_ms)));
+                    .find(|l| Some(l.to_seq) == seq)
+                    .is_none_or(|l| l.state == RouteState::Unverified || !self.route.trusted)
+                    || self.route.legs.iter().any(|l| {
+                        l.state == RouteState::Unverified && self.leg_in_reach(l, now_ms)
+                    }));
         let cap = if near {
             Some("near")
         } else if pending {

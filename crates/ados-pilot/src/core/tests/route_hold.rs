@@ -44,13 +44,21 @@ fn sent_before(w: &World) -> (usize, usize) {
 /// Resumed in AUTO at the FC's own item since `before`, the hold and any
 /// stall gone.
 fn assert_resumed(w: &World, before: (usize, usize)) {
-    assert_eq!(w.set_modes(copter::AUTO), before.0 + 1, "AUTO commanded again");
+    assert_eq!(
+        w.set_modes(copter::AUTO),
+        before.0 + 1,
+        "AUTO commanded again"
+    );
     assert_eq!(w.mode, copter::AUTO);
     assert_eq!(w.p.owner(), Owner::MissionFc);
     let s = w.p.state(w.now);
     assert_eq!(s.hold_reason, None);
     assert!(s.mission_stall.is_none(), "{:?}", s.mission_stall);
-    assert_eq!(w.commands(SET_CURRENT, None), before.1, "resumed at its own item");
+    assert_eq!(
+        w.commands(SET_CURRENT, None),
+        before.1,
+        "resumed at its own item"
+    );
 }
 
 #[test]
@@ -162,7 +170,11 @@ fn a_route_hold_resumes_only_on_fresh_obstacle_data() {
     w.lidar = false;
     map(&mut w, &area(&|_, _| false));
     run_seen(&mut w, 6000);
-    assert_eq!(w.set_modes(copter::AUTO), before.0, "no AUTO on stale scans");
+    assert_eq!(
+        w.set_modes(copter::AUTO),
+        before.0,
+        "no AUTO on stale scans"
+    );
     assert_ne!(w.mode, copter::AUTO);
     // Scans again: the stale checks never counted, so the full dwell runs
     // from the first fresh one.
@@ -235,9 +247,15 @@ fn a_roof_a_nose_up_scan_reaches_is_no_obstacle_on_the_legs_ahead() {
     assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
     assert_eq!(w.set_modes(copter::BRAKE), 0);
     let hits = w.p.obstacles.hits(w.now);
-    assert!(!hits.is_empty() && hits.iter().all(|h| h.range_m > 7.5), "{hits:?}");
+    assert!(
+        !hits.is_empty() && hits.iter().all(|h| h.range_m > 7.5),
+        "{hits:?}"
+    );
     // It still bounds what the beam saw free, for the brake.
-    assert_eq!(w.p.obstacles.horizon_near([7.0, 0.0], 0.1, w.now).count(), 1);
+    assert_eq!(
+        w.p.obstacles.horizon_near([7.0, 0.0], 0.1, w.now).count(),
+        1
+    );
     // Level, the same return is a wall at flight height on the leg.
     w.pitch = 0.0;
     run_seen(&mut w, 1100);
@@ -299,7 +317,11 @@ fn a_far_leg_tight_from_the_wrong_height_is_judged_at_its_own() {
     map(&mut w, &area(&narrow));
     feed(&mut w, "active", 2, items(), Some([10.0, 0.0]), json!({}));
     run_seen(&mut w, 3000);
-    assert_eq!(w.set_modes(copter::BRAKE), 0, "no hold from the wrong height");
+    assert_eq!(
+        w.set_modes(copter::BRAKE),
+        0,
+        "no hold from the wrong height"
+    );
     let rc = w.p.state(w.now).route_check.expect("route_check");
     assert_eq!(rc.state, RouteState::Unverified, "{rc:?}");
     assert_eq!(rc.pinch, None);
