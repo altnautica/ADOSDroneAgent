@@ -253,4 +253,11 @@ fn no_auto_without_the_position_the_leg_from_here_starts_at() {
     assert_eq!(w.set_modes(copter::AUTO), 0, "AUTO never commanded");
     assert_ne!(w.mode, copter::AUTO);
     assert_eq!(s.hold_reason.as_deref(), Some("position-unverified"));
+    // The position returns and the route clears: the hold still waits for
+    // the operator, never resuming AUTO on its own.
+    w.local = true;
+    map(&mut w, &area(&|_, _| false));
+    run_seen(&mut w, 5000);
+    assert_eq!(w.set_modes(copter::AUTO), 0, "held for the operator");
+    assert!(w.p.state(w.now).mission_stall.is_some());
 }

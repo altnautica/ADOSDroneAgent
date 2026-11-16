@@ -523,7 +523,9 @@ impl Pilot {
     /// NE) before a hold that waited stopped it. The straight line is never
     /// longer than the route there, and a leg comes within the required
     /// clearance of an obstacle at most that far before its point nearest
-    /// the obstacle. Without a position everything is in reach.
+    /// that obstacle; `p` is the first such point of a tight stretch, so a
+    /// stretch that narrows toward its pinch counts from where it starts.
+    /// Without a position everything is in reach.
     fn in_reach(&self, p: V2, now_ms: u64) -> bool {
         self.stop_reach(now_ms)
             .is_none_or(|(pos, stop_m)| geo::dist(pos, p) - self.route.required <= stop_m)
@@ -548,7 +550,8 @@ impl Pilot {
     /// While the FC flies the mission: an infeasible leg ahead holds the
     /// vehicle and asks the operator (the stall flow) once every check has
     /// read it for [`ROUTE_HOLD_CONFIRM_MS`], or at once when the vehicle
-    /// could reach its pinch before a hold that waited stopped it.
+    /// could reach where the leg turns tight before a hold that waited
+    /// stopped it.
     pub(super) fn route_hold(&mut self, now_ms: u64) {
         if !self.confined() || !self.mission_flying() || self.owner() != Owner::MissionFc {
             return;
@@ -557,8 +560,9 @@ impl Pilot {
             return;
         };
         let near = leg
-            .pinch
-            .is_none_or(|(p, _)| self.in_reach([p[0], p[1]], now_ms));
+            .tight
+            .or(leg.pinch.map(|(p, _)| [p[0], p[1]]))
+            .is_none_or(|p| self.in_reach(p, now_ms));
         if near || self.route.infeasible_for(ROUTE_HOLD_CONFIRM_MS) {
             let seq = self.mission.as_ref().and_then(|m| m.seq);
             self.hold_route_infeasible(seq, now_ms);

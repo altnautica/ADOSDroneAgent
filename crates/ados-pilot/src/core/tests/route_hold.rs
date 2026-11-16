@@ -152,6 +152,49 @@ fn a_stalled_route_hold_resumes_and_clears_the_stall() {
 }
 
 #[test]
+fn a_route_hold_resumes_only_on_fresh_obstacle_data() {
+    let mut w = flying(&post(15.0));
+    run_seen(&mut w, 2700);
+    assert_eq!(held(&w).as_deref(), Some("route-infeasible"));
+    // The scans stop: the route reads clear on the map alone, yet nothing
+    // would brake in AUTO.
+    let before = sent_before(&w);
+    w.lidar = false;
+    map(&mut w, &area(&|_, _| false));
+    run_seen(&mut w, 6000);
+    assert_eq!(w.set_modes(copter::AUTO), before.0, "no AUTO on stale scans");
+    assert_ne!(w.mode, copter::AUTO);
+    // Scans again: resumed once the dwell passes.
+    w.lidar = true;
+    run_seen(&mut w, 4500);
+    assert_resumed(&w, before);
+}
+
+#[test]
+fn a_bore_that_narrows_toward_its_pinch_holds_from_where_it_turns_tight() {
+    // Walls either side of e = 0 close in from 0.60 m at n 5 to 0.45 m at
+    // n 15: the pinch is at n 10 on leg 1→2, 4.4 m off, but the leg turns
+    // too tight about n 6.7, 1.1 m ahead of the hovering vehicle.
+    let walls = |n: f32, e: f32| {
+        let half = 0.60 - 0.015 * (n - 5.0);
+        (5.0..15.0).contains(&n) && (half..half + 0.06).contains(&e.abs())
+    };
+    let mut w = World::new();
+    confined(&mut w);
+    w.airborne(copter::AUTO);
+    w.pos = [5.6, 0.0, -5.0];
+    w.run(100);
+    map(&mut w, &area(&walls));
+    mission(&mut w, "active", 2);
+    run_seen(&mut w, 100);
+    let rc = w.p.state(w.now).route_check.expect("route_check");
+    assert_eq!(rc.state, RouteState::Infeasible, "{rc:?}");
+    assert!(rc.pinch.as_ref().expect("pinch").ned[0] > 9.0, "{rc:?}");
+    assert_eq!(w.set_modes(copter::BRAKE), 1, "held on the first check");
+    assert_eq!(held(&w).as_deref(), Some("route-infeasible"));
+}
+
+#[test]
 fn a_persistent_pinch_holds_and_never_flies_into_it() {
     let mut w = flying(&post(15.0));
     run_seen(&mut w, 1100);
@@ -164,6 +207,15 @@ fn a_persistent_pinch_holds_and_never_flies_into_it() {
     }
     assert_eq!(w.set_modes(copter::AUTO), 0);
     assert_eq!(w.set_modes(copter::BRAKE), 1);
+    // Past the deadline item 2 is skipped, but the leg on to item 3 still
+    // passes the post: held again, never AUTO.
+    run_seen(&mut w, 6000);
+    let s = w.p.state(w.now);
+    let gaps = s.mission.expect("mission").gaps;
+    assert!(gaps.iter().any(|g| g.seq == 2), "{gaps:?}");
+    assert_eq!(s.hold_reason.as_deref(), Some("route-infeasible"));
+    assert_eq!(w.set_modes(copter::AUTO), 0);
+    assert_ne!(w.mode, copter::AUTO);
 }
 
 #[test]

@@ -31,6 +31,10 @@ pub struct LegProbe {
     pub nearest: Option<(f32, V2, f32)>,
     /// Unseen space lies closer than the unseen radius to the leg.
     pub unseen: bool,
+    /// The point of the leg first (smallest distance along it) nearest a
+    /// seen obstacle closer than the unseen radius: where a tight stretch,
+    /// such as a narrowing bore, starts.
+    pub first_tight: Option<(f32, V2)>,
 }
 
 /// One straight leg.
@@ -74,6 +78,9 @@ impl Obstacles {
             let d = (d - shrink).max(0.0);
             if d <= report_m && out.nearest.is_none_or(|(_, _, best)| d < best) {
                 out.nearest = Some((t, q, d));
+            }
+            if d < unseen_m && out.first_tight.is_none_or(|(ft, _)| t < ft) {
+                out.first_tight = Some((t, q));
             }
         };
         for h in self.hits(now_ms) {

@@ -193,6 +193,10 @@ pub struct LegCheck {
     /// The point of the leg nearest a seen obstacle: local NED and the
     /// clearance (m).
     pub pinch: Option<([f32; 3], f32)>,
+    /// Where the leg first comes within the required clearance of a seen
+    /// obstacle (local NE): the start of a tight stretch, which may lie well
+    /// before the pinch.
+    pub tight: Option<[f32; 2]>,
 }
 
 /// The part `[f0, f1]` of a leg from height `za` to `zb` (local down) that
@@ -230,6 +234,7 @@ pub fn check_legs(
                 to: b,
                 state: RouteState::Unverified,
                 pinch: None,
+                tight: None,
             };
             let Some((f0, f1)) = plane_d.and_then(|d| in_slice(a[2], b[2], d)) else {
                 return leg;
@@ -246,6 +251,7 @@ pub fn check_legs(
                 };
                 ([q[0], q[1], a[2] + f * (b[2] - a[2])], d)
             });
+            leg.tight = probe.first_tight.map(|(_, q)| q);
             let whole = f0 <= 0.0 && f1 >= 1.0;
             leg.state = if leg.pinch.is_some_and(|(_, d)| d < required) {
                 RouteState::Infeasible

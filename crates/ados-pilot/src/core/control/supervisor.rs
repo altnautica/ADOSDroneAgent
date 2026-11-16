@@ -10,7 +10,9 @@ use ados_protocol::pilot::{AvoidMode, ControlMode, Owner};
 use serde_json::json;
 
 use super::super::Pilot;
-use super::{brake_limit, max_abs, progress, HOLD_OBSTACLE_CLOSE, PREEMPT_AXIS};
+use super::{
+    brake_limit, max_abs, progress, HOLD_OBSTACLE_CLOSE, HOLD_OBSTACLE_STALE, PREEMPT_AXIS,
+};
 use crate::flows::banner;
 use crate::geo::V2;
 use crate::modes::{copter, Family};
@@ -137,6 +139,7 @@ impl Pilot {
                 self.hold_reason.as_deref(),
                 Some(
                     HOLD_OBSTACLE_CLOSE
+                        | HOLD_OBSTACLE_STALE
                         | super::stall::HOLD_MISSION_STALLED
                         | super::stall::HOLD_RETURN_BLOCKED
                         | super::route::HOLD_ROUTE_INFEASIBLE
@@ -283,7 +286,9 @@ impl Pilot {
             return;
         }
         if h.route {
-            if !self.route_resume_due() {
+            // The route reads clear on stale scans too (no hits), and AUTO
+            // brakes on none: resume only on fresh obstacle data.
+            if self.obstacle_data_state(now_ms).is_some() || !self.route_resume_due() {
                 return;
             }
         } else {

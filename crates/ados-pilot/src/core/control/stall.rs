@@ -352,6 +352,11 @@ impl Pilot {
             // Never flown on an estimate nobody vouches for, nor (confined)
             // from a position the leg from here cannot be checked from.
             self.supervise_hold(Resume::Mission, HOLD_POSITION_UNVERIFIED, now_ms);
+            // Held for the operator: a route hold carried here no longer
+            // resumes on its own.
+            if let Some(h) = &mut self.sup.hold {
+                h.route = false;
+            }
             self.sup.stall.active = Some(Active {
                 kind: Kind::Mission,
                 seq: Some(next),
