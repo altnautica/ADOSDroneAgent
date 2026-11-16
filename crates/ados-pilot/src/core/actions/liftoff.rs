@@ -51,8 +51,7 @@ impl Pilot {
             id: "supervised_liftoff".into(),
             ok: false,
             severity: Severity::Warn,
-            msg: "Level lift-off is off: the flight controller's own take-off runs (pilot.supervised_liftoff)"
-                .into(),
+            msg: "Standard take-off. Steady take-off is off.".into(),
         })
     }
 
@@ -170,7 +169,7 @@ impl Pilot {
 
     /// The hover thrust the lift-off ramps against: the airframe's learned
     /// hover, else the FC's `MOT_THST_HOVER`.
-    fn liftoff_hover(&self) -> f32 {
+    pub(crate) fn liftoff_hover(&self) -> f32 {
         self.airframe
             .trim()
             .filter(|t| t.samples > 0 && t.hover_thr > 0.0)
@@ -200,7 +199,8 @@ impl Pilot {
             self.airframe.note_liftoff(&o, now_ms);
             if o.saturated {
                 s.detail =
-                    crate::airframe::imbalance_words(&self.fc, inp.i.unwrap_or_default(), o.thrust);
+                    self.airframe
+                        .imbalance_words(&self.fc, inp.i.unwrap_or_default(), o.thrust);
             }
         }
         if let Some(stop) = lo.stopped() {
@@ -208,7 +208,7 @@ impl Pilot {
                 let thrust = hover;
                 s.detail = inp
                     .i
-                    .and_then(|i| crate::airframe::imbalance_words(&self.fc, i, thrust));
+                    .and_then(|i| self.airframe.imbalance_words(&self.fc, i, thrust));
             }
             return self.liftoff_spindown(l, stop, &inp, now_ms);
         }
@@ -354,12 +354,12 @@ impl Pilot {
     }
 
     /// The surfaces' view of the lift-off, with the imbalance added to a
-    /// stop.
+    /// stop's detail.
     pub(in crate::core) fn liftoff_view(l: &Launch) -> Option<ados_protocol::pilot::Liftoff> {
         let s = l.supervised.as_ref()?;
         let mut v = s.liftoff.as_ref()?.view();
         if let (Some(d), "stopped") = (&s.detail, v.phase.as_str()) {
-            v.text = format!("{}. Rebalance: {d}", v.text);
+            v.detail = format!("{} {d}", v.detail);
         }
         Some(v)
     }

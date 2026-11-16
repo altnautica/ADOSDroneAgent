@@ -2,7 +2,7 @@
 //! "when done" actions.
 
 use ados_protocol::mavlink::ardupilotmega::MavCmd;
-use ados_protocol::pilot::{Owner, PlaceClass, VehicleClass};
+use ados_protocol::pilot::{Owner, PlaceClass, Severity, VehicleClass};
 use serde_json::{json, Value};
 
 use super::{ActionRes, SKILL_START_MS, STEP_TIMEOUT_MS};
@@ -136,6 +136,17 @@ impl Pilot {
         }
         if ready {
             self.ready_to_arm(now_ms)?;
+        }
+        // An airframe without the motor headroom to lift off level is
+        // refused in every control mode, not only where readiness gates.
+        if self.supervised_liftoff_applies() {
+            if let Some(r) = self
+                .airframe
+                .readiness(&self.fc)
+                .filter(|r| !r.ok && r.severity == Severity::Block)
+            {
+                return Err(format!("not_ready:{}", r.id));
+            }
         }
         Ok(())
     }
@@ -274,7 +285,7 @@ impl Pilot {
                 .is_some_and(|lo| lo.stopped().is_some());
             let reason = Self::liftoff_view(&l)
                 .filter(|v| v.phase == "stopped")
-                .map(|v| v.text)
+                .map(|v| format!("{}. {}", v.text, v.detail))
                 .or_else(|| crate::liftoff::error_text(e).map(str::to_owned))
                 .unwrap_or_else(|| e.clone());
             self.banner = Some(banner(

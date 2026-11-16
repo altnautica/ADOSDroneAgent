@@ -102,8 +102,8 @@ impl Airframe {
             return;
         };
         let frac = thrust / self.hover;
-        for ax in 0..2 {
-            self.i[ax] += dt * I_PER_RAD_S * (tgt[ax] - self.att[ax]);
+        for (ax, &want) in tgt.iter().take(2).enumerate() {
+            self.i[ax] += dt * I_PER_RAD_S * (want - self.att[ax]);
             // Too little integrator drops that side (negative tilt).
             let err = self.i[ax] - self.trim[ax];
             if self.airborne() {

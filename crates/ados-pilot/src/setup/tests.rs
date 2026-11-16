@@ -297,8 +297,9 @@ fn full_ground_copter_flow() {
     assert_eq!(s.param("FS_GCS_ENABLE"), 4.0);
     assert_eq!(s.param("FS_GCS_TIMEOUT"), 3.0);
     assert_eq!(s.param("BATT_FS_LOW_ACT"), 4.0);
-    // The fake FC's table carries none of the guided, avoidance, SmartRTL
-    // or attitude-input parameters, so nothing that needs a reboot changed.
+    // The fake FC's table carries none of the guided, avoidance, SmartRTL,
+    // attitude-input or lift-off parameters, so nothing that needs a reboot
+    // changed.
     assert_eq!(
         s.result(G, "ados_profile")["absent"],
         json!([
@@ -308,7 +309,9 @@ fn full_ground_copter_flow() {
             "AVOID_ENABLE",
             "SRTL_POINTS",
             "SRTL_ACCURACY",
-            "ATC_INPUT_TC"
+            "ATC_INPUT_TC",
+            "GUID_OPTIONS",
+            "GCS_PID_MASK"
         ])
     );
     assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(false));
@@ -1854,5 +1857,7 @@ fn vtol_air_wizard_flies_every_step() {
 
 mod no_rc;
 mod safety;
+
+mod liftoff;
 
 mod airframe;

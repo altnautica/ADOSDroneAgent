@@ -142,19 +142,14 @@ fn the_phases_read_in_operator_words() {
     launch(&mut w);
     run_to_phase(&mut w, "spool", 3000);
     let l = w.p.state(w.now).sequence.unwrap().liftoff.unwrap();
-    assert_eq!(l.text, "Spinning up the motors");
+    assert_eq!(l.text, "Spinning up");
     assert_eq!(l.trim, "probe");
     run_to_phase(&mut w, "lift", 6000);
     run_to_phase(&mut w, "probe", 10_000);
-    assert!(w
-        .p
-        .state(w.now)
-        .sequence
-        .unwrap()
-        .liftoff
-        .unwrap()
-        .text
-        .starts_with("Finding the balance"));
+    assert_eq!(
+        w.p.state(w.now).sequence.unwrap().liftoff.unwrap().text,
+        "Checking balance"
+    );
 }
 
 /// An operator stop in each ground phase spins down and force-disarms
@@ -221,7 +216,7 @@ fn a_lost_operator_link_mid_spool_stops_and_disarms() {
 #[test]
 fn a_motor_out_of_headroom_stops_on_the_ground_and_says_so() {
     // nose50: no motor headroom left at the thrust it needs to lift.
-    let mut w = world().with_airframe(Airframe::new(0.62, [0.0, 0.37]));
+    let mut w = world().with_airframe(Airframe::new(0.62, [0.0, 0.42]));
     launch(&mut w);
     run_to_phase(&mut w, "stopped", 40_000);
     w.run(1000);
@@ -229,7 +224,9 @@ fn a_motor_out_of_headroom_stops_on_the_ground_and_says_so() {
     assert_eq!(force_disarms(&w), 1);
     let s = w.p.state(w.now).sequence.unwrap();
     assert_eq!(s.error.as_deref(), Some("liftoff_saturated"));
-    assert!(s.liftoff.unwrap().text.contains("ran out of power"));
+    let l = s.liftoff.unwrap();
+    assert_eq!(l.text, "Take-off stopped");
+    assert!(l.detail.contains("ran out of power"), "{}", l.detail);
 }
 
 #[test]

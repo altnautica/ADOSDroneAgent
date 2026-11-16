@@ -231,20 +231,24 @@ pub struct Sequence {
     pub liftoff: Option<Liftoff>,
 }
 
-/// The supervised lift-off: the pilot levels the airframe on the ground with
-/// its trim loaded into the FC's rate loop, then lifts off level.
+/// Steady take-off: the pilot balances the airframe on the ground with its
+/// trim loaded into the FC's rate loop, then lifts off level.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Liftoff {
-    /// `spool` (motors spinning up), `level` (loading the trim on the
-    /// ground), `probe` (finding the trim on the ground: first flight on
-    /// this airframe), `lift`, `climb` (clear of the ground, level),
-    /// `done` (handed over) or `stopped` (stopped on the ground; `text`
+    /// `spool` (motors spinning up), `level` (loading the learned trim on
+    /// the ground), `probe` (finding the trim on the ground: first flight
+    /// on this airframe), `lift`, `climb` (clear of the ground, level),
+    /// `done` (handed over) or `stopped` (stopped on the ground; `detail`
     /// says why).
     pub phase: String,
-    /// What the phase means in the operator's words, e.g. "Levelling on the
-    /// ground", "Lifting off", "Stopped: nose-heavy by about 35 mm, move
-    /// the battery back".
+    /// The phase's status line, e.g. "Spinning up", "Checking balance",
+    /// "Take-off stopped".
     pub text: String,
+    /// A longer line for surfaces with room, e.g. "Climbing to 3 m" or
+    /// "The drone started to tip. Motors off."; empty when the status line
+    /// says it all.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     /// `learned` (the trim this airframe flew with before) or `probe`.
     pub trim: String,
     /// Tilt from the resting attitude, degrees.

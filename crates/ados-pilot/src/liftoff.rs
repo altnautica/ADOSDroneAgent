@@ -1,5 +1,5 @@
-//! The supervised lift-off: an ArduPilot multirotor launch lifts off level
-//! even when the airframe is not balanced.
+//! Steady take-off: an ArduPilot multirotor launch lifts off level even when
+//! the airframe is not balanced.
 //!
 //! ArduPilot resets the rate-loop integrators every loop until a GUIDED or
 //! AUTO take-off leaves the ground, so an airframe whose centre of gravity
@@ -11,20 +11,25 @@
 //!
 //! 1. **Spool**: idle thrust at the resting attitude until every motor spins
 //!    steadily; the resting attitude is captured (slope-aware).
-//! 2. **Level**: at half hover thrust, lean the attitude target toward the
-//!    airframe's learned trim until the rate integrators hold it.
-//! 3. **Ramp**: thrust fast to most of hover, then slowly on until lift-off.
-//!    A tip that begins on the skids (a trim not known, or wrong) backs the
-//!    thrust down, settles and loads a better trim ([`probe`]); a pivot past
-//!    the limit, or a motor at the top of its range, stops the launch.
-//! 4. **Climb**: level, clear of the ground, then a position target at
-//!    the lift-off point climbing to the launch height.
+//! 2. **Level**: with a learned trim, at half hover thrust, lean the
+//!    attitude target toward it until the rate integrators hold it.
+//! 3. **Ramp**: thrust fast to most of hover, then slowly on until lift-off,
+//!    rising only while the airframe sits level on its skids. A side that
+//!    starts to unload (the trim not known yet, or wrong) holds the thrust
+//!    and leans the attitude target toward the low side, so the rate-loop
+//!    integrator winds up against skid contact; the lean turns round when
+//!    the other side unloads. The airframe never pivots: a tilt past
+//!    [`BACK_DEG`] steps the thrust back, past [`HARD_DEG`] cuts it to
+//!    [`HARD_FRAC`] of hover. A tilt past [`ABORT_DEG`], or a motor held at
+//!    the top of its range, stops the launch on the ground.
+//! 4. **Climb**: level, clear of the ground, then a position target that
+//!    starts where the airframe is and moving as it moves, climbing to the
+//!    launch height.
 //!
 //! This module is the state machine only: [`Liftoff::step`] takes what the
 //! FC reports and returns the frame to send. The pilot owns the I/O and the
 //! operator's stops (`core/actions/liftoff.rs`).
 
-pub mod probe;
 #[cfg(test)]
 pub mod sim;
 #[cfg(test)]
@@ -43,7 +48,7 @@ pub const PARAMS: &[&str] = &[
     "FRAME_CLASS",
 ];
 /// `GUID_OPTIONS` bit 3: SET_ATTITUDE_TARGET thrust is thrust.
-pub const GUID_OPTIONS_THRUST: u32 = 1 << 3;
+pub use ados_protocol::mavlink::GUID_OPTIONS_THRUST;
 /// `GCS_PID_MASK` bits 0 and 1: PID_TUNING for roll and pitch.
 pub const GCS_PID_ROLL_PITCH: u32 = 0b11;
 
@@ -59,45 +64,77 @@ const SPOOL_TIMEOUT_MS: u64 = 8000;
 const SPOOL_MIN_FRAC: f32 = 0.05;
 /// …and within this many µs of each other.
 const SPOOL_SPREAD_US: u16 = 15;
-/// Thrust while the trim loads, as a share of hover.
+/// Thrust while a learned trim loads, as a share of hover.
 const LOAD_FRAC: f32 = 0.5;
 /// The attitude target's lean toward the trim while it loads, degrees.
 const LOAD_LEAN_DEG: f32 = 8.0;
 /// A load that has not reached its target by then ramps anyway.
 const LOAD_TIMEOUT_MS: u64 = 8000;
-/// The fast ramp: to this share of hover in [`FAST_S`].
-const K_FAST: f32 = 0.8;
+/// The fast ramp: to this share of hover in [`FAST_S`]. Below it no
+/// airframe the balance check lets fly unloads a skid.
+const K_FAST: f32 = 0.7;
 const FAST_S: f32 = 0.5;
-/// The slow ramp climbs (K_LIFT - K_FAST) × hover every [`RAMP_S`]…
-const K_LIFT: f32 = 1.12;
-const RAMP_S: f32 = 1.5;
-/// …and never past this thrust.
+/// Then the thrust rises by this share of hover per second while the
+/// airframe sits level, until it lifts, up to [`THRUST_MAX`]. The hover
+/// estimate only paces the ramp: an untuned `MOT_THST_HOVER` can be well
+/// short of the airframe's, and the ramp must not park it on its skids.
+const EDGE_RATE: f32 = 0.15;
 const THRUST_MAX: f32 = 0.9;
-/// A tip on the skids past this from rest backs the thrust down and probes.
-pub const PROBE_DEG: f32 = 1.5;
-/// Tries before the launch stops for a trim it cannot find.
-pub const PROBE_MAX: u32 = 10;
-/// Settled back onto the skids: within this of rest for [`SETTLE_MS`].
-const SETTLE_DEG: f32 = 0.5;
-const SETTLE_MS: u64 = 300;
-/// A pivot on the skids past this from rest stops the launch.
-pub const ABORT_DEG: f32 = 10.0;
-/// A motor above this share of its range before lift-off stops the launch:
-/// less than 10 % left to climb and steer.
-pub const SATURATION: f32 = 0.9;
+/// A side has started to unload: tilted this far from rest on its axis.
+pub const EDGE_DEG: f32 = 0.5;
+/// The attitude target's lean toward the low side while it does, degrees.
+const EDGE_LEAN_DEG: f32 = 6.0;
+/// Above this share of hover the lean only acts while a side is unloading,
+/// so the airframe never leaves the ground leaning.
+const LEAN_OFF: f32 = 0.97;
+/// A tilt past this steps the thrust back by [`BACK_STEP`] of hover, once
+/// per excursion…
+pub const BACK_DEG: f32 = 1.0;
+const BACK_STEP: f32 = 0.1;
+/// …and past this cuts it to [`HARD_FRAC`] of hover.
+pub const HARD_DEG: f32 = 2.5;
+const HARD_FRAC: f32 = 0.3;
+/// An integrator wound past this while a side still unloads: the trim is
+/// beyond what the rate loop can hold.
+const TRIM_MAX: f32 = 0.45;
+/// Leaning without rate-loop data for this long stops the launch: nothing
+/// bounds the integrator.
+const NO_RATE_MS: u64 = 1000;
+/// A tilt on the skids past this from rest stops the launch. The airframe
+/// must still be able to fall back onto its skids once the motors stop: a
+/// 50 mm nose-heavy quad stopped at 10.9° rolled over.
+pub const ABORT_DEG: f32 = 6.0;
+/// A motor above this share of its output range for [`SATURATION_MS`]
+/// before lift-off stops the launch: at ArduPilot's default spin range and
+/// thrust curve that is 95 % of the motor's thrust, with nothing left to
+/// climb and steer. A 40 mm offset on a 2.2 kg quad peaks near 0.90 on
+/// its skids; a 50 mm one reaches the top of the range.
+pub const SATURATION: f32 = 0.925;
+const SATURATION_MS: u64 = 150;
+/// Once handed over, the climb stops speeding up while the busiest motor
+/// is above this share of its range, and slows instead.
+const CLIMB_SATURATION: f32 = 0.9;
 /// Off the ground: risen this far, or climbing this fast (m, m/s).
 const LIFT_RISE_M: f32 = 0.08;
 const LIFT_VZ_MPS: f32 = 0.25;
 /// Clear of the ground: hand over to the position controller at this rise,
 /// after this long, or once tilted this far.
-const HANDOVER_RISE_M: f32 = 0.25;
-const CLIMB_MAX_MS: u64 = 2000;
+const HANDOVER_RISE_M: f32 = 0.12;
+const CLIMB_MAX_MS: u64 = 800;
 const CLIMB_TILT_DEG: f32 = 15.0;
-/// The climb thrust eases back toward this share of hover.
-const CLIMB_K: f32 = 1.03;
-/// The position target climbs at this rate, slowing into the launch height.
+/// The position target climbs at up to this rate, slowing into the launch
+/// height. At the hand-over it starts from the climb rate the airframe has
+/// and speeds up at [`CLIMB_ACCEL_MPS2`], so the position controller is
+/// never asked for a step.
 const CLIMB_MPS: f32 = 0.5;
+const CLIMB_ACCEL_MPS2: f32 = 0.25;
 const CLIMB_DECEL_MPS2: f32 = 0.5;
+/// The slowest climb a saturating motor eases the target back to.
+const CLIMB_MIN_MPS: f32 = 0.15;
+/// At the hand-over the horizontal target starts at the airframe's own
+/// drift and eases it to rest at this deceleration, so the position
+/// controller answers with a small lean rather than a jump.
+const DRIFT_DECEL_MPS2: f32 = 0.5;
 /// The ground phases give up after this long.
 const GROUND_TIMEOUT_MS: u64 = 60_000;
 
@@ -108,7 +145,7 @@ pub struct Supervision {
     /// When the FC setup began, and when it was last sent.
     pub prep: Option<(u64, u64)>,
     pub liftoff: Option<Liftoff>,
-    /// The airframe's imbalance in operator words, added to a stop's text.
+    /// The airframe's imbalance in operator words, added to a stop's detail.
     pub detail: Option<String>,
     /// When the pilot saw the lift-off stop, and whether its disarm (or
     /// land) has been sent.
@@ -165,13 +202,13 @@ pub enum Cmd {
 /// Why a lift-off stopped on the ground.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
-    /// It pivoted past [`ABORT_DEG`].
+    /// It tilted past [`ABORT_DEG`].
     Tipping,
-    /// A motor reached [`SATURATION`].
+    /// A motor stayed above [`SATURATION`].
     Saturated,
-    /// [`PROBE_MAX`] tries found no trim.
+    /// The integrator wound past [`TRIM_MAX`] and a side still unloads.
     NoTrim,
-    /// It tipped and the FC sends no rate-loop data to find the trim with.
+    /// A side unloads and the FC sends no rate-loop data to bound the trim.
     NoRateData,
     /// The motors never spun steadily.
     Spool,
@@ -201,28 +238,35 @@ impl Stop {
         }
     }
 
-    /// Why, in the operator's words.
+    /// Why, in the operator's words: the detail under "Take-off stopped".
     pub fn text(self) -> &'static str {
         match self {
-            Self::Tipping => "Stopped on the ground: the drone started to tip over",
-            Self::Saturated => "Stopped on the ground: a motor ran out of power before lift-off",
-            Self::NoTrim => "Stopped on the ground: could not find the drone's balance; check the battery and payload are secure",
-            Self::NoRateData => "Stopped on the ground: the drone tipped and the flight controller sends no rate data to level it",
-            Self::Spool => "Stopped on the ground: the motors did not spin up",
-            Self::FcLink => "Stopped: the flight controller stopped reporting",
-            Self::Link => "Stopped on the ground: the controller link was lost",
-            Self::Operator => "Stopped on the ground by the operator",
-            Self::Timeout => "Stopped on the ground: lift-off took too long",
+            Self::Tipping => "The drone started to tip. Motors off.",
+            Self::Saturated => "A motor ran out of power before lift-off. Motors off.",
+            Self::NoTrim => {
+                "Could not balance the drone on the ground. Check the battery and payload are secure. Motors off."
+            }
+            Self::NoRateData => {
+                "The flight controller sends no rate data to balance the drone with. Motors off."
+            }
+            Self::Spool => "The motors did not spin up steadily. Motors off.",
+            Self::FcLink => "The flight controller stopped reporting.",
+            Self::Link => "The controller link was lost. Motors off.",
+            Self::Operator => "Stopped by the operator. Motors off.",
+            Self::Timeout => "Take-off took too long. Motors off.",
         }
     }
 }
+
+/// The status line of a stopped take-off.
+pub const STOPPED_TEXT: &str = "Take-off stopped";
 
 /// A launch error the lift-off raised before it began, in the operator's
 /// words.
 pub fn error_text(code: &str) -> Option<&'static str> {
     match code {
         "liftoff_fc_params" => Some(
-            "the flight controller did not take the level lift-off settings (GUID_OPTIONS, GCS_PID_MASK)",
+            "Take-off stopped. The flight controller did not take the steady take-off settings (GUID_OPTIONS, GCS_PID_MASK).",
         ),
         _ => None,
     }
@@ -230,12 +274,25 @@ pub fn error_text(code: &str) -> Option<&'static str> {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
-    Spool { since: u64, steady: Option<u64> },
-    Level { since: u64 },
+    Spool {
+        since: u64,
+        steady: Option<u64>,
+    },
+    Level {
+        since: u64,
+    },
     Ramp,
-    Settle { since: Option<u64> },
-    Climb { since: u64 },
-    Hold { ne: [f32; 2], zt: f32 },
+    Climb {
+        since: u64,
+    },
+    /// The position target: where it is (`ne`, height `zt`), the drift it
+    /// still carries (`vne`, m/s) and its climb rate (`vz`, m/s up).
+    Hold {
+        ne: [f32; 2],
+        zt: f32,
+        vne: [f32; 2],
+        vz: f32,
+    },
     Stopped(Stop),
 }
 
@@ -249,21 +306,28 @@ pub struct Liftoff {
     hover: f32,
     /// The trim it started with came from earlier flights.
     learned: bool,
-    /// The integrator each axis loads to, whether it still loads, and the
-    /// side it leans to while it does.
+    /// A learned trim still loading on each axis, and the side it leans to.
     target: [f32; 2],
     loading: [bool; 2],
     lean: [f32; 2],
-    bracket: [probe::Bracket; 2],
-    probes: u32,
+    /// The side each axis leans to while a side unloads on the ramp (−1, 0,
+    /// 1), how often a lean began or turned round, and since when the lean
+    /// runs without rate-loop data.
+    edge: [f32; 2],
+    edges: u32,
+    blind_since: Option<u64>,
+    /// The thrust already stepped back for this excursion.
+    backed: bool,
     rest: Option<(f32, f32)>,
     yaw: f32,
     thrust: f32,
     tilt_deg: f32,
     began_ms: u64,
     last_ms: u64,
-    /// The busiest motor seen on the ground.
+    /// The busiest motor seen on the ground, and since when it has been
+    /// above [`SATURATION`].
     max_motor: f32,
+    saturated_since: Option<u64>,
     /// The rangefinder height at rest, and whether it has left the ground.
     rest_agl: Option<f32>,
     lifted: bool,
@@ -273,7 +337,8 @@ pub struct Liftoff {
 
 impl Liftoff {
     /// A lift-off to `alt_m` above the take-off point, with the learned
-    /// `trim` (`None`: probe) and the hover thrust `hover`.
+    /// `trim` (`None`: it finds the trim on the ground) and the hover thrust
+    /// `hover`.
     pub fn new(trim: Option<Trim>, hover: f32, alt_m: f32, now_ms: u64) -> Self {
         let target = trim.map_or([0.0; 2], |t| t.i);
         Self {
@@ -289,8 +354,10 @@ impl Liftoff {
             loading: target.map(|v| v.abs() > 0.01),
             // The integrators start from zero after arming.
             lean: target.map(f32::signum),
-            bracket: Default::default(),
-            probes: 0,
+            edge: [0.0; 2],
+            edges: 0,
+            blind_since: None,
+            backed: false,
             rest: None,
             yaw: 0.0,
             thrust: SPOOL_THRUST,
@@ -298,6 +365,7 @@ impl Liftoff {
             began_ms: now_ms,
             last_ms: now_ms,
             max_motor: 0.0,
+            saturated_since: None,
             rest_agl: None,
             lifted: false,
             outcome: None,
@@ -323,7 +391,7 @@ impl Liftoff {
     pub fn on_ground(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Spool { .. } | Phase::Level { .. } | Phase::Ramp | Phase::Settle { .. }
+            Phase::Spool { .. } | Phase::Level { .. } | Phase::Ramp
         )
     }
 
@@ -370,8 +438,8 @@ impl Liftoff {
             self.yaw = att.yaw;
         }
         let (r0, p0) = self.rest.unwrap_or((att.roll, att.pitch));
-        let (dr, dp) = (att.roll - r0, att.pitch - p0);
-        self.tilt_deg = dr.abs().max(dp.abs()).to_degrees();
+        let tilt = [(att.roll - r0).to_degrees(), (att.pitch - p0).to_degrees()];
+        self.tilt_deg = tilt[0].abs().max(tilt[1].abs());
         let rise = match (self.start, inp.local) {
             (Some(s), Some(l)) => s.d - l.d,
             _ => 0.0,
@@ -381,7 +449,9 @@ impl Liftoff {
             if let Some(m) = inp.motors {
                 self.max_motor = self.max_motor.max(m.max);
             }
-            if let Some(stop) = self.ground_stop(inp, lifted, now) {
+            let saturating = self.rest.is_some() && inp.motors.is_some_and(|m| m.max > SATURATION);
+            self.saturated_since = saturating.then(|| self.saturated_since.unwrap_or(now));
+            if let Some(stop) = self.ground_stop(lifted, now) {
                 self.phase = Phase::Stopped(stop);
                 if stop == Stop::Saturated {
                     self.outcome = Some(self.outcome_now(inp, true));
@@ -423,7 +493,11 @@ impl Liftoff {
                 if done {
                     self.rest = Some((att.roll, att.pitch));
                     self.rest_agl = inp.agl;
-                    self.phase = self.after_settle(now);
+                    self.phase = if self.loading.iter().any(|&l| l) {
+                        Phase::Level { since: now }
+                    } else {
+                        Phase::Ramp
+                    };
                 } else if now.saturating_sub(since) > SPOOL_TIMEOUT_MS {
                     self.phase = Phase::Stopped(Stop::Spool);
                     return None;
@@ -433,9 +507,9 @@ impl Liftoff {
             Phase::Level { since } => {
                 self.thrust = (self.thrust + dt * hover).min(LOAD_FRAC * hover);
                 if let Some(i) = inp.i {
-                    for ax in 0..2 {
+                    for (ax, &iv) in i.iter().enumerate() {
                         // Loaded once the integrator reached its target.
-                        if self.loading[ax] && (i[ax] - self.target[ax]) * self.lean[ax] >= 0.0 {
+                        if self.loading[ax] && (iv - self.target[ax]) * self.lean[ax] >= 0.0 {
                             self.loading[ax] = false;
                         }
                     }
@@ -464,153 +538,177 @@ impl Liftoff {
             Phase::Ramp => {
                 if lifted {
                     self.lifted = true;
+                    self.edge = [0.0; 2];
                     self.outcome = Some(self.outcome_now(inp, false));
                     self.phase = Phase::Climb { since: now };
                     return self.step_climb(inp, rise, dt);
                 }
-                if self.tilt_deg > PROBE_DEG {
-                    return Some(self.probe(inp, (dr, dp), r0, p0));
+                if let Some(stop) = self.edge_track(inp, tilt, now) {
+                    self.phase = Phase::Stopped(stop);
+                    return None;
                 }
-                let fast = K_FAST * hover;
-                self.thrust = if self.thrust < fast {
-                    (self.thrust + dt * fast / FAST_S).min(fast)
-                } else {
-                    (self.thrust + dt * (K_LIFT - K_FAST) * hover / RAMP_S).min(THRUST_MAX)
-                };
-                Some(att_cmd(r0, p0, self.thrust))
-            }
-            Phase::Settle { since } => {
-                self.thrust = LOAD_FRAC * hover;
-                if self.tilt_deg < SETTLE_DEG {
-                    let s = since.unwrap_or(now);
-                    self.phase = Phase::Settle { since: Some(s) };
-                    if now.saturating_sub(s) >= SETTLE_MS {
-                        self.phase = self.after_settle(now);
-                    }
-                } else {
-                    self.phase = Phase::Settle { since: None };
-                }
-                Some(att_cmd(r0, p0, self.thrust))
+                self.ramp_thrust(dt);
+                let lean = EDGE_LEAN_DEG.to_radians();
+                Some(att_cmd(
+                    r0 + self.edge[0] * lean,
+                    p0 + self.edge[1] * lean,
+                    self.thrust,
+                ))
             }
             Phase::Climb { .. } | Phase::Hold { .. } => self.step_climb(inp, rise, dt),
             Phase::Stopped(_) => None,
         }
     }
 
-    /// The pivot, saturation and timeout guards on the ground.
-    fn ground_stop(&self, inp: &Inputs, lifted: bool, now: u64) -> Option<Stop> {
+    /// The tilt, saturation and timeout guards on the ground.
+    fn ground_stop(&self, lifted: bool, now: u64) -> Option<Stop> {
         if lifted {
             return None;
         }
         if self.rest.is_some() && self.tilt_deg > ABORT_DEG {
             return Some(Stop::Tipping);
         }
-        if self.rest.is_some() && inp.motors.is_some_and(|m| m.max > SATURATION) {
+        if self
+            .saturated_since
+            .is_some_and(|s| now.saturating_sub(s) >= SATURATION_MS)
+        {
             return Some(Stop::Saturated);
         }
         (now.saturating_sub(self.began_ms) > GROUND_TIMEOUT_MS).then_some(Stop::Timeout)
     }
 
-    /// A tip began on the skids: back down, and load a better trim.
-    fn probe(&mut self, inp: &Inputs, tilt: (f32, f32), r0: f32, p0: f32) -> Cmd {
-        let Some(i) = inp.i else {
-            self.phase = Phase::Stopped(Stop::NoRateData);
-            return self.idle_at(r0, p0);
-        };
-        if self.probes >= PROBE_MAX {
-            self.phase = Phase::Stopped(Stop::NoTrim);
-            return self.idle_at(r0, p0);
-        }
-        self.probes += 1;
-        let frac = self.thrust / self.hover;
-        for (ax, d) in [tilt.0, tilt.1].into_iter().enumerate() {
-            if d.abs().to_degrees() > 0.5 * PROBE_DEG {
-                self.target[ax] = self.bracket[ax].next(i[ax], d, frac);
-                self.lean[ax] = (self.target[ax] - i[ax]).signum();
-                self.loading[ax] = true;
+    /// A side unloading on the ramp: lean toward it so the integrator winds
+    /// up against skid contact, turning round when the other side unloads.
+    /// Near lift-off thrust the lean only acts while a side unloads.
+    fn edge_track(&mut self, inp: &Inputs, tilt: [f32; 2], now: u64) -> Option<Stop> {
+        for (ax, &t) in tilt.iter().enumerate() {
+            if t.abs() > EDGE_DEG {
+                let want = -t.signum();
+                if self.edge[ax] != want {
+                    self.edges += 1;
+                }
+                self.edge[ax] = want;
+            } else if self.thrust > LEAN_OFF * self.hover {
+                self.edge[ax] = 0.0;
             }
         }
-        self.thrust = LOAD_FRAC * self.hover;
-        self.phase = Phase::Settle { since: None };
-        Cmd::Attitude {
-            roll: r0,
-            pitch: p0,
-            yaw: self.yaw,
-            thrust: self.thrust,
+        let leaning = self.edge.iter().any(|&e| e != 0.0);
+        match inp.i {
+            Some(i) => {
+                self.blind_since = None;
+                // Winding on past what the rate loop can hold.
+                if (0..2).any(|ax| self.edge[ax] != 0.0 && i[ax] * self.edge[ax] > TRIM_MAX) {
+                    return Some(Stop::NoTrim);
+                }
+            }
+            None if leaning => {
+                let since = *self.blind_since.get_or_insert(now);
+                if now.saturating_sub(since) >= NO_RATE_MS {
+                    return Some(Stop::NoRateData);
+                }
+            }
+            None => self.blind_since = None,
+        }
+        None
+    }
+
+    /// The ramp's thrust: rising only while the airframe sits level, held
+    /// while a side unloads, stepped back past [`BACK_DEG`], cut past
+    /// [`HARD_DEG`].
+    fn ramp_thrust(&mut self, dt: f32) {
+        let hover = self.hover;
+        let fast = K_FAST * hover;
+        if self.tilt_deg > HARD_DEG {
+            self.thrust = self.thrust.min(HARD_FRAC * hover);
+        } else if self.tilt_deg > BACK_DEG {
+            if !self.backed {
+                self.thrust = (self.thrust - BACK_STEP * hover).max(HARD_FRAC * hover);
+                self.backed = true;
+            }
+        } else if self.tilt_deg <= EDGE_DEG {
+            self.backed = false;
+            let rate = if self.thrust < fast {
+                fast / FAST_S
+            } else {
+                EDGE_RATE * hover
+            };
+            self.thrust = (self.thrust + dt * rate).min(THRUST_MAX);
         }
     }
 
-    /// Off the skids: level, easing toward hover, then the position target.
+    /// Off the skids: level, then the position target.
     fn step_climb(&mut self, inp: &Inputs, rise: f32, dt: f32) -> Option<Cmd> {
         if let Phase::Climb { since } = self.phase {
-            self.thrust = (self.thrust - dt * 0.1 * self.hover / 0.5).max(CLIMB_K * self.hover);
             let clear = rise > HANDOVER_RISE_M
                 || inp.now_ms.saturating_sub(since) > CLIMB_MAX_MS
                 || self.tilt_deg > CLIMB_TILT_DEG;
             match (clear, inp.local) {
                 (true, Some(l)) => {
+                    // Start the position target where the airframe is and
+                    // moving as it moves, so the controller has no step.
                     self.phase = Phase::Hold {
                         ne: [l.n, l.e],
                         zt: l.d,
+                        vne: [l.vn, l.ve],
+                        vz: (-l.vd).clamp(0.0, CLIMB_MPS),
                     };
                 }
                 _ => {
+                    // The lift-off thrust holds until the hand-over.
                     return Some(Cmd::Attitude {
                         roll: 0.0,
                         pitch: 0.0,
                         yaw: self.yaw,
                         thrust: self.thrust,
-                    })
+                    });
                 }
             }
         }
-        self.hold_or_none().map(|c| self.climb_target(c, dt))
+        self.hold_or_none()
+            .map(|c| self.climb_target(c, inp.motors, dt))
     }
 
-    /// The climbing position target, carried up from where it handed over
-    /// at [`CLIMB_MPS`], slowing into the launch height.
-    fn climb_target(&mut self, c: Cmd, dt: f32) -> Cmd {
-        let Phase::Hold { ne, zt } = self.phase else {
+    /// The position target once handed over: its drift eases to rest at
+    /// [`DRIFT_DECEL_MPS2`]; its climb speeds up from the hand-over's climb
+    /// rate to [`CLIMB_MPS`] (or slows, while a motor is near the top of its
+    /// range), slowing into the launch height.
+    fn climb_target(&mut self, c: Cmd, motors: Option<Motors>, dt: f32) -> Cmd {
+        let Phase::Hold { ne, zt, vne, vz } = self.phase else {
             return c;
+        };
+        let vz = if motors.is_some_and(|m| m.max > CLIMB_SATURATION) {
+            (vz - dt * CLIMB_ACCEL_MPS2).max(CLIMB_MIN_MPS.min(vz))
+        } else {
+            (vz + dt * CLIMB_ACCEL_MPS2).min(CLIMB_MPS)
         };
         let goal = self.start.map_or(0.0, |s| s.d) - self.alt_m;
         let left = (zt - goal).max(0.0);
-        let v = CLIMB_MPS.min((2.0 * CLIMB_DECEL_MPS2 * left).sqrt());
+        let v = vz.min((2.0 * CLIMB_DECEL_MPS2 * left).sqrt());
         let zt = (zt - v * dt).max(goal);
-        self.phase = Phase::Hold { ne, zt };
+        let speed = vne[0].hypot(vne[1]);
+        let vne = if speed > 0.0 {
+            let k = (speed - dt * DRIFT_DECEL_MPS2).max(0.0) / speed;
+            [vne[0] * k, vne[1] * k]
+        } else {
+            [0.0; 2]
+        };
+        let ne = [ne[0] + vne[0] * dt, ne[1] + vne[1] * dt];
+        self.phase = Phase::Hold { ne, zt, vne, vz };
         Cmd::Position {
             pos: [ne[0], ne[1], zt],
-            vel: [0.0, 0.0, if zt > goal { -v } else { 0.0 }],
+            vel: [vne[0], vne[1], if zt > goal { -v } else { 0.0 }],
             yaw: self.yaw,
         }
     }
 
     fn hold_or_none(&self) -> Option<Cmd> {
         match self.phase {
-            Phase::Hold { ne, zt } => Some(Cmd::Position {
+            Phase::Hold { ne, zt, .. } => Some(Cmd::Position {
                 pos: [ne[0], ne[1], zt],
                 vel: [0.0; 3],
                 yaw: self.yaw,
             }),
             _ => None,
-        }
-    }
-
-    /// Settled (or spooled): load the trim if there is one to load.
-    fn after_settle(&self, now: u64) -> Phase {
-        if self.loading.iter().any(|&l| l) {
-            Phase::Level { since: now }
-        } else {
-            Phase::Ramp
-        }
-    }
-
-    fn idle_at(&self, r0: f32, p0: f32) -> Cmd {
-        Cmd::Attitude {
-            roll: r0,
-            pitch: p0,
-            yaw: self.yaw,
-            thrust: 0.0,
         }
     }
 
@@ -623,26 +721,41 @@ impl Liftoff {
         }
     }
 
-    /// The surfaces' view.
+    /// The surfaces' view: the status line and the longer detail.
     pub fn view(&self) -> ados_protocol::pilot::Liftoff {
-        let probing = !self.learned || self.probes > 0;
-        let (phase, text) = match self.phase {
-            Phase::Spool { .. } => ("spool", "Spinning up the motors"),
-            Phase::Level { .. } | Phase::Settle { .. } if probing => (
-                "probe",
-                "Finding the balance on the ground (first flight on this drone)",
+        let balancing = self.edge.iter().any(|&e| e != 0.0);
+        let (phase, text, detail) = match self.phase {
+            Phase::Spool { .. } => (
+                "spool",
+                "Spinning up",
+                "Motors at idle, checking they're steady".to_string(),
             ),
-            Phase::Level { .. } | Phase::Settle { .. } => ("level", "Levelling on the ground"),
-            Phase::Ramp => ("lift", "Lifting off"),
-            Phase::Climb { .. } => ("climb", "Climbing out level"),
-            Phase::Hold { .. } => ("done", "Lifted off level"),
-            Phase::Stopped(s) => ("stopped", s.text()),
+            Phase::Level { .. } => (
+                "level",
+                "Setting trim",
+                "Loading this airframe's learned balance".to_string(),
+            ),
+            Phase::Ramp if balancing => ("probe", "Checking balance", "Adjusting trim".to_string()),
+            Phase::Ramp => ("lift", "Lifting off", String::new()),
+            Phase::Climb { .. } => ("climb", "Airborne", self.climbing_to()),
+            Phase::Hold { .. } => ("done", "Airborne", self.climbing_to()),
+            Phase::Stopped(s) => ("stopped", STOPPED_TEXT, s.text().to_string()),
         };
         ados_protocol::pilot::Liftoff {
             phase: phase.into(),
             text: text.into(),
+            detail,
             trim: if self.learned { "learned" } else { "probe" }.into(),
             tilt_deg: f64::from((self.tilt_deg * 10.0).round() / 10.0),
+        }
+    }
+
+    fn climbing_to(&self) -> String {
+        let h = (self.alt_m * 10.0).round() / 10.0;
+        if h.fract() == 0.0 {
+            format!("Climbing to {h:.0} m")
+        } else {
+            format!("Climbing to {h:.1} m")
         }
     }
 }
