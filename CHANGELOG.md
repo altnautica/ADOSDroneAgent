@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.117.1] - 2026-11-16
+
+### Fixed
+
+- The `fc_profile` readiness item blocked every confined flight whose flight controller held a SmartRTL accuracy tighter than ArduPilot's 2 m default, the setting a confined place needs. In a confined place (`pilot.place_class: confined`) `SRTL_ACCURACY` now passes at any value above 0 and at most 0.2 m; an open place still wants 2. SmartRTL's return leaves the flown path by up to about half its accuracy (its path simplification keeps points within half the accuracy, and its loop pruning returns through the midpoint of segments closer than 0.99 times it), 1 m at the default. The clearance a confined place keeps whatever the pose uncertainty is the margin's 0.1 m beyond the propeller tips, so 0.2 m keeps the return's departure inside it. 0 turns SmartRTL off and blocks there. A confined mismatch reads, for example, "FC parameters differ: SRTL_ACCURACY 2 (want > 0 and ≤ 0.2 in a confined place)". The setup wizard's `ados_profile` step follows the same rule: in a confined place it keeps a passing `SRTL_ACCURACY` and writes 0.2 m otherwise, so the fix settles the item. A finer accuracy keeps more points: SmartRTL holds at most 500 (`SRTL_POINTS`), and a flight that fills the buffer loses SmartRTL, so the flight controller's own return lands in place.
+
+### Changed
+
+- In a confined place a flight controller at the default `SRTL_ACCURACY` (2 m), or anything above 0.2 m, now fails `fc_profile`: under ADOS control arming and launch are refused with `not_ready:fc_profile`. Run the setup wizard's ADOS safety profile step (Aircraft setup) to write 0.2 m, or set `SRTL_ACCURACY` to 0.2 or less. Open places are unchanged.
+
 ## [0.117.0] - 2026-11-16
 
 ### Fixed
