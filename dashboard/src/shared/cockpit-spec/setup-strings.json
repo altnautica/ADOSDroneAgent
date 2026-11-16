@@ -1291,6 +1291,8 @@
     "cockpit.card.show_radar": "Show obstacle radar",
     "cockpit.sticks.left_aria": "Left stick: climb, descend and turn",
     "cockpit.sticks.right_aria": "Right stick: forward, back and sideways",
+    "cockpit.sticks.left_aria_mode1": "Left stick: forward, back and turn",
+    "cockpit.sticks.right_aria_mode1": "Right stick: climb, descend and sideways",
     "flow.launch.pick_point_hint": "To go to a map point, close this sheet and long-press the map.",
     "cockpit.pilot.unavailable": "The onboard pilot is not reachable.",
     "cockpit.pilot.refused": "The onboard pilot refused: {reason}",
