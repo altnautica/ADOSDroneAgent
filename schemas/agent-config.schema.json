@@ -2497,6 +2497,13 @@
           "title": "Stall Min Progress M",
           "type": "number"
         },
+        "stall_return_after_s": {
+          "default": 45,
+          "maximum": 300,
+          "minimum": 15,
+          "title": "Stall Return After S",
+          "type": "integer"
+        },
         "stall_skip_after_s": {
           "default": 45,
           "maximum": 300,

@@ -62,6 +62,9 @@ pub struct Pinch {
     pub ned: [f64; 3],
     /// The distance from the sample to the nearest seen obstacle, metres.
     pub clearance_m: f64,
+    /// The clearance that obstacle needs: the margin plus max(0.1, 3σ), σ
+    /// the pose's uncertainty relative to it (less than the whole σ for an
+    /// obstacle seen since σ last grew).
     pub required_m: f64,
 }
 
@@ -69,7 +72,8 @@ pub struct Pinch {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteCheck {
     pub state: RouteState,
-    /// The clearance every leg needs: the margin plus max(0.1, 3σ).
+    /// The most clearance a seen obstacle needs: the margin plus
+    /// max(0.1, 3σ) at the whole σ (an obstacle of unknown sighting).
     pub required_m: f64,
     /// The effective obstacle margin, metres.
     pub margin_m: f64,

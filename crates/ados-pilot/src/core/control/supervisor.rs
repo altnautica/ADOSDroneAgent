@@ -53,6 +53,10 @@ pub struct SupHold {
     /// The route held the mission (an infeasible leg ahead): the route from
     /// here, not the way ahead, resumes it, even once a stall was raised.
     pub route: bool,
+    /// What the hold is about, the `hold_reason` it shows once a passing
+    /// condition the stick path reports (an obstacle close, stale data, an
+    /// unverified position) has cleared.
+    pub reason: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -153,7 +157,7 @@ impl Pilot {
 
     /// Stop the FC flight: BRAKE, then hold in GUIDED as `pilot` with
     /// `reason`. A hold already running only takes the new reason.
-    pub(super) fn supervise_hold(&mut self, resume: Resume, reason: &str, now_ms: u64) {
+    pub(super) fn supervise_hold(&mut self, resume: Resume, reason: &'static str, now_ms: u64) {
         if self.sup.hold.is_none() {
             let failsafe_cause = self.failsafe_cause.filter(|_| self.fc_failsafe);
             self.set_mode(copter::BRAKE, now_ms);
@@ -165,7 +169,11 @@ impl Pilot {
                 clear_since: None,
                 failsafe_cause,
                 route: false,
+                reason,
             });
+        }
+        if let Some(h) = &mut self.sup.hold {
+            h.reason = reason;
         }
         self.hold_reason = Some(reason.to_owned());
     }
@@ -444,6 +452,9 @@ impl Pilot {
             since_ms: a.since_ms + self.epoch_offset_ms,
             skip_in_s: a
                 .deadline_ms
+                .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0),
+            return_in_s: a
+                .return_ms
                 .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0),
             window_s: f64::from(self.settings.pilot.stall_window_s),
         })

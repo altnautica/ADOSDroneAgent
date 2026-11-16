@@ -96,6 +96,10 @@ pub struct PilotSection {
     pub stall_max_auto_skips: u32,
     /// A blocked return lands in place this long after the alert.
     pub return_blocked_land_after_s: u32,
+    /// In a confined place, a mission held for the operator (no automatic
+    /// skip left, or a hold the pilot cannot resume on its own) that no
+    /// operator answers flies SmartRTL home this long after the wait began.
+    pub stall_return_after_s: u32,
     /// The announced countdown before the low-battery action.
     pub low_battery_countdown_s: u32,
     /// The declared flow and rangefinder mount, checked against the FC's
@@ -192,6 +196,12 @@ impl Default for PilotSection {
             stall_skip_after_s: 45,
             stall_max_auto_skips: 2,
             return_blocked_land_after_s: 45,
+            // As long as every other announced automatic action (the skip,
+            // the blocked return's landing): the stall has already been
+            // announced as critical, with voice, since it was raised, and
+            // each minute more of hovering is battery the return along the
+            // whole flown path at the 0.5 m/s confined cap needs.
+            stall_return_after_s: 45,
             low_battery_countdown_s: 10,
             fc_sensors: FcSensors::default(),
         }

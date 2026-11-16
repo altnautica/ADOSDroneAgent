@@ -188,6 +188,13 @@ pub struct MissionStall {
     /// the operator answers.
     #[serde(default)]
     pub skip_in_s: Option<f64>,
+    /// Seconds until the vehicle returns home along its flown path
+    /// (SmartRTL) on its own: a mission held for the operator in a confined
+    /// place that no operator has answered. On a position the pilot does not
+    /// vouch for at that moment it lands in place instead. `None`: no such
+    /// countdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_in_s: Option<f64>,
     /// The no-progress window that raised it, seconds.
     pub window_s: f64,
 }

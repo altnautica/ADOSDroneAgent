@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::harness::{wall, World};
 use crate::core::{Out, Reply};
 use crate::modes::copter;
-use crate::obstacles::{encode_tile_for_test, Obstacles};
+use crate::obstacles::{encode_tile_for_test, Bar, Obstacles};
 
 /// The x500's propeller-tip radius.
 pub(super) const TIP_M: f32 = 0.377;
@@ -156,7 +156,7 @@ fn the_clearance_is_measured_to_the_leg_and_to_the_cell_edge() {
         Some([0.0, 0.0]),
         0,
     );
-    let req = REQUIRED_M as f32;
+    let req = &Bar::flat(REQUIRED_M as f32);
     let legs = [(1, [0.0, 0.0, -5.0], 2, [10.0, 0.0, -5.0])];
     let r = crate::core::control::check_legs(&o, &legs, req, Some(-5.0), 0);
     assert_eq!(r[0].state, RouteState::Infeasible, "{r:?}");
@@ -196,7 +196,7 @@ fn a_leg_is_judged_only_where_it_runs_in_the_scan_slice() {
         Some([0.0, 0.0]),
         0,
     );
-    let req = REQUIRED_M as f32;
+    let req = &Bar::flat(REQUIRED_M as f32);
     let check = |legs: &[(u32, [f32; 3], u32, [f32; 3])], d: Option<f32>| {
         crate::core::control::check_legs(&o, legs, req, d, 0)[0]
     };

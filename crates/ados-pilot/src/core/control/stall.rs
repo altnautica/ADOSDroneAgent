@@ -4,7 +4,10 @@
 //! vehicle and asks the operator. A mission waypoint is skipped after
 //! `pilot.stall_skip_after_s` with no answer and recorded as a coverage gap;
 //! after `pilot.stall_max_auto_skips` automatic skips in a row the vehicle
-//! holds until the operator answers. A blocked return lands in place after
+//! holds until the operator answers. In a confined place that wait has an
+//! end: with no answer the vehicle flies SmartRTL home along its flown path
+//! after `pilot.stall_return_after_s`, so a mission never hovers until the
+//! battery runs out. A blocked return lands in place after
 //! `pilot.return_blocked_land_after_s`.
 
 use std::collections::VecDeque;
@@ -54,6 +57,9 @@ pub struct Active {
     /// The automatic skip (mission) or landing (return); `None` holds for
     /// the operator.
     pub deadline_ms: Option<u64>,
+    /// A mission held for the operator in a confined place flies SmartRTL
+    /// home at this time if nobody answers.
+    pub return_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -134,7 +140,9 @@ impl Pilot {
         // A raised stall acts at its deadline whatever the position says,
         // so the countdown on every surface means what it shows.
         if let Some(a) = self.sup.stall.active.clone() {
-            if a.deadline_ms.is_some_and(|d| now_ms >= d) {
+            if a.return_ms.is_some_and(|r| now_ms >= r) {
+                self.stall_return(&a, now_ms);
+            } else if a.deadline_ms.is_some_and(|d| now_ms >= d) {
                 match a.kind {
                     Kind::Mission => {
                         let _ = self.mission_skip(false, now_ms);
@@ -244,6 +252,42 @@ impl Pilot {
             .then(|| now_ms + u64::from(cfg.stall_skip_after_s) * 1000)
     }
 
+    /// When a mission held for the operator returns home on its own: in a
+    /// confined place `stall_return_after_s` from now; elsewhere never (the
+    /// vehicle holds for the operator).
+    pub(super) fn operator_wait_return(&self, now_ms: u64) -> Option<u64> {
+        self.confined()
+            .then(|| now_ms + u64::from(self.settings.pilot.stall_return_after_s) * 1000)
+    }
+
+    /// Nobody answered a mission held for the operator: SmartRTL home along
+    /// the flown path (it lands in place when the FC cannot fly one), or,
+    /// on a position the pilot does not vouch for, a landing here: the
+    /// return is never flown on an estimate nobody vouches for.
+    fn stall_return(&mut self, a: &Active, now_ms: u64) {
+        let unverified = self.auto_position_blocked(now_ms);
+        tracing::warn!(
+            target: "ados_pilot",
+            seq = a.seq,
+            waited_s = now_ms.saturating_sub(a.since_ms) / 1000,
+            action = if unverified { "land" } else { "smart_rtl" },
+            "pilot_stall_return"
+        );
+        let key = if unverified {
+            self.revoke("land");
+            self.land_in_place(now_ms);
+            "pilot.banner.mission_stalled_landing"
+        } else {
+            self.revoke("rth");
+            self.command_return("stall_no_operator", now_ms);
+            self.set_owner(Owner::FcMode, "rth");
+            "pilot.banner.mission_stalled_returning"
+        };
+        // The hold is over, whatever passing condition it last showed.
+        self.hold_reason = None;
+        self.banner = Some(banner(key, &[("wp", wp_arg(a.seq))], now_ms));
+    }
+
     fn raise_stall(
         &mut self,
         kind: Kind,
@@ -258,6 +302,10 @@ impl Pilot {
             Kind::Mission => self.mission_skip_deadline(now_ms),
             Kind::Return => Some(now_ms + u64::from(cfg.return_blocked_land_after_s) * 1000),
         };
+        let return_ms = match (kind, deadline_ms) {
+            (Kind::Mission, None) => self.operator_wait_return(now_ms),
+            _ => None,
+        };
         let (resume, reason) = match kind {
             Kind::Mission => (Resume::Mission, HOLD_MISSION_STALLED),
             Kind::Return => (Resume::Return, HOLD_RETURN_BLOCKED),
@@ -268,20 +316,27 @@ impl Pilot {
             seq,
             since_ms: now_ms,
             deadline_ms,
+            return_ms,
         });
         let in_s = deadline_ms.map(|d| d.saturating_sub(now_ms) / 1000);
-        self.banner = Some(match (kind, in_s) {
-            (Kind::Mission, Some(in_s)) => banner(
+        let home_in_s = return_ms.map(|d| d.saturating_sub(now_ms) / 1000);
+        self.banner = Some(match (kind, in_s, home_in_s) {
+            (Kind::Mission, Some(in_s), _) => banner(
                 "pilot.banner.mission_stalled",
                 &[("wp", wp_arg(seq)), ("in_s", json!(in_s))],
                 now_ms,
             ),
-            (Kind::Mission, None) => banner(
+            (Kind::Mission, None, Some(in_s)) => banner(
+                "pilot.banner.mission_stalled_return",
+                &[("wp", wp_arg(seq)), ("in_s", json!(in_s))],
+                now_ms,
+            ),
+            (Kind::Mission, None, None) => banner(
                 "pilot.banner.mission_stalled_hold",
                 &[("wp", wp_arg(seq))],
                 now_ms,
             ),
-            (Kind::Return, in_s) => banner(
+            (Kind::Return, in_s, _) => banner(
                 "pilot.banner.return_blocked",
                 &[("in_s", json!(in_s.unwrap_or(0)))],
                 now_ms,
@@ -353,15 +408,19 @@ impl Pilot {
             // from a position the leg from here cannot be checked from.
             self.supervise_hold(Resume::Mission, HOLD_POSITION_UNVERIFIED, now_ms);
             // Held for the operator: a route hold carried here no longer
-            // resumes on its own.
+            // resumes on its own, and once the position reads verified again
+            // the hold is the stall waiting for an answer.
             if let Some(h) = &mut self.sup.hold {
                 h.route = false;
+                h.reason = HOLD_MISSION_STALLED;
             }
+            let return_ms = self.operator_wait_return(now_ms);
             self.sup.stall.active = Some(Active {
                 kind: Kind::Mission,
                 seq: Some(next),
                 since_ms: now_ms,
                 deadline_ms: None,
+                return_ms,
             });
             tracing::warn!(target: "ados_pilot", seq = next, "pilot_mission_skip_held");
             return Ok(());

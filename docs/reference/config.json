@@ -2269,6 +2269,16 @@
     },
     {
       "default": 45,
+      "description": "Stall Return After S",
+      "enum": null,
+      "key": "pilot.stall_return_after_s",
+      "maximum": 300,
+      "minimum": 15,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 45,
       "description": "Stall Skip After S",
       "enum": null,
       "key": "pilot.stall_skip_after_s",

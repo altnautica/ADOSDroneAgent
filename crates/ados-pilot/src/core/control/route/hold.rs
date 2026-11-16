@@ -77,7 +77,11 @@ impl Pilot {
                 .into_iter()
                 .flatten()
                 .any(|p| self.in_reach(p, now_ms));
-        if near || self.route.infeasible_for(ROUTE_HOLD_CONFIRM_MS) {
+        // While σ settles every obstacle counts the whole σ, so a leg the
+        // match keeps clear can read tight for those 2 s: only a pinch in
+        // reach holds then (the FC is held to the cap meanwhile); the
+        // confirmation counts once a check has been made with σ settled.
+        if near || (self.route.settled && self.route.infeasible_for(ROUTE_HOLD_CONFIRM_MS)) {
             let seq = self.mission.as_ref().and_then(|m| m.seq);
             self.hold_route_infeasible(seq, now_ms);
         }
@@ -107,11 +111,16 @@ impl Pilot {
             None
         };
         let clearance = leg.pinch.map_or(0.0, |(_, d)| d);
-        let required = self.route.required;
+        let required = leg.required;
         self.supervise_hold(Resume::Mission, HOLD_ROUTE_INFEASIBLE, now_ms);
         if let Some(h) = &mut self.sup.hold {
             h.route = true;
         }
+        let return_ms = if deadline_ms.is_none() {
+            self.operator_wait_return(now_ms)
+        } else {
+            None
+        };
         let st = &mut self.sup.stall;
         let asked = st.active.as_ref().is_some_and(|a| {
             a.kind == Kind::Mission
@@ -124,6 +133,7 @@ impl Pilot {
                 seq,
                 since_ms: now_ms,
                 deadline_ms,
+                return_ms,
             });
         }
         let deadline_ms = st.active.as_ref().and_then(|a| a.deadline_ms);

@@ -356,3 +356,87 @@ fn obstacle_grid_shares_one_ray_per_bearing() {
         assert!(!g.near.is_empty());
     }
 }
+
+#[test]
+fn the_bar_counts_the_sigma_grown_since_an_obstacle_was_seen() {
+    let bar = Bar {
+        margin: 0.302,
+        min_term: 0.1,
+        sigma: Some(0.098),
+        base: Some(0.05),
+    };
+    let rel = |seen: f32| bar.sigma_rel(seen).unwrap();
+    for (seen, want) in [
+        (Bar::NOW, 0.05),
+        (0.098, 0.05),
+        (0.072, 0.076),
+        (0.05, 0.098),
+        (0.0, 0.098),
+    ] {
+        assert!(
+            (rel(seen) - want).abs() < 1e-6,
+            "seen {seen}: {}",
+            rel(seen)
+        );
+    }
+    assert!((bar.required(Bar::NOW) - 0.452).abs() < 1e-6);
+    assert!((bar.most() - 0.596).abs() < 1e-6);
+    // The floor of the term stays: 3 × 0.03 is under 0.1.
+    let small = Bar {
+        sigma: Some(0.03),
+        base: Some(0.03),
+        ..bar
+    };
+    assert!((small.required(Bar::NOW) - 0.402).abs() < 1e-6);
+    // No σ ever: margin + 0.1 for every obstacle.
+    let none = Bar {
+        sigma: None,
+        base: None,
+        ..bar
+    };
+    assert!((none.required(Bar::NOW) - 0.402).abs() < 1e-6);
+    assert!((none.most() - 0.402).abs() < 1e-6);
+}
+
+#[test]
+fn a_cell_keeps_the_sigma_it_turned_occupied_at() {
+    let b64 = |cells: &[(usize, usize)]| {
+        tiles::encode_for_test(&tile_with(cells), 64, png::FilterType::NoFilter)
+    };
+    let mut first = tiles::decode(&b64(&[(1, 7), (5, 2)]), 64).unwrap();
+    first.note_seen(None, 0.05);
+    // (1, 7) stays, (5, 2) is gone, (9, 40) is new.
+    let mut next = tiles::decode(&b64(&[(1, 7), (9, 40)]), 64).unwrap();
+    next.note_seen(Some(&first), 0.1);
+    assert_eq!(next.seen_sigma(1, 7), 0.05);
+    assert_eq!(next.seen_sigma(9, 40), 0.1);
+    // The transposed cells are not occupied: unknown.
+    assert_eq!(next.seen_sigma(7, 1), 0.0);
+    assert_eq!(next.seen_sigma(40, 9), 0.0);
+    // Gone and back: seen anew.
+    let mut again = tiles::decode(&b64(&[(1, 7), (5, 2), (9, 40)]), 64).unwrap();
+    again.note_seen(Some(&next), 0.15);
+    assert_eq!(
+        [
+            again.seen_sigma(1, 7),
+            again.seen_sigma(5, 2),
+            again.seen_sigma(9, 40)
+        ],
+        [0.05, 0.15, 0.1]
+    );
+    // A new map's lower σ caps every sighting; a tile of another size
+    // covered other ground.
+    again.cap_seen(0.08);
+    assert_eq!(
+        [
+            again.seen_sigma(1, 7),
+            again.seen_sigma(5, 2),
+            again.seen_sigma(9, 40)
+        ],
+        [0.05, 0.08, 0.08]
+    );
+    let small = tiles::encode_for_test(&[tiles::OCCUPIED; 32 * 32], 32, png::FilterType::NoFilter);
+    let mut resized = tiles::decode(&small, 32).unwrap();
+    resized.note_seen(Some(&again), 0.2);
+    assert_eq!(resized.seen_sigma(1, 7), 0.0);
+}

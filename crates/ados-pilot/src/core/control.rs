@@ -421,14 +421,25 @@ impl Pilot {
         } else {
             None
         };
+        let passing = |r: &str| {
+            matches!(
+                r,
+                HOLD_OBSTACLE_CLOSE | HOLD_OBSTACLE_STALE | HOLD_POSITION_UNVERIFIED
+            )
+        };
         match reason {
             Some(r) => self.hold_reason = Some(r.into()),
-            None if matches!(
-                self.hold_reason.as_deref(),
-                Some(HOLD_OBSTACLE_CLOSE | HOLD_OBSTACLE_STALE | HOLD_POSITION_UNVERIFIED)
-            ) =>
-            {
-                self.hold_reason = None;
+            // Cleared: back to what a supervisor hold is about (a stall
+            // waiting for the operator still holds), else no reason.
+            None if self.hold_reason.as_deref().is_some_and(passing) => {
+                self.hold_reason = self
+                    .sup
+                    .hold
+                    .as_ref()
+                    .filter(|_| self.supervised().is_some())
+                    .map(|h| h.reason)
+                    .filter(|r| !passing(r))
+                    .map(Into::into);
             }
             None => {}
         }

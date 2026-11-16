@@ -11,16 +11,17 @@ mod grid;
 mod level;
 mod probe;
 mod project;
+mod sight;
 mod tiles;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
 pub use grid::{Grid, CELL_M, GRID_N};
 pub use level::level_hit;
 use level::level_return;
-pub use probe::LegProbe;
+pub use probe::{Bar, LegProbe};
 pub use project::{project_camera, Attitude, Scratch};
 #[cfg(test)]
 pub use tiles::encode_for_test as encode_tile_for_test;
@@ -133,6 +134,28 @@ pub struct Obstacles {
     pub grid: Grid,
     /// The pose's horizontal one-sigma uncertainty (m) and when it arrived.
     pose_sigma: Option<(f32, u64)>,
+    /// The least σ the poses had in the window before the last occupancy
+    /// payload (`[0]`) and since it (`[1]`). A cell newly occupied in a
+    /// payload was seen within those two windows: a scan reaches the 1 Hz
+    /// tiles by the next payload at the latest.
+    seen_floor: [Option<f32>; 2],
+    /// The least σ any pose has published: a matched pose's
+    /// ([`probe::Bar`]).
+    sigma_low: Option<f32>,
+    /// The last σ a pose carried.
+    sigma_last: Option<f32>,
+    /// The last occupancy payload's `seq`.
+    occ_seq: Option<u64>,
+    /// After a gap in the payloads' `seq` (a payload lost, a reconnect, a
+    /// restarted producer): the tiles delivered since. A cell may have
+    /// turned occupied in a lost payload, so a tile's first delivery after
+    /// the gap cannot date its new cells.
+    since_gap: Option<HashSet<(i32, i32)>>,
+    /// The last pose reported its health `lost`: no match holds it to the
+    /// map.
+    pose_lost: bool,
+    /// When σ last rose: the pose then rode something no scan checked.
+    sigma_rose_ms: Option<u64>,
 }
 
 /// Attitude and height used to level a scan.
@@ -154,34 +177,6 @@ impl Obstacles {
         }
     }
 
-    /// Ingest a `plugin.world-engine.occupancy` payload (changed tiles only).
-    pub fn ingest_occupancy(&mut self, payload: &Value) {
-        if let Some(r) = payload.get("res_m").and_then(Value::as_f64) {
-            self.tile_res_m = r as f32;
-        }
-        if let Some(n) = payload.get("tile_cells").and_then(Value::as_u64) {
-            self.tile_cells = n as usize;
-        }
-        let Some(list) = payload.get("tiles").and_then(Value::as_array) else {
-            return;
-        };
-        for t in list {
-            let (Some(ix), Some(iy), Some(b64)) = (
-                t.get("ix").and_then(Value::as_i64),
-                t.get("iy").and_then(Value::as_i64),
-                t.get("png_b64").and_then(Value::as_str),
-            ) else {
-                continue;
-            };
-            match tiles::decode(b64, self.tile_cells) {
-                Ok(tile) => {
-                    self.tiles.insert((ix as i32, iy as i32), tile);
-                }
-                Err(e) => tracing::debug!(error = %e, ix, iy, "occupancy_tile_decode_failed"),
-            }
-        }
-    }
-
     /// Ingest a `plugin.world-engine.pose` payload with the FC local position
     /// at the same moment.
     pub fn ingest_pose(&mut self, payload: &Value, local_ne: Option<V2>, now_ms: u64) {
@@ -192,6 +187,7 @@ impl Obstacles {
             .and_then(Value::as_f64)
             .filter(|s| s.is_finite() && *s >= 0.0)
             .map(|s| (s as f32, now_ms));
+        self.note_pose_sigma(payload, now_ms);
         let t = payload
             .get("pose")
             .and_then(|p| p.get("t"))

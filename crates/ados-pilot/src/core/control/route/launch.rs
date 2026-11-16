@@ -26,7 +26,7 @@ impl Pilot {
                 leg = %leg_label(leg.from_seq, leg.to_seq),
                 ned = ?leg.pinch.map(|(p, _)| p),
                 clearance_m = leg.pinch.map(|(_, d)| d),
-                required_m = self.route.required,
+                required_m = leg.required,
                 "pilot_launch_refused"
             );
             return Err("route_infeasible".into());

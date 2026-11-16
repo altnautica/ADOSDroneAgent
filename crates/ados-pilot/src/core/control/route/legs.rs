@@ -16,7 +16,7 @@ use ados_protocol::pilot::RouteState;
 use serde_json::Value;
 
 use crate::geo::V2;
-use crate::obstacles::{Obstacles, SLICE_HALF_M};
+use crate::obstacles::{Bar, Obstacles, SLICE_HALF_M};
 
 /// MAV_CMD_NAV_TAKEOFF.
 const CMD_TAKEOFF: u16 = 22;
@@ -190,10 +190,13 @@ pub struct LegCheck {
     pub from: [f32; 3],
     pub to: [f32; 3],
     pub state: RouteState,
-    /// The point of the leg nearest a seen obstacle: local NED and the
-    /// clearance (m).
+    /// The point of the leg nearest the seen obstacle tightest against its
+    /// own required clearance: local NED and the clearance (m).
     pub pinch: Option<([f32; 3], f32)>,
-    /// Where the leg first comes within the required clearance of a seen
+    /// The clearance the pinch needs ([`Bar::required`] of its obstacle);
+    /// [`Bar::most`] without a pinch.
+    pub required: f32,
+    /// Where the leg first comes within its required clearance of a seen
     /// obstacle (local NE): the start of a tight stretch, which may lie well
     /// before the pinch.
     pub tight: Option<[f32; 2]>,
@@ -213,15 +216,16 @@ fn in_slice(za: f32, zb: f32, plane_d: f32) -> Option<(f32, f32)> {
     (f0 <= f1).then_some((f0, f1))
 }
 
-/// Check `legs` against `obs` with `required` m of clearance, each along the
-/// part of it within the slice of the scan plane at `plane_d` (local down;
-/// `None`: no plane, nothing is judged). The clearance is a lower bound
-/// (see [`crate::obstacles::Obstacles::probe_leg`]); a leg judged only in
-/// part, or not at all, is at best unverified.
+/// Check `legs` against `obs`, each seen obstacle with its own required
+/// clearance from `bar`, each leg along the part of it within the slice of
+/// the scan plane at `plane_d` (local down; `None`: no plane, nothing is
+/// judged). The clearance is a lower bound (see
+/// [`crate::obstacles::Obstacles::probe_leg`]); a leg judged only in part,
+/// or not at all, is at best unverified.
 pub fn check_legs(
     obs: &Obstacles,
     legs: &[Leg],
-    required: f32,
+    bar: &Bar,
     plane_d: Option<f32>,
     now_ms: u64,
 ) -> Vec<LegCheck> {
@@ -234,6 +238,7 @@ pub fn check_legs(
                 to: b,
                 state: RouteState::Unverified,
                 pinch: None,
+                required: bar.most(),
                 tight: None,
             };
             let Some((f0, f1)) = plane_d.and_then(|d| in_slice(a[2], b[2], d)) else {
@@ -241,8 +246,9 @@ pub fn check_legs(
             };
             let at = |f: f32| [a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])];
             let (pa, pb) = (at(f0), at(f1));
-            let probe = obs.probe_leg(pa, pb, required, required + REPORT_EXTRA_M, now_ms);
-            leg.pinch = probe.nearest.map(|(t, q, d)| {
+            let probe = obs.probe_leg(pa, pb, bar, REPORT_EXTRA_M, now_ms);
+            leg.pinch = probe.nearest.map(|(t, q, d, need)| {
+                leg.required = need;
                 let len = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
                 let f = if len > 1e-6 {
                     f0 + (t / len).clamp(0.0, 1.0) * (f1 - f0)
@@ -253,7 +259,7 @@ pub fn check_legs(
             });
             leg.tight = probe.first_tight.map(|(_, q)| q);
             let whole = f0 <= 0.0 && f1 >= 1.0;
-            leg.state = if leg.pinch.is_some_and(|(_, d)| d < required) {
+            leg.state = if leg.pinch.is_some_and(|(_, d)| d < leg.required) {
                 RouteState::Infeasible
             } else if probe.unseen || !whole {
                 RouteState::Unverified

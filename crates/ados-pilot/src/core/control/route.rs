@@ -27,9 +27,15 @@
 //! infeasible for [`ROUTE_RESUME_DWELL_MS`]; a route that stays infeasible
 //! keeps the hold, its stall countdown and the operator's say.
 //!
-//! The required clearance is the effective margin plus max(0.1 m, 3σ), σ
-//! being the live horizontal pose uncertainty: the planar scan matcher's
-//! `sigma_xy_m` on the `plugin.world-engine.pose` topic. The FC offers no
+//! A leg needs from each seen obstacle the effective margin plus
+//! max(0.1 m, 3σ), σ the vehicle's horizontal uncertainty relative to that
+//! obstacle ([`crate::obstacles::Bar`]): the leg and the map share the frame
+//! the pose places the scans in, so drift of the whole frame is no risk, only
+//! drift since the obstacle was seen. It comes from the live pose
+//! uncertainty, the planar scan matcher's `sigma_xy_m` on the
+//! `plugin.world-engine.pose` topic, and the σ each map cell turned
+//! occupied at: the matcher's own growth between the two, plus the matched
+//! pose's σ. A cell of unknown sighting needs the whole σ. The FC offers no
 //! usable figure: ArduCopter never sends LOCAL_POSITION_NED_COV or ODOMETRY
 //! (it only receives ODOMETRY), and EKF_STATUS_REPORT's `pos_horiz_variance`
 //! is a normalised innovation test ratio, not metres. When the pose goes
@@ -40,6 +46,7 @@
 //! ([`super::super::position_check`]).
 
 mod cap;
+mod clearance;
 mod hold;
 mod launch;
 mod legs;
@@ -62,6 +69,16 @@ pub const HOLD_ROUTE_INFEASIBLE: &str = "route-infeasible";
 pub const MIN_SIGMA_TERM_M: f32 = 0.1;
 /// A stale pose's last σ still counts this long, ms.
 pub const SIGMA_HOLD_MS: u64 = 5000;
+/// After σ rises the whole σ counts against every obstacle for this long,
+/// ms: 20 scans at 10 Hz. A pose that jumps rides the prior and raises σ on
+/// the scan it jumps (a room flight's pose broke with σ rising that scan,
+/// 0.05 to 0.096, then on nearly every scan for seconds), and the FC's own
+/// velocity is no independent check: it fuses that pose. The relative σ
+/// returns only once the scans have matched it for 2 s.
+pub const SIGMA_SETTLE_MS: u64 = 2000;
+/// The planar scan matcher's σ stops growing here, metres (scan2d
+/// `SIGMA_MAX_M`): a pose at it has ridden unmatched past what σ can show.
+pub const SIGMA_CAP_M: f32 = 5.0;
 /// The route is re-checked this often as cells become seen.
 const RECHECK_MS: u64 = 1000;
 /// An infeasible verdict holds the mission only once every check has read
@@ -89,17 +106,6 @@ fn two_dp(v: f32) -> f64 {
     (f64::from(v) * 100.0).round() / 100.0
 }
 
-/// The clearance the route needs now.
-#[derive(Debug, Clone, Copy)]
-pub struct Clearance {
-    pub required: f32,
-    pub margin: f32,
-    /// σ as published: fresh or held, `None` once it aged out.
-    pub sigma: Option<f32>,
-    /// σ is fresh or held and the position is vouched for.
-    pub trusted: bool,
-}
-
 /// The confined-place state.
 #[derive(Debug, Default)]
 pub struct Route {
@@ -113,10 +119,14 @@ pub struct Route {
     pub legs: Vec<LegCheck>,
     /// Items ahead with no position.
     pub unchecked: Vec<u32>,
+    /// The most any obstacle needs ([`crate::obstacles::Bar::most`]); each
+    /// leg holds the clearance its pinch needs ([`LegCheck::required`]).
     pub required: f32,
     pub margin: f32,
     pub sigma: Option<f32>,
     pub trusted: bool,
+    /// The last check was made with σ settled ([`SIGMA_SETTLE_MS`]).
+    pub settled: bool,
     /// The last fresh σ and when it arrived.
     sigma_seen: Option<(f32, u64)>,
     checked_ms: Option<u64>,
@@ -183,12 +193,13 @@ impl Route {
         })
     }
 
-    /// The tightest seen point over the legs ahead.
+    /// The tightest seen point over the legs ahead: the least clearance past
+    /// what its obstacle needs.
     fn pinch(&self) -> Option<(&LegCheck, [f32; 3], f32)> {
         self.legs
             .iter()
             .filter_map(|l| l.pinch.map(|(p, d)| (l, p, d)))
-            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .min_by(|a, b| (a.2 - a.0.required).total_cmp(&(b.2 - b.0.required)))
     }
 
     /// The first infeasible leg ahead.
@@ -227,7 +238,7 @@ impl Route {
                 to_seq: l.to_seq,
                 ned: p.map(wire),
                 clearance_m: wire(d),
-                required_m,
+                required_m: wire(l.required),
             }),
             unverified_legs: self
                 .legs
@@ -243,31 +254,8 @@ impl Route {
 }
 
 impl Pilot {
-    fn confined(&self) -> bool {
+    pub(super) fn confined(&self) -> bool {
         self.settings.pilot.place_class == PlaceClass::Confined
-    }
-
-    /// Keep the last σ with the time its pose arrived: the hold counts from
-    /// the pose, not from when the check last looked.
-    fn note_sigma(&mut self) {
-        if let Some(s) = self.obstacles.last_pose_sigma() {
-            self.route.sigma_seen = Some(s);
-        }
-    }
-
-    /// The clearance the route needs: the effective margin plus
-    /// max(0.1, 3σ), σ fresh, held, or the last one seen.
-    fn required_clearance(&self, now_ms: u64) -> Clearance {
-        let margin = self.settings.pilot.effective_margin_m();
-        let seen = self.route.sigma_seen;
-        let held = seen.filter(|(_, at)| now_ms.saturating_sub(*at) <= SIGMA_HOLD_MS);
-        let term = seen.map_or(MIN_SIGMA_TERM_M, |(s, _)| (3.0 * s).max(MIN_SIGMA_TERM_M));
-        Clearance {
-            required: margin + term,
-            margin,
-            sigma: held.map(|(s, _)| s),
-            trusted: held.is_some() && self.position_unverified(now_ms).is_none(),
-        }
     }
 
     /// The FC flies the mission now (any AUTO the pilot watches, launched
@@ -311,6 +299,7 @@ impl Pilot {
     fn check_route_from(&mut self, origin: Option<Origin>, now_ms: u64) {
         self.note_sigma();
         let c = self.required_clearance(now_ms);
+        let settled = self.obstacles.sigma_settled(now_ms, SIGMA_SETTLE_MS);
         let gaps = &self.sup.stall.gaps;
         let ahead = legs_of(
             &self.route.feed.items,
@@ -321,7 +310,7 @@ impl Pilot {
         );
         let plane_d = self.fc.fresh_local(now_ms).map(|l| l.d);
         let fresh = self.obstacle_data_state(now_ms).is_none();
-        let checked = check_legs(&self.obstacles, &ahead.legs, c.required, plane_d, now_ms);
+        let checked = check_legs(&self.obstacles, &ahead.legs, &c.bar, plane_d, now_ms);
         let r = &mut self.route;
         r.legs = checked;
         r.unchecked = ahead.unchecked;
@@ -329,6 +318,7 @@ impl Pilot {
         r.margin = c.margin;
         r.sigma = c.sigma;
         r.trusted = c.trusted;
+        r.settled = settled;
         r.checked_ms = Some(now_ms);
         r.dirty = false;
         let state = r.state();
@@ -345,14 +335,18 @@ impl Pilot {
                 r.clear_since = None;
             }
         }
-        let pinch = r.pinch().map(|(l, p, d)| ((l.from_seq, l.to_seq), p, d));
-        let key = state.map(|s| (s, pinch.map(|(k, _, _)| k)));
+        let pinch = r
+            .pinch()
+            .map(|(l, p, d)| ((l.from_seq, l.to_seq), p, d, l.required));
+        let key = state.map(|s| (s, pinch.map(|(k, _, _, _)| k)));
         if key != r.logged {
             r.logged = key;
             if let Some(s) = state {
-                let (leg, ned, clearance_m) = match pinch {
-                    Some(((f, t), p, d)) => (Some(leg_label(f, t)), Some(p), Some(d)),
-                    None => (None, None, None),
+                let (leg, ned, clearance_m, pinch_required_m) = match pinch {
+                    Some(((f, t), p, d, need)) => {
+                        (Some(leg_label(f, t)), Some(p), Some(d), Some(need))
+                    }
+                    None => (None, None, None, None),
                 };
                 tracing::info!(
                     target: "ados_pilot",
@@ -360,8 +354,10 @@ impl Pilot {
                     leg = leg.as_deref(),
                     ned = ?ned,
                     clearance_m,
+                    pinch_required_m,
                     required_m = c.required,
                     sigma_m = c.sigma,
+                    sigma_low_m = c.bar.base,
                     unchecked = ?r.unchecked,
                     truncated = r.feed.truncated,
                     "pilot_route_check"

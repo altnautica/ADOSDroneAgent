@@ -18,6 +18,9 @@ pub struct Tile {
     cells: usize,
     /// Row-major PNG pixels.
     px: Vec<u8>,
+    /// Each occupied cell (pixel index, ascending) with the pose's σ when it
+    /// turned occupied ([`Self::note_seen`]).
+    seen: Vec<(u32, f32)>,
 }
 
 impl Tile {
@@ -43,6 +46,47 @@ impl Tile {
     pub fn value(&self, lx: usize, ly: usize) -> u8 {
         self.px[(self.cells - 1 - lx) * self.cells + ly]
     }
+
+    /// Keep, for each cell still occupied in `old` (the tile this one
+    /// replaces), the σ it turned occupied at; a cell newly occupied takes
+    /// `floor`, the least σ the pose had while it can have been seen.
+    /// Earliest, not latest: a cell that stays occupied may never have been
+    /// seen again, and an older σ only asks more clearance of it. An old
+    /// tile of another size covered other ground: every cell is unknown.
+    pub fn note_seen(&mut self, old: Option<&Tile>, floor: f32) {
+        let resized = old.is_some_and(|o| o.cells != self.cells);
+        let floor = if resized { 0.0 } else { floor };
+        let kept = old.filter(|_| !resized).map_or(&[][..], |o| &o.seen[..]);
+        let mut kept = kept.iter().peekable();
+        self.seen.clear();
+        for (k, _) in self.px.iter().enumerate().filter(|(_, &v)| v == OCCUPIED) {
+            let k = k as u32;
+            while kept.next_if(|(j, _)| *j < k).is_some() {}
+            let s = kept.next_if(|(j, _)| *j == k).map_or(floor, |&(_, s)| s);
+            self.seen.push((k, s));
+        }
+    }
+
+    /// No cell was seen later than at σ `s`.
+    pub fn cap_seen(&mut self, s: f32) {
+        for (_, seen) in &mut self.seen {
+            *seen = seen.min(s);
+        }
+    }
+
+    /// Every cell's sighting is unknown.
+    pub fn forget_seen(&mut self) {
+        self.cap_seen(0.0);
+    }
+
+    /// The σ occupied cell `(lx, ly)` turned occupied at (0: unknown, as
+    /// old as the map).
+    pub fn seen_sigma(&self, lx: usize, ly: usize) -> f32 {
+        let k = ((self.cells - 1 - lx) * self.cells + ly) as u32;
+        self.seen
+            .binary_search_by_key(&k, |&(j, _)| j)
+            .map_or(0.0, |i| self.seen[i].1)
+    }
 }
 
 /// Decode one tile. Filters 0–4 are undone by the PNG decoder.
@@ -66,7 +110,11 @@ pub fn decode(b64: &str, cells: usize) -> Result<Tile, String> {
         .chunks(channels)
         .map(|c| c[0])
         .collect();
-    Ok(Tile { cells, px })
+    Ok(Tile {
+        cells,
+        px,
+        seen: Vec::new(),
+    })
 }
 
 #[cfg(test)]
