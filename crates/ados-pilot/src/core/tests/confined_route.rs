@@ -8,7 +8,8 @@ use ados_protocol::pilot::{Owner, RouteState};
 use serde_json::{json, Value};
 
 use super::confined::{
-    area, confined, err, map, map_payload, ok, post, run_seen, seen, speed_changes, REQUIRED_M,
+    area, confined, err, map, map_payload, ok, on_pad, post, run_seen, seen, speed_changes,
+    REQUIRED_M,
 };
 use super::harness::World;
 use crate::core::control::{legs_of, Origin, RouteItem};
@@ -62,7 +63,8 @@ pub(super) fn route(w: &mut World, state: &str, seq: u32, wps: &[Wp]) {
 }
 
 /// A ground station's AUTO in a confined place at item 2 of `wps`, the
-/// vehicle at n 9 on the way, with `occ` mapped: 100 ms later.
+/// vehicle at n 9 on the way, with `occ` mapped: 1.1 s later, past the
+/// confirmation an infeasible verdict needs to hold.
 pub(super) fn flying_to_2(wps: &[Wp], occ: &dyn Fn(f32, f32) -> bool) -> World {
     let mut w = World::new();
     confined(&mut w);
@@ -72,13 +74,13 @@ pub(super) fn flying_to_2(wps: &[Wp], occ: &dyn Fn(f32, f32) -> bool) -> World {
     w.run(100);
     map(&mut w, &area(occ));
     route(&mut w, "active", 2, wps);
-    run_seen(&mut w, 100);
+    run_seen(&mut w, 1100);
     w
 }
 
 /// Held before the infeasible leg 2→3 with the skip counting down.
 fn assert_held_on_2_to_3(w: &World) {
-    assert_eq!(w.set_modes(copter::BRAKE), 1, "held at once");
+    assert_eq!(w.set_modes(copter::BRAKE), 1, "held once confirmed");
     let s = w.p.state(w.now);
     assert_eq!(s.hold_reason.as_deref(), Some("route-infeasible"));
     let in_s = s
@@ -181,7 +183,7 @@ fn the_countdown_acts_on_an_item_the_router_cannot_place() {
     map(&mut w, &area(&post(15.0)));
     let items = LINE.iter().map(|&(s, n, e)| item(s, n, e)).collect();
     feed(&mut w, "active", 2, items, None, json!({}));
-    run_seen(&mut w, 100);
+    run_seen(&mut w, 1100);
     assert_held_on_2_to_3(&w);
     let t0 = w.now;
     while w.now < t0 + 45_500 {
@@ -200,6 +202,7 @@ fn the_countdown_acts_on_an_item_the_router_cannot_place() {
 fn a_pinch_a_few_millimetres_under_the_clearance_never_reads_feasible() {
     let mut w = World::new();
     confined(&mut w);
+    on_pad(&mut w);
     // A wall whose map cells span e 0.55…0.60, the map placed 0.024 m east:
     // its edge is 0.574 m from the route along e = 0, 3 mm under 0.577 m.
     // Its nearest cell centre is 0.599 m off.
@@ -289,6 +292,7 @@ fn a_ground_station_mission_toward_an_unplaced_item_is_capped() {
 fn a_stale_pose_keeps_its_sigma_and_never_lowers_the_clearance() {
     let mut w = World::new();
     confined(&mut w);
+    on_pad(&mut w);
     map(&mut w, &area(&|_, _| false));
     // σ 0.1 m: the 3σ term (0.3 m) is above its 0.1 m floor.
     let pose = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": 0.1});

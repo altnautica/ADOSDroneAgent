@@ -67,6 +67,33 @@ fn level_scan_keeps_obstacle_and_drops_ground() {
 }
 
 #[test]
+fn a_return_over_the_flight_slice_bounds_the_horizon_and_is_no_obstacle() {
+    let l = |pitch_deg: f32| Level {
+        roll: 0.0,
+        pitch: pitch_deg.to_radians(),
+        yaw: 0.0,
+        agl: Some(1.2),
+    };
+    // Nose up 4°: a 6.57 m forward return is 0.46 m over the scan plane (a
+    // tunnel roof), past the 0.13 m slice.
+    assert!(level_hit(6.57, 0.0, l(4.0), [0.0, 0.0]).is_none());
+    // Nose up 1°: 0.11 m over it, inside the slice: a wall.
+    assert!(level_hit(6.57, 0.0, l(1.0), [0.0, 0.0]).is_some());
+    // Nose down 4°: 0.46 m under it, 0.74 m over the floor: kept, the body
+    // and props sit under the plane.
+    assert!(level_hit(6.57, 0.0, l(-4.0), [0.0, 0.0]).is_some());
+    let mut o = Obstacles::new();
+    let mut ranges = vec![0.0f64; 360];
+    ranges[0] = 6.57;
+    let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
+        "angle_increment_rad": std::f64::consts::TAU / 360.0, "ranges_m": ranges});
+    o.ingest_scan(&scan, l(4.0), [0.0, 0.0], 1000);
+    assert_eq!(o.nearest_hit_m(), None);
+    let edge: Vec<V2> = o.horizon_near([6.55, 0.0], 0.05, 1000).collect();
+    assert_eq!(edge.len(), 1, "the roof bounds the horizon");
+}
+
+#[test]
 fn scan_hits_feed_rays_sectors_and_raw_minimum() {
     let mut o = Obstacles::new();
     let mut ranges = vec![0.0f64; 360];

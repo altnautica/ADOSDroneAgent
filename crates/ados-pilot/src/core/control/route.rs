@@ -6,14 +6,26 @@
 //! frame, cut into the legs the FC flies ([`legs::legs_of`]): between
 //! consecutive placed items, skipped items left out, and from the vehicle's
 //! own position to the item the pilot put the FC in AUTO at (after a skip or
-//! a hold ArduPilot flies that item from where the vehicle stands). Each leg
-//! is checked against the occupancy map
+//! a hold ArduPilot flies that item from where the vehicle stands). While a
+//! hold of the mission holds, the route is checked as it resumes: from where
+//! the vehicle holds to the FC's current item, and on. Each leg is checked
+//! against the occupancy map
 //! ([`crate::obstacles::Obstacles::probe_leg`]) with a conservative
-//! clearance: a seen obstacle closer than the required clearance makes the
-//! leg infeasible; unseen space that close leaves it unverified. An item the
+//! clearance, along the part of it within the planar scan's slice of the
+//! vehicle's height ([`legs::check_legs`]): a seen obstacle closer than the
+//! required clearance makes the leg infeasible; unseen space that close, or
+//! a part of the leg off the slice, leaves it unverified. An item the
 //! router cannot place (no position), or a mission longer than the feed
-//! carries, leaves the route unverified and named (`unchecked`, `truncated`);
-//! a launch into such a route is refused.
+//! carries, leaves the route unverified and named (`unchecked`,
+//! `truncated`); a launch into such a route is refused.
+//!
+//! An infeasible verdict holds the mission once it has stood for
+//! [`ROUTE_HOLD_CONFIRM_MS`], or at once when the vehicle could reach the
+//! pinch before a hold that waited stopped it; the FC is held to the
+//! confined cap meanwhile. A route hold resumes the mission at its current
+//! item once the route from where the vehicle holds has read anything but
+//! infeasible for [`ROUTE_RESUME_DWELL_MS`]; a route that stays infeasible
+//! keeps the hold, its stall countdown and the operator's say.
 //!
 //! The required clearance is the effective margin plus max(0.1 m, 3σ), σ
 //! being the live horizontal pose uncertainty: the planar scan matcher's
@@ -38,7 +50,9 @@ use serde_json::json;
 use super::super::Pilot;
 use super::stall::{Active, Kind};
 use super::supervisor::Resume;
+use super::BRAKE_LAG_S;
 use crate::flows::banner;
+use crate::geo::{self, V2};
 
 pub use cap::{Slowed, CONFINED_CAP_MPS};
 #[cfg(test)]
@@ -53,6 +67,22 @@ pub const MIN_SIGMA_TERM_M: f32 = 0.1;
 pub const SIGMA_HOLD_MS: u64 = 5000;
 /// The route is re-checked this often as cells become seen.
 const RECHECK_MS: u64 = 1000;
+/// An infeasible verdict holds the mission only once every check has read
+/// it for this long: two checks `RECHECK_MS` apart, the second on a map ten
+/// more scans (10 Hz) have updated, so one sample (a cell mapped from the
+/// floor before the climb re-maps it, a scan the brake's pitch tilted) never
+/// holds. Waiting is safe: meanwhile the FC is held to the 0.5 m/s confined
+/// cap, and a pinch the vehicle could reach before it stopped holds at once
+/// (`Pilot::stop_reach`): at the cap the wait, the FC's 0.8 s response and
+/// the stop cover 0.94 m (at the normal profile's 3 m/s²).
+pub const ROUTE_HOLD_CONFIRM_MS: u64 = 1000;
+/// A route hold resumes the mission once every check has read the route
+/// from where the vehicle holds as anything but infeasible for this long:
+/// four checks, three re-checks past the first clear one (an obstacle hold
+/// resumes after as long clear). A pinch that reads infeasible on one check
+/// in four keeps the hold: three times the confirmation, so a flickering
+/// pinch holds rather than resumes.
+pub const ROUTE_RESUME_DWELL_MS: u64 = 3000;
 
 fn leg_label(from: u32, to: u32) -> String {
     format!("{from}→{to}")
@@ -93,6 +123,11 @@ pub struct Route {
     /// The last fresh σ and when it arrived.
     sigma_seen: Option<(f32, u64)>,
     checked_ms: Option<u64>,
+    /// The first check of the current run of infeasible verdicts.
+    infeasible_since: Option<u64>,
+    /// The first check of the current run of verdicts that are not
+    /// infeasible.
+    clear_since: Option<u64>,
     /// What the last check depended on beyond the map: the current item,
     /// whether the FC flew the mission, the skipped items and the origin.
     checked_key: Option<(Option<u32>, bool, usize, Option<Origin>)>,
@@ -101,7 +136,7 @@ pub struct Route {
     logged: Option<(RouteState, Option<(u32, u32)>)>,
     /// An obstacle is near the clearance limit (the pilot-flown cap).
     pub near: bool,
-    /// The cap in force and why (`near` or `unverified`).
+    /// The cap in force and why (`near`, `infeasible` or `unverified`).
     pub cap: Option<&'static str>,
     /// The FC flight the cap slowed.
     pub fc_slowed: Option<Slowed>,
@@ -162,6 +197,23 @@ impl Route {
     /// The first infeasible leg ahead.
     pub fn infeasible(&self) -> Option<&LegCheck> {
         self.legs.iter().find(|l| l.state == RouteState::Infeasible)
+    }
+
+    /// Every check has read the route infeasible for at least `ms`.
+    pub fn infeasible_for(&self, ms: u64) -> bool {
+        Self::held_for(self.infeasible_since, self.checked_ms, ms)
+    }
+
+    /// Every check has read the route as anything but infeasible for at
+    /// least `ms`.
+    pub fn clear_for(&self, ms: u64) -> bool {
+        Self::held_for(self.clear_since, self.checked_ms, ms)
+    }
+
+    fn held_for(since: Option<u64>, last: Option<u64>, ms: u64) -> bool {
+        since
+            .zip(last)
+            .is_some_and(|(s, l)| l.saturating_sub(s) >= ms)
     }
 
     /// The `route_check` of the published state.
@@ -235,10 +287,31 @@ impl Pilot {
             .and_then(|m| m.seq)
     }
 
+    /// The FC's current item while a supervisor hold of the mission holds:
+    /// the item it resumes at.
+    fn held_mission_seq(&self) -> Option<u32> {
+        self.sup
+            .hold
+            .as_ref()
+            .filter(|h| h.resume == Resume::Mission)?;
+        self.mission.as_ref().and_then(|m| m.seq)
+    }
+
     /// Check the route ahead now: from the current item on while the
     /// mission runs (from the origin when the pilot put the FC in AUTO),
+    /// from where the vehicle holds to the item a held mission resumes at,
     /// else all of it; never through a skipped item.
     pub(in crate::core) fn check_route(&mut self, now_ms: u64) {
+        let origin = match self.held_mission_seq() {
+            Some(s) => self.origin_here(s, now_ms),
+            None => self.route.origin,
+        };
+        self.check_route_from(origin, now_ms);
+    }
+
+    /// [`Self::check_route`] with the legs flown from `origin`, each judged
+    /// in the scan's slice of the vehicle's height now.
+    fn check_route_from(&mut self, origin: Option<Origin>, now_ms: u64) {
         self.note_sigma();
         let c = self.required_clearance(now_ms);
         let gaps = &self.sup.stall.gaps;
@@ -246,10 +319,11 @@ impl Pilot {
             &self.route.feed.items,
             self.fc.home_ne(),
             &|s| gaps.iter().any(|g| g.seq == s),
-            self.mission_seq(),
-            self.route.origin.as_ref(),
+            self.held_mission_seq().or(self.mission_seq()),
+            origin.as_ref(),
         );
-        let checked = check_legs(&self.obstacles, &ahead.legs, c.required, now_ms);
+        let plane_d = self.fc.fresh_local(now_ms).map(|l| l.d);
+        let checked = check_legs(&self.obstacles, &ahead.legs, c.required, plane_d, now_ms);
         let r = &mut self.route;
         r.legs = checked;
         r.unchecked = ahead.unchecked;
@@ -260,6 +334,13 @@ impl Pilot {
         r.checked_ms = Some(now_ms);
         r.dirty = false;
         let state = r.state();
+        if state == Some(RouteState::Infeasible) {
+            r.infeasible_since.get_or_insert(now_ms);
+            r.clear_since = None;
+        } else {
+            r.infeasible_since = None;
+            r.clear_since.get_or_insert(now_ms);
+        }
         let pinch = r.pinch().map(|(l, p, d)| ((l.from_seq, l.to_seq), p, d));
         let key = state.map(|s| (s, pinch.map(|(k, _, _)| k)));
         if key != r.logged {
@@ -302,6 +383,8 @@ impl Pilot {
             }
             self.route.origin = None;
             self.route.flown = None;
+            self.route.infeasible_since = None;
+            self.route.clear_since = None;
             return;
         }
         // The origin served its item once the FC moved past it.
@@ -407,8 +490,9 @@ impl Pilot {
         if !self.confined() {
             return true;
         }
-        self.route.origin = self.origin_here(to_seq, now_ms);
-        self.check_route(now_ms);
+        let origin = self.origin_here(to_seq, now_ms);
+        self.route.origin = origin;
+        self.check_route_from(origin, now_ms);
         self.route.infeasible().is_none()
     }
 
@@ -422,22 +506,78 @@ impl Pilot {
         }
     }
 
+    /// Where the vehicle is and how far it could fly before it stopped were
+    /// a hold to wait out [`ROUTE_HOLD_CONFIRM_MS`]: at the faster of its
+    /// speed now and the confined cap the wait holds the FC to, for the wait
+    /// and the FC's response (`BRAKE_LAG_S`), then braking at the profile's
+    /// horizontal acceleration. `None` without a fresh position.
+    fn stop_reach(&self, now_ms: u64) -> Option<(V2, f32)> {
+        let l = self.fc.fresh_local(now_ms)?;
+        let v = l.vn.hypot(l.ve).max(CONFINED_CAP_MPS);
+        let a = self.limits_now(now_ms).a_h;
+        let t = ROUTE_HOLD_CONFIRM_MS as f32 / 1000.0 + BRAKE_LAG_S;
+        Some(([l.n, l.e], v * t + v * v / (2.0 * a)))
+    }
+
+    /// The vehicle could come within the required clearance of `p` (local
+    /// NE) before a hold that waited stopped it. The straight line is never
+    /// longer than the route there, and a leg comes within the required
+    /// clearance of an obstacle at most that far before its point nearest
+    /// the obstacle. Without a position everything is in reach.
+    fn in_reach(&self, p: V2, now_ms: u64) -> bool {
+        self.stop_reach(now_ms)
+            .is_none_or(|(pos, stop_m)| geo::dist(pos, p) - self.route.required <= stop_m)
+    }
+
+    /// Some point of the leg `l` is in reach ([`Self::in_reach`]).
+    pub(super) fn leg_in_reach(&self, l: &LegCheck, now_ms: u64) -> bool {
+        let Some(pos) = self.fc.fresh_local(now_ms).map(|l| [l.n, l.e]) else {
+            return true;
+        };
+        let (a, b) = ([l.from[0], l.from[1]], [l.to[0], l.to[1]]);
+        let d = geo::sub(b, a);
+        let len2 = geo::dot(d, d);
+        let t = if len2 > 1e-12 {
+            (geo::dot(geo::sub(pos, a), d) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.in_reach(geo::add(a, geo::scale(d, t)), now_ms)
+    }
+
     /// While the FC flies the mission: an infeasible leg ahead holds the
-    /// vehicle and asks the operator (the stall flow).
+    /// vehicle and asks the operator (the stall flow) once every check has
+    /// read it for [`ROUTE_HOLD_CONFIRM_MS`], or at once when the vehicle
+    /// could reach its pinch before a hold that waited stopped it.
     pub(super) fn route_hold(&mut self, now_ms: u64) {
         if !self.confined() || !self.mission_flying() || self.owner() != Owner::MissionFc {
             return;
         }
-        if self.route.infeasible().is_some() {
+        let Some(leg) = self.route.infeasible().copied() else {
+            return;
+        };
+        let near = leg
+            .pinch
+            .is_none_or(|(p, _)| self.in_reach([p[0], p[1]], now_ms));
+        if near || self.route.infeasible_for(ROUTE_HOLD_CONFIRM_MS) {
             let seq = self.mission.as_ref().and_then(|m| m.seq);
             self.hold_route_infeasible(seq, now_ms);
         }
     }
 
+    /// A route hold may resume: every check has read the route from where
+    /// the vehicle holds as anything but infeasible for
+    /// [`ROUTE_RESUME_DWELL_MS`].
+    pub(super) fn route_resume_due(&self) -> bool {
+        self.route.clear_for(ROUTE_RESUME_DWELL_MS)
+    }
+
     /// Hold before the first infeasible leg with the current item `seq`.
     /// A leg ending or starting at `seq` counts down to its skip (within the
     /// automatic-skip budget); one further on holds until the operator
-    /// answers (skipping `seq` would not remove it).
+    /// answers (skipping `seq` would not remove it). A stall already asking
+    /// about `seq` the same way keeps its countdown. The hold resumes when
+    /// the route clears ([`Self::route_resume_due`]).
     pub(super) fn hold_route_infeasible(&mut self, seq: Option<u32>, now_ms: u64) {
         let Some(leg) = self.route.infeasible().copied() else {
             return;
@@ -451,12 +591,22 @@ impl Pilot {
         let clearance = leg.pinch.map_or(0.0, |(_, d)| d);
         let required = self.route.required;
         self.supervise_hold(Resume::Mission, HOLD_ROUTE_INFEASIBLE, now_ms);
-        self.sup.stall.active = Some(Active {
-            kind: Kind::Mission,
-            seq,
-            since_ms: now_ms,
-            deadline_ms,
+        if let Some(h) = &mut self.sup.hold {
+            h.route = true;
+        }
+        let st = &mut self.sup.stall;
+        let asked = st.active.as_ref().is_some_and(|a| {
+            a.kind == Kind::Mission && a.seq == seq && a.deadline_ms.is_some() == deadline_ms.is_some()
         });
+        if !asked {
+            st.active = Some(Active {
+                kind: Kind::Mission,
+                seq,
+                since_ms: now_ms,
+                deadline_ms,
+            });
+        }
+        let deadline_ms = st.active.as_ref().and_then(|a| a.deadline_ms);
         let label = leg_label(leg.from_seq, leg.to_seq);
         self.banner = Some(banner(
             "pilot.banner.route_infeasible",
@@ -474,6 +624,7 @@ impl Pilot {
             clearance_m = clearance,
             required_m = required,
             seq,
+            infeasible_ms = self.route.infeasible_since.map(|t| now_ms.saturating_sub(t)),
             skip_in_s = deadline_ms.map(|d| d.saturating_sub(now_ms) / 1000),
             "pilot_route_infeasible_hold"
         );

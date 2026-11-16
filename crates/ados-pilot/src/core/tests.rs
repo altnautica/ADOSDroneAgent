@@ -12,6 +12,7 @@ mod nav_cap;
 mod no_returns;
 mod position_check;
 mod rules;
+mod route_hold;
 mod safety;
 mod sensors;
 mod stale;

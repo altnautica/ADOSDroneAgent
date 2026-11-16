@@ -1,6 +1,8 @@
 //! The confined cap: 0.5 m/s while an obstacle is within the required
-//! clearance plus [`NEAR_EXTRA_M`] of the vehicle, and in AUTO along a leg
-//! not yet seen. The pilot's own setpoints are capped where they are made
+//! clearance plus [`NEAR_EXTRA_M`] of the vehicle, and in AUTO while an
+//! infeasible leg ahead waits for its hold, or along a leg not yet seen or
+//! judged (the leg flown now, or any within the stopping reach). The pilot's
+//! own setpoints are capped where they are made
 //! ([`super::super::super::nav_cap`]); the FC's flights are slowed here.
 //!
 //! The FC's speed is lowered with MAV_CMD_DO_CHANGE_SPEED in AUTO (the
@@ -50,8 +52,8 @@ impl Pilot {
     }
 
     /// The cap: on while an obstacle is within the required clearance plus
-    /// [`NEAR_EXTRA_M`] of the vehicle, and in AUTO along a leg not yet
-    /// seen.
+    /// [`NEAR_EXTRA_M`] of the vehicle, and in AUTO while an infeasible leg
+    /// ahead waits for its hold or along a leg not yet seen or judged.
     pub(super) fn update_cap(&mut self, now_ms: u64) {
         let airborne = self.fc.armed && !self.fc.landed();
         let required = self.required_clearance(now_ms).required;
@@ -70,20 +72,32 @@ impl Pilot {
             });
         self.route.near = near;
         let seq = self.mission.as_ref().and_then(|m| m.seq);
-        // The leg flown now: unseen, or not checked at all (an item with no
-        // position, past the end of the feed, or σ or the position not
-        // vouched for). Until the mission feed names the item there is no
-        // leg to judge.
-        let unverified_leg = self.mission_flying()
+        let flying = self.mission_flying();
+        // An infeasible leg ahead the hold has not confirmed yet: the FC
+        // flies no faster than the hold's reach assumes.
+        let pending = flying && self.route.infeasible().is_some();
+        // The leg flown now, or any leg within the stopping reach, not fully
+        // judged: unseen, off the scan's slice, or not checked at all (an
+        // item with no position, past the end of the feed, or σ or the
+        // position not vouched for). Until the mission feed names the item
+        // there is no leg to judge.
+        let unverified_leg = flying
             && seq.is_some()
-            && self
+            && (self
                 .route
                 .legs
                 .iter()
                 .find(|l| Some(l.to_seq) == seq)
-                .is_none_or(|l| l.state == RouteState::Unverified || !self.route.trusted);
+                .is_none_or(|l| l.state == RouteState::Unverified || !self.route.trusted)
+                || self
+                    .route
+                    .legs
+                    .iter()
+                    .any(|l| l.state == RouteState::Unverified && self.leg_in_reach(l, now_ms)));
         let cap = if near {
             Some("near")
+        } else if pending {
+            Some("infeasible")
         } else if unverified_leg {
             Some("unverified")
         } else {

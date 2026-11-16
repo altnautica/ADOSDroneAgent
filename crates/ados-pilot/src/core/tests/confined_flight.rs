@@ -8,7 +8,7 @@
 use ados_protocol::pilot::RouteState;
 use serde_json::json;
 
-use super::confined::{area, confined, err, map, ok, post, run_seen};
+use super::confined::{area, confined, err, map, ok, on_pad, post, run_seen};
 use super::confined_route::{feed, flying_to_2, item, route, Wp, LINE};
 use super::harness::World;
 use crate::modes::copter;
@@ -17,6 +17,7 @@ use crate::modes::copter;
 fn a_mission_the_feed_may_not_hold_refuses_the_launch() {
     let mut w = World::new();
     confined(&mut w);
+    on_pad(&mut w);
     map(&mut w, &area(&|_, _| false));
     // The FC holds a mission the router has not mirrored yet.
     feed(&mut w, "loaded", 0, vec![], None, json!({}));
@@ -52,6 +53,7 @@ fn a_mission_the_feed_may_not_hold_refuses_the_launch() {
 fn a_launch_without_a_position_names_the_position_not_the_route() {
     let mut w = World::new();
     confined(&mut w);
+    on_pad(&mut w);
     assert!(ok(&w.action("control_mode:ados")));
     map(&mut w, &area(&|_, _| false));
     // The FC sends no local position (its EKF is between estimates) for
@@ -212,7 +214,7 @@ fn a_skip_keeps_its_origin_while_the_feed_still_reads_the_skipped_item() {
     w.run(100);
     map(&mut w, &area(&west_post));
     route(&mut w, "active", 2, &LINE);
-    run_seen(&mut w, 100);
+    run_seen(&mut w, 1100);
     assert_eq!(w.set_modes(copter::BRAKE), 1, "held before 2→3");
     assert!(ok(&w.action("mission_skip")));
     assert_eq!(w.mode, copter::AUTO, "the leg from here to 3 is clear");

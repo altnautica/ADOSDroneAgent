@@ -101,6 +101,14 @@ pub(super) fn confined(w: &mut World) {
 /// The route north along e = 0: items 1–4 at n 2, 10, 20, 25.
 const ROUTE: [(u32, f32); 4] = [(1, 2.0), (2, 10.0), (3, 20.0), (4, 25.0)];
 
+/// The vehicle on the ground on a pad at the routes' height (d −5): its
+/// scan plane is the legs' own, so a check before the launch judges them.
+/// From the floor (d 0) the planar scan judges no leg flown at 5 m.
+pub(super) fn on_pad(w: &mut World) {
+    w.pos = [0.0, 0.0, -5.0];
+    w.feed();
+}
+
 /// The router's snapshot with the route's items in the local frame, the FC
 /// at `seq` in `state`.
 pub(super) fn mission(w: &mut World, state: &str, seq: u32) {
@@ -150,7 +158,7 @@ fn the_clearance_is_measured_to_the_leg_and_to_the_cell_edge() {
     );
     let req = REQUIRED_M as f32;
     let legs = [(1, [0.0, 0.0, -5.0], 2, [10.0, 0.0, -5.0])];
-    let r = crate::core::control::check_legs(&o, &legs, req, 0);
+    let r = crate::core::control::check_legs(&o, &legs, req, Some(-5.0), 0);
     assert_eq!(r[0].state, RouteState::Infeasible, "{r:?}");
     let (p, d) = r[0].pinch.unwrap();
     assert!((p[0] - 4.5).abs() < 0.1 && p[1].abs() < 1e-3, "{p:?}");
@@ -163,16 +171,58 @@ fn the_clearance_is_measured_to_the_leg_and_to_the_cell_edge() {
     // A leg leaving the map is unverified; one with no obstacle near it is
     // feasible.
     let out = [(1, [0.0, -2.0, -5.0], 2, [20.0, -2.0, -5.0])];
-    let r = crate::core::control::check_legs(&o, &out, req, 0);
+    let r = crate::core::control::check_legs(&o, &out, req, Some(-5.0), 0);
     assert_eq!(r[0].state, RouteState::Unverified);
     let clear = [(1, [0.0, -2.0, -5.0], 2, [10.0, -2.0, -5.0])];
-    let r = crate::core::control::check_legs(&o, &clear, req, 0);
+    let r = crate::core::control::check_legs(&o, &clear, req, Some(-5.0), 0);
     assert_eq!(r[0].state, RouteState::Feasible);
     // No pose offset: the map cannot be placed, everything is unseen.
     let mut o = Obstacles::new();
     o.ingest_occupancy(&map_payload(-3.2, 12.8, -3.2, 3.2, &|_, _| false));
-    let r = crate::core::control::check_legs(&o, &clear, req, 0);
+    let r = crate::core::control::check_legs(&o, &clear, req, Some(-5.0), 0);
     assert_eq!(r[0].state, RouteState::Unverified);
+}
+
+#[test]
+fn a_leg_is_judged_only_where_it_runs_in_the_scan_slice() {
+    // The post 0.525 m off the leg at n 4.5 reads too tight from the leg's
+    // own height; from 1 m above or below it the planar slice says nothing
+    // about the leg, and a leg climbing through the slice is judged only
+    // where it crosses it.
+    let mut o = Obstacles::new();
+    o.ingest_occupancy(&map_payload(-3.2, 12.8, -3.2, 3.2, &post(4.5)));
+    o.ingest_pose(
+        &json!({"pose": {"t": [0.0, 0.0, 0.0]}}),
+        Some([0.0, 0.0]),
+        0,
+    );
+    let req = REQUIRED_M as f32;
+    let check = |legs: &[(u32, [f32; 3], u32, [f32; 3])], d: Option<f32>| {
+        crate::core::control::check_legs(&o, legs, req, d, 0)[0]
+    };
+    let level = [(1, [0.0, 0.0, -5.0], 2, [10.0, 0.0, -5.0])];
+    assert_eq!(check(&level, Some(-5.0)).state, RouteState::Infeasible);
+    for d in [Some(-6.0), Some(-4.0), None] {
+        let r = check(&level, d);
+        assert_eq!(r.state, RouteState::Unverified, "{d:?}");
+        assert_eq!(r.pinch, None, "{d:?}");
+    }
+    // From d −5 to −6 over 10 m: within 0.13 m of d −5 for its first 1.3 m,
+    // short of the post at n 4.5.
+    let climb = [(1, [0.0, 0.0, -5.0], 2, [10.0, 0.0, -6.0])];
+    let r = check(&climb, Some(-5.0));
+    assert_eq!(r.state, RouteState::Unverified, "{r:?}");
+    // From the plane at d −5.45 the slice holds n 3.2 to 5.8: the post.
+    let r = check(&climb, Some(-5.45));
+    assert_eq!(r.state, RouteState::Infeasible, "{r:?}");
+    let (p, _) = r.pinch.unwrap();
+    assert!((p[0] - 4.5).abs() < 0.1, "{p:?}");
+    assert!((p[2] + 5.45).abs() < 0.02, "{p:?}");
+    // A clear leg judged only in part is unverified, never feasible.
+    let clear = [(1, [0.0, -2.0, -5.0], 2, [10.0, -2.0, -6.0])];
+    assert_eq!(check(&clear, Some(-5.45)).state, RouteState::Unverified);
+    let clear_level = [(1, [0.0, -2.0, -5.0], 2, [10.0, -2.0, -5.0])];
+    assert_eq!(check(&clear_level, Some(-5.1)).state, RouteState::Feasible);
 }
 
 #[test]
@@ -285,6 +335,7 @@ fn a_launch_into_an_infeasible_route_is_refused_naming_the_pinch() {
     let ((), logs) = super::supervisor::with_logs(|| {
         let mut w = World::new();
         confined(&mut w);
+        on_pad(&mut w);
         map(&mut w, &area(&post(15.0)));
         mission(&mut w, "loaded", 0);
         w.run(200);
@@ -329,9 +380,20 @@ fn a_feasible_route_launches_and_reports_feasible() {
     map(&mut w, &area(&|_, _| false));
     mission(&mut w, "loaded", 0);
     w.run(200);
-    assert!(ok(&w.action_args("launch", json!({"after": "mission"}))));
+    // From the floor the scan plane is under every leg: none is judged yet,
+    // and none holds the launch.
     let rc = w.p.state(w.now).route_check.expect("route_check");
-    assert_eq!(rc.state, RouteState::Feasible);
+    assert_eq!((rc.state, rc.pinch), (RouteState::Unverified, None));
+    assert_eq!(rc.unverified_legs, vec![2, 3, 4]);
+    assert!(ok(&w.action_args(
+        "launch",
+        json!({"after": "mission", "alt_m": 5.0})
+    )));
+    // At the legs' height they are judged, and clear.
+    run_seen(&mut w, 3000);
+    assert_eq!(w.pos[2], -5.0);
+    let rc = w.p.state(w.now).route_check.expect("route_check");
+    assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
     assert_eq!(rc.pinch, None, "no obstacle near the route");
     // The pose stops: its σ is held 5 s, then the route reads at best
     // unverified.
@@ -353,7 +415,12 @@ fn an_infeasible_leg_ahead_holds_a_mission_a_ground_station_started() {
     map(&mut w, &area(&post(15.0)));
     mission(&mut w, "active", 2);
     run_seen(&mut w, 100);
-    assert_eq!(w.set_modes(copter::BRAKE), 1, "held at once");
+    // Far ahead (the pinch is 15 m off): not held on one check, the FC
+    // slowed meanwhile; held once the next check confirms it.
+    assert_eq!(w.set_modes(copter::BRAKE), 0, "not on one check");
+    assert_eq!(speed_changes(&w), vec![0.5]);
+    run_seen(&mut w, 1000);
+    assert_eq!(w.set_modes(copter::BRAKE), 1, "held once confirmed");
     run_seen(&mut w, 1600);
     assert_eq!(w.mode, copter::GUIDED);
     assert_eq!(w.p.owner(), Owner::Pilot);
@@ -400,7 +467,7 @@ fn a_leg_seen_tight_mid_flight_holds_the_mission() {
     assert_eq!(w.set_modes(copter::BRAKE), 0, "unseen is no reason to hold");
     // The rest of the tunnel is mapped, with the pinch on leg 2→3.
     map(&mut w, &area(&post(15.0)));
-    run_seen(&mut w, 1200);
+    run_seen(&mut w, 2200);
     assert_eq!(w.set_modes(copter::BRAKE), 1);
     assert_eq!(
         w.p.state(w.now).hold_reason.as_deref(),

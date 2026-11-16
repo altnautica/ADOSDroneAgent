@@ -26,6 +26,28 @@ use crate::geo::{self, V2};
 
 /// A return closer to the ground than this, after levelling, is ground.
 pub const GROUND_REJECT_M: f32 = 0.4;
+/// The airframe's top over the planar scan plane: the planar lidar is
+/// mounted above every other part so nothing cuts its ring, and its own
+/// housing rises at most this far over its plane (an RPLIDAR is about
+/// 41 mm tall).
+pub const FRAME_TOP_M: f32 = 0.03;
+/// Half the height of the flight slice the planar scan stands for: the
+/// airframe's top ([`FRAME_TOP_M`]) plus the confined margin's 0.1 m past
+/// the airframe ([`crate::config::CONFINED_TIP_EXTRA_M`]). A return levelled
+/// higher than this over the scan plane met something over the slice (a
+/// tunnel roof a nose-up scan reaches): like the ground it only bounds what
+/// the beam saw free (the horizon), and is no obstacle. The brake's speed
+/// caps count horizon points as they count obstacles; only the hard stop
+/// and the push, which act inside the margin, read obstacles alone. A
+/// tilted beam lifts a wall over the slice only at tan θ > `SLICE_HALF_M` /
+/// range: past 16.5° inside the 0.44 m a vehicle at the 0.5 m/s confined cap
+/// needs to stop, past 23° inside a 0.30 m confined margin (a 5-inch quad),
+/// all outside the confined pitch envelope; and the tilt lifting a wall
+/// ahead is the one slowing the vehicle toward it. Nothing below the plane
+/// is cut this way: the body, guards and props sit under it, so a return
+/// there is collision geometry. The route check judges a leg only where it
+/// runs within this of the scan plane.
+pub const SLICE_HALF_M: f32 = FRAME_TOP_M + crate::config::CONFINED_TIP_EXTRA_M;
 /// Scans older than this are not used.
 pub const SCAN_MAX_AGE_MS: u64 = 500;
 /// How far the planar scan sees along a bin without a return (the 12 m
@@ -89,9 +111,10 @@ pub struct Obstacles {
     offset: Option<V2>,
     hits: Vec<Hit>,
     /// Where each bin of the current scan stops seeing without an obstacle:
-    /// the floor where a tilted beam meets it, or [`SCAN_HORIZON_M`] when it
-    /// returns nothing. Nothing beyond is known free, so the stick brake
-    /// treats these points as possible obstacles.
+    /// the floor where a tilted beam meets it, a surface over the flight
+    /// slice ([`SLICE_HALF_M`]), or [`SCAN_HORIZON_M`] when it returns
+    /// nothing. Nothing beyond is known free, so the stick brake treats
+    /// these points as possible obstacles.
     horizon: Vec<V2>,
     /// When the current scan arrived (`None`: no scan yet).
     scan_ms: Option<u64>,
@@ -222,7 +245,7 @@ impl Obstacles {
             }
             match level_return(r, theta, level, pos_ne) {
                 (hit, false) => self.hits.push(hit),
-                (floor, true) => self.horizon.push(floor.ne),
+                (off_slice, true) => self.horizon.push(off_slice.ne),
             }
         }
         self.update_closing(level.yaw, now_ms);
@@ -452,7 +475,7 @@ impl Obstacles {
     }
 }
 
-/// Level one return and drop it when it is ground.
+/// Level one return and drop it when it is off the flight slice.
 pub fn level_hit(range: f32, theta: f32, l: Level, pos_ne: V2) -> Option<Hit> {
     match level_return(range, theta, l, pos_ne) {
         (hit, false) => Some(hit),
@@ -460,8 +483,10 @@ pub fn level_hit(range: f32, theta: f32, l: Level, pos_ne: V2) -> Option<Hit> {
     }
 }
 
-/// Level one return: its horizontal position, and whether it is the ground
-/// (closer to it than [`GROUND_REJECT_M`] after levelling).
+/// Level one return: its horizontal position, and whether it is off the
+/// flight slice: the ground (closer to it than [`GROUND_REJECT_M`] after
+/// levelling) or over the slice (more than [`SLICE_HALF_M`] above the scan
+/// plane).
 fn level_return(range: f32, theta: f32, l: Level, pos_ne: V2) -> (Hit, bool) {
     // Body FRD point, then rotate by roll (about x) and pitch (about y).
     let (bx, by) = (range * theta.cos(), range * theta.sin());
@@ -472,13 +497,15 @@ fn level_return(range: f32, theta: f32, l: Level, pos_ne: V2) -> (Hit, bool) {
     // Ry(pitch): x'' = x·cp + z'·sp, z'' = −x·sp + z'·cp
     let x2 = bx * cp + z1 * sp;
     let z2 = -bx * sp + z1 * cp;
+    // z2 is down: the ground below, the slice's top at −SLICE_HALF_M.
     let ground = l.agl.is_some_and(|agl| agl - z2 < GROUND_REJECT_M);
+    let overhead = -z2 > SLICE_HALF_M;
     let hit = Hit {
         body_bearing: y1.atan2(x2),
         range_m: x2.hypot(y1),
         ne: geo::add(pos_ne, geo::body_to_ned(x2, y1, l.yaw)),
     };
-    (hit, ground)
+    (hit, ground || overhead)
 }
 
 #[cfg(test)]

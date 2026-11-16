@@ -1,12 +1,22 @@
 //! The route as the FC flies it: the router's mirrored navigation items in
 //! the FC's local NED frame, cut into legs, and each leg's verdict against
 //! the occupancy map.
+//!
+//! The map is planar: the occupancy tiles and the scan say what lies at the
+//! height of the scan plane, which flies with the vehicle. A leg is judged
+//! only along the part of it that runs within
+//! [`crate::obstacles::SLICE_HALF_M`] of the plane; the rest of it reads
+//! unverified, never clear and never too tight. Each part is judged when the
+//! vehicle reaches its height. A pinch that exists only below the scan plane
+//! (a ledge at the height of the body under it) is not visible to a planar
+//! lidar; a confined survey route is cleared offline against the place's
+//! geometry for it.
 
 use ados_protocol::pilot::RouteState;
 use serde_json::Value;
 
 use crate::geo::V2;
-use crate::obstacles::Obstacles;
+use crate::obstacles::{Obstacles, SLICE_HALF_M};
 
 /// MAV_CMD_NAV_TAKEOFF.
 const CMD_TAKEOFF: u16 = 22;
@@ -176,46 +186,75 @@ pub fn legs_of(
 pub struct LegCheck {
     pub from_seq: u32,
     pub to_seq: u32,
+    /// The leg's ends, local NED.
+    pub from: [f32; 3],
+    pub to: [f32; 3],
     pub state: RouteState,
     /// The point of the leg nearest a seen obstacle: local NED and the
     /// clearance (m).
     pub pinch: Option<([f32; 3], f32)>,
 }
 
-/// Check `legs` against `obs` with `required` m of clearance. The clearance
-/// is a lower bound (see [`crate::obstacles::Obstacles::probe_leg`]).
-pub fn check_legs(obs: &Obstacles, legs: &[Leg], required: f32, now_ms: u64) -> Vec<LegCheck> {
+/// The part `[f0, f1]` of a leg from height `za` to `zb` (local down) that
+/// runs within [`SLICE_HALF_M`] of the scan plane at `plane_d`; `None` when
+/// no part does.
+fn in_slice(za: f32, zb: f32, plane_d: f32) -> Option<(f32, f32)> {
+    let dz = zb - za;
+    if dz.abs() < 1e-6 {
+        return ((za - plane_d).abs() <= SLICE_HALF_M).then_some((0.0, 1.0));
+    }
+    let lo = (plane_d - SLICE_HALF_M - za) / dz;
+    let hi = (plane_d + SLICE_HALF_M - za) / dz;
+    let (f0, f1) = (lo.min(hi).max(0.0), lo.max(hi).min(1.0));
+    (f0 <= f1).then_some((f0, f1))
+}
+
+/// Check `legs` against `obs` with `required` m of clearance, each along the
+/// part of it within the slice of the scan plane at `plane_d` (local down;
+/// `None`: no plane, nothing is judged). The clearance is a lower bound
+/// (see [`crate::obstacles::Obstacles::probe_leg`]); a leg judged only in
+/// part, or not at all, is at best unverified.
+pub fn check_legs(
+    obs: &Obstacles,
+    legs: &[Leg],
+    required: f32,
+    plane_d: Option<f32>,
+    now_ms: u64,
+) -> Vec<LegCheck> {
     legs.iter()
         .map(|&(from_seq, a, to_seq, b)| {
-            let probe = obs.probe_leg(
-                [a[0], a[1]],
-                [b[0], b[1]],
-                required,
-                required + REPORT_EXTRA_M,
-                now_ms,
-            );
-            let pinch = probe.nearest.map(|(t, q, d)| {
-                let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+            let mut leg = LegCheck {
+                from_seq,
+                to_seq,
+                from: a,
+                to: b,
+                state: RouteState::Unverified,
+                pinch: None,
+            };
+            let Some((f0, f1)) = plane_d.and_then(|d| in_slice(a[2], b[2], d)) else {
+                return leg;
+            };
+            let at = |f: f32| [a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])];
+            let (pa, pb) = (at(f0), at(f1));
+            let probe = obs.probe_leg(pa, pb, required, required + REPORT_EXTRA_M, now_ms);
+            leg.pinch = probe.nearest.map(|(t, q, d)| {
+                let len = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
                 let f = if len > 1e-6 {
-                    (t / len).clamp(0.0, 1.0)
+                    f0 + (t / len).clamp(0.0, 1.0) * (f1 - f0)
                 } else {
-                    0.0
+                    f0
                 };
                 ([q[0], q[1], a[2] + f * (b[2] - a[2])], d)
             });
-            let state = if pinch.is_some_and(|(_, d)| d < required) {
+            let whole = f0 <= 0.0 && f1 >= 1.0;
+            leg.state = if leg.pinch.is_some_and(|(_, d)| d < required) {
                 RouteState::Infeasible
-            } else if probe.unseen {
+            } else if probe.unseen || !whole {
                 RouteState::Unverified
             } else {
                 RouteState::Feasible
             };
-            LegCheck {
-                from_seq,
-                to_seq,
-                state,
-                pinch,
-            }
+            leg
         })
         .collect()
 }

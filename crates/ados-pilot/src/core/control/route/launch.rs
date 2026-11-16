@@ -1,5 +1,6 @@
 //! The confined launch into the FC mission: refused unless the whole route,
-//! from its first item, was checked and keeps the clearance.
+//! from its first item, was checked, and refused where a leg the scan judges
+//! from the ground (one flown within its slice) is too tight.
 
 use super::super::super::Pilot;
 use super::leg_label;
@@ -9,7 +10,9 @@ impl Pilot {
     /// route is infeasible (naming the leg, the point, its clearance and the
     /// clearance needed), or while it was not fully checked
     /// (`route_unchecked`): an item has no position, the mission is longer
-    /// than the feed, or the feed may not hold the FC's mission at all.
+    /// than the feed, or the feed may not hold the FC's mission at all. From
+    /// the floor the planar scan judges no leg flown above its slice: those
+    /// read unverified and are judged in flight at their height.
     pub(in crate::core) fn route_launch_check(&mut self, now_ms: u64) -> Result<(), String> {
         if !self.confined() {
             return Ok(());

@@ -48,6 +48,9 @@ pub struct SupHold {
     /// The FC flew its own failsafe return when the hold began: the resumed
     /// return is still that failsafe.
     pub failsafe_cause: Option<&'static str>,
+    /// The route held the mission (an infeasible leg ahead): the route from
+    /// here, not the way ahead, resumes it, even once a stall was raised.
+    pub route: bool,
 }
 
 #[derive(Debug, Default)]
@@ -158,6 +161,7 @@ impl Pilot {
                 braking_ms: Some(now_ms),
                 clear_since: None,
                 failsafe_cause,
+                route: false,
             });
         }
         self.hold_reason = Some(reason.to_owned());
@@ -266,22 +270,35 @@ impl Pilot {
         }
     }
 
-    /// An obstacle hold (no stall) resumes the FC flight it stopped.
+    /// A hold resumes the FC flight it stopped: an obstacle hold (no stall)
+    /// once the way ahead has kept clear for `RESUME_CLEAR_MS`; a route hold,
+    /// stalled or not, once the route from here has read anything but
+    /// infeasible for [`super::route::ROUTE_RESUME_DWELL_MS`]. Resuming ends
+    /// the stall, its countdown and the hold reason.
     fn try_resume(&mut self, now_ms: u64) {
         let Some(h) = self.sup.hold.clone() else {
             return;
         };
-        if h.braking_ms.is_some() || self.sup.stall.active.is_some() || !self.in_guided() {
+        if h.braking_ms.is_some() || !self.in_guided() {
             return;
         }
-        let clear_since = self
-            .ahead_clear(h.resume, now_ms)
-            .then(|| h.clear_since.unwrap_or(now_ms));
-        if let Some(hh) = &mut self.sup.hold {
-            hh.clear_since = clear_since;
-        }
-        if !clear_since.is_some_and(|t| now_ms.saturating_sub(t) >= RESUME_CLEAR_MS) {
-            return;
+        if h.route {
+            if !self.route_resume_due() {
+                return;
+            }
+        } else {
+            if self.sup.stall.active.is_some() {
+                return;
+            }
+            let clear_since = self
+                .ahead_clear(h.resume, now_ms)
+                .then(|| h.clear_since.unwrap_or(now_ms));
+            if let Some(hh) = &mut self.sup.hold {
+                hh.clear_since = clear_since;
+            }
+            if !clear_since.is_some_and(|t| now_ms.saturating_sub(t) >= RESUME_CLEAR_MS) {
+                return;
+            }
         }
         if h.resume == Resume::Mission {
             // The mission is not flown on an estimate nobody vouches for,
@@ -311,7 +328,7 @@ impl Pilot {
                 self.sup.return_req = Some((now_ms, copter::GUIDED));
             }
         }
-        tracing::info!(target: "ados_pilot", resume = ?h.resume, "pilot_supervisor_resume");
+        tracing::info!(target: "ados_pilot", resume = ?h.resume, route = h.route, "pilot_supervisor_resume");
     }
 
     /// The mission item the FC flies, in local NED, when the router knows it.
