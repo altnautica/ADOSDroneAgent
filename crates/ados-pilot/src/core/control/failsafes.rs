@@ -17,7 +17,9 @@ impl Pilot {
         self.watch_rc(now_ms);
         // The FC's own landed state: a touchdown never holds a failsafe back.
         let airborne = self.fc.armed && !self.fc.landed();
-        // Controller lost: the owning session stopped streaming.
+        // Controller lost: the owning session stopped streaming. The sticks
+        // ask nothing, so the reference brakes to a hold on the profile's
+        // brake limits, and resumed frames fly only once centred.
         if self.owner() == Owner::Pilot
             && self.sessions.owner.is_some()
             && self.failsafe.input_stale(now_ms)
@@ -25,7 +27,8 @@ impl Pilot {
         {
             self.controller_lost_shown = true;
             self.sessions.axes = [0.0; 4];
-            self.brake_hold(now_ms, Some("controller-lost"));
+            self.sessions.arm_gate();
+            self.brake_hold(Some("controller-lost"));
             self.banner = Some(banner("pilot.banner.controller_lost", &[], now_ms));
         }
         let window = u64::from(self.settings.pilot.link_loss_s) * 1000;

@@ -15,19 +15,32 @@ impl Pilot {
     pub fn on_request_from(&mut self, req: Request, sid: Option<&str>, now_ms: u64) -> Reply {
         match req {
             Request::Input(i) => {
-                self.failsafe.on_input(now_ms);
+                // Every frame from an operator instance keeps its own
+                // link-loss watch alive.
                 self.failsafe.instances.heard(sid, &i.src, now_ms);
                 self.failsafe.instances.session(sid, i.session);
-                self.sessions
-                    .offer(&i.src, i.session, i.axes, i.buttons, now_ms);
-                self.controller_lost_shown = false;
+                // Only the owner's newer frames keep its sticks alive; a
+                // late, reordered or other surface's frame still shows the
+                // operator link is up.
+                match self
+                    .sessions
+                    .offer(&i.src, i.session, i.seq, i.axes, i.buttons, now_ms)
+                {
+                    crate::flows::Accept::Accepted => {
+                        self.failsafe.on_input(now_ms);
+                        self.controller_lost_shown = false;
+                    }
+                    crate::flows::Accept::OtherSession | crate::flows::Accept::Stale => {
+                        self.failsafe.on_surface(now_ms);
+                    }
+                }
                 Reply::None
             }
             Request::Release { src, session } => {
                 self.failsafe.on_surface(now_ms);
                 self.failsafe.instances.heard(sid, &src, now_ms);
                 if self.sessions.release(&src, session, now_ms) && self.owner() == Owner::Pilot {
-                    self.brake_hold(now_ms, None);
+                    self.brake_hold(None);
                 }
                 Reply::None
             }
@@ -73,7 +86,7 @@ impl Pilot {
             }
             Request::LeaseRelease { lease_id } => {
                 if self.auth.release(lease_id) {
-                    self.brake_hold(now_ms, None);
+                    self.brake_hold(None);
                     self.skill_ended(now_ms);
                 }
                 Reply::None
@@ -222,8 +235,10 @@ impl Pilot {
         self.swarm = Some(g);
     }
 
-    /// Brake to a hold as `pilot`.
-    pub(super) fn brake_hold(&mut self, now_ms: u64, reason: Option<&str>) {
+    /// Brake to a hold as `pilot`: the reference flown so far brakes on the
+    /// stick limits from its own velocity and acceleration, and holds where
+    /// it stops.
+    pub(super) fn brake_hold(&mut self, reason: Option<&str>) {
         if matches!(
             self.owner(),
             Owner::Idle | Owner::FcMode | Owner::MissionFc | Owner::Tuning
@@ -233,12 +248,6 @@ impl Pilot {
         self.set_owner(Owner::Pilot, reason.unwrap_or("brake"));
         self.goto = None;
         self.swarm = None;
-        let v = self
-            .fc
-            .fresh_local(now_ms)
-            .map(|p| [p.vn, p.ve])
-            .unwrap_or([0.0, 0.0]);
-        self.mr.engage(v);
         self.hold_reason = reason.map(str::to_owned);
     }
 }

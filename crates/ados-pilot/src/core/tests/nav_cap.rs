@@ -316,15 +316,14 @@ fn a_stop_under_the_cap_slows_at_the_profiles_acceleration() {
     ext_nav(&mut w);
     let v = capped_stop(&mut w);
     assert!(v[0] > CAP - 0.2, "at the cap before the stop: {v:?}");
-    let profile = crate::model::limits(w.p.settings.pilot.profile).a_h;
+    let profile = w.p.profile_limits().a_brk;
     assert!(
         profile > ACCEL,
         "the test needs a profile faster than the cap"
     );
+    // The stop brakes into its hold with no last step to zero.
     let decel = v
         .windows(2)
-        // The last step to the position hold drops to zero at once.
-        .filter(|p| p[1] > crate::model::HOLD_CAPTURE_MPS)
         .map(|p| (p[0] - p[1]) / TICK_S)
         .fold(0.0f32, f32::max);
     assert!(

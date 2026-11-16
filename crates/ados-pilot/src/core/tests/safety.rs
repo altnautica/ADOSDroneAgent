@@ -14,7 +14,7 @@ use crate::core::control::{
     HOLD_OBSTACLE_CLOSE, PUSH_MAX_MPS,
 };
 use crate::core::Reply;
-use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
+use crate::fc::MASK_POS_VEL_YAW;
 use crate::geo;
 use crate::modes::{copter, plane};
 use crate::obstacles::{level_hit, Level, Obstacles, SCAN_CLOSING_MAX_MPS};
@@ -608,9 +608,10 @@ fn a_centred_stick_inside_the_margin_is_pushed_out_not_held() {
     w.action("take_control");
     w.stick([0.0; 4], 600);
     // Sticks centred 1.2 m from a wall ahead, long past the hold capture.
+    // The push moves the reference out with it: the setpoint keeps one type,
+    // and its velocity is the push.
     stick_with_scan(&mut w, [0.0; 4], &wall_scan(1.2), 3000);
     let sp = w.last_setpoint().unwrap();
-    assert_eq!(sp.type_mask.bits(), MASK_VELOCITY, "held inside the margin");
     assert!(sp.vx < -0.1, "not pushed back out: {}", sp.vx);
 }
 
@@ -640,7 +641,7 @@ fn a_goto_arrival_hold_inside_the_margin_moves_back_out() {
     let a = w.last_setpoint().unwrap().x;
     feed(&mut w, 2000);
     let b = w.last_setpoint().unwrap();
-    assert_eq!(b.type_mask.bits(), MASK_POS_VEL_YAW, "not a hold");
+    assert_eq!(b.type_mask.bits(), crate::fc::MASK_POS_VEL_ACC_YAW, "not a hold");
     assert!(b.x < a - 0.05, "push dropped by the hold: {a} -> {}", b.x);
 }
 
@@ -972,8 +973,13 @@ fn a_blocked_goto_keeps_its_goal_and_way_on_the_frame() {
     assert_eq!(s.plan_ned[1], [g[0], g[1]]);
 }
 
+/// Centred sticks brake the reference to a hold where it stops, whatever
+/// the vehicle still does: the hold is the reference standing still, never a
+/// point taken again where a coasting or drifting vehicle happens to be.
+/// Before, the hold point was captured once the vehicle slowed (or after
+/// 3 s of drift), so a vehicle that coasted on flew back to it.
 #[test]
-fn centred_sticks_hold_only_once_the_vehicle_slows() {
+fn centred_sticks_hold_where_the_reference_stops() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);
     w.action("take_control");
@@ -982,34 +988,16 @@ fn centred_sticks_hold_only_once_the_vehicle_slows() {
     // Sticks centred while the vehicle still coasts at 3 m/s.
     w.vel = [3.0, 0.0, 0.0];
     w.stick([0.0; 4], 2500);
-    let sp = w.last_setpoint().unwrap();
-    assert_eq!(
-        sp.type_mask.bits(),
-        MASK_VELOCITY,
-        "hold point taken while coasting"
-    );
+    let sp = w.last_setpoint().unwrap().clone();
+    assert_eq!(sp.type_mask.bits(), crate::fc::MASK_POS_VEL_ACC_YAW);
     assert!(sp.vx.abs() < 1e-3 && sp.vy.abs() < 1e-3, "commands a stop");
-    w.vel = [0.1, 0.0, 0.0];
-    w.pos[0] = 6.0;
-    w.stick([0.0; 4], 100);
-    let sp = w.last_setpoint().unwrap();
-    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_YAW);
-    assert_eq!(sp.x, 6.0, "the hold is where the vehicle stopped");
-}
-
-#[test]
-fn centred_sticks_hold_after_settling_even_in_a_drift() {
-    let mut w = World::new();
-    w.airborne(copter::GUIDED);
-    w.action("take_control");
-    w.stick([0.0; 4], 600);
-    w.stick([0.0, 1.0, 0.0, 0.0], 500);
+    // The vehicle creeps and drifts near the point: the hold stays put.
     w.vel = [0.5, 0.0, 0.0];
+    w.pos[0] = sp.x - 0.5;
     w.stick([0.0; 4], 3500);
-    assert_eq!(
-        w.last_setpoint().unwrap().type_mask.bits(),
-        MASK_POS_VEL_YAW
-    );
+    let held = w.last_setpoint().unwrap();
+    assert_eq!(held.type_mask.bits(), crate::fc::MASK_POS_VEL_ACC_YAW);
+    assert_eq!([held.x, held.y], [sp.x, sp.y], "the hold moved");
 }
 
 /// A follow skill's position goal with its feed-forward.

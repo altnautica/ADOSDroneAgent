@@ -1,52 +1,160 @@
-//! Multirotor stick model (C2): profiles, expo, a jerk-limited velocity
-//! shaper, and position, altitude and heading hold capture.
+//! Multirotor stick model (C2): the speed profiles and their stick limits,
+//! held to the flight controller's guidance limits, the stick curve, and the
+//! jerk-limited shaper every pilot-flown reference moves on
+//! ([`crate::core`]'s `MotionRef`).
 
-use ados_protocol::pilot::Profile;
+use ados_protocol::pilot::{Profile, VehicleClass};
 
 use crate::geo::{self, V2};
 
-/// One profile's limits.
+/// One profile's stick limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits {
+    /// Horizontal speed at full stick, m/s.
     pub v_h: f32,
+    /// Climb and descent speed at full stick, m/s.
     pub v_up: f32,
     pub v_down: f32,
+    /// Yaw rate at full stick, °/s.
     pub yaw_dps: f32,
-    pub a_h: f32,
+    /// Horizontal acceleration while speeding up, m/s².
+    pub a_acc: f32,
+    /// Horizontal deceleration while slowing, braking to a hold or braking
+    /// for an obstacle, m/s².
+    pub a_brk: f32,
+    /// Horizontal jerk, m/s³.
     pub jerk: f32,
-    pub expo: f32,
+    /// Vertical acceleration, m/s², and jerk, m/s³.
+    pub a_v: f32,
+    pub jerk_v: f32,
+    /// Yaw acceleration, °/s².
+    pub yaw_dps2: f32,
+    /// Stick expo per axis ([`expo`]).
+    pub expo_h: f32,
+    pub expo_v: f32,
+    pub expo_yaw: f32,
 }
 
-pub fn limits(p: Profile) -> Limits {
+impl Limits {
+    /// Every limit the lower of `self` and `o`.
+    pub fn min(self, o: Limits) -> Limits {
+        Limits {
+            v_h: self.v_h.min(o.v_h),
+            v_up: self.v_up.min(o.v_up),
+            v_down: self.v_down.min(o.v_down),
+            yaw_dps: self.yaw_dps.min(o.yaw_dps),
+            a_acc: self.a_acc.min(o.a_acc),
+            a_brk: self.a_brk.min(o.a_brk),
+            jerk: self.jerk.min(o.jerk),
+            a_v: self.a_v.min(o.a_v),
+            jerk_v: self.jerk_v.min(o.jerk_v),
+            yaw_dps2: self.yaw_dps2.min(o.yaw_dps2),
+            // Expo only softens the centre; the profile's own stays.
+            expo_h: self.expo_h,
+            expo_v: self.expo_v,
+            expo_yaw: self.expo_yaw,
+        }
+    }
+}
+
+/// The open-place multirotor rows: at or under ArduCopter's default guided
+/// limits (`WP_ACC` 2.5 m/s², `PSC_NE_JERK` 5 m/s³, `WP_ACC_Z` 1 m/s²,
+/// `PSC_D_JERK` 5 m/s³, `ATC_ACC_Y_MAX` 270 °/s²), so the flight controller
+/// tracks the pilot's reference rather than shaping it again. Braking is
+/// firmer than speeding up, and Sport has the most expo, so its extra speed
+/// stays fine near the centre.
+fn multirotor(p: Profile) -> Limits {
     match p {
         Profile::Cine => Limits {
             v_h: 3.0,
             v_up: 1.5,
             v_down: 1.0,
             yaw_dps: 30.0,
-            a_h: 1.5,
-            jerk: 3.0,
-            expo: 0.3,
+            a_acc: 1.0,
+            a_brk: 2.0,
+            jerk: 4.0,
+            a_v: 0.6,
+            jerk_v: 4.0,
+            yaw_dps2: 60.0,
+            expo_h: 0.25,
+            expo_v: 0.3,
+            expo_yaw: 0.2,
         },
         Profile::Normal => Limits {
-            v_h: 8.0,
-            v_up: 3.0,
-            v_down: 2.0,
+            v_h: 7.0,
+            v_up: 2.5,
+            v_down: 1.5,
             yaw_dps: 90.0,
-            a_h: 3.0,
-            jerk: 6.0,
-            expo: 0.2,
+            a_acc: 2.0,
+            a_brk: 2.5,
+            jerk: 5.0,
+            a_v: 1.0,
+            jerk_v: 5.0,
+            yaw_dps2: 180.0,
+            expo_h: 0.25,
+            expo_v: 0.3,
+            expo_yaw: 0.2,
         },
         Profile::Sport => Limits {
-            v_h: 14.0,
-            v_up: 5.0,
-            v_down: 3.0,
+            v_h: 10.0,
+            v_up: 3.0,
+            v_down: 2.0,
             yaw_dps: 150.0,
-            a_h: 6.0,
-            jerk: 12.0,
-            expo: 0.1,
+            a_acc: 2.5,
+            a_brk: 2.5,
+            jerk: 5.0,
+            a_v: 1.0,
+            jerk_v: 5.0,
+            yaw_dps2: 270.0,
+            expo_h: 0.4,
+            expo_v: 0.4,
+            expo_yaw: 0.3,
         },
     }
+}
+
+/// A profile's stick limits for an airframe class. The table is the open
+/// multirotor's; a class without a row of its own (a VTOL in hover) flies
+/// that row held to Cine's.
+pub fn limits(class: VehicleClass, p: Profile) -> Limits {
+    match class {
+        VehicleClass::Multirotor => multirotor(p),
+        _ => multirotor(p).min(multirotor(Profile::Cine)),
+    }
+}
+
+/// `lim` held to the flight controller's own guidance limits where it
+/// reports them (`param` reads one): `WP_ACC` and `WP_ACC_Z` (m/s²; the
+/// older `WPNAV_ACCEL` and `WPNAV_ACCEL_Z` in cm/s²), `PSC_NE_JERK` and
+/// `PSC_D_JERK` (m/s³; the older `PSC_JERK_XY` and `PSC_JERK_Z`), and
+/// `ATC_ACC_Y_MAX` (°/s², or the older `ATC_ACCEL_Y_MAX` in cdeg/s²; 0 is
+/// no limit). Asking more than these, the FC would shape the reference again.
+pub fn fc_capped(mut lim: Limits, param: impl Fn(&str) -> Option<f32>) -> Limits {
+    let pos = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0);
+    let either = |new: &str, old: &str, old_scale: f32| {
+        pos(param(new)).or_else(|| pos(param(old)).map(|v| v * old_scale))
+    };
+    if let Some(a) = either("WP_ACC", "WPNAV_ACCEL", 0.01) {
+        lim.a_acc = lim.a_acc.min(a);
+        lim.a_brk = lim.a_brk.min(a);
+    }
+    if let Some(j) = either("PSC_NE_JERK", "PSC_JERK_XY", 1.0) {
+        lim.jerk = lim.jerk.min(j);
+    }
+    if let Some(a) = either("WP_ACC_Z", "WPNAV_ACCEL_Z", 0.01) {
+        lim.a_v = lim.a_v.min(a);
+    }
+    if let Some(j) = either("PSC_D_JERK", "PSC_JERK_Z", 1.0) {
+        lim.jerk_v = lim.jerk_v.min(j);
+    }
+    // A value past 1000 is centidegrees (firmware before the unit change).
+    let yaw = pos(param("ATC_ACC_Y_MAX"))
+        .map(|v| if v > 1000.0 { v / 100.0 } else { v })
+        .or_else(|| pos(param("ATC_ACCEL_Y_MAX")).map(|v| v / 100.0));
+    if let Some(y) = yaw {
+        lim.yaw_dps2 = lim.yaw_dps2.min(y);
+    }
+    lim
 }
 
 /// One profile's limits on the setpoints the pilot flies for a skill goal or
@@ -56,7 +164,8 @@ pub fn limits(p: Profile) -> Limits {
 /// 2.0 m/s³ an 11.7°/s tilt rate; ArduCopter's own guided shaping defaults
 /// are `WP_ACC` 2.5 m/s² and `PSC_NE_JERK` 5 m/s³, which turned stepped
 /// follow commands into 15-26°/s tilt rates. The obstacle brake keeps the
-/// profile's stick limits ([`Limits::a_h`]): a stop is never held to these.
+/// profile's stick brake limit ([`Limits::a_brk`]): a stop is never held to
+/// these.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GoalLimits {
     /// Horizontal acceleration, m/s².
@@ -112,13 +221,26 @@ pub fn expo(x: f32, e: f32) -> f32 {
     (1.0 - e) * x + e * x * x * x
 }
 
-/// Below this speed a centred stick captures a hold point.
-pub const HOLD_CAPTURE_MPS: f32 = 0.2;
-/// A centred stick holds after this long even if the vehicle never slows
-/// below [`HOLD_CAPTURE_MPS`].
-pub const HOLD_SETTLE_S: f32 = 3.0;
+/// A stick axis smaller than this is centred: every surface's own deadzone
+/// (at least 0.04) is larger, so a tiny residual never creeps.
+pub const CENTRED_AXIS: f32 = 0.02;
 
-/// A 2-D velocity shaper: acceleration magnitude ≤ `a_h`, change of
+/// `x`, or 0 when it is centred ([`CENTRED_AXIS`]).
+pub fn centred(x: f32) -> f32 {
+    if x.abs() < CENTRED_AXIS {
+        0.0
+    } else {
+        x
+    }
+}
+
+/// Gain the stick reference settles on near its target, 1/s: a 0.25 s
+/// time constant below `jerk`/16 m/s of the target (0.3 m/s at 5 m/s³).
+/// The goal shaper's own gain (jerk over acceleration, 2/s on a 2.5 m/s²
+/// brake) leaves a stop crawling for over a second below 0.5 m/s.
+pub const SETTLE_GAIN: f32 = 4.0;
+
+/// A 2-D velocity shaper: acceleration magnitude ≤ `a_max`, change of
 /// acceleration ≤ `jerk`·dt.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Shaper {
@@ -132,40 +254,20 @@ impl Shaper {
         self.a = [0.0, 0.0];
     }
 
-    /// Advance one step toward `target`.
-    pub fn step(&mut self, target: V2, lim: &Limits, dt: f32) -> V2 {
-        let err = geo::sub(target, self.v);
-        let e = geo::norm(err);
-        // Desired acceleration: the largest one that can still be ramped back to
-        // zero by the jerk limit before reaching the target (sqrt(2·j·e)),
-        // capped at a_h.
-        let a_mag = (2.0 * lim.jerk * e).sqrt().min(lim.a_h);
-        let a_des = if e > 1e-6 {
-            geo::scale(err, a_mag / e)
-        } else {
-            [0.0, 0.0]
-        };
-        let da = geo::clamp_len(geo::sub(a_des, self.a), lim.jerk * dt);
-        self.a = geo::clamp_len(geo::add(self.a, da), lim.a_h);
-        let step = geo::scale(self.a, dt);
-        // Never step past the target.
-        if geo::norm(step) >= e {
-            self.v = target;
-            self.a = [0.0, 0.0];
-        } else {
-            self.v = geo::add(self.v, step);
-        }
-        self.v
+    /// Advance one step toward `target`, with the acceleration held to
+    /// `a_max` and its change to `jerk`·`dt`, never to zero at once. Near
+    /// the target the acceleration falls off linearly, so it settles without
+    /// snapping to zero.
+    pub fn track(&mut self, target: V2, a_max: f32, jerk: f32, dt: f32) -> V2 {
+        self.track_gain(target, a_max, jerk, jerk / a_max, dt)
     }
 
-    /// Advance one step toward `target`, with the acceleration held to
-    /// `a_max` and its change to `jerk`·`dt`, never to zero at once: the
-    /// setpoints of a skill goal. Near the target the acceleration falls off
-    /// linearly, so it settles without snapping to zero.
-    pub fn track(&mut self, target: V2, a_max: f32, jerk: f32, dt: f32) -> V2 {
+    /// [`Shaper::track`] settling on the linear gain `k` (1/s) within
+    /// `jerk`/`k`² of the target.
+    fn track_gain(&mut self, target: V2, a_max: f32, jerk: f32, k: f32, dt: f32) -> V2 {
         let err = geo::sub(target, self.v);
         let e = geo::norm(err);
-        let a_mag = sqrt_rate(e, jerk / a_max, jerk, a_max, dt);
+        let a_mag = sqrt_rate(e, k, jerk, a_max, dt);
         let a_des = if e > 1e-6 {
             geo::scale(err, a_mag / e)
         } else {
@@ -176,161 +278,86 @@ impl Shaper {
         self.v = geo::add(self.v, geo::scale(self.a, dt));
         self.v
     }
-}
 
-/// What the stick model asks the FC for this tick.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Command {
-    /// Position hold: `[n, e, d]`, zero velocity, heading `yaw`.
-    Hold { pos: [f32; 3], yaw: f32 },
-    /// Velocity `[vn, ve, vd]` and yaw rate (rad/s).
-    Velocity { vel: [f32; 3], yaw_rate: f32 },
-}
-
-/// Inputs for one stick tick.
-#[derive(Debug, Clone, Copy)]
-pub struct StickIn {
-    /// `[roll, pitch, thr, yaw]` in [-1, 1].
-    pub axes: [f32; 4],
-    pub pos: [f32; 3],
-    pub vel: [f32; 3],
-    pub yaw: f32,
-    pub dt: f32,
-}
-
-/// Multirotor stick state: shaper plus captured holds.
-#[derive(Debug, Clone, Default)]
-pub struct Multirotor {
-    pub shaper: Shaper,
-    pub hold_ne: Option<V2>,
-    pub hold_d: Option<f32>,
-    pub hold_yaw: Option<f32>,
-    /// Seconds the sticks have been centred with the shaper stopped while the
-    /// vehicle still moved faster than [`HOLD_CAPTURE_MPS`].
-    pub settle_s: f32,
-}
-
-impl Multirotor {
-    /// Forget holds and match the shaper to the vehicle (on entering pilot).
-    pub fn engage(&mut self, vel_ne: V2) {
-        self.shaper.reset(vel_ne);
-        self.hold_ne = None;
-        self.hold_d = None;
-        self.hold_yaw = None;
-        self.settle_s = 0.0;
-    }
-
-    /// Capture a full hold at the current state.
-    pub fn hold_here(&mut self, pos: [f32; 3], yaw: f32) {
-        self.shaper.reset([0.0, 0.0]);
-        self.hold_ne = Some([pos[0], pos[1]]);
-        self.hold_d = Some(pos[2]);
-        self.hold_yaw = Some(yaw);
-        self.settle_s = 0.0;
-    }
-
-    /// The horizontal velocity the sticks ask for, in NED, before shaping.
-    pub fn stick_velocity(axes: [f32; 4], yaw: f32, lim: &Limits) -> V2 {
-        let fwd = expo(axes[1], lim.expo) * lim.v_h;
-        let right = expo(axes[0], lim.expo) * lim.v_h;
-        geo::body_to_ned(fwd, right, yaw)
-    }
-
-    /// One tick. `limit` post-processes the shaped horizontal velocity (the
-    /// obstacle brake and the geofence), `vz_bounds` clamps the vertical rate
-    /// (floor and ceiling).
-    pub fn step(
-        &mut self,
-        inp: &StickIn,
-        lim: &Limits,
-        mut limit: impl FnMut(V2) -> V2,
-        vz_bounds: (f32, f32),
-    ) -> Command {
-        let [_, _, thr, yaw_in] = inp.axes;
-        let horiz_centred = inp.axes[0] == 0.0 && inp.axes[1] == 0.0;
-        // Horizontal.
-        let target = if horiz_centred {
-            [0.0, 0.0]
-        } else {
-            Self::stick_velocity(inp.axes, inp.yaw, lim)
-        };
-        if !horiz_centred {
-            self.hold_ne = None;
-            self.settle_s = 0.0;
-        }
-        let shaped = self.shaper.step(target, lim, inp.dt);
-        let v_ne = limit(shaped);
-        if geo::norm(v_ne) < geo::norm(shaped) {
-            // The limiter cut speed: keep the shaper consistent with what
-            // flies, and drop the acceleration it was building, so a stick
-            // reversed away from an obstacle is not first spent unwinding it.
-            self.shaper.v = v_ne;
-            self.shaper.a = [0.0, 0.0];
-        }
-        // The hold point is captured once the vehicle itself is slow: a point
-        // taken while it still coasts is overshot and flown back to. The
-        // commanded zero velocity brakes it meanwhile; a vehicle that never
-        // settles (gusts) is held after `HOLD_SETTLE_S` anyway.
-        let coasting = geo::norm([inp.vel[0], inp.vel[1]]) >= HOLD_CAPTURE_MPS;
-        if horiz_centred && self.hold_ne.is_none() && coasting {
-            self.settle_s += inp.dt;
-        }
-        // The limiter may fly the vehicle with the sticks centred (the
-        // obstacle brake's push back out of the margin). Faster than a hold
-        // captures, it flies as velocity: no hold, and a held vehicle leaves
-        // the hold point. Slower, a captured hold (a stick hover, a goto's
-        // arrival) moves with it, so a push of any size is carried.
-        let limiter_flies = geo::norm(v_ne) >= HOLD_CAPTURE_MPS;
-        if limiter_flies {
-            self.hold_ne = None;
-        } else if let Some(h) = self.hold_ne.as_mut() {
-            h[0] += v_ne[0] * inp.dt;
-            h[1] += v_ne[1] * inp.dt;
-        }
-        if horiz_centred
-            && self.hold_ne.is_none()
-            && !limiter_flies
-            && geo::norm(self.shaper.v) < HOLD_CAPTURE_MPS
-            && (!coasting || self.settle_s >= HOLD_SETTLE_S)
+    /// [`Shaper::track`] speeding up at `a_acc` and slowing (a smaller or
+    /// reversed `target`) at `a_brk`, settling on [`SETTLE_GAIN`]. An
+    /// acceleration above the limit now in force (a brake that ends in a new
+    /// stick push) falls at the jerk limit, never at once. A target of zero
+    /// reached within one jerk step comes to rest, so a hold stands still.
+    pub fn track_ab(&mut self, target: V2, a_acc: f32, a_brk: f32, jerk: f32, dt: f32) -> V2 {
+        let slowing = geo::norm(target) < geo::norm(self.v) || geo::dot(target, self.v) < 0.0;
+        let a_max = if slowing { a_brk } else { a_acc };
+        let a_max = a_max.max(geo::norm(self.a) - jerk * dt);
+        self.track_gain(target, a_max, jerk, SETTLE_GAIN, dt);
+        if geo::norm(target) < 1e-6 && geo::norm(self.v) < 1e-3 && geo::norm(self.a) <= jerk * dt
         {
-            self.hold_ne = Some([inp.pos[0], inp.pos[1]]);
-            self.shaper.reset([0.0, 0.0]);
+            self.reset([0.0, 0.0]);
         }
-        // Vertical (NED: down positive).
-        let vd = if thr == 0.0 {
-            let hold = *self.hold_d.get_or_insert(inp.pos[2]);
-            (hold - inp.pos[2]).clamp(-lim.v_up, lim.v_down)
-        } else {
-            self.hold_d = None;
-            let t = expo(thr, lim.expo);
-            if t > 0.0 {
-                -t * lim.v_up
-            } else {
-                -t * lim.v_down
-            }
+        self.v
+    }
+}
+
+/// A 1-D [`Shaper`] (the reference's vertical speed).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Shaper1 {
+    pub v: f32,
+    pub a: f32,
+}
+
+impl Shaper1 {
+    pub fn reset(&mut self, v: f32) {
+        self.v = v;
+        self.a = 0.0;
+    }
+
+    /// [`Shaper::track_ab`] on one axis, at `a_max` both ways.
+    pub fn track(&mut self, target: f32, a_max: f32, jerk: f32, dt: f32) -> f32 {
+        let mut s = Shaper {
+            v: [self.v, 0.0],
+            a: [self.a, 0.0],
         };
-        let vd = vd.clamp(vz_bounds.0, vz_bounds.1);
-        // Yaw.
-        let yaw_rate = if yaw_in == 0.0 {
-            let hold = *self.hold_yaw.get_or_insert(inp.yaw);
-            (geo::wrap_pi(hold - inp.yaw) * 2.0)
-                .clamp(-lim.yaw_dps.to_radians(), lim.yaw_dps.to_radians())
+        s.track_ab([target, 0.0], a_max, a_max, jerk, dt);
+        self.v = s.v[0];
+        self.a = s.a[0];
+        self.v
+    }
+}
+
+/// What the sticks ask, after the centre threshold and the expo, before
+/// shaping.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StickAsk {
+    /// Horizontal velocity, NED m/s.
+    pub ne: V2,
+    /// Down velocity, m/s (NED: positive descends).
+    pub vd: f32,
+    /// Yaw rate, rad/s (positive clockwise).
+    pub yaw_rate: f32,
+}
+
+impl StickAsk {
+    /// `axes` (`[roll, pitch, thr, yaw]` in [-1, 1]) at heading `yaw`.
+    pub fn of(axes: [f32; 4], yaw: f32, lim: &Limits) -> Self {
+        let [roll, pitch, thr, yaw_in] = axes.map(centred);
+        let fwd = expo(pitch, lim.expo_h) * lim.v_h;
+        let right = expo(roll, lim.expo_h) * lim.v_h;
+        let t = expo(thr, lim.expo_v);
+        let vd = if t > 0.0 {
+            -t * lim.v_up
         } else {
-            self.hold_yaw = None;
-            expo(yaw_in, lim.expo) * lim.yaw_dps.to_radians()
+            -t * lim.v_down
         };
-        match (self.hold_ne, self.hold_d, self.hold_yaw) {
-            (Some(ne), Some(d), Some(yaw)) if vz_bounds.0 <= 0.0 && vz_bounds.1 >= 0.0 => {
-                Command::Hold {
-                    pos: [ne[0], ne[1], d],
-                    yaw,
-                }
-            }
-            _ => Command::Velocity {
-                vel: [v_ne[0], v_ne[1], vd],
-                yaw_rate,
-            },
+        Self {
+            // A diagonal full stick flies the horizontal limit, not √2 of it.
+            ne: geo::clamp_len(geo::body_to_ned(fwd, right, yaw), lim.v_h),
+            vd,
+            yaw_rate: expo(yaw_in, lim.expo_yaw) * lim.yaw_dps.to_radians(),
         }
+    }
+
+    /// Nothing asked on any axis: the reference brakes to a hold.
+    pub fn is_release(&self) -> bool {
+        self.ne == [0.0, 0.0] && self.vd == 0.0 && self.yaw_rate == 0.0
     }
 }
 

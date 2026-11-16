@@ -28,6 +28,7 @@ mod sloped_leg;
 mod stale;
 mod stall_return;
 mod subject;
+mod stick_feel;
 mod supervisor;
 mod take;
 mod touchdown;

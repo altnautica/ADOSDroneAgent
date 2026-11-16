@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::harness::{World, FC_COMP, FC_SYS};
 use crate::core::Reply;
-use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
+use crate::fc::MASK_POS_VEL_YAW;
 use crate::modes::copter;
 
 /// The `hold_reason` wire string while obstacle data is stale.
@@ -287,7 +287,7 @@ fn land_rtl_and_pause_still_act_on_stale_scans() {
     assert_eq!(err(&w.action("land")), None);
     w.run(500);
     let sp = w.last_setpoint().unwrap();
-    assert_eq!(sp.type_mask.bits(), MASK_VELOCITY);
+    assert_eq!(sp.type_mask.bits(), crate::fc::MASK_POS_VEL_ACC_YAW);
     assert!(sp.vz > 0.1, "land does not descend: {}", sp.vz);
     assert!(sp.vx.hypot(sp.vy) < 1e-3);
 

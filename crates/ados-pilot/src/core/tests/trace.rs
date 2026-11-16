@@ -345,13 +345,37 @@ fn the_goal_speed_limit_is_named_when_it_binds() {
     assert!(geo::norm(sp) <= 6.0 + 1e-3, "{sp:?}");
 }
 
-/// Stick flight flies no goal, so the frame carries no command.
+/// A stick tick publishes its command: what the sticks asked, the shaped
+/// reference sent, the limits it flew at and the input age and `seq` of the
+/// frame flown; the frame also carries `stick` and `profile_limits`.
 #[test]
-fn stick_flight_publishes_no_command() {
+fn stick_flight_publishes_the_stick_command() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);
+    w.action("take_control");
+    w.stick([0.0; 4], 600);
     w.stick([0.0, 0.5, 0.0, 0.0], 300);
-    assert!(frame(&w).get("command").is_none());
+    let f = frame(&w);
+    let cmd = &f["command"];
+    let stick = &cmd["stick"];
+    assert_eq!(stick, &f["stick"], "{f}");
+    assert!(stick["ask_ne_mps"][0].as_f64().unwrap() > 2.0, "{stick}");
+    let v = stick["v_ne_mps"][0].as_f64().unwrap();
+    assert!(v > 0.0 && v < 2.0, "shaped below the ask: {stick}");
+    assert_eq!(stick["braking"], false);
+    assert_eq!(stick["input_seq"], w.seq - 1);
+    assert!(stick["input_age_ms"].as_u64().unwrap() <= 20, "{stick}");
+    assert_eq!(cmd["profile_limits"]["profile"], "normal");
+    assert_eq!(f["profile_limits"]["v_h_mps"], 7.0);
+    assert!(limits(cmd).iter().any(|l| l == "shaper"), "{cmd}");
+    // Released, it brakes; once at rest the frame keeps the stick command
+    // with nothing asked.
+    w.stick([0.0; 4], 100);
+    assert_eq!(frame(&w)["stick"]["braking"], true);
+    w.stick([0.0; 4], 3000);
+    let f = frame(&w);
+    assert_eq!(f["stick"]["braking"], false);
+    assert_eq!(f["stick"]["v_ne_mps"], serde_json::json!([0.0, 0.0]));
 }
 
 /// Mark a square block of cells centred on `c` with half-width `half`.

@@ -1,12 +1,16 @@
-//! What the pilot commanded on its latest control tick of a skill goal or a
-//! goto, and the shadow-mode hook: a planner run beside the one that flies
-//! hands its commands to [`Pilot::set_shadow`], and they are published
-//! (`command` and `shadow` in the pilot frame) but never flown.
+//! What the pilot commanded on its latest control tick of a skill goal, a
+//! goto or the operator's sticks, and the shadow-mode hook: a planner run
+//! beside the one that flies hands its commands to [`Pilot::set_shadow`],
+//! and they are published (`command` and `shadow` in the pilot frame) but
+//! never flown.
 
-use ados_protocol::pilot::{wire, PilotCommand, ShadowCommand, COMMAND_LIMITS};
+use ados_protocol::pilot::{
+    wire, PilotCommand, ProfileLimits, ShadowCommand, StickCommand, COMMAND_LIMITS,
+};
 
 use super::Pilot;
 use crate::geo::V2;
+use crate::model::{Limits, StickAsk};
 
 /// Bits of [`Tick::limits`], one per [`COMMAND_LIMITS`] code at the same
 /// index.
@@ -87,6 +91,50 @@ impl Tick {
     }
 }
 
+/// One stick tick, as flown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct StickTick {
+    pub at_ms: u64,
+    /// What the sticks asked, before shaping.
+    pub ask: StickAsk,
+    /// The reference sent: horizontal velocity and acceleration, down
+    /// velocity, yaw rate (rad/s).
+    pub v: V2,
+    pub a: V2,
+    pub vd: f32,
+    pub yaw_rate: f32,
+    /// The horizontal velocity the setpoint asks of the FC (its velocity
+    /// plus the position-loop pull toward its position).
+    pub cmd: V2,
+    /// The reference brakes to a hold.
+    pub braking: bool,
+    /// The stick frame flown: its age and `seq`.
+    pub input_age_ms: u32,
+    pub input_seq: u32,
+    /// [`limit`] bits.
+    pub limits: u16,
+    /// The limits flown.
+    pub lim: Limits,
+}
+
+impl StickTick {
+    /// The published stick command.
+    pub fn wire(&self) -> StickCommand {
+        StickCommand {
+            ask_ne_mps: self.ask.ne,
+            ask_vz_mps: -self.ask.vd,
+            ask_yaw_dps: self.ask.yaw_rate.to_degrees(),
+            v_ne_mps: self.v,
+            a_ne_mps2: self.a,
+            vz_mps: -self.vd,
+            yaw_rate_dps: self.yaw_rate.to_degrees(),
+            braking: self.braking,
+            input_age_ms: self.input_age_ms,
+            input_seq: self.input_seq,
+        }
+    }
+}
+
 /// The limits and hold reasons of every goal tick since the pilot frame was
 /// last published, so a cut shorter than the frame period reaches the log.
 #[derive(Debug, Default)]
@@ -136,12 +184,14 @@ impl Pilot {
     }
 
     /// Fold this tick's limits and hold reason into the latch, at the end of
-    /// every control tick that flew a goal.
+    /// every control tick that flew a goal or the sticks.
     pub(super) fn latch_tick(&mut self) {
-        let Some(t) = self.command else {
-            return;
+        let bits = match (self.command, self.stick) {
+            (Some(t), _) => t.limits,
+            (None, Some(s)) => s.limits,
+            (None, None) => return,
         };
-        self.latch.limits |= t.limits;
+        self.latch.limits |= bits;
         if let Some(r) = &self.hold_reason {
             if !self.latch.holds.contains(r) {
                 self.latch.holds.push(r.clone());
@@ -156,21 +206,36 @@ impl Pilot {
         self.latch.holds.clear();
     }
 
-    /// The published `command`: the latest tick of a goal, if this tick
-    /// flew one, with the limits and hold reasons latched since the last
-    /// published frame.
+    /// The published `command`: the latest tick of a goal or of the sticks,
+    /// if this tick flew one, with the limits and hold reasons latched since
+    /// the last published frame.
     pub(super) fn command_frame(&self) -> Option<PilotCommand> {
-        let t = self.command?;
-        let mut c = PilotCommand::new(t.at_ms + self.epoch_offset_ms);
-        c.goal_ned = self.commanded_goal().map(|g| g.map(wire));
-        c.target_ne = t.ask.target_ne.map(ne);
-        c.ask_vel_ne = ne(t.ask.vel);
-        c.cmd_vel_ne = ne(t.cmd);
-        c.sp_vel_ned = t.sp_vel.map(wire);
-        c.sp_acc_ne = ne(t.sp_acc);
-        c.v_cap_mps = wire(t.ask.v_cap);
-        let bits = t.limits | self.latch.limits;
-        let first = bits & t.bound_by;
+        let (bits, first, mut c) = match (self.command, self.stick) {
+            (Some(t), _) => {
+                let mut c = PilotCommand::new(t.at_ms + self.epoch_offset_ms);
+                c.goal_ned = self.commanded_goal().map(|g| g.map(wire));
+                c.target_ne = t.ask.target_ne.map(ne);
+                c.ask_vel_ne = ne(t.ask.vel);
+                c.cmd_vel_ne = ne(t.cmd);
+                c.sp_vel_ned = t.sp_vel.map(wire);
+                c.sp_acc_ne = ne(t.sp_acc);
+                c.v_cap_mps = wire(t.ask.v_cap);
+                let bits = t.limits | self.latch.limits;
+                (bits, bits & t.bound_by, c)
+            }
+            (None, Some(s)) => {
+                let mut c = PilotCommand::new(s.at_ms + self.epoch_offset_ms);
+                c.ask_vel_ne = ne(s.ask.ne);
+                c.cmd_vel_ne = ne(s.cmd);
+                c.sp_vel_ned = [s.v[0], s.v[1], s.vd].map(wire);
+                c.sp_acc_ne = ne(s.a);
+                c.v_cap_mps = wire(s.lim.v_h);
+                c.stick = Some(s.wire());
+                c.profile_limits = Some(self.profile_limits_of(&s.lim));
+                (s.limits | self.latch.limits, 0, c)
+            }
+            (None, None) => return None,
+        };
         c.limits = COMMAND_LIMITS
             .iter()
             .enumerate()
@@ -190,6 +255,27 @@ impl Pilot {
             }
         }
         Some(c)
+    }
+
+    /// The published form of the stick limits `lim` of the profile in use.
+    pub(super) fn profile_limits_of(&self, lim: &Limits) -> ProfileLimits {
+        ProfileLimits {
+            profile: self.settings.pilot.profile,
+            v_h_mps: lim.v_h,
+            v_up_mps: lim.v_up,
+            v_down_mps: lim.v_down,
+            yaw_dps: lim.yaw_dps,
+            a_acc_mps2: lim.a_acc,
+            a_brk_mps2: lim.a_brk,
+            jerk_mps3: lim.jerk,
+            a_v_mps2: lim.a_v,
+            yaw_dps2: lim.yaw_dps2,
+            expo_h: lim.expo_h,
+            expo_v: lim.expo_v,
+            expo_yaw: lim.expo_yaw,
+            stop_m: ProfileLimits::stop_distance_m(lim.v_h, lim.a_brk, lim.jerk),
+            margin_m: self.settings.pilot.effective_margin_m(),
+        }
     }
 
     /// The published `shadow`: the shadow planner's latest command while

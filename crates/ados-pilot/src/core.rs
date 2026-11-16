@@ -33,7 +33,6 @@ use crate::fc::{FcState, Tx};
 use crate::fixedwing::Fixedwing;
 use crate::flows::{HoldDetector, Launch, Sessions};
 use crate::geo::V2;
-use crate::model::Multirotor;
 use crate::modes::Family;
 use crate::obstacles::{Obstacles, Scratch};
 use crate::planner::Plan;
@@ -99,7 +98,6 @@ pub struct Pilot {
     pub lidar: crate::sensor_health::LidarTrack,
     /// The FC IMU feeding the lidar pose (`map_status.imu_feed`).
     pub nav_imu: crate::nav_imu::NavImuTrack,
-    mr: Multirotor,
     fw: Fixedwing,
     /// The brake's verdict this tick (stick flight, or a braked goal).
     brake_avoid: ados_protocol::pilot::AvoidState,
@@ -157,6 +155,9 @@ pub struct Pilot {
     /// This tick's command of a skill goal or a goto ([`trace`]); `None`
     /// on a tick that flew none.
     command: Option<trace::Tick>,
+    /// This tick's stick command ([`trace`]); `None` on a tick the
+    /// operator's sticks did not fly.
+    stick: Option<trace::StickTick>,
     /// The goal ticks' limits and hold reasons since the last published
     /// frame.
     latch: trace::Latch,
@@ -168,6 +169,9 @@ pub struct Pilot {
     /// The subject the skill's goals name, for the subject brake
     /// ([`control::SubjectTrack`]).
     subject_track: control::SubjectTrack,
+    /// The shaped reference the latest tick flew, whoever owned it: the
+    /// sticks, a goal or a hold ([`control::MotionRef`]).
+    motion_ref: Option<control::MotionRef>,
     /// Where a skill goal or goto holds while the obstacle data is stale,
     /// from the tick it went stale; cleared on any tick that does not keep it.
     stale_hold: Option<[f32; 3]>,
@@ -206,7 +210,6 @@ impl Pilot {
             obstacles: Obstacles::new(),
             lidar: Default::default(),
             nav_imu: Default::default(),
-            mr: Multirotor::default(),
             fw: Fixedwing::default(),
             plan: Plan::hold(ados_protocol::pilot::AvoidState::Clear),
             plan_ms: 0,
@@ -243,11 +246,13 @@ impl Pilot {
             params_ms: 0,
             setpoint: None,
             command: None,
+            stick: None,
             latch: trace::Latch::default(),
             shadow: None,
             plan_hold: None,
             goal_ref: None,
             subject_track: control::SubjectTrack::default(),
+            motion_ref: None,
             stale_hold: None,
             nav_set: nav_cap::BOOT_SOURCE_SET,
             cap_vel: None,

@@ -209,7 +209,7 @@ impl Pilot {
                 }
                 self.persist_mode(cm);
                 if cm != ControlMode::Ados && self.owner() == Owner::Pilot {
-                    self.brake_hold(now_ms, None);
+                    self.brake_hold(None);
                 }
                 Ok(())
             }
@@ -301,7 +301,7 @@ impl Pilot {
                 self.land_handed_over();
             }
             _ => {
-                self.brake_hold(now_ms, None);
+                self.brake_hold(None);
                 self.landing = true;
             }
         }
@@ -390,15 +390,11 @@ impl Pilot {
         }
     }
 
-    /// Start flying as `pilot` from the current state (hold here).
+    /// Start flying as `pilot` from the current state: the reference flown
+    /// just before, or one starting at the vehicle's position and velocity,
+    /// brakes to a hold.
     pub(super) fn engage_pilot(&mut self, now_ms: u64) {
-        let p = self.fc.fresh_local(now_ms);
         let yaw = self.yaw(now_ms);
-        self.mr
-            .engage(p.map(|p| [p.vn, p.ve]).unwrap_or([0.0, 0.0]));
-        if let Some(p) = p {
-            self.mr.hold_here([p.n, p.e, p.d], yaw);
-        }
         let lim = crate::fixedwing::PlaneLimits::from_params(|n| self.fc.params.get(n).copied());
         let alt = self
             .fc

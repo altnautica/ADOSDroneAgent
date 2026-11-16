@@ -6,7 +6,7 @@ use ados_protocol::mavlink::ardupilotmega::{
 
 use super::harness::{World, FC_COMP, FC_SYS};
 use crate::core::Reply;
-use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
+use crate::fc::MASK_POS_VEL_ACC_YAW;
 use crate::modes::copter;
 
 #[test]
@@ -45,7 +45,8 @@ fn take_control_enters_guided_and_holds() {
     assert_eq!(w.mode, copter::GUIDED);
     assert_eq!(w.p.owner(), Owner::Pilot);
     let sp = w.last_setpoint().unwrap();
-    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_YAW);
+    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_ACC_YAW);
+    assert_eq!([sp.vx, sp.vy, sp.vz], [0.0; 3], "a hold stands still");
     assert_eq!(sp.z, -5.0);
 }
 
@@ -141,21 +142,26 @@ fn hold_keeps_streaming_under_ados() {
     assert!(n >= 5, "{n} hold setpoints in 1 s");
 }
 
+/// The sticks and their hold fly one setpoint type (position, velocity and
+/// acceleration with the heading): a hold is the reference standing still,
+/// not a switch from velocity to position control.
 #[test]
 fn stick_flight_moves_and_centred_sticks_hold() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);
     w.action("take_control");
     w.stick([0.0; 4], 600); // pass the gate
-    w.stick([0.0, 1.0, 0.0, 0.0], 500);
+    w.stick([0.0, 1.0, 0.0, 0.0], 800);
     let sp = w.last_setpoint().unwrap();
-    assert_eq!(sp.type_mask.bits(), MASK_VELOCITY);
+    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_ACC_YAW);
     assert!(sp.vx > 0.5, "forward velocity {}", sp.vx);
     w.stick([0.0; 4], 6000);
-    assert_eq!(
-        w.last_setpoint().unwrap().type_mask.bits(),
-        MASK_POS_VEL_YAW
-    );
+    let sp = w.last_setpoint().unwrap().clone();
+    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_ACC_YAW);
+    assert_eq!([sp.vx, sp.vy, sp.afx, sp.afy], [0.0; 4], "held");
+    w.stick([0.0; 4], 500);
+    let later = w.last_setpoint().unwrap();
+    assert_eq!([later.x, later.y], [sp.x, sp.y], "the hold point stays");
 }
 
 #[test]
@@ -165,11 +171,9 @@ fn gate_blocks_deflected_sticks_until_centred() {
     w.action("take_control");
     w.stick([0.0, 0.5, 0.0, 0.0], 1000);
     assert!(w.p.state(w.now).gate.unwrap().pending);
-    assert_eq!(
-        w.last_setpoint().unwrap().type_mask.bits(),
-        MASK_POS_VEL_YAW,
-        "no stick effect"
-    );
+    let sp = w.last_setpoint().unwrap();
+    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_ACC_YAW);
+    assert_eq!([sp.vx, sp.vy], [0.0; 2], "no stick effect");
     w.stick([0.0; 4], 600);
     assert!(w.p.state(w.now).gate.is_none());
 }

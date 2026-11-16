@@ -251,7 +251,7 @@ impl Pilot {
                 now_ms,
             ));
             if self.fc.armed && !self.fc.landed() {
-                self.brake_hold(now_ms, None);
+                self.brake_hold(None);
             }
             if l.step == LaunchStep::Done || elapsed > 5000 {
                 return;

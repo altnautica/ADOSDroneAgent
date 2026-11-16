@@ -34,6 +34,18 @@ const EXTRA_PARAMS: &[&str] = &[
     // Visual odometry enabled: with it the EKF's relative position counts for
     // the `position` readiness item, as with `FLOW_TYPE`.
     "VISO_TYPE",
+    // The FC's guidance limits the stick profile is held to
+    // (`crate::model::fc_capped`), with their older names.
+    "WP_ACC",
+    "WPNAV_ACCEL",
+    "PSC_NE_JERK",
+    "PSC_JERK_XY",
+    "WP_ACC_Z",
+    "WPNAV_ACCEL_Z",
+    "PSC_D_JERK",
+    "PSC_JERK_Z",
+    "ATC_ACC_Y_MAX",
+    "ATC_ACCEL_Y_MAX",
 ];
 /// Re-request missing parameters this often.
 const PARAM_RETRY_MS: u64 = 15_000;

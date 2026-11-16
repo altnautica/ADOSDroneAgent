@@ -39,6 +39,8 @@ pub struct Sessions {
     /// stops streaming (a pad held perfectly still) and resumes within
     /// [`RESUME_MS`] keeps the sticks without passing the gate again.
     released: Option<(String, u32, u64)>,
+    /// The `seq` of the owner's last accepted frame; `None` until its first.
+    last_seq: Option<u32>,
 }
 
 /// See [`Sessions::released`].
@@ -49,21 +51,36 @@ pub enum Accept {
     Accepted,
     /// Another surface holds the sticks.
     OtherSession,
+    /// The owner's frame is not newer than the last one accepted from it
+    /// (reordered or repeated on the way): dropped.
+    Stale,
+}
+
+/// `seq` comes after `last`, across the wrap of `u32`.
+pub fn seq_newer(seq: u32, last: u32) -> bool {
+    (seq.wrapping_sub(last) as i32) > 0
 }
 
 impl Sessions {
-    /// Offer one input frame. The first live session owns the sticks.
+    /// Offer one input frame. The first live session owns the sticks; a
+    /// frame of the owner's session whose `seq` is not newer than its last
+    /// accepted one is dropped.
     pub fn offer(
         &mut self,
         src: &str,
         session: u32,
+        seq: u32,
         axes: [f32; 4],
         buttons: u32,
         now_ms: u64,
     ) -> Accept {
         match &self.owner {
             Some(o) if o.src != src || o.session != session => return Accept::OtherSession,
-            Some(_) => {}
+            Some(_) => {
+                if self.last_seq.is_some_and(|last| !seq_newer(seq, last)) {
+                    return Accept::Stale;
+                }
+            }
             None => {
                 self.owner = Some(InputSession {
                     src: src.to_owned(),
@@ -86,6 +103,7 @@ impl Sessions {
             }
         });
         self.buttons = buttons;
+        self.last_seq = Some(seq);
         self.update_gate(now_ms);
         Accept::Accepted
     }
@@ -98,6 +116,7 @@ impl Sessions {
             label: src_label(src),
         });
         self.axes = [0.0; 4];
+        self.last_seq = None;
         self.arm_gate();
     }
 
@@ -111,6 +130,7 @@ impl Sessions {
             self.released = (!self.gate_pending).then(|| (src.to_owned(), session, now_ms));
             self.owner = None;
             self.axes = [0.0; 4];
+            self.last_seq = None;
             self.gate_pending = false;
             true
         } else {
@@ -163,6 +183,11 @@ impl Sessions {
 
     pub fn gate_pending(&self) -> bool {
         self.gate_pending && self.owner.is_some()
+    }
+
+    /// The `seq` of the owner's last accepted frame.
+    pub fn last_seq(&self) -> Option<u32> {
+        self.last_seq
     }
 }
 
@@ -248,42 +273,59 @@ mod tests {
     #[test]
     fn second_session_is_ignored_until_take() {
         let mut s = Sessions::default();
-        assert_eq!(s.offer("mc", 1, [0.0; 4], 0, 0), Accept::Accepted);
-        assert_eq!(s.offer("android", 9, [0.5; 4], 0, 10), Accept::OtherSession);
+        assert_eq!(s.offer("mc", 1, 1, [0.0; 4], 0, 0), Accept::Accepted);
+        assert_eq!(s.offer("android", 9, 1, [0.5; 4], 0, 10), Accept::OtherSession);
         s.take("android", 9);
         assert_eq!(s.owner.as_ref().unwrap().src, "android");
-        assert_eq!(s.offer("mc", 1, [0.0; 4], 0, 20), Accept::OtherSession);
+        assert_eq!(s.offer("mc", 1, 2, [0.0; 4], 0, 20), Accept::OtherSession);
     }
 
     #[test]
     fn brief_release_resumes_without_the_gate() {
         let mut s = Sessions::default();
-        s.offer("mc", 1, [0.0; 4], 0, 0);
-        s.offer("mc", 1, [0.0; 4], 0, 600);
+        s.offer("mc", 1, 1, [0.0; 4], 0, 0);
+        s.offer("mc", 1, 2, [0.0; 4], 0, 600);
         assert!(!s.gate_pending());
         assert!(s.release("mc", 1, 700));
-        s.offer("mc", 1, [0.0, 1.0, 0.0, 0.0], 0, 900);
+        s.offer("mc", 1, 3, [0.0, 1.0, 0.0, 0.0], 0, 900);
         assert_eq!(s.effective_axes()[1], 1.0);
         assert!(s.release("mc", 1, 1000));
-        s.offer("mc", 1, [0.0, 1.0, 0.0, 0.0], 0, 3000);
+        s.offer("mc", 1, 4, [0.0, 1.0, 0.0, 0.0], 0, 3000);
         assert!(s.gate_pending(), "a long gap passes the gate again");
     }
 
     #[test]
     fn gate_needs_half_a_second_centred() {
         let mut s = Sessions::default();
-        s.offer("mc", 1, [0.0, 0.5, 0.0, 0.0], 0, 0);
+        s.offer("mc", 1, 1, [0.0, 0.5, 0.0, 0.0], 0, 0);
         assert!(s.gate_pending());
         assert_eq!(s.effective_axes(), [0.0; 4]);
-        s.offer("mc", 1, [0.0, 0.5, 0.0, 0.0], 0, 1000);
+        s.offer("mc", 1, 2, [0.0, 0.5, 0.0, 0.0], 0, 1000);
         assert!(s.gate_pending(), "deflected sticks never pass the gate");
-        s.offer("mc", 1, [0.0; 4], 0, 1100);
-        s.offer("mc", 1, [0.05, 0.0, 0.0, 0.0], 0, 1400);
+        s.offer("mc", 1, 3, [0.0; 4], 0, 1100);
+        s.offer("mc", 1, 4, [0.05, 0.0, 0.0, 0.0], 0, 1400);
         assert!((s.gate(1400).unwrap().progress - 0.6).abs() < 1e-3);
-        s.offer("mc", 1, [0.0; 4], 0, 1600);
+        s.offer("mc", 1, 5, [0.0; 4], 0, 1600);
         assert!(!s.gate_pending());
-        s.offer("mc", 1, [0.0, 0.5, 0.0, 0.0], 0, 1620);
+        s.offer("mc", 1, 6, [0.0, 0.5, 0.0, 0.0], 0, 1620);
         assert_eq!(s.effective_axes()[1], 0.5);
+    }
+
+    #[test]
+    fn a_frame_not_newer_than_the_last_is_dropped_across_the_wrap() {
+        let mut s = Sessions::default();
+        assert_eq!(s.offer("mc", 1, 10, [0.0; 4], 0, 0), Accept::Accepted);
+        assert_eq!(s.offer("mc", 1, 9, [0.0; 4], 0, 20), Accept::Stale);
+        assert_eq!(s.offer("mc", 1, 10, [0.0; 4], 0, 40), Accept::Stale);
+        assert_eq!(s.offer("mc", 1, 11, [0.0; 4], 0, 60), Accept::Accepted);
+        // Across the wrap.
+        s.take("mc", 2);
+        assert_eq!(s.offer("mc", 2, u32::MAX, [0.0; 4], 0, 80), Accept::Accepted);
+        assert_eq!(s.offer("mc", 2, 0, [0.0; 4], 0, 100), Accept::Accepted);
+        assert_eq!(s.offer("mc", 2, u32::MAX, [0.0; 4], 0, 120), Accept::Stale);
+        // A new session starts its own count.
+        s.take("android", 7);
+        assert_eq!(s.offer("android", 7, 1, [0.0; 4], 0, 140), Accept::Accepted);
     }
 
     #[test]

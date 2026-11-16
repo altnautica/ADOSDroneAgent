@@ -73,7 +73,7 @@ impl Pilot {
             _ => {}
         }
         self.landing = false;
-        self.brake_hold(now_ms, None);
+        self.brake_hold(None);
         if self.fc.vehicle_class() == VehicleClass::Fixedwing || self.fc.vtol_forward() {
             self.fw = Default::default();
         }

@@ -59,6 +59,8 @@ pub struct World {
     /// position loop's pull (gain 1/s) toward the setpoint's position, and
     /// its position moves on it. Off: the vehicle stays where a test puts it.
     pub fly: bool,
+    /// The `seq` of the next stick frame [`World::input`] sends.
+    pub seq: u32,
 }
 
 /// A scan with one return, `range_m` away in body bin `bin` (degrees
@@ -130,6 +132,7 @@ impl World {
             goal_status: Vec::new(),
             local: true,
             fly: false,
+            seq: 1,
         };
         w.feed();
         w
@@ -430,11 +433,12 @@ impl World {
         let r = Request::Input(Input {
             src: "mc".into(),
             session: 1,
-            seq: 0,
+            seq: self.seq,
             t_ms: self.now,
             axes,
             buttons: 0,
         });
+        self.seq = self.seq.wrapping_add(1);
         self.req(r);
     }
 

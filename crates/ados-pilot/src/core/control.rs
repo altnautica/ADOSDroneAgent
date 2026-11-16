@@ -7,16 +7,16 @@ use ados_protocol::pilot::{
 
 use super::position_check::HOLD_POSITION_UNVERIFIED;
 use super::{Out, Pilot, PLAN_PERIOD_MS, STICKS_PERIOD_MS};
-use crate::fc::{heartbeat, MASK_POS_VEL_YAW, MASK_VELOCITY};
+use crate::fc::{heartbeat, MASK_POS_VEL_ACC_YAW, MASK_VELOCITY};
 use crate::flows::banner;
 use crate::geo::{self, V2};
-use crate::model::{Command, StickIn};
+use crate::model::StickAsk;
 use crate::planner;
 
 mod brake;
 mod failsafes;
 mod goal_brake;
-mod goal_ref;
+mod motion_ref;
 mod obstacle_data;
 mod plan;
 mod route;
@@ -26,7 +26,8 @@ pub(super) mod supervisor;
 mod trail;
 mod vantage_goal;
 pub use brake::*;
-pub(super) use goal_ref::GoalRef;
+pub(super) use motion_ref::MotionRef;
+use motion_ref::{leash_within, REF_LEASH_M, SHAPER_REPORT_MPS};
 #[cfg(test)]
 pub use route::{check_legs, legs_of, Origin};
 pub use route::{route_of, Route, RouteItem, CONFINED_CAP_MPS};
@@ -88,8 +89,9 @@ impl Pilot {
             (now_ms.saturating_sub(t) as f32 / 1000.0).clamp(0.001, 0.1)
         });
         self.last_tick_ms = Some(now_ms);
-        // Set again below only while this tick flies a goal.
+        // Set again below only while this tick flies a goal or the sticks.
         self.command = None;
+        self.stick = None;
         if self.failsafe.heartbeat_due(now_ms) {
             self.mav(heartbeat());
         }
@@ -102,7 +104,7 @@ impl Pilot {
         }
         if let Some(r) = self.auth.expire(now_ms) {
             self.out.push(Out::Revoked(r));
-            self.brake_hold(now_ms, Some("lease-revoked"));
+            self.brake_hold(Some("lease-revoked"));
         }
         self.drive_launch(now_ms);
         self.track_touchdown(now_ms);
@@ -177,7 +179,7 @@ impl Pilot {
                     .update(deflect > TAKEOVER_AXIS, now_ms, TAKEOVER_MS)
                 {
                     self.revoke("takeover");
-                    self.brake_hold(now_ms, None);
+                    self.brake_hold(None);
                     self.sessions.arm_gate();
                     self.banner = Some(banner("pilot.banner.pilot_took_control", &[], now_ms));
                 }
@@ -300,7 +302,7 @@ impl Pilot {
             Owner::Skill | Owner::Goto => self.fly_plan(pos, yaw, dt, stale_hold, now_ms),
             // Unknown obstacles: the swarm goal is not flown; the pilot holds.
             Owner::Swarm if self.obstacle_data_stale(now_ms) => {
-                self.brake_hold(now_ms, Some(HOLD_OBSTACLE_STALE));
+                self.brake_hold(Some(HOLD_OBSTACLE_STALE));
             }
             Owner::Swarm => match self.swarm {
                 Some(g) if now_ms.saturating_sub(g.at_ms) <= SWARM_STALE_MS => {
@@ -318,22 +320,26 @@ impl Pilot {
                     );
                     self.mav(m);
                 }
-                _ => self.brake_hold(now_ms, None),
+                _ => self.brake_hold(None),
             },
             _ => {}
         }
     }
 
+    /// The operator's sticks fly the pilot's one reference
+    /// ([`MotionRef`]) on the stick limits: what they ask after the centre
+    /// threshold and the expo is reached at the accelerate limit, and a
+    /// released stick brakes to a hold at the brake limit, holding where the
+    /// reference stops. The vertical speed and the yaw rate ramp and brake
+    /// the same way on their own accelerations. Only a safety cut steps it:
+    /// the obstacle brake, the geofence, a speed cap coming on, a height
+    /// bound.
     fn fly_sticks(&mut self, axes: [f32; 4], pos: [f32; 3], yaw: f32, dt: f32, now_ms: u64) {
-        let mut lim = self.stick_limits(axes, now_ms);
+        let lim = self.stick_limits(now_ms);
         // An unverified position: the sticks fly slowly, and a hold is a
-        // zero-velocity brake, never a position hold on the estimate.
+        // velocity brake, never a position hold on the estimate.
         let unverified = self.position_unverified(now_ms).is_some();
-        if unverified {
-            use super::position_check::UNVERIFIED_MAX_MPS;
-            lim.v_h = lim.v_h.min(UNVERIFIED_MAX_MPS);
-            self.mr.shaper.v = geo::clamp_len(self.mr.shaper.v, lim.v_h);
-        }
+        let capped = unverified || self.speed_capped(now_ms);
         let agl = self.agl(now_ms);
         // Unknown obstacles: the sticks ask nothing (a landing still
         // descends), and with no scans there is nothing to push away from.
@@ -386,44 +392,102 @@ impl Pilot {
             .fc
             .fresh_local(now_ms)
             .map_or([0.0; 3], |l| [l.vn, l.ve, l.vd]);
-        let inp = StickIn {
-            axes,
-            pos,
-            vel,
-            yaw,
-            dt,
-        };
         let pos_ne = [pos[0], pos[1]];
         let unavailable = self.obstacle_data_unavailable(now_ms);
         let brake = self.settings.pilot.avoid != AvoidMode::Off && !stale && !unavailable;
-        let home = self.fc.home_ne();
-        let max_dist = self.settings.pilot.max_dist();
-        let obstacles = &self.obstacles;
-        let a_h = lim.a_h;
-        let geom = self.brake_geom(self.settings.pilot.effective_margin_m());
-        let mut braked: Option<Braked> = None;
-        let limit = |v: V2| {
-            let v = if brake {
-                let b = brake_limit(obstacles, pos_ne, [vel[0], vel[1]], v, a_h, geom, now_ms);
-                braked = Some(b);
-                b.v
-            } else {
-                v
-            };
-            geofence(pos_ne, home, max_dist, v)
-        };
-        let cmd = self.mr.step(&inp, &lim, limit, vz);
-        // Judged against what the sticks ask, not the shaped velocity: the
-        // shaper follows what flew, push included, so it may point back.
-        let ask = if axes[0] == 0.0 && axes[1] == 0.0 {
-            [0.0, 0.0]
+        let ask = StickAsk::of(axes, yaw, &lim);
+        let mut r = self.motion_ref(pos, yaw, now_ms);
+        let mut limits = 0;
+        // Horizontal. A speed cap that comes on mid-flight holds at once.
+        if capped && geo::norm(r.sh.v) > lim.v_h + 1e-3 {
+            r.sh.reset(geo::clamp_len(r.sh.v, lim.v_h));
+            limits |= super::limit::NAV_CAP;
+        }
+        let shaped = r.sh.track_ab(ask.ne, lim.a_acc, lim.a_brk, lim.jerk, dt);
+        if geo::dist(shaped, ask.ne) > SHAPER_REPORT_MPS {
+            limits |= super::limit::SHAPER;
+        }
+        let braked = brake.then(|| {
+            let geom = self.brake_geom(self.settings.pilot.effective_margin_m());
+            let v2 = [vel[0], vel[1]];
+            brake_limit(&self.obstacles, pos_ne, v2, shaped, lim.a_brk, geom, now_ms)
+        });
+        let mut v = braked.map_or(shaped, |b| b.v);
+        if let Some(b) = braked {
+            limits |= b.by;
+        }
+        let fenced = geofence(pos_ne, self.fc.home_ne(), self.settings.pilot.max_dist_m, v);
+        if geo::dist(fenced, v) > 1e-3 {
+            limits |= super::limit::GEOFENCE;
+            v = fenced;
+        }
+        if unverified || geo::norm(v) < geo::norm(shaped) - 1e-3 {
+            // A cut that slows flies at once from the vehicle's own
+            // position, and hands its velocity back to the reference:
+            // leaving the obstacle is shaped again from what flew.
+            r.cut(pos_ne, v);
         } else {
-            crate::model::Multirotor::stick_velocity(axes, yaw, &lim)
-        };
+            if geo::dist(v, shaped) > 1e-3 {
+                // The push back out of the margin (or a fence's slide)
+                // moves the reference with it, so a hold walks out.
+                r.sh.reset(v);
+            }
+            // The reference point moves on what flies, held near the vehicle
+            // while it moves; standing still it is the hold point and stays,
+            // wherever the vehicle drifts (or a ground station repositions
+            // it outside `ados`). Capped, the FC's pull toward the reference
+            // may add only what the cap leaves.
+            if v != [0.0, 0.0] {
+                let reach = if capped {
+                    (lim.v_h - geo::norm(v)).clamp(0.0, REF_LEASH_M)
+                } else {
+                    REF_LEASH_M
+                };
+                r.p = leash_within(geo::add(r.p, geo::scale(v, dt)), pos_ne, reach);
+            }
+        }
+        // Vertical (NED: down positive). A floor, a ceiling or the landing's
+        // descent cap the reference is past cuts it at once, and its height
+        // never lies beyond the vehicle's toward that bound. Faster than the
+        // profile's own speed (a profile change, a skill's descent handed
+        // over), it brakes on the vertical acceleration instead.
+        if r.vert.v > vz.1 && vz.1 < lim.v_down {
+            r.vert.reset(vz.1);
+        } else if r.vert.v < vz.0 && vz.0 > -lim.v_up {
+            r.vert.reset(vz.0);
+        }
+        let vd = r
+            .vert
+            .track(ask.vd.clamp(vz.0, vz.1), lim.a_v, lim.jerk_v, dt);
+        let mut d = r.d + vd * dt;
+        if vz.1 <= 0.0 {
+            d = d.min(pos[2]);
+        }
+        if vz.0 >= 0.0 {
+            d = d.max(pos[2]);
+        }
+        if vd != 0.0 {
+            r.d = d.clamp(pos[2] - REF_LEASH_M, pos[2] + REF_LEASH_M);
+        } else {
+            r.d = d;
+        }
+        // Heading: the yaw rate ramps and brakes on the yaw acceleration,
+        // and the heading holds where the turn stops.
+        let yaw_cmd = r.slew_rate(ask.yaw_rate, lim.yaw_dps2.to_radians(), dt);
+        if unverified {
+            r.d = pos[2];
+        }
+        // A goal taking over goes on from the velocity flown.
+        r.ask = r.sh.v;
+        r.at_ms = now_ms;
+        self.motion_ref = Some(r);
+
+        // Judged against what the sticks ask, not the shaped velocity: the
+        // reference follows what flew, push included, so it may point back.
         self.brake_avoid = match braked {
             _ if stale => AvoidState::Stale,
             _ if unavailable => AvoidState::Unavailable,
-            Some(b) if b.close || (b.cut && progress(ask, b.v) < STOPPED_MPS) => {
+            Some(b) if b.close || (b.cut && progress(ask.ne, b.v) < STOPPED_MPS) => {
                 AvoidState::Blocked
             }
             Some(b) if b.cut => AvoidState::Detour,
@@ -445,7 +509,10 @@ impl Pilot {
             )
         };
         match reason {
-            Some(r) => self.hold_reason = Some(r.into()),
+            Some(r) => {
+                self.hold_reason = Some(r.into());
+                limits |= super::limit::HOLD;
+            }
             // Cleared: back to what a supervisor hold is about (a stall
             // waiting for the operator still holds), else no reason.
             None if self.hold_reason.as_deref().is_some_and(passing) => {
@@ -460,34 +527,56 @@ impl Pilot {
             }
             None => {}
         }
+        self.stick = Some(super::trace::StickTick {
+            at_ms: now_ms,
+            ask,
+            v,
+            a: r.sh.a,
+            vd,
+            yaw_rate: r.yaw_rate,
+            cmd: geo::add(v, geo::scale(geo::sub(r.p, pos_ne), FC_POS_GAIN)),
+            braking: ask.is_release() && !r.at_rest(),
+            input_age_ms: self
+                .failsafe
+                .input_age_ms(now_ms)
+                .map_or(0, |a| u32::try_from(a).unwrap_or(u32::MAX)),
+            input_seq: self.sessions.last_seq().unwrap_or(0),
+            limits,
+            lim,
+        });
+
         let tx = self.tx();
-        let m = match cmd {
-            Command::Hold { .. } if unverified => {
-                self.fc_hold = None;
-                tx.setpoint(MASK_VELOCITY, [0.0; 3], [0.0; 3], 0.0, 0.0)
+        if unverified {
+            self.fc_hold = None;
+            let m = tx.setpoint(MASK_VELOCITY, [0.0; 3], [v[0], v[1], vd], 0.0, r.yaw_rate);
+            self.mav(m);
+            return;
+        }
+        let sp = [r.p[0], r.p[1], r.d];
+        self.setpoint = Some(sp);
+        // Outside `ados` no operator steers this hold (the axes are zeroed):
+        // the FC's GUIDED keeps the target once given, so a reference at
+        // rest is sent once, and a ground station's reposition is not
+        // overwritten on the next tick.
+        if self.control_mode() != ControlMode::Ados && r.at_rest() {
+            let same = self
+                .fc_hold
+                .is_some_and(|h| h.iter().zip(sp).all(|(a, b)| (a - b).abs() < 0.05));
+            if same {
+                return;
             }
-            Command::Hold { pos, yaw } => {
-                self.setpoint = Some(pos);
-                // Outside `ados` no operator steers this hold (the axes are
-                // zeroed): the FC's GUIDED keeps the target once given, so it
-                // is sent once, and a ground station's reposition is not
-                // overwritten on the next tick.
-                if self.control_mode() != ControlMode::Ados {
-                    let same = self
-                        .fc_hold
-                        .is_some_and(|h| h.iter().zip(pos).all(|(a, b)| (a - b).abs() < 0.05));
-                    if same {
-                        return;
-                    }
-                    self.fc_hold = Some(pos);
-                }
-                tx.setpoint(MASK_POS_VEL_YAW, pos, [0.0; 3], yaw, 0.0)
-            }
-            Command::Velocity { vel, yaw_rate } => {
-                self.fc_hold = None;
-                tx.setpoint(MASK_VELOCITY, [0.0; 3], vel, 0.0, yaw_rate)
-            }
-        };
+            self.fc_hold = Some(sp);
+        } else {
+            self.fc_hold = None;
+        }
+        let m = tx.setpoint_acc(
+            MASK_POS_VEL_ACC_YAW,
+            sp,
+            [v[0], v[1], vd],
+            [r.sh.a[0], r.sh.a[1], r.vert.a],
+            yaw_cmd,
+            0.0,
+        );
         self.mav(m);
     }
 }

@@ -261,6 +261,12 @@ impl Pilot {
         });
         s.command = self.command_frame();
         s.shadow = self.shadow_frame(now_ms);
+        // The limits the sticks fly at now, on a vehicle they fly as a
+        // multirotor; what they flew on the latest tick while they own it.
+        let hover = self.fc.vehicle_class() != ados_protocol::pilot::VehicleClass::Fixedwing
+            && !self.fc.vtol_forward();
+        s.profile_limits = hover.then(|| self.profile_limits_of(&self.stick_limits(now_ms)));
+        s.stick = self.stick.map(|t| t.wire());
         s
     }
 

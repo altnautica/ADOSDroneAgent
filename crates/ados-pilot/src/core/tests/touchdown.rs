@@ -59,6 +59,11 @@ fn physics(w: &mut World, s: &mut Sim) {
     } else if w.mode == copter::GUIDED {
         match w.last_setpoint() {
             Some(sp) if sp.type_mask.bits() == MASK_VELOCITY => sp.vz,
+            // A shaped setpoint: its velocity plus the position loop's pull
+            // (gain 1/s) toward its height.
+            Some(sp) if sp.type_mask.bits() == crate::fc::MASK_POS_VEL_ACC_YAW => {
+                (sp.vz + sp.z - w.pos[2]).clamp(-2.0, 2.0)
+            }
             Some(sp) => (sp.z - w.pos[2]).clamp(-2.0, 2.0),
             None => 0.0,
         }

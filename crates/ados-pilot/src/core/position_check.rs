@@ -278,11 +278,11 @@ impl Pilot {
         match self.owner() {
             ados_protocol::pilot::Owner::Skill => {
                 self.revoke("position_unverified");
-                self.brake_hold(now_ms, Some(HOLD_POSITION_UNVERIFIED));
+                self.brake_hold(Some(HOLD_POSITION_UNVERIFIED));
                 self.skill_ended(now_ms);
             }
             ados_protocol::pilot::Owner::Goto | ados_protocol::pilot::Owner::Swarm => {
-                self.brake_hold(now_ms, Some(HOLD_POSITION_UNVERIFIED));
+                self.brake_hold(Some(HOLD_POSITION_UNVERIFIED));
             }
             _ => {}
         }
