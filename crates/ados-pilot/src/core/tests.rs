@@ -1,6 +1,7 @@
 //! Behaviour tests for the pilot rules, against a scripted flight controller.
 
 mod battery;
+mod bore_return;
 mod confined;
 mod confined_flight;
 mod confined_route;
@@ -24,3 +25,4 @@ mod stall_return;
 mod supervisor;
 mod take;
 mod touchdown;
+mod tunnel_replay;

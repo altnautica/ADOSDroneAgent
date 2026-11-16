@@ -82,9 +82,13 @@ pub const CLOSING_SMOOTH: f32 = 0.5;
 /// Fastest closing speed a scan pair may measure, m/s: above the fastest
 /// multirotor profile (14 m/s). A sector whose nearest range falls faster
 /// than this has a new nearest surface (a post passing in front of a far
-/// wall, a dropout recovering), not motion, and measures nothing.
+/// wall, a dropout recovering), not motion, and measures nothing. While the
+/// vehicle's own speed is known, a fall faster than the brake's trust bound
+/// on it ([`Obstacles::ingest_scan`]) counts as that bound: a far wall giving
+/// way to a nearer one at a bend in a tunnel is not a 10 m/s approach, and
+/// something moving in faster still reads what the brake would trust.
 pub const SCAN_CLOSING_MAX_MPS: f32 = 16.0;
-/// Range noise allowed on top of [`SCAN_CLOSING_MAX_MPS`] per pair, metres.
+/// Range noise allowed on top of the bound per pair, metres.
 pub const SCAN_CLOSING_SLACK_M: f32 = 0.1;
 
 /// The 5° sector (of `n`) of a bearing, radians clockwise from north.
@@ -122,6 +126,8 @@ pub struct Obstacles {
     horizon: Vec<V2>,
     /// When the current scan arrived (`None`: no scan yet).
     scan_ms: Option<u64>,
+    /// The current scan's capture stamp (`t_ns`), when it carried one.
+    scan_stamp_ns: Option<u64>,
     /// Nearest horizontal return per 5° world sector (north = 0, clockwise)
     /// of the current scan, metres (infinite: none).
     sector_min: Vec<f32>,
@@ -209,8 +215,19 @@ impl Obstacles {
         self.pose_sigma
     }
 
-    /// Ingest a `plugin.world-engine.scan` payload.
-    pub fn ingest_scan(&mut self, payload: &Value, level: Level, pos_ne: V2, now_ms: u64) {
+    /// Ingest a `plugin.world-engine.scan` payload. `closing_max_mps` is the
+    /// fastest closing speed a standing obstacle can show this scan (the
+    /// brake's trust bound on the vehicle's own speed, or
+    /// [`SCAN_CLOSING_MAX_MPS`] when that speed is unknown): a sector whose
+    /// nearest range falls faster counts as closing at this.
+    pub fn ingest_scan(
+        &mut self,
+        payload: &Value,
+        level: Level,
+        pos_ne: V2,
+        closing_max_mps: f32,
+        now_ms: u64,
+    ) {
         if payload
             .get("frame")
             .and_then(Value::as_str)
@@ -247,8 +264,13 @@ impl Obstacles {
                 (ground, true) => self.horizon.push(ground.ne),
             }
         }
-        self.update_closing(level.yaw, now_ms);
+        // The scan's own capture time: delivery jitter (two scans arriving
+        // 50 ms apart though captured 100 ms apart) must not double a range
+        // rate.
+        let stamp_ns = payload.get("t_ns").and_then(Value::as_u64);
+        self.update_closing(level.yaw, stamp_ns, closing_max_mps, now_ms);
         self.scan_ms = Some(now_ms);
+        self.scan_stamp_ns = stamp_ns;
     }
 
     /// How old the current scan is, ms (`None`: no scan yet).
@@ -311,28 +333,45 @@ impl Obstacles {
 
     /// Range rate of each world sector's nearest return between the previous
     /// scan and this one, smoothed; sectors without a return in both, or a
-    /// gap outside 50-500 ms, decay toward zero.
-    fn update_closing(&mut self, yaw: f32, now_ms: u64) {
+    /// gap outside 50-500 ms, decay toward zero. The gap is the scans' own
+    /// capture stamps' when both carry one, else their arrival times'. A
+    /// fall faster than `closing_max_mps` counts as that bound.
+    fn update_closing(
+        &mut self,
+        yaw: f32,
+        stamp_ns: Option<u64>,
+        closing_max_mps: f32,
+        now_ms: u64,
+    ) {
         let n = ados_protocol::pilot::SECTORS;
         let mut cur = vec![f32::INFINITY; n];
         for h in &self.hits {
             let s = sector_of(yaw + h.body_bearing, n);
             cur[s] = cur[s].min(h.range_m);
         }
-        let dt = self
+        let arrival = self
             .scan_ms
             .map_or(f32::INFINITY, |t| now_ms.saturating_sub(t) as f32 / 1000.0);
+        let dt = match (stamp_ns, self.scan_stamp_ns) {
+            (Some(s), Some(p)) if s > p => (s - p) as f32 / 1e9,
+            _ => arrival,
+        };
         let paired =
             self.sector_min.len() == n && (0.05..=SCAN_MAX_AGE_MS as f32 / 1000.0).contains(&dt);
         if self.closing.len() != n {
             self.closing = vec![0.0; n];
         }
+        let max_step = SCAN_CLOSING_MAX_MPS * dt + SCAN_CLOSING_SLACK_M;
         for (s, (c, &now)) in self.closing.iter_mut().zip(&cur).enumerate() {
             let prev = self.sector_min.get(s).copied().unwrap_or(f32::INFINITY);
             let fall = prev - now;
-            let same_surface = fall <= SCAN_CLOSING_MAX_MPS * dt + SCAN_CLOSING_SLACK_M;
-            let rate = if paired && now.is_finite() && prev.is_finite() && same_surface {
-                (fall / dt).max(0.0)
+            // A fall faster than the bound counts as the bound: a step to a
+            // nearer surface (a bend's wall coming into view) is not taken
+            // for a 10 m/s approach, and something moving in faster than the
+            // bound still measures what the brake would trust of it.
+            let rate = if paired && now.is_finite() && prev.is_finite() && fall <= max_step {
+                // `min` (not `clamp`): a NaN bound keeps the measured rate.
+                (fall / dt).max(0.0).min(closing_max_mps)
             } else {
                 0.0
             };

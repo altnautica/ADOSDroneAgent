@@ -8,7 +8,8 @@
 //! end: with no answer the vehicle flies SmartRTL home along its flown path
 //! after `pilot.stall_return_after_s`, so a mission never hovers until the
 //! battery runs out. A blocked return lands in place after
-//! `pilot.return_blocked_land_after_s`.
+//! `pilot.return_blocked_land_after_s`, unless in a confined place its way
+//! back along the flown path clears first (`supervisor::try_resume`).
 
 use std::collections::VecDeque;
 

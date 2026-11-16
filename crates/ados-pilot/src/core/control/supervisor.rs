@@ -11,7 +11,8 @@ use serde_json::json;
 
 use super::super::Pilot;
 use super::{
-    brake_limit, max_abs, progress, HOLD_OBSTACLE_CLOSE, HOLD_OBSTACLE_STALE, PREEMPT_AXIS,
+    brake_limit, max_abs, progress, CONFINED_CAP_MPS, HOLD_OBSTACLE_CLOSE, HOLD_OBSTACLE_STALE,
+    PREEMPT_AXIS,
 };
 use crate::flows::banner;
 use crate::geo::V2;
@@ -30,6 +31,10 @@ const RESUME_EXTRA_M: f32 = 0.5;
 const RESUME_CLEAR_MS: u64 = 3000;
 /// The speed the clear-ahead check plans for, m/s.
 const RESUME_PROBE_MPS: f32 = 2.0;
+/// A blocked return in a confined place resumes when its way back clears
+/// during the landing countdown at most this many times a flight; after
+/// that the countdown lands.
+pub const RETURN_BLOCKED_RESUMES: u32 = 2;
 /// A commanded SmartRTL the FC does not fly within this long lands instead.
 pub const RETURN_CONFIRM_MS: u64 = 1000;
 
@@ -71,6 +76,10 @@ pub struct Supervisor {
     pub return_battery_pct: Option<f32>,
     /// A resumed failsafe return re-asserts its cause on the mode change.
     pub restore_failsafe: Option<&'static str>,
+    /// The path flown out this flight: where a held return goes next.
+    pub trail: super::trail::Trail,
+    /// Blocked returns resumed this flight ([`RETURN_BLOCKED_RESUMES`]).
+    pub return_resumes: u32,
 }
 
 impl Pilot {
@@ -101,6 +110,7 @@ impl Pilot {
     /// Every tick after the replan.
     pub(super) fn supervise(&mut self, now_ms: u64) {
         self.check_return(now_ms);
+        self.record_trail(now_ms);
         if self.sup.hold.is_some() && self.owner() != Owner::Pilot {
             // An action, a failsafe or the operator took the vehicle.
             self.end_supervision();
@@ -130,6 +140,36 @@ impl Pilot {
             }
         } else {
             self.try_resume(now_ms);
+        }
+    }
+
+    /// Keep the path flown out, as SmartRTL keeps it: every position while
+    /// airborne; a return (flown, held or asked for) retraces it, dropping
+    /// the stretch flown back over; a landing keeps it as it is. A landed or
+    /// disarmed vehicle starts a new path.
+    fn record_trail(&mut self, now_ms: u64) {
+        if !self.fc.armed || self.fc.landed() {
+            self.sup.trail.clear();
+            self.sup.return_resumes = 0;
+            return;
+        }
+        if self.family() != Family::Copter || self.fc.custom_mode == copter::LAND {
+            return;
+        }
+        let Some(l) = self.fc.fresh_local(now_ms) else {
+            return;
+        };
+        let returning = matches!(self.fc.custom_mode, copter::RTL | copter::SMART_RTL)
+            || self.sup.return_req.is_some()
+            || self
+                .sup
+                .hold
+                .as_ref()
+                .is_some_and(|h| h.resume == Resume::Return);
+        if returning {
+            self.sup.trail.retrace([l.n, l.e]);
+        } else {
+            self.sup.trail.record([l.n, l.e]);
         }
     }
 
@@ -249,7 +289,13 @@ impl Pilot {
     }
 
     /// The way the held flight goes next keeps the margin plus
-    /// `RESUME_EXTRA_M`: toward the mission item, or home for a return.
+    /// `RESUME_EXTRA_M` at `RESUME_PROBE_MPS`: toward the mission item, or
+    /// home for a return. In a confined place no passage keeps that much
+    /// (a 1.8 m bore holds every wall inside 2 m/s's reach), so there the
+    /// way keeps the brake's own rule at the confined cap: flown at
+    /// `CONFINED_CAP_MPS` it would neither hit the hard stop nor be slowed
+    /// by half the excess that brakes; and a return goes back along the path
+    /// flown out (the SmartRTL path), not the straight line home.
     fn ahead_clear(&self, resume: Resume, now_ms: u64) -> bool {
         if self.obstacle_data_state(now_ms).is_some() {
             return false;
@@ -258,9 +304,23 @@ impl Pilot {
             return false;
         };
         let pos = [l.n, l.e];
-        let margin = self.settings.pilot.effective_margin_m() + RESUME_EXTRA_M;
+        let confined = self.confined();
+        let (margin, probe_mps) = if confined {
+            (self.settings.pilot.effective_margin_m(), CONFINED_CAP_MPS)
+        } else {
+            (
+                self.settings.pilot.effective_margin_m() + RESUME_EXTRA_M,
+                RESUME_PROBE_MPS,
+            )
+        };
         let toward = match resume {
             Resume::Mission => self.mission_target_ned().map(|t| [t[0], t[1]]),
+            Resume::Return if confined => Some(
+                self.sup
+                    .trail
+                    .back_from(pos)
+                    .unwrap_or_else(|| self.fc.home_ne()),
+            ),
             Resume::Return => Some(self.fc.home_ne()),
         };
         let dir = toward
@@ -268,12 +328,16 @@ impl Pilot {
             .filter(|d| d[0].hypot(d[1]) > 0.5);
         match dir {
             Some(d) => {
-                let k = RESUME_PROBE_MPS / d[0].hypot(d[1]);
+                let k = probe_mps / d[0].hypot(d[1]);
                 let ask = [d[0] * k, d[1] * k];
                 let a_h = self.limits_now(now_ms).a_h;
                 let geom = self.brake_geom(margin);
                 let b = brake_limit(&self.obstacles, pos, [l.vn, l.ve], ask, a_h, geom, now_ms);
-                !b.cut && !b.close
+                if confined {
+                    !b.close && probe_mps - progress(ask, b.v) <= BRAKE_EXCESS_MPS / 2.0
+                } else {
+                    !b.cut && !b.close
+                }
             }
             None => self
                 .nearest_obstacle(pos, now_ms)
@@ -284,8 +348,11 @@ impl Pilot {
     /// A hold resumes the FC flight it stopped: an obstacle hold (no stall)
     /// once the way ahead has kept clear for `RESUME_CLEAR_MS`; a route hold,
     /// stalled or not, once the route from here has read anything but
-    /// infeasible for [`super::route::ROUTE_RESUME_DWELL_MS`]. Resuming ends
-    /// the stall, its countdown and the hold reason.
+    /// infeasible for [`super::route::ROUTE_RESUME_DWELL_MS`]. In a confined
+    /// place a blocked return keeps looking during its landing countdown:
+    /// landing in a tunnel is the last resort, so a way back that clears
+    /// resumes the return ([`RETURN_BLOCKED_RESUMES`] times a flight).
+    /// Resuming ends the stall, its countdown and the hold reason.
     fn try_resume(&mut self, now_ms: u64) {
         let Some(h) = self.sup.hold.clone() else {
             return;
@@ -293,6 +360,12 @@ impl Pilot {
         if h.braking_ms.is_some() || !self.in_guided() {
             return;
         }
+        let blocked_return = !h.route
+            && self.sup.stall.active.as_ref().is_some_and(|a| {
+                a.kind == super::stall::Kind::Return
+                    && self.confined()
+                    && self.sup.return_resumes < RETURN_BLOCKED_RESUMES
+            });
         if h.route {
             // The route reads clear on stale scans too (no hits), and AUTO
             // brakes on none: resume only on fresh obstacle data.
@@ -300,7 +373,7 @@ impl Pilot {
                 return;
             }
         } else {
-            if self.sup.stall.active.is_some() {
+            if self.sup.stall.active.is_some() && !blocked_return {
                 return;
             }
             let clear_since = self
@@ -327,6 +400,10 @@ impl Pilot {
                     return;
                 }
             }
+        }
+        if blocked_return {
+            self.sup.return_resumes += 1;
+            tracing::info!(target: "ados_pilot", resumes = self.sup.return_resumes, "pilot_return_unblocked");
         }
         self.end_supervision();
         match h.resume {

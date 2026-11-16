@@ -21,11 +21,14 @@ mod plan;
 mod route;
 mod stall;
 mod supervisor;
+mod trail;
 mod vantage_goal;
 pub use brake::*;
 #[cfg(test)]
 pub use route::{check_legs, legs_of, Origin, RouteItem};
 pub use route::{route_of, Route, CONFINED_CAP_MPS};
+#[cfg(test)]
+pub use supervisor::RETURN_BLOCKED_RESUMES;
 pub use supervisor::{Resume, Supervisor};
 pub use vantage_goal::HOLD_NO_VANTAGE;
 

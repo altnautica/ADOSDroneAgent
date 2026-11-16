@@ -89,8 +89,20 @@ impl Pilot {
                     yaw: att.yaw,
                     agl: self.agl(now_ms),
                 };
+                // The brake's trust bound on a standing obstacle's closing
+                // speed (`brake_limit`), on the FC's speed now; the widest
+                // bound without a finite one.
+                let closing_max = self
+                    .fc
+                    .fresh_local(now_ms)
+                    .map(|l| {
+                        super::control::SCAN_CLOSING_VEL_FACTOR * l.vn.hypot(l.ve)
+                            + super::control::SCAN_CLOSING_FLOOR_MPS
+                    })
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(crate::obstacles::SCAN_CLOSING_MAX_MPS);
                 self.obstacles
-                    .ingest_scan(payload, level, [ned[0], ned[1]], now_ms);
+                    .ingest_scan(payload, level, [ned[0], ned[1]], closing_max, now_ms);
                 if self.obstacles.scan_age_ms(now_ms) == Some(0) {
                     match self.obstacles.nearest_surface() {
                         Some((range_m, ne, extent_m)) => {

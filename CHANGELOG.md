@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.117.4] - 2026-11-16
+
+### Fixed
+
+- The scans' own closing speed, which the brake takes when it is faster than the velocity estimate, was timed by when each scan arrived rather than when it was captured. Two scans delivered 50 ms apart though captured 100 ms apart doubled every range rate, and at the 0.5 m/s confined cap a tunnel's side walls 0.8–1.1 m away then read as closing at 0.9 m/s: the speed caps closed on both sides at once and the brake stopped a mission leg and a SmartRTL that had nothing within a metre. A scan's range rate now uses the capture stamps (`t_ns`) when both scans carry one, and arrival times otherwise.
+- A sector's nearest range that fell faster than a standing obstacle can close was smoothed at its full rate: anything under 16 m/s counted, and the brake then cut it to its trust bound (twice the vehicle's speed plus 1 m/s). At a bend in a tunnel the far wall gives way to the bend's own wall 1.2 m nearer between two scans; at 0.5 m/s that one 12 m/s step held the brake at its 2 m/s bound for several scans. While the vehicle's speed is known, a scan pair's rate is now held to that same trust bound before smoothing, so a step reads at most the bound for one pair and something moving in faster still reads the bound.
+- In a confined place a mission or a return held for an obstacle never resumed on its own unless the mission item lay within 0.5 m: the way ahead had to keep the margin plus 0.5 m at a 2 m/s probe, which no passage under about 5 m wide keeps. The hold then ran into the no-progress rule, its automatic skips, and a return that landed in place. In a confined place the way ahead is now judged by the brake's own rule at the 0.5 m/s cap (no hard stop, and the brake would slow it by at most half the excess that brakes), and a held return looks back along the path the vehicle flew out, which its SmartRTL retraces (a return cuts that path back as it flies it), rather than along the straight line home. A blocked return also keeps looking during its landing countdown and flies on when its way back clears (twice a flight), so it lands in place only when that way stays blocked.
+
 ## [0.117.3] - 2026-11-16
 
 ### Fixed
