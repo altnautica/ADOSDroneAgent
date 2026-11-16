@@ -18,7 +18,7 @@ export interface SensorRow {
 /** The state words of `health`, as cockpit-spec `sensor-health.json` names them. */
 export const FLOW_STATES = ["ok", "low", "lost", "absent"] as const;
 export const RANGE_STATES = ["ok", "out_of_range", "lost", "absent"] as const;
-export const LIDAR_STATES = ["ok", "degraded", "lost", "absent"] as const;
+export const LIDAR_STATES = ["ok", "degraded", "no_returns", "lost", "absent"] as const;
 export const CAMERA_STATES = ["live", "stale", "lost"] as const;
 
 export type FlowState = (typeof FLOW_STATES)[number];

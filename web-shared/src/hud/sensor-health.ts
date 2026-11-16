@@ -15,7 +15,7 @@ import tokensJson from "../cockpit-spec/tokens.json";
 
 export type FlowState = "ok" | "low" | "lost" | "absent" | "unknown";
 export type RangeState = "ok" | "out_of_range" | "lost" | "absent" | "unknown";
-export type LidarState = "ok" | "degraded" | "lost" | "absent";
+export type LidarState = "ok" | "degraded" | "no_returns" | "lost" | "absent";
 export type CameraState = "live" | "stale" | "lost";
 export type LidarDriverHealth = "good" | "warning" | "error";
 
@@ -87,7 +87,7 @@ function oneOf<T extends string>(v: unknown, values: readonly T[]): T | null {
 
 const FLOW_STATES = ["ok", "low", "lost", "absent"] as const;
 const RANGE_STATES = ["ok", "out_of_range", "lost", "absent"] as const;
-const LIDAR_STATES = ["ok", "degraded", "lost", "absent"] as const;
+const LIDAR_STATES = ["ok", "degraded", "no_returns", "lost", "absent"] as const;
 const CAMERA_STATES = ["live", "stale", "lost"] as const;
 
 export function parseFlowHealth(raw: unknown): FlowHealth {

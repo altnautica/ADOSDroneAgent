@@ -18,6 +18,7 @@
   { "name": "lidar_degraded", "fn": "lidarWord", "input": { "state": "degraded", "rate_hz": 5.2, "health": "warning", "age_ms": 120 }, "expected": { "state": "degraded", "text": "Lidar 5.2 Hz", "color": "avoiding" } },
   { "name": "lidar_degraded_null_rate", "fn": "lidarWord", "input": { "state": "degraded", "rate_hz": null, "health": "error", "age_ms": null }, "expected": { "state": "degraded", "text": "Lidar — Hz", "color": "avoiding" } },
   { "name": "lidar_lost", "fn": "lidarWord", "input": { "state": "lost", "rate_hz": 0.0, "health": null, "age_ms": 900 }, "expected": { "state": "lost", "text": "Lidar lost", "color": "not_ready" } },
+  { "name": "lidar_no_returns", "fn": "lidarWord", "input": { "state": "no_returns", "rate_hz": 10.0, "health": "good", "age_ms": 80 }, "expected": { "state": "no_returns", "text": "Lidar no returns", "color": "avoiding" } },
   { "name": "lidar_absent", "fn": "lidarWord", "input": { "state": "absent", "rate_hz": null, "health": null, "age_ms": null }, "expected": { "state": "absent", "text": "No lidar", "color": "stale" } },
   { "name": "camera_live", "fn": "cameraWord", "input": { "id": "front", "leg": "main", "role": "front", "state": "live", "fps": 29.7, "age_ms": 33 }, "expected": { "state": "live", "text": "front 30 fps", "color": "ready" } },
   { "name": "camera_stale", "fn": "cameraWord", "input": { "id": "belly", "leg": "belly", "role": "down", "state": "stale", "fps": 2, "age_ms": 1800 }, "expected": { "state": "stale", "text": "belly stale", "color": "avoiding" } },

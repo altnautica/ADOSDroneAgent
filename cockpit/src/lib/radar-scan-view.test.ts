@@ -75,9 +75,20 @@ describe("buildRadarView", () => {
     expect(buildRadarView({ ...BASE, scan: scan([8, 0, 0, 0]) }).readout?.word).toBe("CLEAR");
   });
 
-  it("says CLEAR when a live source has no return, and nothing with no source", () => {
+  it("says NO RETURNS for a fresh scan with no return and no other reading", () => {
     expect(buildRadarView({ ...BASE, scan: scan([0, 0, 0, 0]) }).readout).toEqual({
       range: "—",
+      word: "NO RETURNS",
+      band: "no_returns",
+    });
+    expect(buildRadarView({ ...BASE, scan: scan([0.03, 0.05, 0, 0]) }).readout?.word).toBe("NO RETURNS");
+    expect(buildRadarView({ ...BASE, scan: scan([0, 0, 0, 0]), fcPresent: true }).readout?.word).toBe("NO RETURNS");
+    expect(buildRadarView({ ...BASE, scan: scan([0, 0, 0, 0]), fcNearestM: 1.5, fcPresent: true }).readout?.word).toBe("DANGER");
+  });
+
+  it("says CLEAR when a live source has nothing near, and nothing with no source", () => {
+    expect(buildRadarView({ ...BASE, scan: scan([8, 0, 0, 0]) }).readout).toEqual({
+      range: "8.0 m",
       word: "CLEAR",
       band: "clear",
     });

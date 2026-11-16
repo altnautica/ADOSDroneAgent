@@ -3,9 +3,8 @@
 // course-over-ground (an outer-ring marker from the velocity vector), on a
 // north-up compass. It additionally paints surround-obstacle sectors, but ONLY
 // from real OBSTACLE_DISTANCE data when the agent's sensor stack surfaces a
-// proximity sensor onto the snapshot — the base wire carries none today, so the
-// obstacle overlay simply does not appear (it never draws a false "all clear",
-// because this is a heading instrument, not an obstacle-only radar).
+// proximity sensor onto the snapshot; without one the obstacle overlay simply
+// does not appear.
 //
 // Purely informational (pointer-events pass through) and reduced-motion-safe (no
 // animation — the arrow/marker are data-driven, not decorative motion). Honest
@@ -15,7 +14,8 @@
 // With the companion lidar running it also draws the raw planar scan (nav
 // stream `scan` frames) as dots rotated north-up, on a 3 / 6 / 12 m or AUTO
 // range the operator cycles from the corner label, and the readout carries the
-// nearest return with its CLEAR / CAUTION / DANGER word.
+// nearest return with its CLEAR / CAUTION / DANGER word, or NO RETURNS when the
+// fresh scan holds no return at all (never CLEAR for a blind sensor).
 
 import { specText } from "@/shared/hud/spec-text";
 import { useNow } from "@/hooks/use-now";
@@ -28,9 +28,9 @@ import {
   sectorArcPath,
   trackBearing,
 } from "@/lib/radar-geometry";
-import { buildRadarView } from "@/lib/radar-scan-view";
+import { buildRadarView, type RadarReadoutBand } from "@/lib/radar-scan-view";
 import { cn } from "@/lib/utils";
-import { cycleRadarScale, type RadarBand } from "@/shared/hud/radar-scan";
+import { cycleRadarScale } from "@/shared/hud/radar-scan";
 
 const CX = 50;
 const CY = 50;
@@ -51,8 +51,9 @@ const CARDINALS: { label: string; bearing: number }[] = [
   { label: "W", bearing: 270 },
 ];
 
-const BAND_CLASS: Record<RadarBand, string> = {
+const BAND_CLASS: Record<RadarReadoutBand, string> = {
   clear: "text-ok",
+  no_returns: "text-warn",
   caution: "text-warn",
   danger: "text-err",
 };
@@ -94,11 +95,11 @@ export function ProximityRadar({ className }: { className?: string } = {}) {
   const trackPt = track != null ? bearingToXY(track, OUTER_R - 3, CX, CY) : null;
 
   // The bottom readout: the nearest obstacle with its band word takes
-  // priority, else the heading value, else the honest empty state. CLEAR is
-  // shown only while an obstacle source is live.
+  // priority, else the heading value, else the honest empty state. CLEAR and
+  // NO RETURNS are shown only while an obstacle source is live.
   const bottom = view.readout
     ? {
-        text: view.readout.band === "clear" && view.readout.range === "—"
+        text: view.readout.range === "—"
           ? view.readout.word
           : `${view.readout.range} ${view.readout.word}`,
         cls: BAND_CLASS[view.readout.band],

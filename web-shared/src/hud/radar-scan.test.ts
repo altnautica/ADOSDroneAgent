@@ -43,9 +43,11 @@ describe("radarScanDots", () => {
 });
 
 describe("readout", () => {
-  it("finds the nearest positive return", () => {
+  it("finds the nearest return, a finite range above 5 cm", () => {
     expect(nearestScanM(scan([0, 3, 2.5, 0]))).toBe(2.5);
     expect(nearestScanM(scan([0, 0]))).toBeNull();
+    expect(nearestScanM(scan([0.03, 0.05, 0, 1.2]))).toBe(1.2);
+    expect(nearestScanM(scan([0.03, 0.05, Number.NaN]))).toBeNull();
     expect(nearestScanM(null)).toBeNull();
   });
   it("bands danger < 2 m, caution ≤ 5 m, else clear", () => {

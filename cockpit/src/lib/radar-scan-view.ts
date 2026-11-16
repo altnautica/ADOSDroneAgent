@@ -1,8 +1,10 @@
 // What the Feed's proximity radar draws from the live planar scan: the scan
 // dots rotated onto the radar's north-up dial, the display range (pinned by
 // the operator or chosen automatically from the nearest return), and the
-// bottom readout as a range plus a CLEAR / CAUTION / DANGER word. A scan older
-// than SCAN_FRESH_MS draws nothing, so a dead link never paints live dots.
+// bottom readout as a range plus a CLEAR / CAUTION / DANGER word. A fresh scan
+// with no return at all and no other reading says NO RETURNS, never CLEAR: an
+// empty scan is a blind sensor, not open space. A scan older than
+// SCAN_FRESH_MS draws nothing, so a dead link never paints live dots.
 
 import {
   autoRadarScale,
@@ -16,6 +18,10 @@ import {
   type RadarScaleSetting,
 } from "@/shared/hud/radar-scan";
 import type { NavScan } from "@/shared/hud/nav-types";
+import { specText } from "@/shared/hud/spec-text";
+
+/** The readout tone: a distance band, or a live scan that saw nothing. */
+export type RadarReadoutBand = RadarBand | "no_returns";
 
 /** The scan arrives at 10 Hz; one second without one is a dead source. */
 export const SCAN_FRESH_MS = 1000;
@@ -56,7 +62,7 @@ export interface RadarView {
   scaleLabel: string;
   dots: Array<{ x: number; y: number }>;
   /** Null when no obstacle source is live (the radar shows the heading). */
-  readout: { range: string; word: string; band: RadarBand } | null;
+  readout: { range: string; word: string; band: RadarReadoutBand } | null;
 }
 
 export function buildRadarView(input: RadarViewInput): RadarView {
@@ -80,9 +86,11 @@ export function buildRadarView(input: RadarViewInput): RadarView {
   const r = radarReadout(input.fcNearestM, minObstacle, scanNearest);
   const readout = r.band !== null && r.word !== null
     ? { range: r.range, word: r.word, band: r.band }
-    : anyLive
-      ? { range: r.range, word: "CLEAR", band: "clear" as const }
-      : null;
+    : scan !== null && scanNearest === null
+      ? { range: r.range, word: specText("radar.no_returns").toUpperCase(), band: "no_returns" as const }
+      : anyLive
+        ? { range: r.range, word: "CLEAR", band: "clear" as const }
+        : null;
 
   return {
     scaleM,
