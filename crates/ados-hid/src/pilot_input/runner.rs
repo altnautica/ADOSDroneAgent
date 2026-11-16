@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
 use super::bindings::{ControlsDoc, ELRS_EMERGENCY_ACTION};
-use super::feedback::{lightbar_rgb, transition_alert, PilotView, RumbleQueue};
+use super::feedback::{feedback_alert, lightbar_rgb, PilotView, RumbleQueue};
 use super::gestures::{Context, Gestures};
 use super::linux::OpenPad;
 use super::pad::{pilot_axes, PadMap};
@@ -138,7 +138,6 @@ pub async fn run(mut cfg: RunnerConfig) {
     let mut session: u32 = 0;
     let mut seq: u32 = 0;
     let mut streaming = false;
-    let mut prev_bar = "";
     let mut prev_state: Option<Value> = None;
     let mut last_sidecar: Option<(u64, GsInputState)> = None;
 
@@ -234,10 +233,9 @@ pub async fn run(mut cfg: RunnerConfig) {
         streaming = should_stream;
 
         let bar = view.lightbar_state(now);
-        if let Some(a) = transition_alert(prev_state.as_ref(), live.as_ref(), prev_bar, bar) {
+        if let Some(a) = feedback_alert(prev_state.as_ref(), live.as_ref()) {
             rumble.alert(a, now);
         }
-        prev_bar = bar;
         prev_state = live;
         if let Some((p, _)) = pad.as_mut() {
             p.set_lightbar(lightbar_rgb(bar, now));

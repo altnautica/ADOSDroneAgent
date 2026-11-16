@@ -141,3 +141,41 @@ fn a_centred_dead_band_on_a_real_range_reads_zero() {
     assert_eq!(pilot_axes(&st, mode2(), 0.08), [0.0, 0.0, 0.0, 0.0]);
     assert!(is_centred(st.stick_l));
 }
+
+/// The shared golden vectors (`cockpit-spec/stick-golden.json`): the same raw
+/// stick positions give the same pilot axes on every surface.
+#[test]
+fn sticks_match_the_shared_golden_vectors() {
+    let golden: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../web-shared/src/cockpit-spec/stick-golden.json"
+    ))
+    .expect("stick-golden.json parses");
+    let tol = golden["tolerance"].as_f64().unwrap() as f32;
+    let default_dz = golden["deadzone"].as_f64().unwrap() as f32;
+    assert_eq!(default_dz, ds4().conditioning.radial_deadzone);
+    let cases = golden["cases"].as_array().unwrap();
+    assert!(cases.iter().any(|c| c["mode"] == "mode1") && cases.iter().any(|c| c["mode"] == "mode2"));
+    for c in cases {
+        let f = |k: &str| c["raw"][k].as_f64().unwrap() as f32;
+        let st = PadState {
+            stick_l: (f("lx"), f("ly")),
+            stick_r: (f("rx"), f("ry")),
+            l2: 0.0,
+            r2: 0.0,
+            buttons: 0,
+        };
+        let dz = c["deadzone"].as_f64().map_or(default_dz, |d| d as f32);
+        let mode = &ds4().stick_modes[c["mode"].as_str().unwrap()];
+        let got = pilot_axes(&st, mode, dz);
+        for (i, want) in c["out"].as_array().unwrap().iter().enumerate() {
+            let want = want.as_f64().unwrap() as f32;
+            assert!(
+                (got[i] - want).abs() <= tol,
+                "{} {}: axis {i} {} != {want}",
+                c["mode"],
+                c["name"],
+                got[i]
+            );
+        }
+    }
+}

@@ -1,8 +1,8 @@
 //! The controller half of the cockpit spec (`web-shared/src/cockpit-spec/ds4.json`),
 //! compiled into the binary so the ground station and every operator surface
 //! read one table: stick modes, conditioning, the `buttons` bitfield, the
-//! evdev maps, the binding rows, the locked actions, the lightbar colours and
-//! the rumble patterns.
+//! evdev maps, the binding rows, the locked actions, the lightbar colours,
+//! the rumble patterns and the pilot-state feedback rules.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -81,6 +81,49 @@ pub struct LightbarState {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Lightbar {
     pub states: BTreeMap<String, LightbarState>,
+    /// The state per pilot profile while the operator's sticks own the
+    /// vehicle (`cine` → `pilot_cine`, …), plus its `$description`.
+    pub profile_states: BTreeMap<String, String>,
+}
+
+/// What a feedback rule watches for between two consecutive pilot states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    Changed,
+    NewValue,
+    Entered,
+    Appeared,
+    NewItem,
+    StateLost,
+}
+
+/// One `feedback` rule.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeedbackRule {
+    pub id: String,
+    /// Dotted path into the pilot state; `None` for `state_lost`.
+    #[serde(default)]
+    pub field: Option<String>,
+    pub on: Trigger,
+    #[serde(default)]
+    pub values: Vec<serde_json::Value>,
+    #[serde(default, rename = "where")]
+    pub where_: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub armed_only: bool,
+    pub rumble: String,
+}
+
+/// The pilot-state feedback table: rule classes, strongest first in `order`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Feedback {
+    pub order: Vec<String>,
+    pub mode_change: Vec<FeedbackRule>,
+    pub warning: Vec<FeedbackRule>,
+    pub critical: Vec<FeedbackRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -145,6 +188,7 @@ pub struct Ds4Spec {
     pub locked_actions: Vec<LockedAction>,
     pub lightbar: Lightbar,
     pub rumble: Rumble,
+    pub feedback: Feedback,
 }
 
 /// The spec, parsed once. The file is compiled in and covered by a unit test,
@@ -235,6 +279,24 @@ mod tests {
                 s.lightbar.states.contains_key(state),
                 "lightbar state {state}"
             );
+        }
+        for profile in ["cine", "normal", "sport"] {
+            let state = &s.lightbar.profile_states[profile];
+            assert!(s.lightbar.states.contains_key(state), "profile state {state}");
+        }
+        // Every feedback class is a rumble pattern, and each rule plays its class.
+        let classes = [
+            ("mode_change", &s.feedback.mode_change),
+            ("warning", &s.feedback.warning),
+            ("critical", &s.feedback.critical),
+        ];
+        assert_eq!(s.feedback.order, ["critical", "warning", "mode_change"]);
+        for (class, rules) in classes {
+            assert!(!rules.is_empty(), "{class}");
+            for r in rules {
+                assert_eq!(r.rumble, class, "rule {}", r.id);
+                assert_eq!(r.field.is_none(), r.on == Trigger::StateLost, "rule {}", r.id);
+            }
         }
         assert!(!s.locked_actions.is_empty());
     }
