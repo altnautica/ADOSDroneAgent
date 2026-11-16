@@ -11,11 +11,13 @@
 //! surface's mode mapping and deadzone already applied): pitch + is forward,
 //! thr + is climb, yaw + is clockwise, roll + is right.
 
+mod command;
 mod route;
 mod sensors;
 mod state;
 mod wire;
 
+pub use command::*;
 pub use route::*;
 pub use sensors::*;
 pub use state::*;
@@ -49,12 +51,19 @@ pub struct Goal {
     pub n: f32,
     pub e: f32,
     pub d: f32,
+    /// The horizontal velocity, m/s: a feed-forward the pilot adds to its
+    /// own pull toward `n`/`e`, or with [`VelMode::Command`] the whole
+    /// velocity the skill asks for.
     #[serde(default)]
     pub vn: f32,
     #[serde(default)]
     pub ve: f32,
+    /// Down velocity feed-forward, m/s (`d` stays a position target).
     #[serde(default)]
     pub vd: f32,
+    /// What `vn`/`ve` mean. Absent reads [`VelMode::FeedForward`].
+    #[serde(default)]
+    pub vel_mode: VelMode,
     /// Absolute yaw in radians, or `None` to leave heading to the pilot.
     #[serde(default)]
     pub yaw: Option<f32>,
@@ -93,6 +102,7 @@ impl Goal {
             vn: 0.0,
             ve: 0.0,
             vd: 0.0,
+            vel_mode: VelMode::FeedForward,
             yaw: None,
             yaw_rate: None,
             subject_ne: None,
@@ -113,6 +123,25 @@ pub enum GoalKind {
     Position,
     /// Fly to a point that sees the lost subject's predicted area.
     Vantage,
+}
+
+/// What a goal's horizontal velocity means. Either way the pilot shapes the
+/// velocity it flies (acceleration and jerk limited by the profile) and holds
+/// it to the goal's speed limit, the profile, any speed cap, the obstacle
+/// brake and the geofence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum VelMode {
+    /// `vn`/`ve` are a feed-forward: the pilot adds its own pull toward
+    /// `n`/`e`, slowing into the point on the profile's deceleration.
+    #[default]
+    FeedForward,
+    /// `vn`/`ve` are the whole horizontal velocity the skill asks for: the
+    /// pilot adds no pull toward `n`/`e`, which stay the destination for the
+    /// planner, the obstacle brake and `goal.status`. Zero holds the point
+    /// where the pilot's deceleration ends.
+    Command,
 }
 
 /// Where a lost subject may be and the bounds of the search for a point

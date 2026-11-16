@@ -31,6 +31,26 @@ fn json_goal_frame_decodes_with_defaults() {
     assert_eq!(goal.vn, 0.0);
     assert_eq!(goal.yaw, None);
     assert_eq!(goal.margin_m, Some(2.0));
+    assert_eq!(goal.vel_mode, crate::pilot::VelMode::FeedForward);
+}
+
+#[test]
+fn a_commanded_velocity_goal_decodes_its_vel_mode() {
+    let frame = serde_json::json!({
+        "op": "goal", "lease_id": 5,
+        "goal": {"kind": "follow", "n": 1.0, "e": 2.0, "d": -4.0, "max_speed_mps": 6.0,
+                 "vn": 1.5, "ve": 0.0, "vel_mode": "command"}
+    });
+    let (req, _) = json_to_request_body(&frame).unwrap();
+    let Request::Goal { goal, .. } = req else {
+        panic!("not a goal")
+    };
+    assert_eq!(goal.vel_mode, crate::pilot::VelMode::Command);
+    let body = encode_op("goal", &serde_json::json!({"lease_id": 5, "goal": goal})).unwrap();
+    let Request::Goal { goal: back, .. } = decode_request(&body).unwrap() else {
+        panic!("not a goal")
+    };
+    assert_eq!(back, goal);
 }
 
 #[test]
@@ -206,12 +226,13 @@ fn wire_floats_are_short_decimals() {
 }
 
 #[test]
-fn the_registry_version_records_the_nullable_fc_state() {
+fn the_registry_version_records_the_nullable_fc_state_and_the_vel_mode() {
     // `state.armed`, `state.landed` (v2), `state.fc_mode` and
     // `state.fc_mode_name` (v3) are null while the FC link is down: changes
     // of the state message's shape, so the contract version moved with them
-    // and the registry describes them.
-    assert_eq!(crate::pilot::PILOT_V1_VERSION, 3);
+    // and the registry describes them. v4: a goal's velocity may be the
+    // whole commanded velocity (`goal.vel_mode`).
+    assert_eq!(crate::pilot::PILOT_V1_VERSION, 4);
     let meta = crate::contracts::CONTRACTS
         .iter()
         .find(|c| c.id == "pilot.v1")
@@ -219,6 +240,7 @@ fn the_registry_version_records_the_nullable_fc_state() {
     for text in [
         "armed and landed are null",
         "fc_mode and fc_mode_name are null",
+        "goal.vel_mode",
     ] {
         assert!(meta.description.contains(text), "{}", meta.description);
     }
