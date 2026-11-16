@@ -141,6 +141,11 @@ impl PilotHandle {
         let _ = self.cmd.send(CoreCmd::SetupMode(mode)).await;
     }
 
+    /// Hand a setup lift-off's outcome to airframe health.
+    pub async fn liftoff_outcome(&self, o: crate::airframe::LiftoffOutcome) {
+        let _ = self.cmd.send(CoreCmd::LiftoffOutcome(o)).await;
+    }
+
     /// Hand the FC identity's stored airframe record to airframe health.
     pub async fn airframe_load(
         &self,
@@ -156,9 +161,6 @@ impl PilotHandle {
                 prop_in,
             })
             .await;
-    /// Hand a setup lift-off's outcome to airframe health.
-    pub async fn liftoff_outcome(&self, o: crate::airframe::LiftoffOutcome) {
-        let _ = self.cmd.send(CoreCmd::LiftoffOutcome(o)).await;
     }
 }
 
