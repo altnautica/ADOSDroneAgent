@@ -162,6 +162,8 @@ pub struct Pilot {
     /// The shadow planner's latest command and its source.
     shadow: Option<(&'static str, ShadowCmd)>,
     plan_hold: Option<[f32; 3]>,
+    /// The shaped reference the latest goal tick flew ([`control::GoalRef`]).
+    goal_ref: Option<control::GoalRef>,
     /// Where a skill goal or goto holds while the obstacle data is stale,
     /// from the tick it went stale; cleared on any tick that does not keep it.
     stale_hold: Option<[f32; 3]>,
@@ -240,6 +242,7 @@ impl Pilot {
             latch: trace::Latch::default(),
             shadow: None,
             plan_hold: None,
+            goal_ref: None,
             stale_hold: None,
             nav_set: nav_cap::BOOT_SOURCE_SET,
             cap_vel: None,

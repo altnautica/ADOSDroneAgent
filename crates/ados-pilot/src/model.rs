@@ -49,6 +49,63 @@ pub fn limits(p: Profile) -> Limits {
     }
 }
 
+/// One profile's limits on the setpoints the pilot flies for a skill goal or
+/// a goto. Softer than the stick limits: the camera is fixed to the body, and
+/// a multirotor tilts by atan(a/g) to accelerate at `a` and changes that tilt
+/// at about j/g rad/s for a jerk `j`. On Normal, 1.0 m/s² is a 5.8° tilt and
+/// 2.0 m/s³ an 11.7°/s tilt rate; ArduCopter's own guided shaping defaults
+/// are `WP_ACC` 2.5 m/s² and `PSC_NE_JERK` 5 m/s³, which turned stepped
+/// follow commands into 15-26°/s tilt rates. The obstacle brake keeps the
+/// profile's stick limits ([`Limits::a_h`]): a stop is never held to these.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GoalLimits {
+    /// Horizontal acceleration, m/s².
+    pub a_h: f32,
+    /// Horizontal jerk, m/s³.
+    pub jerk: f32,
+    /// Heading rate, °/s.
+    pub yaw_dps: f32,
+    /// Heading acceleration, °/s².
+    pub yaw_dps2: f32,
+}
+
+pub fn goal_limits(p: Profile) -> GoalLimits {
+    match p {
+        Profile::Cine => GoalLimits {
+            a_h: 0.6,
+            jerk: 1.2,
+            yaw_dps: 20.0,
+            yaw_dps2: 40.0,
+        },
+        Profile::Normal => GoalLimits {
+            a_h: 1.0,
+            jerk: 2.0,
+            yaw_dps: 30.0,
+            yaw_dps2: 60.0,
+        },
+        Profile::Sport => GoalLimits {
+            a_h: 2.5,
+            jerk: 5.0,
+            yaw_dps: 60.0,
+            yaw_dps2: 120.0,
+        },
+    }
+}
+
+/// The rate that closes `err` without overshoot at `rate_max`, slowing at no
+/// more than `acc` (a square-root profile, linear within `acc`/`k`² of zero
+/// so it settles without chatter), and never more than `err` in one `dt`.
+/// `err` is a magnitude ≥ 0; so is the result.
+pub fn sqrt_rate(err: f32, k: f32, acc: f32, rate_max: f32, dt: f32) -> f32 {
+    let linear = acc / (k * k);
+    let r = if err > linear {
+        (2.0 * acc * (err - linear / 2.0)).sqrt()
+    } else {
+        k * err
+    };
+    r.min(rate_max).min(err / dt)
+}
+
 /// `(1 - e)·x + e·x³`.
 pub fn expo(x: f32, e: f32) -> f32 {
     let x = x.clamp(-1.0, 1.0);
@@ -98,6 +155,25 @@ impl Shaper {
         } else {
             self.v = geo::add(self.v, step);
         }
+        self.v
+    }
+
+    /// Advance one step toward `target`, with the acceleration held to
+    /// `a_max` and its change to `jerk`·`dt`, never to zero at once: the
+    /// setpoints of a skill goal. Near the target the acceleration falls off
+    /// linearly, so it settles without snapping to zero.
+    pub fn track(&mut self, target: V2, a_max: f32, jerk: f32, dt: f32) -> V2 {
+        let err = geo::sub(target, self.v);
+        let e = geo::norm(err);
+        let a_mag = sqrt_rate(e, jerk / a_max, jerk, a_max, dt);
+        let a_des = if e > 1e-6 {
+            geo::scale(err, a_mag / e)
+        } else {
+            [0.0, 0.0]
+        };
+        let da = geo::clamp_len(geo::sub(a_des, self.a), jerk * dt);
+        self.a = geo::clamp_len(geo::add(self.a, da), a_max);
+        self.v = geo::add(self.v, geo::scale(self.a, dt));
         self.v
     }
 }

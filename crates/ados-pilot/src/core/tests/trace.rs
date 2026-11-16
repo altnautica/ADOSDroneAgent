@@ -10,7 +10,7 @@ use super::harness::World;
 use super::safety::{wall_scan, G};
 use crate::core::control::brake_limit;
 use crate::core::{limit, ShadowCmd, SHADOW_MAX_AGE_MS};
-use crate::fc::MASK_POS_VEL_YAW;
+use crate::fc::{MASK_POS_VEL_ACC_YAW, MASK_POS_VEL_YAW};
 use crate::geo;
 use crate::modes::copter;
 use crate::obstacles::Obstacles;
@@ -45,38 +45,82 @@ fn limits(cmd: &Value) -> Vec<String> {
 /// position loop's pull (gain 1) toward its position.
 fn fc_ask(w: &World, pos: [f32; 2]) -> [f32; 2] {
     let sp = w.last_setpoint().unwrap();
-    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_YAW);
+    let mask = sp.type_mask.bits();
+    assert!(
+        mask == MASK_POS_VEL_YAW || mask == MASK_POS_VEL_ACC_YAW,
+        "mask {mask}"
+    );
     geo::add([sp.vx, sp.vy], geo::sub([sp.x, sp.y], pos))
+}
+
+/// The pilot's own pull toward a point `to` away: linear at gain 1 near
+/// it, slowing into it at 0.7 m/s² (the Normal goal deceleration).
+fn pull(to: [f32; 2]) -> [f32; 2] {
+    let e = geo::norm(to);
+    let r = if e > 0.7 {
+        (1.4 * (e - 0.35)).sqrt()
+    } else {
+        e
+    };
+    geo::scale(to, r / e)
+}
+
+/// Send `goal(seconds)` every 100 ms for `ms`, with `scan` before each
+/// 20 ms tick when given.
+fn fly_goal(w: &mut World, id: u64, ms: u64, scan: Option<&Value>, goal: impl Fn(f32) -> Goal) {
+    let t0 = w.now;
+    while w.now < t0 + ms {
+        let g = goal((w.now - t0) as f32 / 1000.0);
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: g,
+        });
+        for _ in 0..5 {
+            if let Some(s) = scan {
+                w.p.on_feed("plugin.world-engine.scan", s, w.now);
+            }
+            w.run(20);
+        }
+    }
 }
 
 /// A follow goal flown in the open: the frame carries the command of the
 /// tick, in the FC's local frame, with the skill's goal, the target, the
 /// asked and commanded velocity (which is what the setpoint asks of the FC)
-/// and the speed limit.
+/// and the speed limit. Once the shaped flight has caught up with the
+/// moving goal, nothing limits it.
 #[test]
 fn a_flown_goal_publishes_its_command() {
     let mut w = World::new();
     w.p.epoch_offset_ms = 1_700_000_000_000;
+    w.p.settings.pilot.avoid = AvoidMode::Off;
     w.airborne(copter::GUIDED);
+    w.fly = true;
     let id = w.lease();
-    w.req(Request::Goal {
-        lease_id: id,
-        goal: follow_goal([3.0, 1.0, -5.0], [1.0, 0.0]),
+    fly_goal(&mut w, id, 10_000, None, |t| {
+        follow_goal([3.0 + t, 1.0, -5.0], [1.0, 0.0])
     });
-    w.run(300);
     let v = frame(&w);
     let cmd = &v["command"];
     assert!(cmd.is_object(), "no command on the frame: {v}");
     let t = cmd["t_ms"].as_u64().unwrap() - 1_700_000_000_000;
     assert!(t + 40 >= w.now && t <= w.now, "tick at {t}, now {}", w.now);
-    assert_eq!(cmd["goal_ned"], json!([3.0, 1.0, -5.0]));
-    assert_eq!(pair(&cmd["target_ne"]), [3.0, 1.0]);
-    // Asked: the feed-forward plus the pull toward the target.
-    assert_eq!(pair(&cmd["ask_vel_ne"]), [4.0, 1.0]);
-    let fc = fc_ask(&w, [0.0, 0.0]);
+    let goal = &cmd["goal_ned"];
+    assert!(
+        (goal[0].as_f64().unwrap() - 12.9).abs() < 1e-3 && goal[1] == 1.0,
+        "{goal}"
+    );
+    assert!((pair(&cmd["target_ne"])[1] - 1.0).abs() < 1e-3, "{cmd}");
+    // Asked: the feed-forward plus the pull toward the target, nearly
+    // nothing once caught up.
+    let ask = pair(&cmd["ask_vel_ne"]);
+    assert!(geo::dist(ask, [1.0, 0.0]) < 0.1, "asked {ask:?}");
+    // The command is what the setpoint asks of the FC (the vehicle has
+    // since flown one 20 ms tick).
+    let fc = fc_ask(&w, [w.pos[0], w.pos[1]]);
     let c = pair(&cmd["cmd_vel_ne"]);
     assert!(
-        geo::dist(c, fc) < 1e-3,
+        geo::dist(c, fc) < 0.05,
         "command {c:?}, setpoint asks {fc:?}"
     );
     assert_eq!(cmd["v_cap_mps"].as_f64(), Some(6.0));
@@ -93,18 +137,17 @@ fn a_braked_goal_names_the_limit_that_cut_it() {
     let id = w.lease();
     let empty = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                        "angle_increment_rad": TAU / 360.0, "ranges_m": vec![0.0f32; 360]});
-    w.p.on_feed("plugin.world-engine.scan", &empty, w.now);
-    w.req(Request::Goal {
-        lease_id: id,
-        goal: follow_goal([30.0, 0.0, -5.0], [0.0, 0.0]),
+    fly_goal(&mut w, id, 6000, Some(&empty), |_| {
+        follow_goal([30.0, 0.0, -5.0], [0.0, 0.0])
     });
-    w.run(300);
     let v = frame(&w);
     let cmd = &v["command"];
-    assert_eq!(limits(cmd), ["seen_space"], "{cmd}");
+    let lim = limits(cmd);
+    assert!(lim.iter().any(|l| l == "seen_space"), "{cmd}");
+    assert!(!lim.iter().any(|l| l == "hold"), "{cmd}");
     let ask = pair(&cmd["ask_vel_ne"]);
     let flown = pair(&cmd["cmd_vel_ne"]);
-    assert!(ask[0] > 29.0, "asked {ask:?}");
+    assert!(ask[0] > 6.0, "asked {ask:?}");
     assert!(flown[0] > 1.0 && flown[0] < ask[0], "flown {flown:?}");
     assert!(geo::dist(flown, fc_ask(&w, [0.0, 0.0])) < 1e-3);
 }
@@ -134,11 +177,10 @@ fn a_blocked_goto_publishes_a_hold() {
     assert_eq!(cmd["hold_reasons"], json!(["blocked"]), "{cmd}");
     assert_eq!(pair(&cmd["target_ne"]), [20.0, 0.0], "{cmd}");
     assert_eq!(cmd["goal_ned"], json!([20.0, 0.0, -5.0]));
-    // Asked: a goto's velocity toward its target plus the pull toward it,
-    // from where the vehicle is.
+    // Asked: the pilot's pull toward the goto's target, slowing into it on
+    // the goal deceleration, from where the vehicle is.
     let ask = pair(&cmd["ask_vel_ne"]);
-    let to = geo::sub([20.0, 0.0], [w.pos[0], w.pos[1]]);
-    let want = geo::scale(to, 2.0);
+    let want = pull(geo::sub([20.0, 0.0], [w.pos[0], w.pos[1]]));
     assert!(geo::dist(ask, want) < 1e-2, "asked {ask:?}, want {want:?}");
     assert!(cmd["v_cap_mps"].as_f64().unwrap() > 0.0, "{cmd}");
     // Flown: the hold, far below what was asked.
@@ -177,7 +219,7 @@ fn a_blocked_follow_keeps_what_it_asked() {
     let to = geo::sub(target, [w.pos[0], w.pos[1]]);
     let ask = pair(&cmd["ask_vel_ne"]);
     assert!(
-        geo::dist(ask, geo::add([3.0, 0.0], to)) < 1e-2,
+        geo::dist(ask, geo::add([3.0, 0.0], pull(to))) < 1e-2,
         "asked {ask:?}, target {target:?}"
     );
     assert_eq!(cmd["v_cap_mps"].as_f64(), Some(6.0));
@@ -187,6 +229,7 @@ fn a_blocked_follow_keeps_what_it_asked() {
 
 /// Under external navigation the speed cap binds a far goal: the command
 /// names it first, and names the goal's own limit only when that cut too.
+/// At the cap the shaper no longer limits it.
 #[test]
 fn the_nav_cap_is_named_when_it_binds() {
     for (ff, want) in [(3.0, vec!["nav_cap"]), (8.0, vec!["nav_cap", "speed"])] {
@@ -194,14 +237,15 @@ fn the_nav_cap_is_named_when_it_binds() {
         w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
         w.p.fc.params.insert("EK3_SRC2_POSXY".into(), 6.0);
         w.airborne(copter::GUIDED);
-        // vision-nav reports source set 2 (external nav) active.
-        w.p.on_feed("nav.state", &json!({"active_set": 2, "gps_fix": 0}), w.now);
         let id = w.lease();
-        w.req(Request::Goal {
-            lease_id: id,
-            goal: follow_goal([8.0, 0.0, -5.0], [ff, 0.0]),
-        });
-        w.run(300);
+        let t0 = w.now;
+        while w.now < t0 + 5000 {
+            // vision-nav reports source set 2 (external nav) active.
+            w.p.on_feed("nav.state", &json!({"active_set": 2, "gps_fix": 0}), w.now);
+            fly_goal(&mut w, id, 100, None, |_| {
+                follow_goal([8.0, 0.0, -5.0], [ff, 0.0])
+            });
+        }
         let cmd = &frame(&w)["command"];
         assert_eq!(limits(cmd), want, "feed-forward {ff}: {cmd}");
         assert_eq!(cmd["v_cap_mps"].as_f64(), Some(2.0));
@@ -211,22 +255,26 @@ fn the_nav_cap_is_named_when_it_binds() {
 }
 
 /// A goal far away with nothing to brake for: the setpoint's pull toward it
-/// is held, so the commanded velocity stays within the speed limit.
+/// is held, so the commanded velocity stays within the speed limit, and the
+/// shaped flight reaches it.
 #[test]
 fn the_commanded_velocity_stays_within_the_limit() {
     let mut w = World::new();
     w.p.settings.pilot.avoid = AvoidMode::Off;
     w.airborne(copter::GUIDED);
     let id = w.lease();
-    w.req(Request::Goal {
-        lease_id: id,
-        goal: follow_goal([30.0, 0.0, -5.0], [0.0, 0.0]),
-    });
-    w.run(300);
+    let t0 = w.now;
+    while w.now < t0 + 10_000 {
+        fly_goal(&mut w, id, 100, None, |_| {
+            follow_goal([60.0, 0.0, -5.0], [0.0, 0.0])
+        });
+        let cmd = &frame(&w)["command"];
+        let flown = pair(&cmd["cmd_vel_ne"]);
+        assert!(geo::norm(flown) <= 6.0 + 1e-3, "flown {flown:?}");
+    }
     let cmd = &frame(&w)["command"];
-    assert!(pair(&cmd["ask_vel_ne"])[0] > 25.0, "{cmd}");
+    assert!(pair(&cmd["ask_vel_ne"])[0] > 6.0, "{cmd}");
     let flown = pair(&cmd["cmd_vel_ne"]);
-    assert!(geo::norm(flown) <= 6.0 + 1e-3, "flown {flown:?}");
     assert!(flown[0] > 5.0, "flown {flown:?}");
 }
 

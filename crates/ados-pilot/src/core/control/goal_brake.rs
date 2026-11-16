@@ -29,6 +29,35 @@ impl Pilot {
         .v
     }
 
+    /// The brake's caps planned on the goal limits' acceleration `a_h`,
+    /// applied to what a goal asks before it is shaped: the shaped velocity
+    /// then slows for an obstacle on the goal profile, well before the
+    /// safety brake ([`Pilot::goal_brake`], on the profile's stick
+    /// acceleration) would have to cut it. Returns the velocity and the
+    /// brake terms that cut ([`crate::core::limit`] bits).
+    pub(super) fn soft_brake(&mut self, pos: V2, v: V2, a_h: f32, now_ms: u64) -> (V2, u16) {
+        if self.settings.pilot.avoid == AvoidMode::Off || self.obstacle_data_unavailable(now_ms) {
+            return (v, 0);
+        }
+        let vel = self
+            .fc
+            .fresh_local(now_ms)
+            .map_or([0.0; 2], |l| [l.vn, l.ve]);
+        let geom = self.brake_geom(self.margin());
+        let b = brake_limit(&self.obstacles, pos, vel, v, a_h, geom, now_ms);
+        if !b.cut {
+            return (v, 0);
+        }
+        // The published avoid state says the brake slowed the goal even when
+        // only this soft brake did.
+        self.brake_avoid = if progress(v, b.v) < STOPPED_MPS {
+            AvoidState::Blocked
+        } else {
+            AvoidState::Detour
+        };
+        (b.v, b.by)
+    }
+
     /// The brake for a goal setpoint (skill or goto). With a position
     /// setpoint the FC flies the feed-forward plus its position loop's pull
     /// toward the target (`ask`), which the planner's `clear` never bounds by

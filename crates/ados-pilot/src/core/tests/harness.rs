@@ -54,6 +54,11 @@ pub struct World {
     /// The scripted FC sends LOCAL_POSITION_NED (off: its local position
     /// goes stale).
     pub local: bool,
+    /// The vehicle flies each tick's setpoint as a stiff FC would: its
+    /// horizontal velocity becomes the setpoint's velocity plus the
+    /// position loop's pull (gain 1/s) toward the setpoint's position, and
+    /// its position moves on it. Off: the vehicle stays where a test puts it.
+    pub fly: bool,
 }
 
 /// A scan with one return, `range_m` away in body bin `bin` (degrees
@@ -124,6 +129,7 @@ impl World {
             scan_ranges: vec![0.0; 360],
             goal_status: Vec::new(),
             local: true,
+            fly: false,
         };
         w.feed();
         w
@@ -239,11 +245,34 @@ impl World {
             self.now += 20;
             self.feed();
             self.p.tick(self.now);
+            let from = self.sent.len();
             self.collect();
+            if self.fly {
+                self.fly_tick(from, 0.02);
+            }
             if self.now.is_multiple_of(100) {
                 self.p.state_published();
             }
         }
+    }
+
+    /// [`World::fly`]: fly the last setpoint sent since `from` for `dt`.
+    fn fly_tick(&mut self, from: usize, dt: f32) {
+        let Some(sp) = self.sent[from..].iter().rev().find_map(|m| match m {
+            MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) => Some(s.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let mask = sp.type_mask.bits();
+        let mut v = [sp.vx, sp.vy];
+        if mask & 0b111 == 0 {
+            v[0] += sp.x - self.pos[0];
+            v[1] += sp.y - self.pos[1];
+        }
+        self.vel = [v[0], v[1], 0.0];
+        self.pos[0] += v[0] * dt;
+        self.pos[1] += v[1] * dt;
     }
 
     pub fn collect(&mut self) {

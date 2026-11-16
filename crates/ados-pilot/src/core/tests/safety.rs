@@ -921,7 +921,8 @@ fn follow_goal(ned: [f32; 3], vel_ne: [f32; 2]) -> Goal {
 fn fc_ask(w: &World, pos: [f32; 2]) -> [f32; 2] {
     let sp = w.last_setpoint().unwrap();
     let ff = [sp.vx, sp.vy];
-    if sp.type_mask.bits() == MASK_POS_VEL_YAW {
+    let mask = sp.type_mask.bits();
+    if mask == MASK_POS_VEL_YAW || mask == crate::fc::MASK_POS_VEL_ACC_YAW {
         geo::add(ff, geo::sub([sp.x, sp.y], pos))
     } else {
         ff
@@ -1000,31 +1001,48 @@ fn replayed_follow_approach_never_asks_more_than_it_can_stop_from() {
 fn goal_brake_keeps_open_goals_and_caps_them_to_seen_space() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);
+    w.fly = true;
     let id = w.lease();
-    // Nothing seen yet: a near goal is flown as planned.
-    w.req(Request::Goal {
-        lease_id: id,
-        goal: follow_goal([3.0, 0.0, -5.0], [0.0, 0.0]),
-    });
-    w.run(300);
+    let fly_to = |w: &mut World, ne: [f32; 2], ms: u64| {
+        let end = w.now + ms;
+        while w.now < end {
+            w.req(Request::Goal {
+                lease_id: id,
+                goal: follow_goal([ne[0], ne[1], -5.0], [0.0, 0.0]),
+            });
+            w.run(100);
+        }
+    };
+    // Nothing seen yet: a near goal is flown as planned, onto its point.
+    fly_to(&mut w, [3.0, 0.0], 6000);
     let sp = w.last_setpoint().unwrap();
-    assert_eq!((sp.x, sp.y), (3.0, 0.0), "planned setpoint kept");
+    assert!(
+        (sp.x - 3.0).abs() < 0.05 && sp.y.abs() < 0.05,
+        "planned setpoint kept: {} {}",
+        sp.x,
+        sp.y
+    );
     assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Clear);
     // A scan with no return: free space to the lidar's range only. A goal
     // 30 m out asks more than the vehicle can stop from inside it.
     let empty = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                        "angle_increment_rad": TAU / 360.0, "ranges_m": vec![0.0f32; 360]});
-    w.p.on_feed("plugin.world-engine.scan", &empty, w.now);
-    w.req(Request::Goal {
-        lease_id: id,
-        goal: follow_goal([30.0, 0.0, -5.0], [0.0, 0.0]),
-    });
-    w.run(300);
-    let ask = fc_ask(&w, [0.0, 0.0]);
-    let seen = stop_cap(crate::obstacles::SCAN_HORIZON_M, 0.0, 3.0, 1.5);
+    let mut ask_max = 0.0f32;
+    let end = w.now + 6000;
+    while w.now < end {
+        w.p.on_feed("plugin.world-engine.scan", &empty, w.now);
+        fly_to(&mut w, [30.0, 0.0], 100);
+        let ask = fc_ask(&w, [w.pos[0], w.pos[1]]);
+        let seen = stop_cap(crate::obstacles::SCAN_HORIZON_M, 0.0, 3.0, 1.5);
+        assert!(
+            ask[0] <= seen + 0.05,
+            "flies {ask:?}, seen space allows {seen:.2}"
+        );
+        ask_max = ask_max.max(ask[0]);
+    }
     assert!(
-        ask[0] > 1.0 && ask[0] <= seen + 0.05,
-        "flies {ask:?}, seen space allows {seen:.2}"
+        ask_max > 1.0,
+        "the open goal is flown: up to {ask_max:.2} m/s"
     );
     assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Detour);
 }

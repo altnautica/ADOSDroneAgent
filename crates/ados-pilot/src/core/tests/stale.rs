@@ -105,7 +105,8 @@ fn stale_scans_mid_goto_hold_where_the_vehicle_is() {
         d: -5.0,
         yaw: None,
     });
-    w.run(600);
+    // The shaped goto reaches 0.5 m/s on the goal acceleration and jerk.
+    w.run(2000);
     assert_eq!(w.p.owner(), Owner::Goto);
     assert!(w.last_setpoint().unwrap().vx > 0.5, "goto not flown");
     w.pos = [2.0, 0.0, -5.0];
@@ -128,7 +129,7 @@ fn stale_scans_mid_goto_hold_where_the_vehicle_is() {
     assert_eq!(hold_reason(&w).as_deref(), Some(STALE));
     // Fresh scans: the goto goes on.
     w.lidar = true;
-    w.run(600);
+    w.run(2000);
     assert_eq!(w.p.owner(), Owner::Goto);
     assert!(w.last_setpoint().unwrap().vx > 0.5, "goto not resumed");
     assert_eq!(hold_reason(&w), None);
@@ -165,8 +166,11 @@ fn stale_scans_hold_a_skill_goal_and_refuse_swarm_goals() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);
     let id = w.lease();
-    w.goal(id, 10.0, 0.0);
-    w.run(400);
+    // The skill streams its goal; the shaped goal reaches 0.5 m/s.
+    for _ in 0..10 {
+        w.goal(id, 10.0, 0.0);
+        w.run(200);
+    }
     assert!(w.last_setpoint().unwrap().vx > 0.5, "goal not flown");
     w.pos = [1.0, 0.0, -5.0];
     // The skill keeps streaming goals while the lidar is silent.

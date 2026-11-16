@@ -2,6 +2,7 @@
 
 mod battery;
 mod closing;
+mod command_goal;
 mod confined;
 mod confined_flight;
 mod confined_route;
@@ -19,6 +20,7 @@ mod route_sigma;
 mod rules;
 mod safety;
 mod sensors;
+mod shaping;
 mod sloped_leg;
 mod stale;
 mod stall_return;

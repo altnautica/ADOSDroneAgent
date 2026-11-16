@@ -16,6 +16,7 @@ use crate::planner;
 mod brake;
 mod failsafes;
 mod goal_brake;
+mod goal_ref;
 mod obstacle_data;
 mod plan;
 mod route;
@@ -23,6 +24,7 @@ mod stall;
 mod supervisor;
 mod vantage_goal;
 pub use brake::*;
+pub(super) use goal_ref::GoalRef;
 #[cfg(test)]
 pub use route::{check_legs, legs_of, Origin, RouteItem};
 pub use route::{route_of, Route, CONFINED_CAP_MPS};
@@ -480,8 +482,6 @@ impl Pilot {
         };
         self.mav(m);
     }
-
-
 }
 
 /// How fast `v` still goes the way `ask` asked, m/s (the speed of `v` when

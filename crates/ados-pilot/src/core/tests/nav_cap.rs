@@ -93,7 +93,8 @@ fn capped_goal_velocity_changes_no_faster_than_the_accel_cap() {
     let id = w.lease();
     w.goal(id, 40.0, 0.0);
     let from = w.sent.len();
-    fly_goal_ext_nav(&mut w, id, 3000);
+    // The shaped goal reaches the cap on the goal acceleration and jerk.
+    fly_goal_ext_nav(&mut w, id, 5000);
     let v = speeds(&w, from);
     assert!(v.len() > 100);
     let mut prev = 0.0;
@@ -215,7 +216,7 @@ fn stick_flight_is_capped_too() {
 fn capped_goal_at_speed(w: &mut World) -> u64 {
     ext_nav(w);
     let id = w.lease();
-    fly_goal_ext_nav(w, id, 2000);
+    fly_goal_ext_nav(w, id, 5000);
     let sp = w.last_setpoint().unwrap();
     assert!((sp.vx - CAP).abs() < 1e-3, "at the cap: {}", sp.vx);
     w.vel = [sp.vx, sp.vy, 0.0];
@@ -393,6 +394,16 @@ fn a_vantage_goal_is_held_to_the_cap() {
     }
     assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Skill);
     let v = speeds(&w, from);
-    assert!(v.iter().any(|s| *s > 0.5), "it flies: {v:?}");
+    let st = w.p.state(w.now);
+    assert!(
+        v.iter().any(|s| *s > 0.5),
+        "it flies: peak {:.2} m/s, hold {:?}, avoid {:?}, plan target {:?}, status {:?}, last setpoint {:?}",
+        v.iter().copied().fold(0.0, f32::max),
+        st.hold_reason,
+        st.avoid_state,
+        w.p.plan.target,
+        w.goal_status.last(),
+        w.last_setpoint()
+    );
     assert!(v.iter().all(|s| *s <= CAP + 1e-3), "{v:?}");
 }

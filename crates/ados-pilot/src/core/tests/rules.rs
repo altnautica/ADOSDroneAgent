@@ -284,8 +284,8 @@ fn tuning_owner_survives_the_landing_between_setup_flight_steps() {
 #[test]
 fn lease_grant_goal_and_revocations() {
     let mut w = World::new();
-    // Avoidance off: the goal is flown as a position setpoint at the target
-    // (with avoidance on, the brake caps it to the space the lidar has seen).
+    // Avoidance off: the goal is flown on its shaped reference, which moves
+    // toward the target (with avoidance on, the brake also caps it).
     w.p.settings.pilot.avoid = ados_protocol::pilot::AvoidMode::Off;
     w.airborne(copter::GUIDED);
     let id = w.lease();
@@ -302,7 +302,13 @@ fn lease_grant_goal_and_revocations() {
     w.goal(id, 10.0, 0.0);
     w.run(300);
     let sp = w.last_setpoint().unwrap();
-    assert_eq!((sp.x, sp.y), (10.0, 0.0));
+    assert!(
+        sp.x > 0.0 && sp.x < 10.0 && sp.vx > 0.0,
+        "flies toward the goal: {} m at {} m/s",
+        sp.x,
+        sp.vx
+    );
+    assert_eq!(sp.y, 0.0);
     // pause revokes.
     w.action("pause");
     assert_eq!(w.revoked.last().unwrap(), &(id, "pause".to_owned()));
@@ -426,7 +432,13 @@ fn goto_flies_and_arrives_into_hold() {
     });
     w.run(300);
     assert_eq!(w.p.owner(), Owner::Goto);
-    assert_eq!(w.last_setpoint().unwrap().x, 20.0);
+    let sp = w.last_setpoint().unwrap();
+    assert!(
+        sp.x > 0.0 && sp.vx > 0.0,
+        "flies toward the target: {} m at {} m/s",
+        sp.x,
+        sp.vx
+    );
 }
 
 #[test]
@@ -1006,7 +1018,8 @@ fn a_vantage_goal_faces_the_predicted_subject() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);
     let id = w.lease();
-    w.hold_vantage(id, [0.0, 7.0], [0.0, 0.0], 600);
+    // A 90° turn at the goal limits' 30°/s.
+    w.hold_vantage(id, [0.0, 7.0], [0.0, 0.0], 5000);
     let sp = w.last_setpoint().expect("a setpoint");
     assert!(
         (sp.yaw - std::f32::consts::FRAC_PI_2).abs() < 0.05,
