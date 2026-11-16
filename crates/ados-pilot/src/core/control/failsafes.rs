@@ -1,6 +1,7 @@
 //! The pilot's own failsafes in the control tick: a lost controller, link
 //! loss and the low-battery countdown (the return, or Land on a multirotor
-//! that may fly without GNSS), announced and logged.
+//! that lands on a low battery: [`crate::batt_failsafe::lands_on_low`]),
+//! announced and logged.
 
 use ados_protocol::pilot::{Owner, VehicleClass};
 use serde_json::json;
@@ -72,10 +73,13 @@ impl Pilot {
             return;
         }
         // A multirotor that may fly without GNSS lands where it is: a return
-        // climbs to the RTL altitude, into the roof indoors (the
+        // climbs to the RTL altitude, into the roof indoors. In a confined
+        // place on external nav it returns along the flown path instead (the
         // `battery_failsafe` readiness item's rule).
         let land = self.fc.vehicle_class() == VehicleClass::Multirotor
-            && crate::batt_failsafe::gnss_free(|n| self.fc.params.get(n).copied());
+            && crate::batt_failsafe::lands_on_low(self.settings.pilot.place_class, |n| {
+                self.fc.params.get(n).copied()
+            });
         let action = if land { "land" } else { "rth" };
         self.low_batt_action = Some(action);
         let Some(deadline) = self.rth_deadline_ms else {

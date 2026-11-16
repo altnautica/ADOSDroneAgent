@@ -330,12 +330,86 @@ fn full_ground_copter_flow() {
 
 /// Run `ados_profile` on its own and apply it; the battery actions written.
 fn apply_profile(params: std::collections::BTreeMap<String, f32>) -> (f32, f32) {
+    apply_profile_in(ados_protocol::pilot::PlaceClass::Open, params)
+}
+
+/// [`apply_profile`] with the pilot's place class `place`.
+fn apply_profile_in(
+    place: ados_protocol::pilot::PlaceClass,
+    params: std::collections::BTreeMap<String, f32>,
+) -> (f32, f32) {
     let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, params);
+    s.fc.inputs.place_class = place;
+    // One tick hands the engine the pilot's inputs.
+    s.run(TICK);
     assert_eq!(s.e.run_step(G, "ados_profile", s.now)["ok"], json!(true));
     s.wait_step("ados_profile", StepState::WaitingUser);
     s.act(G, "ados_profile", "apply", json!({}));
-    s.until(|s| s.e.current_view().is_none(), 10_000);
+    s.until(|s| s.e.current_view().is_none(), 30_000);
     (s.param("BATT_FS_LOW_ACT"), s.param("BATT_FS_CRT_ACT"))
+}
+
+/// A confined place on external nav: a low battery retraces the flown path
+/// (SmartRTL, Land when it has none), never landing in place next to the
+/// furniture or walls it flew by. Critical stays Land.
+#[test]
+fn ados_profile_sets_smart_rtl_or_land_in_a_confined_place_on_external_nav() {
+    use ados_protocol::pilot::PlaceClass;
+    let mut p = ap_copter_params();
+    p.insert("EK3_SRC1_POSXY".into(), 6.0);
+    assert_eq!(
+        apply_profile_in(PlaceClass::Confined, p.clone()),
+        (4.0, 1.0)
+    );
+    // GPS on the boot set, external nav on a later one.
+    let mut q = ap_copter_params();
+    q.insert("EK3_SRC1_POSXY".into(), 3.0);
+    q.insert("EK3_SRC2_POSXY".into(), 6.0);
+    assert_eq!(apply_profile_in(PlaceClass::Confined, q), (4.0, 1.0));
+    // The same vehicle in an open place keeps Land.
+    assert_eq!(apply_profile_in(PlaceClass::Open, p), (1.0, 1.0));
+    // Confined without external nav (optical flow alone) keeps Land.
+    let mut f = ap_copter_params();
+    f.insert("EK3_SRC1_POSXY".into(), 0.0);
+    assert_eq!(apply_profile_in(PlaceClass::Confined, f), (1.0, 1.0));
+}
+
+/// Run `initial_params` on a 10 in, 4S copter with `BATT_CAPACITY`
+/// `capacity`; the parameters after it.
+fn initial_params_with_capacity(capacity: f32) -> Sim {
+    let mut p = ap_copter_params();
+    p.insert("BATT_CAPACITY".into(), capacity);
+    let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
+    s.e.state.data.prop_in = Some(10.0);
+    s.e.state.data.cells = Some(4.0);
+    s.e.run_step(G, "initial_params", s.now);
+    s.wait_step("initial_params", StepState::WaitingUser);
+    s.act(G, "initial_params", "apply", json!({"chemistry": "lipo"}));
+    s.until(|s| s.e.current_view().is_none(), 10_000);
+    assert_eq!(s.step_state(G, "initial_params"), StepState::Done);
+    s
+}
+
+/// The reserve on charge used: low at 20 % and critical at 10 % of the
+/// pack's capacity, the raw-voltage levels kept as the backstop.
+#[test]
+fn initial_params_sets_the_capacity_reserve() {
+    let s = initial_params_with_capacity(5000.0);
+    assert_eq!(s.param("BATT_LOW_MAH"), 1000.0);
+    assert_eq!(s.param("BATT_CRT_MAH"), 500.0);
+    assert!((s.param("BATT_LOW_VOLT") - 14.4).abs() < 1e-4);
+    assert!((s.param("BATT_CRT_VOLT") - 14.0).abs() < 1e-4);
+    assert_eq!(
+        s.result(G, "initial_params")["params"]["BATT_LOW_MAH"],
+        json!(1000.0)
+    );
+    // No capacity: a level in mAh would trip at once (ArduPilot counts the
+    // capacity left as BATT_CAPACITY less the charge used), so none is
+    // written and the readiness item warns.
+    let s = initial_params_with_capacity(0.0);
+    assert_eq!(s.param("BATT_LOW_MAH"), 0.0);
+    assert_eq!(s.param("BATT_CRT_MAH"), 0.0);
+    assert!((s.param("BATT_LOW_VOLT") - 14.4).abs() < 1e-4);
 }
 
 #[test]
@@ -380,7 +454,11 @@ fn ados_profile_and_readiness_agree_on_a_later_external_nav_set() {
     ] {
         fc.params.insert(k.into(), v);
     }
-    let r = crate::batt_failsafe::item_for(&fc, ados_protocol::pilot::ControlMode::Ados);
+    let r = crate::batt_failsafe::item_for(
+        &fc,
+        ados_protocol::pilot::ControlMode::Ados,
+        ados_protocol::pilot::PlaceClass::Open,
+    );
     assert!(r.ok, "{r:?}");
 }
 

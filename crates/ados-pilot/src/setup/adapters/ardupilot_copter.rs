@@ -149,6 +149,24 @@ fn round_to(value: f64, precision: i32) -> f64 {
     (v - v % p).round()
 }
 
+/// The battery levels on charge used, as fractions of `BATT_CAPACITY`:
+/// low (`BATT_LOW_MAH`) at 20 %, critical (`BATT_CRT_MAH`) at 10 %.
+///
+/// - Low at 20 %: the floor of the return reserve. The pilot reads its own
+///   low-battery trigger from `BATT_LOW_MAH` / `BATT_CAPACITY`, so the FC's
+///   level and the pilot's reserve act at the same charge, never below the
+///   floor.
+/// - Critical at 10 %: half the floor, kept for the landing. On a 5000 mAh
+///   pack hovering at 26 A it is 69 s, against about 30 s to land from 15 m
+///   at ArduCopter's 0.5 m/s landing speed.
+///
+/// A LiPo's resting voltage is too flat to place either level: from 20 % to
+/// 10 % left a graphene LiPo cell's open-circuit voltage falls only from
+/// about 3.72 V to 3.685 V, and a voltage level judged on the loaded
+/// voltage trips early under a hover's sag. The voltage levels the initial
+/// tune writes stay as a backstop for a wrong capacity or current sensor.
+pub const CAPACITY_RESERVE: [(&str, f32); 2] = [("BATT_LOW_MAH", 0.20), ("BATT_CRT_MAH", 0.10)];
+
 /// The initial tune parameters, ported from Mission Planner's
 /// `ConfigInitialParams.cs` (`calc_values` and the 4.x parameter names).
 /// `atc` / `mot` are the prefixes (`ATC`/`MOT`, or `Q_A`/`Q_M` on a VTOL).

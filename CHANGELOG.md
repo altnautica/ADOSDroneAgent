@@ -31,6 +31,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 - The single-object tracker advances in time, not batches: prediction, coast budget, gate growth and velocity decay run in steps of `TrackerConfig::step_s` (1/3 s), so a lock coasts the same 2.7 s at 3, 10 or 30 Hz and re-associates up to 3 s after its last measurement, as before at 3 Hz. A frame after a longer gap reports the track lost instead of re-associating under a gate grown across the gap, and the first update after a designation advances one step.
 - The detector's reported latency is the batch's inference time, crop pass included.
 - Cockpit and dashboard overlays hold the boxes of the camera's latest whole-frame batch outside a crop-only batch's window for up to 1 s, so other people's boxes stay drawn during follow. `GET /api/vision/detections/latest` adds `full_frame`, the camera's newest whole-frame batch, to a crop-only batch's reply, for pollers.
+- A copter that may fly without GNSS no longer lands in place on a low battery when it flies a confined place on external navigation (`EK3_SRCn_POSXY` 6 on any source set). Landing in place there came down beside the furniture the confined margin let it fly past: in a simulated room a low-battery landing 0.70 m up, next to a 0.8 m surface 0.5 m away, tipped over. In a confined place on external nav the `battery_failsafe` readiness item and the setup wizard's `ados_profile` step now want low = SmartRTL or Land (4), so the flight controller retraces the flown path the route check cleared and lands only when it has none; the pilot's own reserve rule returns the same way ("Returning in N s", then SmartRTL). Critical stays Land. Elsewhere without GNSS (an open place, or a confined place without external nav) low stays Land, and RTL still blocks. A confined vehicle set up with low = Land reads "Battery failsafe not set for ADOS: set low = SmartRTL or Land, critical = Land" until the profile is applied again.
+- The setup wizard's starting parameters now also set the battery levels on charge used: `BATT_LOW_MAH` at 20 % and `BATT_CRT_MAH` at 10 % of `BATT_CAPACITY`. 20 % is the floor of the return reserve, and the pilot reads its own low-battery trigger from `BATT_LOW_MAH` / `BATT_CAPACITY`, so both act at the same charge; 10 % keeps a landing's worth. The raw-voltage levels stay as a backstop. A LiPo's resting voltage is too flat to place these levels by voltage (about 3.72 V a cell at 20 % left, 3.685 V at 10 %), and the raw-voltage low level alone tripped under a hover's sag with half the pack left. Nothing is written while `BATT_CAPACITY` is unset (10 mAh or less): ArduPilot would count the charge left as below the levels at once. The `battery_failsafe` readiness item warns then: "Battery capacity not set: set BATT_CAPACITY so the low and critical reserve count the charge used".
 
 ### Fixed
 
@@ -61,6 +63,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - The confined route check judges each leg only where it runs within 0.13 m of the scan plane's height: the planar map says what lies at the height the vehicle flies, not at a leg's. The rest of a leg reads `unverified`, never too tight and never clear, and is judged when the vehicle flies at its height; the flight controller is held to 0.5 m/s along any unverified leg within its stopping reach, not only the current one. Before the launch, from the floor, every leg flown higher reads `unverified`, so the `route_infeasible` launch refusal now applies only to legs in the ground slice: a pinch at flight height is judged after the climb and holds the mission. The surfaces' line for an unverified route (`route_check.unverified`) reads "Route checked in flight at each leg's height · slow near walls". A pinch that exists only below the scan plane is not visible to a planar lidar; a confined survey route is cleared offline against the place's geometry for it.
 - Known limit: on a sloped leg the scan's slice reaches only about 0.13 m divided by the slope ahead along it, so beyond a few degrees of slope a pinch off the slice is judged later than a 0.5 m/s stop needs. Today's confined routes are near level; a slope-aware cap follows.
+
 ## [0.117.1] - 2026-11-16
 
 ### Fixed
@@ -156,6 +159,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - The pilot kind carries `setup_abort`, the setup-strings key of the air wizard's last abort the operator did not ask for, for 2 minutes. The cockpit, kiosk, dashboard and terminal UI show it in the status pill.
+
 ## [0.113.0] - 2026-11-14
 
 ### Changed

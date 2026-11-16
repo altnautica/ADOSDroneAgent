@@ -107,7 +107,7 @@ pub fn items(
     if let Some(fw) = fc.firmware {
         out.push(profile_item(fc, fw, mode, place));
         if fw == Firmware::Ardupilot {
-            out.push(crate::batt_failsafe::item_for(fc, mode));
+            out.push(crate::batt_failsafe::item_for(fc, mode, place));
         }
     }
     out.push(position_item(fc, now_ms));

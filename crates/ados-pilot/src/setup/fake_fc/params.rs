@@ -47,6 +47,8 @@ pub fn ap_copter_params() -> BTreeMap<String, f32> {
         ("BATT_ARM_VOLT", 0.0),
         ("BATT_CRT_VOLT", 0.0),
         ("BATT_LOW_VOLT", 10.5),
+        ("BATT_CRT_MAH", 0.0),
+        ("BATT_LOW_MAH", 0.0),
         ("SERVO1_FUNCTION", 33.0),
         ("SERVO2_FUNCTION", 34.0),
         ("SERVO3_FUNCTION", 35.0),

@@ -1,7 +1,8 @@
 //! `ados_profile`: the FC parameter profile ADOS Pilot depends on (one table
 //! with the pilot's readiness check; the battery actions follow
 //! [`crate::batt_failsafe::recommended`], Land for both on a multirotor that
-//! navigates without GNSS), and `ados_intro`: "Meet ADOS Pilot", where the
+//! lands on a low battery, [`crate::batt_failsafe::lands_on_low`]), and
+//! `ados_intro`: "Meet ADOS Pilot", where the
 //! operator chooses the control mode. A changed row the FC reads only at
 //! boot (`OA_TYPE`, `SRTL_POINTS`) reboots the FC before the step is done, as
 //! the battery and frame steps do. In a confined place `SRTL_ACCURACY` keeps
@@ -142,15 +143,15 @@ impl Step for AdosProfile {
 }
 
 /// The value to write for a profile row, from the same rules the readiness
-/// items read (the place class for `fc_profile`, the GNSS rule for
-/// `battery_failsafe`), so the fix settles them.
+/// items read (the place class for `fc_profile` and `battery_failsafe`, the
+/// GNSS rule for `battery_failsafe`), so the fix settles them.
 fn row_value(cx: &Cx, row: &ProfileParam) -> f32 {
     let have = std::iter::once(row.name)
         .chain(row.alt_names.iter().copied())
         .find_map(|n| cx.params.get(n));
     let value = row.value_in(cx.inputs.place_class, have);
-    let free = crate::batt_failsafe::gnss_free(|n| cx.params.get(n));
-    crate::batt_failsafe::profile_value(row.name, value, vehicle_class(cx.adapter.class), free)
+    let lands = crate::batt_failsafe::lands_on_low(cx.inputs.place_class, |n| cx.params.get(n));
+    crate::batt_failsafe::profile_value(row.name, value, vehicle_class(cx.adapter.class), lands)
 }
 
 #[derive(Default)]

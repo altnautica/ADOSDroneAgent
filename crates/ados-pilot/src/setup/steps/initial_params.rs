@@ -1,9 +1,13 @@
 //! `initial_params`: the starting tune.
 //!
 //! Copter and VTOL (`Q_` params): Mission Planner's "Initial tune
-//! parameters" formulas from the prop size and cell count. Plane: the
-//! operator's airspeed limits and cruise throttle, plus TECS defaults the
-//! `air` wizard refines.
+//! parameters" formulas from the prop size and cell count, and the battery
+//! levels on charge used from the FC's `BATT_CAPACITY`
+//! ([`ardupilot_copter::CAPACITY_RESERVE`]; none while the capacity is
+//! unset, when ArduPilot would count the charge left as below them at once
+//! and the `battery_failsafe` readiness item warns). Plane: the operator's
+//! airspeed limits and cruise throttle, plus TECS defaults the `air` wizard
+//! refines.
 
 use serde_json::{json, Map, Value};
 
@@ -170,6 +174,17 @@ impl Step for InitialParams {
                 // A name this firmware does not have (e.g. ACRO_YAW_P on Plane) is left out.
                 if cx.params.has(&name) {
                     written.push((name, v));
+                }
+            }
+            if let Some(cap) = cx
+                .params
+                .get("BATT_CAPACITY")
+                .filter(|c| *c > crate::batt_failsafe::CAPACITY_MIN_MAH)
+            {
+                for (name, frac) in ardupilot_copter::CAPACITY_RESERVE {
+                    if cx.params.has(name) {
+                        written.push((name.into(), (cap * frac).round()));
+                    }
                 }
             }
         }

@@ -5,7 +5,7 @@
 //! GNSS, announcing what it does.
 
 use ados_protocol::mavlink::ardupilotmega::*;
-use ados_protocol::pilot::{Owner, Readiness, Severity};
+use ados_protocol::pilot::{Owner, PlaceClass, Readiness, Severity};
 
 use super::harness::*;
 use crate::core::Reply;
@@ -90,6 +90,77 @@ fn copter_with_gnss_wants_smart_rtl_or_land() {
         assert!(profile.ok, "{profile:?}");
         assert_eq!((batt.ok, batt.severity), (false, Severity::Block), "{low}");
     }
+}
+
+/// The pilot's reserve and the FC's mAh levels both count the charge used
+/// against `BATT_CAPACITY`: without it they never act, so the item warns.
+#[test]
+fn an_unset_capacity_warns() {
+    for unset in [0.0, 10.0] {
+        let mut w = world(4.0, 1.0, GPS);
+        w.p.fc.params.insert("BATT_CAPACITY".into(), unset);
+        let batt = item(&w, "battery_failsafe").expect("a battery_failsafe item");
+        assert_eq!((batt.ok, batt.severity), (false, Severity::Warn), "{unset}");
+        assert_eq!(
+            batt.msg,
+            "Battery capacity not set: set BATT_CAPACITY so the low and critical reserve count the charge used"
+        );
+    }
+    let mut w = world(4.0, 1.0, GPS);
+    w.p.fc.params.insert("BATT_CAPACITY".into(), 5000.0);
+    assert!(item(&w, "battery_failsafe").unwrap().ok);
+}
+
+/// A confined place: the vehicle's tip radius set, as a confined launch
+/// needs, and the FC's SmartRTL accuracy within the confined bound.
+fn confined(w: &mut World) {
+    w.p.settings.pilot.place_class = PlaceClass::Confined;
+    w.p.settings.pilot.prop_tip_radius_m = Some(0.377);
+    w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
+    w.run(100);
+}
+
+#[test]
+fn confined_external_nav_copter_wants_smart_rtl_or_land() {
+    // Landing in place came down on furniture next to the hover point: in a
+    // confined place on external navigation the low battery retraces the
+    // flown path, which the route check cleared.
+    let mut w = world(4.0, 1.0, EXTERNAL_NAV);
+    confined(&mut w);
+    assert!(item(&w, "fc_profile").unwrap().ok);
+    let batt = item(&w, "battery_failsafe").expect("a battery_failsafe item");
+    assert!(batt.ok, "{batt:?}");
+    // Land on low there is the profile's error, and the fix names SmartRTL.
+    for low in [1.0, 2.0] {
+        let mut w = world(low, 1.0, EXTERNAL_NAV);
+        confined(&mut w);
+        let batt = item(&w, "battery_failsafe").expect("a battery_failsafe item");
+        assert_eq!((batt.ok, batt.severity), (false, Severity::Block), "{low}");
+        assert_eq!(
+            batt.msg,
+            "Battery failsafe not set for ADOS: set low = SmartRTL or Land, critical = Land"
+        );
+    }
+    // Critical stays Land.
+    let mut w = world(4.0, 4.0, EXTERNAL_NAV);
+    confined(&mut w);
+    assert!(!item(&w, "battery_failsafe").unwrap().ok);
+}
+
+#[test]
+fn open_external_nav_copter_keeps_land() {
+    let w = world(4.0, 1.0, EXTERNAL_NAV);
+    let batt = item(&w, "battery_failsafe").expect("a battery_failsafe item");
+    assert_eq!((batt.ok, batt.severity), (false, Severity::Block));
+    assert_eq!(
+        batt.msg,
+        "Battery failsafe not set for ADOS: may fly without GNSS, so set low = Land, critical = Land"
+    );
+    // A confined place positioned by optical flow alone (no external nav)
+    // keeps Land too.
+    let mut w = world(1.0, 1.0, 0.0);
+    confined(&mut w);
+    assert!(item(&w, "battery_failsafe").unwrap().ok);
 }
 
 /// An EKF report with no horizontal position: the `position` item blocks.
@@ -207,6 +278,37 @@ fn low_battery_returns_a_gnss_copter_by_smart_rtl_and_says_so() {
         .statustext
         .iter()
         .any(|t| t.text == "Low battery: returning home" && t.severity == 2));
+}
+
+#[test]
+fn low_battery_returns_a_confined_external_nav_copter_by_smart_rtl() {
+    let mut w = low_battery_flight(EXTERNAL_NAV, 19.0);
+    w.p.fc.params.insert("BATT_FS_LOW_ACT".into(), 4.0);
+    confined(&mut w);
+    w.run(1_000);
+    let s = w.p.state(w.now);
+    assert_eq!(s.low_battery_action.as_deref(), Some("rth"));
+    assert_eq!(
+        s.banner.map(|b| b.text_key),
+        Some("pilot.banner.low_battery_rth".to_string())
+    );
+    w.run(10_000);
+    assert!(!w.p.landing, "never lands in place first");
+    assert_eq!(w.mode, copter::SMART_RTL);
+    assert_eq!(w.set_modes(copter::RTL), 0, "never a plain RTL climb");
+    let s = w.p.state(w.now);
+    assert_eq!(
+        s.banner.as_ref().map(|b| b.text_key.as_str()),
+        Some("pilot.banner.low_battery_smart_rtl")
+    );
+}
+
+#[test]
+fn low_battery_still_lands_an_open_external_nav_copter() {
+    let mut w = low_battery_flight(EXTERNAL_NAV, 19.0);
+    w.run(11_000);
+    assert_eq!(w.set_modes(copter::SMART_RTL), 0);
+    assert!(w.p.landing);
 }
 
 #[test]
