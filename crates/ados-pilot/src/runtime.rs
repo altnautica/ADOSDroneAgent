@@ -44,6 +44,8 @@ pub struct SetupView {
     pub link_lost: bool,
     /// `pilot.place_class`: the `ados_profile` step writes its values.
     pub place_class: ados_protocol::pilot::PlaceClass,
+    /// `pilot.rc_receiver`: the `ados_profile` step writes its values.
+    pub rc_receiver: ados_protocol::pilot::RcReceiver,
 }
 
 /// Commands from the setup engine to the core.
@@ -52,6 +54,8 @@ pub enum CoreCmd {
     ExitTuning,
     SetControlMode(ados_protocol::pilot::ControlMode),
     SetRcAdosPosition(u8),
+    /// Declare `pilot.rc_receiver` through the pilot's `rc_receiver` action.
+    SetRcReceiver(ados_protocol::pilot::RcReceiver),
     /// `Some(msg)`: setup incomplete (blocks arming); `None`: complete.
     SetupNeeded(Option<String>),
     /// The setup engine's active step id, `None` without a run.
@@ -94,6 +98,10 @@ impl PilotHandle {
 
     pub async fn set_rc_ados_position(&self, slot: u8) {
         let _ = self.cmd.send(CoreCmd::SetRcAdosPosition(slot)).await;
+    }
+
+    pub async fn set_rc_receiver(&self, rc: ados_protocol::pilot::RcReceiver) {
+        let _ = self.cmd.send(CoreCmd::SetRcReceiver(rc)).await;
     }
 
     pub async fn setup_needed(&self, msg: Option<String>) {
@@ -245,6 +253,7 @@ impl Core {
                             readiness: s.readiness.clone(),
                             link_lost: self.pilot.link_lost(t),
                             place_class: s.place_class,
+                            rc_receiver: self.pilot.rc_receiver(),
                         };
                         self.status_tx.send_if_modified(|v| {
                             let changed = *v != view;
@@ -266,7 +275,7 @@ impl Core {
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
                 r = req_rx.recv() => match r {
-                    Some((req, reply)) => match self.pilot.on_request(req, now()) {
+                    Some((req, sid, reply)) => match self.pilot.on_request_from(req, sid.as_deref(), now()) {
                         Reply::Deferred(token) => { self.deferred.insert(token, reply); }
                         r => { let _ = reply.send(r); }
                     },
@@ -288,13 +297,10 @@ impl Core {
                     }
                     Some(CoreCmd::ExitTuning) => self.pilot.exit_tuning(now()),
                     Some(CoreCmd::SetControlMode(m)) => {
-                        let name = format!("control_mode:{}", m.as_str());
-                        let _ = self.pilot.on_request(
-                            ados_protocol::pilot::Request::Action(ados_protocol::pilot::ActionReq {
-                                name, src: "setup".into(), args: None, id: None,
-                            }),
-                            now(),
-                        );
+                        self.setup_action(format!("control_mode:{}", m.as_str()), now());
+                    }
+                    Some(CoreCmd::SetRcReceiver(rc)) => {
+                        self.setup_action(format!("rc_receiver:{}", rc.as_str()), now());
                     }
                     Some(CoreCmd::SetRcAdosPosition(n)) => self.pilot.set_rc_ados_position(n),
                     Some(CoreCmd::SetupNeeded(msg)) => self.pilot.setup_needed = Some(msg),
@@ -312,6 +318,18 @@ impl Core {
             });
             self.flush().await;
         }
+    }
+
+    /// Apply a setup engine choice as the pilot action `name` (src `setup`);
+    /// a refusal is logged by the action itself.
+    fn setup_action(&mut self, name: String, now_ms: u64) {
+        let req = ados_protocol::pilot::Request::Action(ados_protocol::pilot::ActionReq {
+            name,
+            src: "setup".into(),
+            args: None,
+            id: None,
+        });
+        let _ = self.pilot.on_request(req, now_ms);
     }
 
     fn publish<T: serde::Serialize>(&self, op: &str, body: &T) {

@@ -52,10 +52,20 @@ export function PlaceCard({ card, send }: PlaceCardProps) {
             {card.badge}
           </span>
         ) : null}
+        {card.noRcBadge ? (
+          <span className="rounded-full border border-warn/60 px-2 py-0.5 font-mono font-semibold text-warn" data-testid="no-rc-chip">
+            {card.noRcBadge}
+          </span>
+        ) : null}
       </div>
       <span className="text-muted-foreground" data-testid="place-explain">
         {card.explain}
       </span>
+      {card.noRcLine ? (
+        <span className="text-warn" data-testid="no-rc-line">
+          {card.noRcLine}
+        </span>
+      ) : null}
       {report ? (
         <div
           role={report.severity === "critical" ? "alert" : "status"}

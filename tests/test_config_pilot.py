@@ -57,3 +57,10 @@ def test_the_schema_bounds() -> None:
         PilotConfig(place_class="tunnel")
     with pytest.raises(ValidationError):
         PilotConfig(prop_tip_radius_m=0.0)
+
+
+def test_the_rc_declaration_defaults_present_and_loads_absent() -> None:
+    assert PilotConfig().rc_receiver == "present"
+    assert PilotConfig(rc_receiver="absent").rc_receiver == "absent"
+    with pytest.raises(ValidationError):
+        PilotConfig(rc_receiver="none")

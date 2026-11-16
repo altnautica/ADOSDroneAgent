@@ -239,7 +239,9 @@ impl FcState {
                     self.params.insert(name.to_owned(), p.param_value);
                 }
             }
-            MavMessage::RC_CHANNELS(r) => {
+            // A frame with no channel carries no receiver: the FC repeats
+            // its last values once RC input stops.
+            MavMessage::RC_CHANNELS(r) if r.chancount > 0 => {
                 let v = [
                     r.chan1_raw,
                     r.chan2_raw,

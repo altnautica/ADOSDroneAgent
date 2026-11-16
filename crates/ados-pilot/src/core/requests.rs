@@ -5,11 +5,19 @@ use ados_protocol::pilot::{ActionResult, Holder, LeaseReply, Owner, Request};
 use super::{Pilot, Reply, SwarmGoal};
 
 impl Pilot {
-    /// Handle one client request.
+    /// Handle one client request with no surface instance id.
     pub fn on_request(&mut self, req: Request, now_ms: u64) -> Reply {
+        self.on_request_from(req, None, now_ms)
+    }
+
+    /// Handle one client request from surface instance `sid` (the frame's
+    /// `sid`, [`ados_protocol::pilot::surface_sid`]).
+    pub fn on_request_from(&mut self, req: Request, sid: Option<&str>, now_ms: u64) -> Reply {
         match req {
             Request::Input(i) => {
                 self.failsafe.on_input(now_ms);
+                self.failsafe.instances.heard(sid, &i.src, now_ms);
+                self.failsafe.instances.session(sid, i.session);
                 self.sessions
                     .offer(&i.src, i.session, i.axes, i.buttons, now_ms);
                 self.controller_lost_shown = false;
@@ -17,6 +25,7 @@ impl Pilot {
             }
             Request::Release { src, session } => {
                 self.failsafe.on_surface(now_ms);
+                self.failsafe.instances.heard(sid, &src, now_ms);
                 if self.sessions.release(&src, session, now_ms) && self.owner() == Owner::Pilot {
                     self.brake_hold(now_ms, None);
                 }
@@ -24,11 +33,18 @@ impl Pilot {
             }
             Request::SessionTake { src, session } => {
                 self.failsafe.on_surface(now_ms);
+                self.failsafe.instances.heard(sid, &src, now_ms);
+                self.failsafe.instances.session(sid, session);
                 self.sessions.take(&src, session);
                 Reply::None
             }
-            Request::Hb { .. } => {
+            Request::Hb { src } => {
                 self.failsafe.on_surface(now_ms);
+                self.failsafe.instances.heard(sid, &src, now_ms);
+                Reply::None
+            }
+            Request::Bye { src } => {
+                self.on_bye(&src, sid);
                 Reply::None
             }
             Request::Action(a) => {
@@ -39,6 +55,7 @@ impl Pilot {
                 // link-loss timer.
                 if !matches!(a.src.as_str(), "plugin-host" | "router" | "setup" | "api") {
                     self.failsafe.on_surface(now_ms);
+                    self.failsafe.instances.heard(sid, &a.src, now_ms);
                 }
                 let res = self.action(&a.name, a.args.as_ref(), now_ms);
                 let result = ActionResult {
@@ -122,6 +139,19 @@ impl Pilot {
         // Hand to FC) ends it.
         if self.fc_failsafe {
             return refuse("failsafe", None);
+        }
+        // Nor out of a return or landing it flies for the pilot (a link-loss
+        // or operator return): a GUIDED switch would cancel it.
+        if self.fc_returns_or_lands() {
+            return refuse("failsafe", None);
+        }
+        // With no RC transmitter, a lost operator instance blocks a new
+        // skill until it speaks again (or the vehicle lands).
+        if !self.settings.pilot.rc_receiver.is_present() {
+            if let Some(src) = self.failsafe.instances.unrecovered() {
+                tracing::info!(target: "ados_pilot", src, "lease_refused_link_loss_unrecovered");
+                return refuse("link_loss_unrecovered", None);
+            }
         }
         // A skill's goals fly on the estimate.
         if self.position_unverified(now_ms).is_some() {

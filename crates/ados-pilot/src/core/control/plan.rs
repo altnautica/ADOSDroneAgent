@@ -106,8 +106,8 @@ impl Pilot {
             .is_some_and(|d| d < HARD_STOP_FRAC * margin)
             && self.settings.pilot.avoid != AvoidMode::Off;
         let home = self.fc.home_ne();
-        let max_dist = self.settings.pilot.max_dist_m;
-        let max_alt = self.settings.pilot.max_alt_agl_m;
+        let max_dist = self.settings.pilot.max_dist();
+        let max_alt = self.settings.pilot.max_alt();
         let agl = self.agl(now_ms);
         if self.owner() == Owner::Goto {
             if let Some(t) = self.goto {

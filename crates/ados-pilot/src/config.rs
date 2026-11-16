@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ados_protocol::pilot::{AvoidMode, ControlMode, PlaceClass, Profile};
+use ados_protocol::pilot::{AvoidMode, ControlMode, PlaceClass, Profile, RcReceiver};
 use serde::{Deserialize, Serialize};
 
 /// Default agent config path.
@@ -74,6 +74,10 @@ pub struct PilotSection {
     /// rigid mounts (a guarded frame enters the guard radius). A confined
     /// place needs it.
     pub prop_tip_radius_m: Option<f32>,
+    /// Whether an RC transmitter flies with the vehicle, as the operator
+    /// declared it in setup. `absent` (controller-free flight) only with
+    /// ADOS control on ArduCopter in an open place: see [`crate::no_rc`].
+    pub rc_receiver: RcReceiver,
     pub max_alt_agl_m: f32,
     pub max_dist_m: f32,
     pub min_agl_fw_m: f32,
@@ -116,7 +120,33 @@ pub const CONFINED_TIP_EXTRA_M: f32 = 0.1;
 /// confined place requires the key, so never flies this.
 pub const DEFAULT_BODY_RADIUS_M: f32 = 0.4;
 
+/// The distance cap from home with no RC transmitter, metres: the take-off
+/// form of the operator leash, 20 m inside the FC fence
+/// ([`crate::no_rc::FENCE_RADIUS_M`]).
+pub const NO_RC_MAX_DIST_M: f32 = 50.0;
+/// The height cap with no RC transmitter, metres above home, 10 m under the
+/// FC fence's ceiling ([`crate::no_rc::FENCE_ALT_MAX_M`]).
+pub const NO_RC_MAX_ALT_M: f32 = 40.0;
+
 impl PilotSection {
+    /// The distance cap from home the pilot flies to: `max_dist_m`, held to
+    /// [`NO_RC_MAX_DIST_M`] with no RC transmitter.
+    pub fn max_dist(&self) -> f32 {
+        match self.rc_receiver {
+            RcReceiver::Absent => self.max_dist_m.min(NO_RC_MAX_DIST_M),
+            RcReceiver::Present => self.max_dist_m,
+        }
+    }
+
+    /// The height cap the pilot flies to: `max_alt_agl_m`, held to
+    /// [`NO_RC_MAX_ALT_M`] with no RC transmitter.
+    pub fn max_alt(&self) -> f32 {
+        match self.rc_receiver {
+            RcReceiver::Absent => self.max_alt_agl_m.min(NO_RC_MAX_ALT_M),
+            RcReceiver::Present => self.max_alt_agl_m,
+        }
+    }
+
     /// The vehicle's outermost rigid extent from the CG the brake keeps
     /// clear: `prop_tip_radius_m` when set, else [`DEFAULT_BODY_RADIUS_M`].
     pub fn body_radius_m(&self) -> f32 {
@@ -184,6 +214,7 @@ impl Default for PilotSection {
             obstacle_margin_m: 1.5,
             place_class: PlaceClass::Open,
             prop_tip_radius_m: None,
+            rc_receiver: RcReceiver::Present,
             max_alt_agl_m: 120.0,
             max_dist_m: 500.0,
             min_agl_fw_m: 30.0,

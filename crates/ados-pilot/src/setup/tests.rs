@@ -1852,4 +1852,5 @@ fn vtol_air_wizard_flies_every_step() {
     assert!(!s.fc.armed);
 }
 
+mod no_rc;
 mod safety;

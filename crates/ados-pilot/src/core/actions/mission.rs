@@ -129,6 +129,7 @@ impl Pilot {
                 return Err("route_infeasible".into());
             }
         }
+        self.no_rc_route_check()?;
         let fam = self.family();
         if fam.is_auto(self.fc.custom_mode) {
             let m = self.tx().command(

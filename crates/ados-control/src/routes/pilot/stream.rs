@@ -52,8 +52,9 @@ fn action_error(frame: &Value, err: &str) -> Option<Value> {
 }
 
 /// Ops a surface may send. Lease, goal, swarm, feed, view and setup ops belong
-/// to on-box services, not to an operator socket.
-const SURFACE_OPS: &[&str] = &["input", "release", "session.take", "hb", "action"];
+/// to on-box services, not to an operator socket. Each frame is forwarded as
+/// sent, so its `sid` (the surface instance id) reaches the pilot.
+const SURFACE_OPS: &[&str] = &["input", "release", "session.take", "hb", "bye", "action"];
 
 /// A surface's JSON frame as the decoded request and the `pilot.v1` body sent
 /// to the pilot, or the error a surface is answered with.
@@ -232,6 +233,12 @@ mod tests {
             }
         );
         assert_eq!(
+            decode("bye"),
+            pilot::Request::Bye {
+                src: "android".into()
+            }
+        );
+        assert_eq!(
             decode("action"),
             pilot::Request::Action(pilot::ActionReq {
                 name: "hand_to_fc".into(),
@@ -249,7 +256,15 @@ mod tests {
                 id: Some("4".into()),
             })
         );
-        assert_eq!(doc.as_object().unwrap().len(), 6, "every entry is checked");
+        assert_eq!(doc.as_object().unwrap().len(), 7, "every entry is checked");
+        for (key, frame) in doc.as_object().unwrap() {
+            let (_, body) = decode_surface_frame(frame).unwrap();
+            assert_eq!(
+                pilot::surface_sid(&body).as_deref(),
+                Some("0f1e2d3c4b5a69788796a5b4c3d2e1f0"),
+                "{key} keeps its instance id"
+            );
+        }
     }
 
     #[test]

@@ -79,6 +79,36 @@ fn an_open_place_shows_open_and_no_route_check() {
 }
 
 #[test]
+fn with_no_rc_the_pilot_block_says_what_stops_the_drone_and_what_link_loss_does() {
+    let mut frame = open_frame();
+    frame["rc_receiver"] = json!("absent");
+    frame["link_loss_action"] = json!("land");
+    frame["link_loss_s"] = json!(8);
+    let mut app = app_with_frame(1, frame);
+    let text = draw(&mut app, 160, 60);
+    let rows = column_rows(&text, "RC        ", 3);
+    assert_eq!(rows[0].trim_end(), "RC        No controller", "{text}");
+    // The column clips the long phrase on this terminal width.
+    assert!(
+        rows[1]
+            .trim()
+            .starts_with("Stop it from this phone: Pause, Land or"),
+        "{text}"
+    );
+    assert!(
+        rows[2]
+            .trim()
+            .starts_with("If the link drops for 8 s: Land"),
+        "{text}"
+    );
+    let mut app = app_with_frame(1, open_frame());
+    assert!(
+        !draw(&mut app, 160, 60).contains("RC        "),
+        "absent only"
+    );
+}
+
+#[test]
 fn on_the_ground_the_place_key_is_offered_and_sends_the_other_class() {
     for (frame, cmd, hint) in [
         (on_ground(confined_frame()), "placeclass_open", "c Open"),

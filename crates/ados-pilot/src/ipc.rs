@@ -11,8 +11,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::Reply;
 
-/// A request for the core task, with the slot for its reply.
-pub type CoreReq = (Request, oneshot::Sender<Reply>);
+/// A request for the core task, the surface instance id its frame carried
+/// (`sid`, [`pilot::surface_sid`]), and the slot for its reply.
+pub type CoreReq = (Request, Option<String>, oneshot::Sender<Reply>);
 
 /// The setup engine's entry point for `setup.*` ops. `sink` reaches the
 /// requesting client, for the 5 Hz step stream of `setup.subscribe`.
@@ -79,6 +80,7 @@ async fn client(stream: UnixStream, shared: Shared) -> Result<(), pilot::PilotWi
             Ok(None) => break Ok(()),
             Err(e) => break Err(e),
         };
+        let sid = pilot::surface_sid(&body);
         let req = match pilot::decode_request(&body) {
             Ok(r) => r,
             Err(e) => {
@@ -109,7 +111,7 @@ async fn client(stream: UnixStream, shared: Shared) -> Result<(), pilot::PilotWi
                 let op = op_name(&req);
                 let action = matches!(req, Request::Action(_));
                 let (tx, rx) = oneshot::channel();
-                if shared.core.send((req, tx)).await.is_err() {
+                if shared.core.send((req, sid, tx)).await.is_err() {
                     break Ok(());
                 }
                 let out = out_tx.clone();

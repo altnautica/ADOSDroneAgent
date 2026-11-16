@@ -7,6 +7,7 @@ mod actions;
 mod control;
 mod events;
 mod nav_cap;
+mod no_rc;
 mod operator;
 mod position_check;
 mod requests;

@@ -18,6 +18,7 @@ impl Pilot {
             &self.fc,
             self.control_mode(),
             self.settings.pilot.place_class,
+            self.settings.pilot.rc_receiver,
             self.sessions.owner.is_some(),
             &sensors,
             now_ms,
@@ -51,6 +52,7 @@ impl Pilot {
         if let Some(item) = self.extnav_settle_item(now_ms) {
             items.push(item);
         }
+        items.extend(self.no_rc_items());
         items
     }
 

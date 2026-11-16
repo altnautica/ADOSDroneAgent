@@ -29,7 +29,7 @@ impl Pilot {
         if !self.fc.linked(now_ms)
             && !matches!(
                 name.split(':').next(),
-                Some("profile" | "control_mode" | "avoid" | "place_class")
+                Some("profile" | "control_mode" | "avoid" | "place_class" | "rc_receiver")
             )
         {
             return Err("no_fc".into());
@@ -140,8 +140,12 @@ impl Pilot {
                     .and_then(|a| a.get("control_mode"))
                     .and_then(Value::as_str)
                     .unwrap_or("fc_manual");
+                // With no RC transmitter the control mode stays `ados`: the FC
+                // flies its mode under the pilot's link-loss watch.
                 if let Some(cm) = ControlMode::parse(to).filter(|c| *c != ControlMode::Ados) {
-                    self.persist_mode(cm);
+                    if self.settings.pilot.rc_receiver.is_present() {
+                        self.persist_mode(cm);
+                    }
                 }
                 self.banner = Some(banner(
                     "pilot.banner.fc_control",
@@ -155,7 +159,11 @@ impl Pilot {
     }
 
     fn set_option(&mut self, kind: &str, value: &str, now_ms: u64) -> ActionRes {
+        if let Some(err) = self.no_rc_refusal(kind, value) {
+            return Err(err.into());
+        }
         match kind {
+            "rc_receiver" => self.set_rc_receiver(value),
             "profile" => {
                 let p: Profile = serde_json::from_value(json!(value)).map_err(|_| "bad_value")?;
                 self.settings.pilot.profile = p;

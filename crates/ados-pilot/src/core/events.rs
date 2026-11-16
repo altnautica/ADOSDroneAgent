@@ -223,7 +223,8 @@ impl Pilot {
         } else {
             &[]
         };
-        let mut names: Vec<&str> = crate::fc_profile::all_names(fw, class)
+        // Under either RC declaration: the fence rows are read in advance.
+        let mut names: Vec<&str> = crate::no_rc::all_names(fw, class)
             .chain(EXTRA_PARAMS.iter().copied())
             .chain(batt.iter().chain(batt_legacy).copied())
             .chain(sensors.iter().map(String::as_str))

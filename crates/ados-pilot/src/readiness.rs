@@ -1,9 +1,9 @@
 //! Readiness items shown in the pre-flight checklist and the chip.
 
-use ados_protocol::pilot::{ControlMode, PlaceClass, Readiness, Severity};
+use ados_protocol::pilot::{ControlMode, PlaceClass, RcReceiver, Readiness, Severity};
 
 use crate::fc::FcState;
-use crate::fc_profile::{check_row, fc_profile, Firmware, RowCheck};
+use crate::fc_profile::{check_row, Firmware, RowCheck};
 
 fn item(id: &str, ok: bool, severity: Severity, msg: impl Into<String>) -> Readiness {
     Readiness {
@@ -62,11 +62,13 @@ fn position_item(fc: &FcState, now_ms: u64) -> Readiness {
     }
 }
 
-/// Every readiness item for the current state, in a place of `place`.
+/// Every readiness item for the current state, in a place of `place`, with
+/// the operator's RC declaration `rc`.
 pub fn items(
     fc: &FcState,
     mode: ControlMode,
     place: PlaceClass,
+    rc: RcReceiver,
     controller_live: bool,
     sensors: &crate::sensor_readiness::SensorCtx,
     now_ms: u64,
@@ -105,7 +107,7 @@ pub fn items(
         )),
     }
     if let Some(fw) = fc.firmware {
-        out.push(profile_item(fc, fw, mode, place));
+        out.push(profile_item(fc, fw, mode, place, rc));
         if fw == Firmware::Ardupilot {
             out.push(crate::batt_failsafe::item_for(fc, mode, place));
         }
@@ -127,17 +129,23 @@ pub fn items(
     out
 }
 
-fn profile_item(fc: &FcState, fw: Firmware, mode: ControlMode, place: PlaceClass) -> Readiness {
+fn profile_item(
+    fc: &FcState,
+    fw: Firmware,
+    mode: ControlMode,
+    place: PlaceClass,
+    rc: RcReceiver,
+) -> Readiness {
     let class = fc.vehicle_class();
     let mut missing = Vec::new();
     let mut unread = false;
     // The battery actions are the `battery_failsafe` item's: their right
-    // value depends on the GNSS sources and the place class.
-    let rows = fc_profile(fw, class)
-        .iter()
+    // value depends on the GNSS sources and the place class. The RC
+    // failsafe and the fence follow the RC declaration.
+    let rows = crate::no_rc::profile(fw, class, rc)
         .filter(|r| !crate::batt_failsafe::ACTIONS.contains(&r.name));
     for row in rows {
-        match check_row(row, place, |n| fc.params.get(n).copied()) {
+        match check_row(&row, place, |n| fc.params.get(n).copied()) {
             RowCheck::Ok => {}
             RowCheck::Absent => match row.absent_blocks {
                 Some(why) if !fc.params.is_empty() => {

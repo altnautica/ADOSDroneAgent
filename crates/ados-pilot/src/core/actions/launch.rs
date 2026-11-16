@@ -59,6 +59,12 @@ impl Pilot {
                 self.route_launch_check(now_ms)?;
             }
         }
+        // With no RC transmitter the FC's mission must keep inside the
+        // pilot's caps, after the more basic refusals.
+        if after == "mission" && !self.rc_receiver().is_present() {
+            self.launch_refusal(true, now_ms)?;
+            self.no_rc_route_check()?;
+        }
         let default_alt = match self.fc.vehicle_class() {
             VehicleClass::Fixedwing => self.fc.params.get("TKOFF_ALT").copied().unwrap_or(50.0),
             _ => 3.0,

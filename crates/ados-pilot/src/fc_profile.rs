@@ -80,7 +80,11 @@ pub const OPEN_INPUT_TC_S: (f32, f32) = (0.15, 0.2);
 /// SmartRTL, so its FC-side return lands in place.
 pub const CONFINED_SRTL_ACCURACY_MAX_M: f32 = 2.0 * CONFINED_TIP_EXTRA_M;
 
-const fn p(name: &'static str, alt_names: &'static [&'static str], value: f32) -> ProfileParam {
+pub(crate) const fn p(
+    name: &'static str,
+    alt_names: &'static [&'static str],
+    value: f32,
+) -> ProfileParam {
     ProfileParam {
         name,
         alt_names,
@@ -100,7 +104,7 @@ impl ProfileParam {
         }
     }
 
-    const fn absent_blocks(self, why: &'static str) -> Self {
+    pub(crate) const fn absent_blocks(self, why: &'static str) -> Self {
         ProfileParam {
             absent_blocks: Some(why),
             ..self

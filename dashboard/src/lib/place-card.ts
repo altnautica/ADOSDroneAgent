@@ -5,11 +5,14 @@
 // line (the obstacle margin the pilot flies), the "Confined" badge, and the
 // pilot's route check of the loaded mission. A press sends
 // `place_class:<class>` over the page's pilot link; the pilot refuses it while
-// armed, and the refusal reads through the refusal table.
+// armed (or, with no RC transmitter, refuses Confined), and the refusal reads
+// through the refusal table. With no RC transmitter the card also carries the
+// "No RC" badge and the line saying what stops the drone.
 
 import type { ActionResult } from "@/lib/pilot-action";
 import { PLACE_CLASSES, type PilotState, type PlaceClass } from "@/shared/hud/cockpit-frames";
 import { refusalText } from "@/shared/hud/refusal";
+import { noRcChipText, noRcStripText } from "@/shared/hud/no-rc";
 import { confinedChipText, placeClassAction, placeClassLabel, routeCheckReport, type RouteCheckReport } from "@/shared/hud/route-check";
 import { specText } from "@/shared/hud/spec-text";
 import { placeExplainLine, type PlaceMargins } from "@/shared/place-class";
@@ -29,6 +32,10 @@ export interface PlaceCardModel {
   /** "Confined" while the pilot flies the confined profile, else null. */
   badge: string | null;
   routeCheck: RouteCheckReport | null;
+  /** "No RC" while the drone flies with no RC transmitter, else null. */
+  noRcBadge: string | null;
+  /** What stops the drone and what a lost link ends in, with no RC. */
+  noRcLine: string | null;
 }
 
 /** The card for a fresh pilot frame, or null with none. */
@@ -40,6 +47,8 @@ export function placeCard(pilot: PilotState | null, margins: PlaceMargins): Plac
     explain: placeExplainLine(pilot.placeClass, pilot, margins),
     badge: confinedChipText(pilot),
     routeCheck: routeCheckReport(pilot.routeCheck),
+    noRcBadge: noRcChipText(pilot),
+    noRcLine: noRcStripText(pilot),
   };
 }
 

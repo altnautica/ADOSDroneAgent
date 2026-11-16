@@ -95,6 +95,7 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             "link_loss_action",
             &["rth", "rtl", "hold", "loiter", "land"],
         ),
+        link_loss_s: f(d, "link_loss_s"),
         mission: d
             .get("mission")
             .filter(|m| m.is_object())
@@ -153,6 +154,7 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             .and_then(Value::as_str)
             .map(str::to_string),
         place_class: parse_place_class(d),
+        rc_absent: d.get("rc_receiver").and_then(Value::as_str) == Some("absent"),
         route_check: d.get("route_check").and_then(parse_route_check),
         surface_ops: d
             .get("surface_ops")

@@ -1,5 +1,5 @@
 use ados_protocol::mavlink::ardupilotmega::MavLandedState;
-use ados_protocol::pilot::{ControlMode, PlaceClass, Readiness, Severity};
+use ados_protocol::pilot::{ControlMode, PlaceClass, RcReceiver, Readiness, Severity};
 
 use super::items;
 use crate::config::FcSensors;
@@ -36,7 +36,15 @@ fn all(fc: &FcState, mode: ControlMode) -> Vec<Readiness> {
         mounts: &mounts,
         nav_imu: &nav_imu,
     };
-    items(fc, mode, PlaceClass::Open, false, &ctx, 2)
+    items(
+        fc,
+        mode,
+        PlaceClass::Open,
+        RcReceiver::Present,
+        false,
+        &ctx,
+        2,
+    )
 }
 
 fn find(items: &[Readiness], id: &str) -> Option<Readiness> {
@@ -324,7 +332,13 @@ fn profile(fc: &FcState) -> Readiness {
 }
 
 fn profile_in(fc: &FcState, place: PlaceClass) -> Readiness {
-    super::profile_item(fc, Firmware::Ardupilot, ControlMode::Ados, place)
+    super::profile_item(
+        fc,
+        Firmware::Ardupilot,
+        ControlMode::Ados,
+        place,
+        RcReceiver::Present,
+    )
 }
 
 #[test]

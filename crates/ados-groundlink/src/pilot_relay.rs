@@ -5,11 +5,13 @@
 //! its cockpit and the control front's pilot stream talk to it exactly as they
 //! would to a drone's pilot:
 //!
-//! - `input`, `release`, `session.take`, `hb` and `action` requests go up the
-//!   aux uplink on the `Pilot` channel, one datagram each and never batched,
-//!   addressed to the drone whose state arrived last (0 before any did). An
-//!   action is answered here with whether it left the ground station; the
-//!   drone's own verdict shows in the state that follows.
+//! - `input`, `release`, `session.take`, `hb`, `bye` and `action` requests go
+//!   up the aux uplink on the `Pilot` channel, one datagram each and never
+//!   batched, addressed to the drone whose state arrived last (0 before any
+//!   did). Each body goes up as the surface sent it, so its `sid` (the
+//!   surface instance id) reaches the drone's pilot. An action is answered
+//!   here with whether it left the ground station; the drone's own verdict
+//!   shows in the state that follows.
 //! - `subscribe` clients receive every `state` the drone sends down.
 
 use std::path::{Path, PathBuf};
@@ -146,7 +148,8 @@ async fn client(relay: Arc<PilotRelay>, stream: UnixStream) {
             Request::Input(_)
             | Request::Release { .. }
             | Request::SessionTake { .. }
-            | Request::Hb { .. } => {
+            | Request::Hb { .. }
+            | Request::Bye { .. } => {
                 relay.uplink(&body).await;
             }
             Request::Action(a) => {

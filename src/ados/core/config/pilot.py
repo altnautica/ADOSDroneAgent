@@ -80,6 +80,12 @@ class PilotConfig(BaseModel):
             "it and keeps it plus 0.1 m."
         ),
     )
+    # Whether an RC transmitter flies with the vehicle, as the operator
+    # declared it in setup. ``absent`` (controller-free flight from the app)
+    # only with ADOS control on ArduCopter in an open place: the FC's RC
+    # failsafe is off, its fence is on, and the pilot caps distance from home
+    # at 50 m and height at 40 m.
+    rc_receiver: Literal["present", "absent"] = "present"
     max_alt_agl_m: float = Field(default=120.0, ge=5.0, le=500.0)
     max_dist_m: float = Field(default=500.0, ge=20.0, le=10000.0)
     min_agl_fw_m: float = Field(default=30.0, ge=10.0, le=300.0)

@@ -6,6 +6,22 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Controller-free follow, phase 1: a drone can be declared to fly with no RC transmitter (`pilot.rc_receiver: absent`, the setup wizard's `use_ados_no_rc` choice on the ADOS Pilot step, or the pilot action `rc_receiver:absent`). The declaration is taken only disarmed, in ADOS control, on ArduCopter and in an open place; while it holds, switching to a confined place or away from ADOS control is refused (`rc_receiver_absent`).
+- With the declaration the flight controller profile wants the RC failsafe off (`FS_THR_ENABLE` 0, without which ArduCopter refuses to arm with no receiver) and its own fence on as the backstop: a 70 m circle from home, a 50 m ceiling, SmartRTL or Land on a breach (`FENCE_ENABLE` 1, `FENCE_TYPE` 3, `FENCE_RADIUS` 70, `FENCE_ALT_MAX` 50, `FENCE_ACTION` 5). With an RC transmitter the profile still wants `FS_THR_ENABLE` 5, so `0` is accepted only with the declaration. The setup step writes the rows the declaration decides.
+- Readiness rows for the posture: `rc_receiver` (a warning line saying what stops the drone and what a dropped link does), `rc_seen` (blocks arming once an RC receiver has fed the flight controller since the pilot connected; seen in flight, it raises an alert), and `link_loss_posture` (blocks a `hold` link-loss action, warns when `link_loss_s` is over 15 s).
+- With the declaration the pilot flies goals and gotos no farther than 50 m from home and no higher than 40 m (or the configured `max_dist_m` / `max_alt_agl_m` when lower), inside the flight controller's fence. A launch into, or a resume of, a flight controller mission with a waypoint beyond either cap is refused (`beyond_no_rc_caps`), as is one whose waypoints cannot all be placed (`route_unchecked`).
+- The pilot state carries `rc_receiver` (only when `absent`) and `link_loss_s`.
+- Every pilot stream frame may carry `sid`, the surface instance id (one per app process or browser tab, kept across reconnects), and a surface says `bye` before a deliberate close. `ados-control` and the ground-station relay forward both.
+- The agent dashboard's place card and the terminal UI's Pilot block show the "No controller" posture line.
+
+### Changed
+
+- With no RC transmitter the link-loss failsafe fires for every airborne owner (a flight controller mode, an FC-flown mission, a tuning flight, an airborne idle), not only for the pilot's own, and keeps one timer per surface instance: an unattended tab sending heartbeats never hides the phone's loss, two phones are watched apart, and an instance that fired stays fired until it speaks again. It leaves the flight controller alone while the FC flies a failsafe, a return or a landing. A `bye` ends an instance's watch only while disarmed or after another instance took the stick session. The countdown follows the longest silence.
+- A skill's lease is refused while the flight controller flies a return or landing (a follow switching to GUIDED would cancel it), and with no RC transmitter while a lost instance has not spoken again (`link_loss_unrecovered`).
+- Hand to FC keeps ADOS control with no RC transmitter, so the link-loss watch stays on.
+
 ## [0.118.0] - 2026-11-16
 
 ### Added

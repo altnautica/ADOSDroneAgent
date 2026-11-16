@@ -14,6 +14,7 @@ const LOW_BATT_SEVERITY: u8 = 2;
 
 impl Pilot {
     pub(super) fn failsafes(&mut self, now_ms: u64) {
+        self.watch_rc(now_ms);
         // The FC's own landed state: a touchdown never holds a failsafe back.
         let airborne = self.fc.armed && !self.fc.landed();
         // Controller lost: the owning session stopped streaming.
@@ -27,28 +28,58 @@ impl Pilot {
             self.brake_hold(now_ms, Some("controller-lost"));
             self.banner = Some(banner("pilot.banner.controller_lost", &[], now_ms));
         }
-        let flying = matches!(
-            self.owner(),
-            Owner::Pilot | Owner::Skill | Owner::Goto | Owner::Swarm
-        );
         let window = u64::from(self.settings.pilot.link_loss_s) * 1000;
-        if airborne && flying && self.failsafe.link_lost(now_ms, window) {
-            let action = self.settings.pilot.link_loss_action;
-            self.banner = Some(banner(
-                "pilot.banner.link_loss",
-                &[("action", json!(action.as_str())), ("in_s", json!(0))],
-                now_ms,
-            ));
-            let _ = match action {
-                crate::config::LinkLossAction::Rth => self.do_rth("link_loss", now_ms),
-                crate::config::LinkLossAction::Land => self.do_land(now_ms),
-                crate::config::LinkLossAction::Hold => {
-                    self.revoke("link-loss");
-                    self.brake_hold(now_ms, Some("link-loss"));
-                    Ok(())
-                }
-            };
+        let lost = if self.settings.pilot.rc_receiver.is_present() {
+            let flying = matches!(
+                self.owner(),
+                Owner::Pilot | Owner::Skill | Owner::Goto | Owner::Swarm
+            );
+            airborne && flying && self.failsafe.link_lost(now_ms, window)
+        } else {
+            // No RC transmitter: every airborne owner, each operator
+            // instance on its own, except while the FC returns or lands or
+            // the pilot lands.
+            airborne
+                && !self.landing
+                && !self.fc_returns_or_lands()
+                && self.failsafe.instances.lost(now_ms, window).is_some()
+        };
+        if lost {
+            self.link_loss_action(now_ms);
         }
+    }
+
+    /// The FC flies a failsafe of its own, or a return or a landing: with no
+    /// RC transmitter, link loss leaves it alone (a critical-battery Land is
+    /// never turned into a return), and no skill takes the vehicle back from
+    /// it.
+    pub(in crate::core) fn fc_returns_or_lands(&self) -> bool {
+        let fam = self.family();
+        let mode = self.fc.custom_mode;
+        self.fc_failsafe || fam.is_rtl(mode) || fam.is_land(mode)
+    }
+
+    fn link_loss_action(&mut self, now_ms: u64) {
+        let action = self.settings.pilot.link_loss_action;
+        self.banner = Some(banner(
+            "pilot.banner.link_loss",
+            &[("action", json!(action.as_str())), ("in_s", json!(0))],
+            now_ms,
+        ));
+        // A tuning flight ends first, as for the operator's own safety
+        // actions.
+        if self.owner() == Owner::Tuning {
+            self.exit_tuning(now_ms);
+        }
+        let _ = match action {
+            crate::config::LinkLossAction::Rth => self.do_rth("link_loss", now_ms),
+            crate::config::LinkLossAction::Land => self.do_land(now_ms),
+            crate::config::LinkLossAction::Hold => {
+                self.revoke("link-loss");
+                self.brake_hold(now_ms, Some("link-loss"));
+                Ok(())
+            }
+        };
     }
 
     pub(super) fn low_battery(&mut self, now_ms: u64) {

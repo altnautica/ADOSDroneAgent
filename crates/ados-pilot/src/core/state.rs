@@ -124,7 +124,10 @@ impl Pilot {
         };
         let window = u64::from(self.settings.pilot.link_loss_s) * 1000;
         let link_loss_in_s = if self.fc.armed && !self.fc.landed() {
-            self.failsafe.link_countdown_s(now_ms, window).map(wire)
+            let per_instance = !self.settings.pilot.rc_receiver.is_present();
+            self.failsafe
+                .link_countdown_s(now_ms, window, per_instance)
+                .map(wire)
         } else {
             None
         };
@@ -161,6 +164,8 @@ impl Pilot {
         s.readiness = readiness;
         s.link_loss_in_s = link_loss_in_s;
         s.link_loss_action = self.settings.pilot.link_loss_action.as_str().to_owned();
+        s.link_loss_s = self.settings.pilot.link_loss_s;
+        s.rc_receiver = self.settings.pilot.rc_receiver;
         // A mission the pilot paused (a stick takeover, Pause) reads
         // `paused`; the router sees GUIDED and reports it `loaded`. Not
         // during an FC failsafe: the FC flies its own return or landing, and

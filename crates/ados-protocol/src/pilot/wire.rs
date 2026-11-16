@@ -62,6 +62,25 @@ pub fn encode_op<T: Serialize + ?Sized>(op: &str, body: &T) -> Result<Vec<u8>, P
     Ok(out)
 }
 
+/// The longest surface instance id the pilot keeps.
+pub const SID_MAX_LEN: usize = 64;
+
+/// The surface instance id (`sid`) a client frame carries: one per app
+/// process or browser tab, kept across reconnects, so the pilot can watch
+/// each operator instance's link on its own. `None` for a frame without one
+/// (an older surface) or with an empty or over-long id.
+pub fn surface_sid(body: &[u8]) -> Option<String> {
+    let value = rmpv::decode::read_value(&mut &body[..]).ok()?;
+    let rmpv::Value::Map(m) = value else {
+        return None;
+    };
+    m.iter()
+        .find(|(k, _)| k.as_str() == Some("sid"))
+        .and_then(|(_, v)| v.as_str())
+        .filter(|s| !s.is_empty() && s.len() <= SID_MAX_LEN)
+        .map(str::to_owned)
+}
+
 /// The `op` of a msgpack body, and the decoded map.
 pub fn peek_op(body: &[u8]) -> Result<(String, rmpv::Value), PilotWireError> {
     let value = rmpv::decode::read_value(&mut &body[..]).map_err(|_| PilotWireError::NoOp)?;
@@ -156,6 +175,9 @@ pub fn decode_request(body: &[u8]) -> Result<Request, PilotWireError> {
             }
         }
         "hb" => Request::Hb {
+            src: field::<Src>(&op, value)?.src,
+        },
+        "bye" => Request::Bye {
             src: field::<Src>(&op, value)?.src,
         },
         "action" => Request::Action(field::<ActionReq>(&op, value)?),
@@ -300,5 +322,7 @@ impl GoalStatus {
     }
 }
 
+#[cfg(test)]
+mod sid_tests;
 #[cfg(test)]
 mod tests;

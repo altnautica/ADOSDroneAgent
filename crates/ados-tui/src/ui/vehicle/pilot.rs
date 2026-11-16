@@ -120,6 +120,9 @@ fn countdown_rows(core: &Core, p: &Pilot, age_ms: u64, now_ms: u64, stale: bool)
     out
 }
 
+/// The link-loss window the pilot uses when its state does not report one.
+const DEFAULT_LINK_LOSS_S: f64 = 10.0;
+
 /// The place class (Confined in the warning colour, with the key that
 /// switches it while the pilot is disarmed) and, in a confined place with a
 /// mission loaded, the route check and its tightest point. A confined place
@@ -148,6 +151,27 @@ fn place_rows(core: &Core, p: &Pilot, place_key: bool, stale: bool) -> Vec<Row> 
         ));
     }
     let mut out = vec![(mark_stale(t, Line::from(spans), stale), confined)];
+    // With no RC transmitter: what stops the drone and what a lost link ends
+    // in, kept on a short terminal like a confined place.
+    if p.rc_absent {
+        let action = p.link_loss_action.as_deref().unwrap_or("rth");
+        let s = p
+            .link_loss_s
+            .unwrap_or(DEFAULT_LINK_LOSS_S)
+            .round()
+            .to_string();
+        let text = spec_text(
+            "follow.no_rc_strip",
+            &[("action", &link_loss_action_text(Some(action))), ("s", &s)],
+        );
+        out.extend(phrase_rows(
+            t,
+            "RC",
+            &text,
+            Style::default().fg(t.warning()),
+            stale,
+        ));
+    }
     if let Some(rc) = &p.route_check {
         let report = route_check_report(rc);
         let (style, keep) = match report.severity {

@@ -13,6 +13,8 @@ mod handoff;
 mod harness;
 mod mission;
 mod nav_cap;
+mod no_rc;
+mod no_rc_caps;
 mod no_returns;
 mod overhead;
 mod position_check;

@@ -50,6 +50,17 @@ describe("the Home place card on the golden confined frame", () => {
     expect(card.routeCheck).toBeNull();
     expect(card.explain).toBe("Open sites: 0.5 m from obstacles.");
     expect(render(open)).not.toContain('data-testid="route-check"');
+    expect(card.noRcBadge).toBeNull();
+    expect(render(open)).not.toContain('data-testid="no-rc-line"');
+  });
+
+  it("carries the No controller badge and line with no RC transmitter", () => {
+    const p = parsePilotState({ ...(fixture("pilot-frame.json") as object), rc_receiver: "absent", link_loss_action: "rth", link_loss_s: 10 })!;
+    const card = placeCard(p, margins)!;
+    expect(card.noRcBadge).toBe("No controller");
+    const html = render(p);
+    expect(html).toContain('data-testid="no-rc-chip"');
+    expect(html).toContain("No controller · Stop it from this phone: Pause, Land or Return · If the link drops for 10 s: Return home");
   });
 
   it("is absent without a fresh pilot", () => {

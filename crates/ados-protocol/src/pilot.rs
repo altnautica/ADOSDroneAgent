@@ -12,12 +12,14 @@
 //! thr + is climb, yaw + is clockwise, roll + is right.
 
 mod command;
+mod rc;
 mod route;
 mod sensors;
 mod state;
 mod wire;
 
 pub use command::*;
+pub use rc::*;
 pub use route::*;
 pub use sensors::*;
 pub use state::*;
@@ -226,6 +228,12 @@ pub enum Request {
         session: u32,
     },
     Hb {
+        src: String,
+    },
+    /// A surface instance leaving on purpose (its `sid` rides in the body,
+    /// see [`surface_sid`]). The pilot decides whether it ends that instance's
+    /// link-loss watch.
+    Bye {
         src: String,
     },
     Action(ActionReq),

@@ -3,16 +3,17 @@
 //! [`crate::batt_failsafe::recommended`], Land for both on a multirotor that
 //! lands on a low battery, [`crate::batt_failsafe::lands_on_low`]), and
 //! `ados_intro`: "Meet ADOS Pilot", where the
-//! operator chooses the control mode. A changed row the FC reads only at
+//! operator chooses the control mode and declares whether an RC transmitter
+//! flies with the vehicle ([`crate::no_rc`]). A changed row the FC reads only at
 //! boot (`OA_TYPE`, `SRTL_POINTS`) reboots the FC before the step is done, as
 //! the battery and frame steps do. In a confined place `SRTL_ACCURACY` keeps
 //! a value within the confined bound and is written to the bound otherwise
 //! ([`crate::fc_profile::CONFINED_SRTL_ACCURACY_MAX_M`]).
 
-use ados_protocol::pilot::VehicleClass;
+use ados_protocol::pilot::{ControlMode, RcReceiver, VehicleClass};
 use serde_json::{json, Map, Value};
 
-use crate::fc_profile::{check_row, fc_profile, Firmware, ProfileParam, RowCheck};
+use crate::fc_profile::{check_row, Firmware, ProfileParam, RowCheck};
 use crate::setup::fcstate::{Class, Fw};
 use crate::setup::out::Effect;
 use crate::setup::schema::{obj, Action};
@@ -63,10 +64,9 @@ impl Step for AdosProfile {
         let class = vehicle_class(cx.adapter.class);
         self.needs_reboot = false;
         let rows: Vec<Value> = firmware(cx.adapter.fw)
-            .map(|f| fc_profile(f, class))
-            .unwrap_or(&[])
-            .iter()
-            .map(|r| json!({"name": r.name, "value": row_value(cx, r)}))
+            .into_iter()
+            .flat_map(|f| crate::no_rc::profile(f, class, cx.inputs.rc_receiver))
+            .map(|r| json!({"name": r.name, "value": row_value(cx, &r)}))
             .collect();
         self.core.args.insert("params".into(), Value::Array(rows));
         self.core.wait_user(vec![Action::primary("apply")]);
@@ -120,7 +120,10 @@ impl Step for AdosProfile {
         self.applied.clear();
         self.absent.clear();
         self.needs_reboot = false;
-        for row in fc_profile(fw, vehicle_class(cx.adapter.class)) {
+        let declared =
+            crate::no_rc::profile(fw, vehicle_class(cx.adapter.class), cx.inputs.rc_receiver);
+        for row in declared {
+            let row = &row;
             let name = std::iter::once(row.name)
                 .chain(row.alt_names.iter().copied())
                 .find(|n| cx.params.has(n));
@@ -157,6 +160,20 @@ fn row_value(cx: &Cx, row: &ProfileParam) -> f32 {
 #[derive(Default)]
 pub struct AdosIntro {
     core: StepCore,
+    /// The declaration rows being written, and the result once they settle.
+    writing: Option<Map<String, Value>>,
+}
+
+/// Why `use_ados_no_rc` is refused here ([`crate::no_rc::declare_refusal`]
+/// in ADOS control, the mode it sets).
+fn no_rc_refusal(cx: &Cx) -> Option<&'static str> {
+    crate::no_rc::declare_refusal(
+        cx.fc.armed,
+        ControlMode::Ados,
+        firmware(cx.adapter.fw),
+        vehicle_class(cx.adapter.class),
+        cx.inputs.place_class,
+    )
 }
 
 impl Step for AdosIntro {
@@ -164,36 +181,103 @@ impl Step for AdosIntro {
 
     fn begin(&mut self, cx: &mut Cx) {
         self.core = StepCore::default();
-        let fallback = if cx.fc.rc_present(cx.now) {
-            "elrs"
-        } else {
-            "fc_manual"
-        };
+        self.writing = None;
+        let rc_present = cx.fc.rc_present(cx.now);
+        let fallback = if rc_present { "elrs" } else { "fc_manual" };
         self.core
             .args
             .insert("fallback_mode".into(), json!(fallback));
-        self.core.wait_user(vec![
-            Action::primary("use_ados"),
-            Action::secondary("keep_fc"),
-        ]);
+        self.core
+            .args
+            .insert("rc_present".into(), json!(rc_present));
+        // Flying with no RC transmitter is offered where it may be declared,
+        // first when no receiver feeds the FC. A receiver whose transmitter
+        // is off reads as none, so it is never chosen without the operator.
+        let no_rc = no_rc_refusal(cx).is_none_or(|e| e == "armed");
+        let actions = match (no_rc, rc_present) {
+            (true, false) => vec![
+                Action::primary("use_ados_no_rc"),
+                Action::secondary("use_ados"),
+                Action::secondary("keep_fc"),
+            ],
+            (true, true) => vec![
+                Action::primary("use_ados"),
+                Action::secondary("use_ados_no_rc"),
+                Action::secondary("keep_fc"),
+            ],
+            (false, _) => vec![Action::primary("use_ados"), Action::secondary("keep_fc")],
+        };
+        self.core.wait_user(actions);
     }
 
-    fn tick(&mut self, _cx: &mut Cx) {}
+    fn tick(&mut self, cx: &mut Cx) {
+        if self.writing.is_none() {
+            return;
+        }
+        match writes_settled(cx) {
+            None => {}
+            Some(Ok(())) => {
+                let result = self.writing.take().unwrap_or_default();
+                self.core.done(result);
+            }
+            Some(Err(names)) => {
+                self.writing = None;
+                self.core.result = Some(obj([("failed", json!(names))]));
+                self.core.fail("setup.blocker.param_write_failed");
+            }
+        }
+    }
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
-        let mode: &'static str = match id {
-            "use_ados" => "ados",
+        let (mode, rc): (&'static str, RcReceiver) = match id {
+            "use_ados" => ("ados", RcReceiver::Present),
+            "use_ados_no_rc" => {
+                if let Some(err) = no_rc_refusal(cx) {
+                    return Err(err);
+                }
+                ("ados", RcReceiver::Absent)
+            }
             "keep_fc" => {
                 if cx.fc.rc_present(cx.now) {
-                    "elrs"
+                    ("elrs", RcReceiver::Present)
                 } else {
-                    "fc_manual"
+                    ("fc_manual", RcReceiver::Present)
                 }
             }
             _ => return Err("unknown_action"),
         };
-        cx.out.effect(Effect::SetControlMode(mode));
-        self.core.done(obj([("control_mode", json!(mode))]));
+        if cx.fc.armed {
+            return Err("armed");
+        }
+        // The profile was written under the earlier declaration: the rows
+        // this one decides (the RC failsafe, the fence) are written here.
+        let mut applied = Vec::new();
+        if let Some(fw) = firmware(cx.adapter.fw) {
+            for row in crate::no_rc::declaration_rows(fw, vehicle_class(cx.adapter.class), rc) {
+                let name = std::iter::once(row.name)
+                    .chain(row.alt_names.iter().copied())
+                    .find(|n| cx.params.has(n));
+                if let Some(n) = name {
+                    cx.params.set(n, row.value);
+                    applied.push(json!({"name": n, "value": row.value}));
+                }
+            }
+        }
+        // The declaration after the control mode: `absent` needs `ados`, and
+        // `present` must come before leaving it.
+        if rc == RcReceiver::Present {
+            cx.out.effect(Effect::SetRcReceiver(rc));
+            cx.out.effect(Effect::SetControlMode(mode));
+        } else {
+            cx.out.effect(Effect::SetControlMode(mode));
+            cx.out.effect(Effect::SetRcReceiver(rc));
+        }
+        self.writing = Some(obj([
+            ("control_mode", json!(mode)),
+            ("rc_receiver", json!(rc.as_str())),
+            ("applied", Value::Array(applied)),
+        ]));
+        self.core.running();
         Ok(())
     }
 }

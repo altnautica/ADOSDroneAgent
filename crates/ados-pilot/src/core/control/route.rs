@@ -153,6 +153,11 @@ pub struct Route {
 }
 
 impl Route {
+    /// The mission feed's route as last received.
+    pub fn feed(&self) -> &RouteFeed {
+        &self.feed
+    }
+
     /// A new mission feed; a different route re-checks at once and forgets
     /// the origin.
     pub fn set_feed(&mut self, feed: RouteFeed) {

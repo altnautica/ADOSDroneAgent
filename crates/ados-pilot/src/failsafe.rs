@@ -16,6 +16,14 @@ pub struct Failsafe {
     last_heartbeat_ms: Option<u64>,
     /// Set once the link-loss action fired; cleared by the next surface frame.
     pub link_loss_fired: bool,
+    /// Each operator instance's own timer, watched with no RC transmitter
+    /// ([`crate::link_watch`]). Fed alongside the shared timer.
+    pub instances: crate::link_watch::Instances,
+    /// An RC receiver fed the FC since the pilot connected to it: with no RC
+    /// transmitter declared, a bound receiver blocks arming (an RC mode
+    /// switch could put the FC in a mode whose RC loss nothing catches).
+    /// Never reset on disarm.
+    pub rc_seen: bool,
 }
 
 impl Failsafe {
@@ -36,6 +44,7 @@ impl Failsafe {
         self.last_surface_ms = None;
         self.last_input_ms = None;
         self.link_loss_fired = false;
+        self.instances.clear();
     }
 
     pub fn input_age_ms(&self, now_ms: u64) -> Option<u64> {
@@ -67,12 +76,17 @@ impl Failsafe {
         false
     }
 
-    /// Seconds left before the link-loss action, once the countdown shows.
-    pub fn link_countdown_s(&self, now_ms: u64, window_ms: u64) -> Option<f32> {
-        if self.link_loss_fired {
+    /// Seconds left before the link-loss action, once the countdown shows:
+    /// from the shared timer, or with no RC transmitter (`per_instance`)
+    /// from the longest silence among operator instances.
+    pub fn link_countdown_s(&self, now_ms: u64, window_ms: u64, per_instance: bool) -> Option<f32> {
+        let s = if per_instance {
+            self.instances.worst_silence_ms(now_ms)?
+        } else if self.link_loss_fired {
             return None;
-        }
-        let s = self.surface_silence_ms(now_ms)?;
+        } else {
+            self.surface_silence_ms(now_ms)?
+        };
         (s >= LINK_COUNTDOWN_SHOW_MS && s < window_ms).then(|| (window_ms - s) as f32 / 1000.0)
     }
 
@@ -104,13 +118,27 @@ mod tests {
         let mut f = Failsafe::default();
         assert!(!f.link_lost(50_000, 10_000), "no surface yet: never fires");
         f.on_surface(0);
-        assert_eq!(f.link_countdown_s(1000, 10_000), None);
-        assert_eq!(f.link_countdown_s(4000, 10_000), Some(6.0));
+        assert_eq!(f.link_countdown_s(1000, 10_000, false), None);
+        assert_eq!(f.link_countdown_s(4000, 10_000, false), Some(6.0));
         assert!(!f.link_lost(9999, 10_000));
         assert!(f.link_lost(10_000, 10_000));
         assert!(!f.link_lost(11_000, 10_000));
         f.on_surface(12_000);
         assert!(!f.link_loss_fired);
+    }
+
+    #[test]
+    fn with_no_rc_the_countdown_follows_the_silent_instance() {
+        let mut f = Failsafe::default();
+        f.on_surface(4000);
+        f.instances.heard(Some("phone"), "android", 0);
+        f.instances.heard(Some("tab"), "mc", 4000);
+        assert_eq!(f.link_countdown_s(4000, 10_000, true), Some(6.0));
+        assert_eq!(
+            f.link_countdown_s(4000, 10_000, false),
+            None,
+            "the tab hides it"
+        );
     }
 
     #[test]

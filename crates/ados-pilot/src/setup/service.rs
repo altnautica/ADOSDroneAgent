@@ -101,6 +101,7 @@ async fn run(
                         .map(|r| r.msg.clone())
                         .collect(),
                     place_class: status.place_class,
+                    rc_receiver: status.rc_receiver,
                 };
                 let owner_tuning = *handle.owner.borrow() == Owner::Tuning;
                 let (msgs, effects, out_frames, need, step, abort) = {
@@ -187,6 +188,7 @@ async fn apply(inner: &Arc<Inner>, handle: &PilotHandle, eff: Effect) {
             handle.set_control_mode(mode).await;
         }
         Effect::SetRcAdosPosition(n) => handle.set_rc_ados_position(n).await,
+        Effect::SetRcReceiver(rc) => handle.set_rc_receiver(rc).await,
     }
 }
 

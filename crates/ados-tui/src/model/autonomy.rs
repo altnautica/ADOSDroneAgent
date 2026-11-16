@@ -229,6 +229,8 @@ pub struct Pilot {
     /// Seconds left before the link-loss action, while the link is lost.
     pub link_loss_in_s: Option<f64>,
     pub link_loss_action: Option<String>,
+    /// The link-loss window, seconds; `None` from an agent that omits it.
+    pub link_loss_s: Option<f64>,
     pub mission: Option<PilotMission>,
     /// The pilot's banner, while it sends one.
     pub banner: Option<Banner>,
@@ -274,6 +276,9 @@ pub struct Pilot {
     pub speed_cap_reason: Option<String>,
     /// The operator's place class, `open` or `confined` (absent reads open).
     pub place_class: String,
+    /// The drone is declared to fly with no RC transmitter
+    /// (`rc_receiver: absent`; omitted or `present` reads false).
+    pub rc_absent: bool,
     /// The route check of the loaded mission, while confined.
     pub route_check: Option<RouteCheck>,
     /// The pilot operations a surface may offer now (`goto`, ...).

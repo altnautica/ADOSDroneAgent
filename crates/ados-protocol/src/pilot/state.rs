@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::command::{PilotCommand, ShadowCommand};
+use super::rc::RcReceiver;
 use super::route::{PlaceClass, RouteCheck};
 
 /// Who currently commands motion.
@@ -345,6 +346,14 @@ pub struct PilotState {
     /// What the pilot does when the control link stays lost: `rth`, `hold`
     /// or `land` (the configured `pilot.link_loss_action`).
     pub link_loss_action: String,
+    /// The link-loss window, seconds (the configured `pilot.link_loss_s`):
+    /// how long the pilot waits for an operator frame before
+    /// `link_loss_action`.
+    #[serde(default)]
+    pub link_loss_s: u32,
+    /// The operator's RC declaration; omitted while `present`.
+    #[serde(default, skip_serializing_if = "RcReceiver::is_present")]
+    pub rc_receiver: RcReceiver,
     pub mission: Option<Mission>,
     pub input_session: Option<InputSession>,
     pub gate: Option<Gate>,

@@ -18,6 +18,9 @@ pub enum Effect {
     SetControlMode(&'static str),
     /// Persist `control.rc_ados_position` (flight-mode slot 1..6).
     SetRcAdosPosition(u8),
+    /// Declare `pilot.rc_receiver` (`present` | `absent`), applied after the
+    /// control mode it comes with.
+    SetRcReceiver(ados_protocol::pilot::RcReceiver),
 }
 
 #[derive(Debug, Default)]

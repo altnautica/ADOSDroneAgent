@@ -109,6 +109,11 @@ impl Pilot {
         let axes = self.stick_axes();
         if self.owner() == Owner::Tuning {
             self.tuning_axes = axes;
+            // With no RC transmitter nothing else catches a lost operator
+            // during a tuning flight.
+            if !self.settings.pilot.rc_receiver.is_present() {
+                self.failsafes(now_ms);
+            }
             return;
         }
         let raw = self.raw_axes();
@@ -373,7 +378,7 @@ impl Pilot {
                 let vd = self.fc.fresh_local(now_ms).map_or(0.0, |l| l.vd);
                 vz.1 = vz.1.min(self.land_descent_cap(a, vd));
             }
-            if a >= self.settings.pilot.max_alt_agl_m {
+            if a >= self.settings.pilot.max_alt() {
                 vz.0 = 0.0;
             }
         }
@@ -392,7 +397,7 @@ impl Pilot {
         let unavailable = self.obstacle_data_unavailable(now_ms);
         let brake = self.settings.pilot.avoid != AvoidMode::Off && !stale && !unavailable;
         let home = self.fc.home_ne();
-        let max_dist = self.settings.pilot.max_dist_m;
+        let max_dist = self.settings.pilot.max_dist();
         let obstacles = &self.obstacles;
         let a_h = lim.a_h;
         let geom = self.brake_geom(self.settings.pilot.effective_margin_m());

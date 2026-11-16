@@ -49,7 +49,7 @@ impl Pilot {
             return;
         }
         let v_cap = goal.max_speed_mps.min(self.limits_now(now_ms).v_h).max(0.5);
-        let fence = Some((self.fc.home_ne(), self.settings.pilot.max_dist_m));
+        let fence = Some((self.fc.home_ne(), self.settings.pilot.max_dist()));
         let c = vantage::choose(&self.obstacles, spec, pos, fence, margin, v_cap);
         let mut status = GoalStatus::new(lease_id, VantageState::NoVantage, c.coverage);
         status.occluder_ne = c.occluder.map(|o| o.ne);
