@@ -17,6 +17,7 @@ impl Pilot {
         let mut items = crate::readiness::items(
             &self.fc,
             self.control_mode(),
+            self.settings.pilot.place_class,
             self.sessions.owner.is_some(),
             &sensors,
             now_ms,

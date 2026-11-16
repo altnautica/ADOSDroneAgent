@@ -21,6 +21,9 @@ pub struct PilotInputs {
     pub link_lost: bool,
     /// Blocking pilot readiness items other than `setup_needed` (message keys).
     pub readiness_blockers: Vec<String>,
+    /// `pilot.place_class`: what the `ados_profile` step writes for a row
+    /// with a confined bound (`SRTL_ACCURACY`).
+    pub place_class: ados_protocol::pilot::PlaceClass,
 }
 
 /// Values carried between steps and persisted per aircraft.

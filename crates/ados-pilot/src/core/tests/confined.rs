@@ -86,13 +86,15 @@ pub(super) fn map(w: &mut World, payload: &Value) {
 }
 
 /// A confined place for the x500 (margin 0.477 m), the open margin left at
-/// its 1.5 m default. A confined place has walls, so the lidar sees one
-/// 8 m to the left (west, off the routes north along e = 0): an empty scan
-/// there is not obstacle data.
+/// its 1.5 m default, and an FC set up for it (`SRTL_ACCURACY` 0.2). A
+/// confined place has walls, so the lidar sees one 8 m to the left (west,
+/// off the routes north along e = 0): an empty scan there is not obstacle
+/// data.
 pub(super) fn confined(w: &mut World) {
     let p = &mut w.p.settings.pilot;
     p.place_class = PlaceClass::Confined;
     p.prop_tip_radius_m = Some(TIP_M);
+    w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
     w.scan_ranges = wall(270, 8.0);
 }
 
@@ -185,6 +187,7 @@ fn confined_without_a_tip_radius_blocks_readiness_and_refuses_the_launch() {
     };
     assert_eq!(item(&w), None, "an open place has no place_class item");
     w.p.settings.pilot.place_class = PlaceClass::Confined;
+    w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
     let it = item(&w).expect("place_class item");
     assert!(!it.ok);
     assert_eq!(it.severity, ados_protocol::pilot::Severity::Block);
@@ -201,6 +204,38 @@ fn confined_without_a_tip_radius_blocks_readiness_and_refuses_the_launch() {
     let it = item(&w).unwrap();
     assert!(it.ok, "{it:?}");
     assert_eq!(it.msg, "Confined place: 0.48 m from obstacles");
+}
+
+#[test]
+fn a_confined_place_takes_a_tight_smartrtl_accuracy_an_open_one_flags_it() {
+    let mut w = World::new();
+    w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
+    w.run(200);
+    let item = |w: &World| {
+        w.p.state(w.now)
+            .readiness
+            .into_iter()
+            .find(|r| r.id == "fc_profile")
+            .expect("fc_profile item")
+    };
+    let it = item(&w);
+    assert!(!it.ok, "an open place keeps the 2 m accuracy");
+    assert_eq!(it.msg, "FC parameters differ: SRTL_ACCURACY 0.2 (want 2)");
+    confined(&mut w);
+    let it = item(&w);
+    assert!(it.ok, "{it:?}");
+    assert_ne!(
+        err(&w.action("arm")).as_deref(),
+        Some("not_ready:fc_profile")
+    );
+    // Coarser than the confined bound flags again.
+    w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.25);
+    let it = item(&w);
+    assert!(!it.ok);
+    assert_eq!(
+        it.msg,
+        "FC parameters differ: SRTL_ACCURACY 0.25 (want > 0 and ≤ 0.2 in a confined place)"
+    );
 }
 
 #[test]

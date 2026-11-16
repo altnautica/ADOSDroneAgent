@@ -449,6 +449,44 @@ fn ados_profile_skips_the_reboot_for_runtime_rows() {
     assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(false));
 }
 
+/// Runs `ados_profile` in a confined place on a copter matching the profile
+/// but for `SRTL_ACCURACY` `have`; returns the `SRTL_ACCURACY` it leaves.
+fn confined_srtl_accuracy_after_apply(have: f32) -> f32 {
+    let mut p = ap_copter_params();
+    let profile = crate::fc_profile::fc_profile(
+        crate::fc_profile::Firmware::Ardupilot,
+        ados_protocol::pilot::VehicleClass::Multirotor,
+    );
+    for row in profile {
+        p.insert(row.name.into(), row.value);
+    }
+    p.insert("SRTL_ACCURACY".into(), have);
+    let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
+    s.fc.inputs.place_class = ados_protocol::pilot::PlaceClass::Confined;
+    // One tick hands the engine the pilot's inputs.
+    s.run(TICK);
+    s.e.run_step(G, "ados_profile", s.now);
+    s.wait_step("ados_profile", StepState::WaitingUser);
+    s.act(G, "ados_profile", "apply", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 30_000);
+    assert_eq!(s.step_state(G, "ados_profile"), StepState::Done);
+    s.param("SRTL_ACCURACY")
+}
+
+#[test]
+fn ados_profile_in_a_confined_place_keeps_a_tight_smartrtl_accuracy() {
+    assert_eq!(confined_srtl_accuracy_after_apply(0.15), 0.15);
+    // Coarser than the bound, the firmware default too: the bound is written.
+    assert_eq!(
+        confined_srtl_accuracy_after_apply(0.25),
+        crate::fc_profile::CONFINED_SRTL_ACCURACY_MAX_M
+    );
+    assert_eq!(
+        confined_srtl_accuracy_after_apply(2.0),
+        crate::fc_profile::CONFINED_SRTL_ACCURACY_MAX_M
+    );
+}
+
 #[test]
 fn active_step_names_the_running_step() {
     let mut s = Sim::copter();

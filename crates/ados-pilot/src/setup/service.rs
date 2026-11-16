@@ -100,6 +100,7 @@ async fn run(
                         .filter(|r| !r.ok && r.severity == pilot::Severity::Block && r.id != "setup_needed")
                         .map(|r| r.msg.clone())
                         .collect(),
+                    place_class: status.place_class,
                 };
                 let owner_tuning = *handle.owner.borrow() == Owner::Tuning;
                 let (msgs, effects, out_frames, need, step, abort) = {

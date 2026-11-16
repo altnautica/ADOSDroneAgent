@@ -1,6 +1,6 @@
 //! Readiness items shown in the pre-flight checklist and the chip.
 
-use ados_protocol::pilot::{ControlMode, Readiness, Severity};
+use ados_protocol::pilot::{ControlMode, PlaceClass, Readiness, Severity};
 
 use crate::fc::FcState;
 use crate::fc_profile::{check_row, fc_profile, Firmware, RowCheck};
@@ -62,10 +62,11 @@ fn position_item(fc: &FcState, now_ms: u64) -> Readiness {
     }
 }
 
-/// Every readiness item for the current state.
+/// Every readiness item for the current state, in a place of `place`.
 pub fn items(
     fc: &FcState,
     mode: ControlMode,
+    place: PlaceClass,
     controller_live: bool,
     sensors: &crate::sensor_readiness::SensorCtx,
     now_ms: u64,
@@ -104,7 +105,7 @@ pub fn items(
         )),
     }
     if let Some(fw) = fc.firmware {
-        out.push(profile_item(fc, fw, mode));
+        out.push(profile_item(fc, fw, mode, place));
         if fw == Firmware::Ardupilot {
             out.push(crate::batt_failsafe::item_for(fc, mode));
         }
@@ -126,7 +127,7 @@ pub fn items(
     out
 }
 
-fn profile_item(fc: &FcState, fw: Firmware, mode: ControlMode) -> Readiness {
+fn profile_item(fc: &FcState, fw: Firmware, mode: ControlMode, place: PlaceClass) -> Readiness {
     let class = fc.vehicle_class();
     let mut missing = Vec::new();
     let mut unread = false;
@@ -136,7 +137,7 @@ fn profile_item(fc: &FcState, fw: Firmware, mode: ControlMode) -> Readiness {
         .iter()
         .filter(|r| !crate::batt_failsafe::ACTIONS.contains(&r.name));
     for row in rows {
-        match check_row(row, |n| fc.params.get(n).copied()) {
+        match check_row(row, place, |n| fc.params.get(n).copied()) {
             RowCheck::Ok => {}
             RowCheck::Absent => match row.absent_blocks {
                 Some(why) if !fc.params.is_empty() => {

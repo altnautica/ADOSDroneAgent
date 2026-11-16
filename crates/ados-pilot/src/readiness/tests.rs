@@ -1,5 +1,5 @@
 use ados_protocol::mavlink::ardupilotmega::MavLandedState;
-use ados_protocol::pilot::{ControlMode, Readiness, Severity};
+use ados_protocol::pilot::{ControlMode, PlaceClass, Readiness, Severity};
 
 use super::items;
 use crate::config::FcSensors;
@@ -36,7 +36,7 @@ fn all(fc: &FcState, mode: ControlMode) -> Vec<Readiness> {
         mounts: &mounts,
         nav_imu: &nav_imu,
     };
-    items(fc, mode, false, &ctx, 2)
+    items(fc, mode, PlaceClass::Open, false, &ctx, 2)
 }
 
 fn find(items: &[Readiness], id: &str) -> Option<Readiness> {
@@ -320,7 +320,44 @@ fn copter() -> FcState {
 }
 
 fn profile(fc: &FcState) -> Readiness {
-    super::profile_item(fc, Firmware::Ardupilot, ControlMode::Ados)
+    profile_in(fc, PlaceClass::Open)
+}
+
+fn profile_in(fc: &FcState, place: PlaceClass) -> Readiness {
+    super::profile_item(fc, Firmware::Ardupilot, ControlMode::Ados, place)
+}
+
+#[test]
+fn a_confined_place_accepts_a_tight_smartrtl_accuracy_an_open_one_does_not() {
+    let with_accuracy = |v: f32| {
+        let mut fc = copter();
+        fc.params.insert("SRTL_ACCURACY".into(), v);
+        fc
+    };
+    let tight = with_accuracy(0.2);
+    assert!(profile_in(&tight, PlaceClass::Confined).ok);
+    let r = profile_in(&tight, PlaceClass::Open);
+    assert!(!r.ok);
+    assert_eq!(r.msg, "FC parameters differ: SRTL_ACCURACY 0.2 (want 2)");
+    // Coarser than the bound, the firmware default, and 0 (SmartRTL off)
+    // block there.
+    for wrong in [0.25, 2.0, 0.0] {
+        let r = profile_in(&with_accuracy(wrong), PlaceClass::Confined);
+        assert_eq!((r.ok, r.severity), (false, Severity::Block), "{wrong}");
+        assert_eq!(
+            r.msg,
+            format!(
+                "FC parameters differ: SRTL_ACCURACY {wrong} (want > 0 and ≤ 0.2 in a confined place)"
+            )
+        );
+    }
+    // Every other row still wants its own value in a confined place.
+    let mut fc = with_accuracy(0.2);
+    fc.params.insert("FS_THR_ENABLE".into(), 1.0);
+    assert_eq!(
+        profile_in(&fc, PlaceClass::Confined).msg,
+        "FC parameters differ: FS_THR_ENABLE 1 (want 5)"
+    );
 }
 
 #[test]

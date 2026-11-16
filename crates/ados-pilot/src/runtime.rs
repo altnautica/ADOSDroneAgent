@@ -42,6 +42,8 @@ pub struct SetupView {
     pub readiness: Vec<ados_protocol::pilot::Readiness>,
     /// No operator surface heard from for `pilot.link_loss_s`.
     pub link_lost: bool,
+    /// `pilot.place_class`: the `ados_profile` step writes its values.
+    pub place_class: ados_protocol::pilot::PlaceClass,
 }
 
 /// Commands from the setup engine to the core.
@@ -239,7 +241,11 @@ impl Core {
                     if t.saturating_sub(state_ms) >= STATE_PERIOD_MS {
                         state_ms = t;
                         let s = self.pilot.state(t);
-                        let view = SetupView { readiness: s.readiness.clone(), link_lost: self.pilot.link_lost(t) };
+                        let view = SetupView {
+                            readiness: s.readiness.clone(),
+                            link_lost: self.pilot.link_lost(t),
+                            place_class: s.place_class,
+                        };
                         self.status_tx.send_if_modified(|v| {
                             let changed = *v != view;
                             *v = view;

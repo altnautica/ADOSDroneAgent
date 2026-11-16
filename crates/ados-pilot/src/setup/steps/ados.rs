@@ -4,7 +4,9 @@
 //! navigates without GNSS), and `ados_intro`: "Meet ADOS Pilot", where the
 //! operator chooses the control mode. A changed row the FC reads only at
 //! boot (`OA_TYPE`, `SRTL_POINTS`) reboots the FC before the step is done, as
-//! the battery and frame steps do.
+//! the battery and frame steps do. In a confined place `SRTL_ACCURACY` keeps
+//! a value within the confined bound and is written to the bound otherwise
+//! ([`crate::fc_profile::CONFINED_SRTL_ACCURACY_MAX_M`]).
 
 use ados_protocol::pilot::VehicleClass;
 use serde_json::{json, Map, Value};
@@ -124,8 +126,9 @@ impl Step for AdosProfile {
             match name {
                 Some(n) => {
                     let v = row_value(cx, row);
-                    self.needs_reboot |=
-                        row.reboot && check_row(row, |k| cx.params.get(k)) != RowCheck::Ok;
+                    self.needs_reboot |= row.reboot
+                        && check_row(row, cx.inputs.place_class, |k| cx.params.get(k))
+                            != RowCheck::Ok;
                     cx.params.set(n, v);
                     self.applied.push(json!({"name": n, "value": v}));
                 }
@@ -138,11 +141,16 @@ impl Step for AdosProfile {
     }
 }
 
-/// The value to write for a profile row, from the same GNSS rule the
-/// `battery_failsafe` readiness item reads, so the fix settles the item.
+/// The value to write for a profile row, from the same rules the readiness
+/// items read (the place class for `fc_profile`, the GNSS rule for
+/// `battery_failsafe`), so the fix settles them.
 fn row_value(cx: &Cx, row: &ProfileParam) -> f32 {
+    let have = std::iter::once(row.name)
+        .chain(row.alt_names.iter().copied())
+        .find_map(|n| cx.params.get(n));
+    let value = row.value_in(cx.inputs.place_class, have);
     let free = crate::batt_failsafe::gnss_free(|n| cx.params.get(n));
-    crate::batt_failsafe::profile_value(row.name, row.value, vehicle_class(cx.adapter.class), free)
+    crate::batt_failsafe::profile_value(row.name, value, vehicle_class(cx.adapter.class), free)
 }
 
 #[derive(Default)]
