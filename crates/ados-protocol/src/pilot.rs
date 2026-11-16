@@ -70,9 +70,15 @@ pub struct Goal {
     /// Yaw rate in rad/s, used when `yaw` is `None`.
     #[serde(default)]
     pub yaw_rate: Option<f32>,
-    /// The subject the skill keeps in view, `[n, e]`.
+    /// The subject the skill keeps in view, `[n, e]`. For a skill's goal the
+    /// pilot keeps the vehicle clear of a person standing there.
     #[serde(default)]
     pub subject_ne: Option<[f32; 2]>,
+    /// The 1-sigma error of `subject_ne` along the line of sight, metres.
+    /// The pilot widens the distance it keeps from the subject by it.
+    /// Absent reads 0.
+    #[serde(default)]
+    pub subject_sigma_m: Option<f32>,
     pub max_speed_mps: f32,
     /// Ring of acceptable detour goals around the subject.
     #[serde(default)]
@@ -106,6 +112,7 @@ impl Goal {
             yaw: None,
             yaw_rate: None,
             subject_ne: None,
+            subject_sigma_m: None,
             max_speed_mps,
             candidates: None,
             margin_m: None,

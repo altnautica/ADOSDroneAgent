@@ -20,8 +20,9 @@ pub mod limit {
     pub const SEEN_SPACE: u16 = 1 << 6;
     pub const CLEARANCE: u16 = 1 << 7;
     pub const PUSH: u16 = 1 << 8;
-    pub const GEOFENCE: u16 = 1 << 9;
-    pub const HOLD: u16 = 1 << 10;
+    pub const SUBJECT: u16 = 1 << 9;
+    pub const GEOFENCE: u16 = 1 << 10;
+    pub const HOLD: u16 = 1 << 11;
 }
 
 /// A shadow command older than this is no longer published.

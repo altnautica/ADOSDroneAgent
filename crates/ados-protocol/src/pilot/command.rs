@@ -66,9 +66,11 @@ pub struct PilotCommand {
 /// closing speed being faster than the velocity estimate), `seen_space` (the
 /// stopping distance to where the scans stop seeing), `clearance` (the
 /// clearance speed in a confined space), `push` (the push back out of the
-/// margin), `geofence` and `hold` (no motion toward the goal: `hold_reason`
-/// says why).
-pub const COMMAND_LIMITS: [&str; 11] = [
+/// margin), `subject` (the distance kept from the subject a skill's goal
+/// names, `subject_ne`: the speed toward it that still stops outside that
+/// distance, or the push back out of it), `geofence` and `hold` (no motion
+/// toward the goal: `hold_reason` says why).
+pub const COMMAND_LIMITS: [&str; 12] = [
     "speed",
     "nav_cap",
     "shaper",
@@ -78,6 +80,7 @@ pub const COMMAND_LIMITS: [&str; 11] = [
     "seen_space",
     "clearance",
     "push",
+    "subject",
     "geofence",
     "hold",
 ];

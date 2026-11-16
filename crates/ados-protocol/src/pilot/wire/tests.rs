@@ -32,6 +32,27 @@ fn json_goal_frame_decodes_with_defaults() {
     assert_eq!(goal.yaw, None);
     assert_eq!(goal.margin_m, Some(2.0));
     assert_eq!(goal.vel_mode, crate::pilot::VelMode::FeedForward);
+    assert_eq!(goal.subject_sigma_m, None);
+}
+
+#[test]
+fn a_goal_decodes_its_subject_sigma() {
+    let frame = serde_json::json!({
+        "op": "goal", "lease_id": 6,
+        "goal": {"kind": "follow", "n": 1.0, "e": 2.0, "d": -4.0, "max_speed_mps": 6.0,
+                 "subject_ne": [5.0, 2.0], "subject_sigma_m": 0.75}
+    });
+    let (req, _) = json_to_request_body(&frame).unwrap();
+    let Request::Goal { goal, .. } = req else {
+        panic!("not a goal")
+    };
+    assert_eq!(goal.subject_ne, Some([5.0, 2.0]));
+    assert_eq!(goal.subject_sigma_m, Some(0.75));
+    let body = encode_op("goal", &serde_json::json!({"lease_id": 6, "goal": goal})).unwrap();
+    let Request::Goal { goal: back, .. } = decode_request(&body).unwrap() else {
+        panic!("not a goal")
+    };
+    assert_eq!(back, goal);
 }
 
 #[test]
@@ -226,13 +247,14 @@ fn wire_floats_are_short_decimals() {
 }
 
 #[test]
-fn the_registry_version_records_the_nullable_fc_state_and_the_vel_mode() {
+fn the_registry_version_records_the_nullable_fc_state_the_vel_mode_and_the_subject_sigma() {
     // `state.armed`, `state.landed` (v2), `state.fc_mode` and
     // `state.fc_mode_name` (v3) are null while the FC link is down: changes
     // of the state message's shape, so the contract version moved with them
     // and the registry describes them. v4: a goal's velocity may be the
-    // whole commanded velocity (`goal.vel_mode`).
-    assert_eq!(crate::pilot::PILOT_V1_VERSION, 4);
+    // whole commanded velocity (`goal.vel_mode`). v5: a goal's subject
+    // carries its error (`goal.subject_sigma_m`).
+    assert_eq!(crate::pilot::PILOT_V1_VERSION, 5);
     let meta = crate::contracts::CONTRACTS
         .iter()
         .find(|c| c.id == "pilot.v1")
@@ -241,6 +263,7 @@ fn the_registry_version_records_the_nullable_fc_state_and_the_vel_mode() {
         "armed and landed are null",
         "fc_mode and fc_mode_name are null",
         "goal.vel_mode",
+        "goal.subject_sigma_m",
     ] {
         assert!(meta.description.contains(text), "{}", meta.description);
     }
