@@ -21,6 +21,12 @@ path = "src/bin/ados-vision.rs"
 name = "detect_bench"
 required-features = ["onnx"]
 
+# Replays a follow sequence through the engine: batch time, passes and
+# recall by range (see the file header).
+[[example]]
+name = "follow_bench"
+required-features = ["onnx"]
+
 [features]
 # The default build carries no native inference runtime so it compiles fast
 # everywhere; the MockBackend and the RKNN sidecar IPC client cover the baseline.

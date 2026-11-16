@@ -29,6 +29,7 @@ use crate::backend::{BackendState, LoadedModel, VisionBackend};
 use crate::camera_control::CameraControls;
 use crate::depth::geometry::CameraMount;
 use crate::ring::{FrameTiming, RingWriter};
+mod batch_times;
 mod camera_motion;
 mod crop;
 mod demand;
@@ -182,9 +183,10 @@ pub struct VisionEngine {
     range_feed: Arc<crate::depth::feed::RangeFeed>,
     /// Every published depth grid and landing-zone frame.
     depth_tx: broadcast::Sender<ados_protocol::vision_depth::DepthRecord>,
-    /// Per camera, the designated-track crop passes run and those that found a
-    /// box of the track's class, for the status sidecar.
-    crop_counts: std::sync::Mutex<HashMap<String, crop::CropCounts>>,
+    /// Each detector's crop-primary schedule and, per camera, the last
+    /// whole-frame pass, the crop counters, a pending designation and the
+    /// batch stage times, for the batch plan and the status sidecar.
+    batches: std::sync::Mutex<crop::BatchState>,
     /// Moving each camera's track with the camera's own turn.
     camera_motion: std::sync::Mutex<camera_motion::CameraMotion>,
     /// The cameras this engine is configured to capture, known before their
@@ -298,7 +300,7 @@ impl VisionEngine {
             depth: std::sync::Mutex::new(depth::DepthRuntime::default()),
             range_feed: Arc::new(crate::depth::feed::RangeFeed::default()),
             depth_tx: broadcast::channel(BROADCAST_DEPTH).0,
-            crop_counts: std::sync::Mutex::new(HashMap::new()),
+            batches: std::sync::Mutex::new(crop::BatchState::default()),
             camera_motion: std::sync::Mutex::new(camera_motion::CameraMotion::default()),
             capture_ids: std::sync::Mutex::new(Vec::new()),
             camera_mounts: std::sync::Mutex::new(HashMap::new()),

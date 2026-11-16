@@ -270,6 +270,7 @@ impl VisionEngine {
                     crop_runs: crop.runs,
                     crop_hits: crop.hits,
                     turn_moves: self.turn_moves(&id),
+                    batches: self.batch_status(&id),
                 };
                 (id, status)
             })

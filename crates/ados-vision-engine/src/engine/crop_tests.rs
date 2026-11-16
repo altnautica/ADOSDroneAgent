@@ -97,9 +97,11 @@ fn walker_in(frame: &[u8], w: u32, h: u32) -> Option<BoundingBox> {
 /// A person detector with a recall cliff: it reports the walker only when the
 /// walker, stretched into the model's input like the real preprocessing does,
 /// is at least `MIN_MODEL_HEIGHT` tall, and only when the walker is whole in the
-/// pixels it is handed (a box cut by the frame edge is not a person).
+/// pixels it is handed (a box cut by the frame edge is not a person). It
+/// counts its calls and logs the image size of each.
 struct CliffDetector {
     calls: Arc<AtomicUsize>,
+    log: Arc<std::sync::Mutex<Vec<(u32, u32)>>>,
 }
 
 impl LoadedModel for CliffDetector {
@@ -107,6 +109,7 @@ impl LoadedModel for CliffDetector {
         assert_eq!(f, FrameFormat::Rgb24);
         assert_eq!(frame.len(), (w * h * 3) as usize);
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.log.lock().unwrap().push((w, h));
         let Some(b) = walker_in(frame, w, h) else {
             return Ok(Vec::new());
         };
@@ -142,6 +145,7 @@ impl LoadedModel for ColourReid {
 
 struct CliffBackend {
     calls: Arc<AtomicUsize>,
+    log: Arc<std::sync::Mutex<Vec<(u32, u32)>>>,
 }
 
 impl VisionBackend for CliffBackend {
@@ -150,6 +154,7 @@ impl VisionBackend for CliffBackend {
             ModelKind::Tracking => Box::new(ColourReid),
             _ => Box::new(CliffDetector {
                 calls: self.calls.clone(),
+                log: self.log.clone(),
             }),
         })
     }
@@ -177,10 +182,22 @@ fn model(id: &str, kind: ModelKind, w: u32, h: u32) -> ModelMetadata {
 
 /// The engine as a follow deployment runs it: tracker and re-id on.
 async fn follow_engine() -> (Arc<VisionEngine>, Arc<AtomicUsize>) {
+    let (e, calls, _) = logged_follow_engine().await;
+    (e, calls)
+}
+
+/// [`follow_engine`], with the image size of every detector call.
+async fn logged_follow_engine() -> (
+    Arc<VisionEngine>,
+    Arc<AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<(u32, u32)>>>,
+) {
     let calls = Arc::new(AtomicUsize::new(0));
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let e = VisionEngine::with_tracker_reid(
         Box::new(CliffBackend {
             calls: calls.clone(),
+            log: log.clone(),
         }),
         4,
         true,
@@ -195,7 +212,7 @@ async fn follow_engine() -> (Arc<VisionEngine>, Arc<AtomicUsize>) {
     e.register_model(model("reid", ModelKind::Tracking, 128, 256))
         .await
         .unwrap();
-    (e, calls)
+    (e, calls, log)
 }
 
 fn frame_with(walker: &BoundingBox) -> Vec<u8> {
@@ -214,12 +231,17 @@ fn frame_with(walker: &BoundingBox) -> Vec<u8> {
     f
 }
 
+/// The frame `frame_id` of a 3 Hz detector (the replays' batch rate).
 fn desc(frame_id: u64) -> FrameDescriptor {
+    desc_at(frame_id, 1_000_000_000 + frame_id * 333_333_333)
+}
+
+fn desc_at(frame_id: u64, ts_ns: u64) -> FrameDescriptor {
     FrameDescriptor {
         v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
         camera_id: "main".into(),
         frame_id,
-        ts_ns: frame_id,
+        ts_ns,
         ts_sensor_ns: None,
         exposure_ns: None,
         trigger_seq: None,
@@ -416,16 +438,19 @@ async fn crop_pass_runs_only_while_designated() {
 
 #[test]
 fn crop_window_scales_the_subject_to_the_target_height() {
+    /// The vertical scale of the whole-frame pass beside the crop.
+    const WHOLE: Option<f32> = Some(MODEL_IN as f32 / H as f32);
     use super::crop::{crop_window, CROP_SUBJECT_MODEL_HEIGHT};
     // An 80 px subject: a 400 px square window puts it 128 px tall in a 640
     // input, centred on the box.
     let w = crop_window(
         &bbox([600.0, 300.0, 40.0, 80.0]),
-        0,
+        0.0,
         W,
         H,
         MODEL_IN,
         MODEL_IN,
+        WHOLE,
     )
     .unwrap();
     assert!(
@@ -436,25 +461,209 @@ fn crop_window_scales_the_subject_to_the_target_height() {
     assert_eq!((w.x, w.y), (420.0, 140.0));
 
     // Near a corner the window moves inside the frame instead of shrinking.
-    let w = crop_window(&bbox([2.0, 650.0, 30.0, 60.0]), 0, W, H, MODEL_IN, MODEL_IN).unwrap();
+    let w = crop_window(
+        &bbox([2.0, 650.0, 30.0, 60.0]),
+        0.0,
+        W,
+        H,
+        MODEL_IN,
+        MODEL_IN,
+        WHOLE,
+    )
+    .unwrap();
     assert_eq!((w.x, w.y + w.height), (0.0, H as f32));
 
     // A tiny subject is magnified at most CROP_MAX_UPSCALE.
-    let w = crop_window(&bbox([600.0, 300.0, 4.0, 8.0]), 0, W, H, MODEL_IN, MODEL_IN).unwrap();
+    let w = crop_window(
+        &bbox([600.0, 300.0, 4.0, 8.0]),
+        0.0,
+        W,
+        H,
+        MODEL_IN,
+        MODEL_IN,
+        WHOLE,
+    )
+    .unwrap();
     assert!((w.height - MODEL_IN as f32 / super::crop::CROP_MAX_UPSCALE).abs() < 0.01);
 
     // A measured subject the whole-frame pass already sees at the target size:
-    // no crop.
+    // no crop beside a whole-frame pass.
     let large = bbox([600.0, 300.0, 70.0, 150.0]);
-    assert!(crop_window(&large, 0, W, H, MODEL_IN, MODEL_IN).is_none());
-    // The same box after two missed batches is a stale size for a subject
-    // that is receding: the crop runs, scaled for the shrunken subject.
-    let w = crop_window(&large, 2, W, H, MODEL_IN, MODEL_IN).unwrap();
+    assert!(crop_window(&large, 0.0, W, H, MODEL_IN, MODEL_IN, WHOLE).is_none());
+    // Without one the crop is the only pass, so it runs whatever the size.
+    assert!(crop_window(&large, 0.0, W, H, MODEL_IN, MODEL_IN, None).is_some());
+    // The same box after two steps without a measurement is a stale size for
+    // a subject that is receding: the crop runs, scaled for the shrunken
+    // subject.
+    let w = crop_window(&large, 2.0, W, H, MODEL_IN, MODEL_IN, WHOLE).unwrap();
     let expected = 150.0 * super::crop::CROP_COAST_SHRINK.powi(2);
     assert!((expected * MODEL_IN as f32 / w.height - CROP_SUBJECT_MODEL_HEIGHT).abs() < 0.01);
     // A non-square input keeps its aspect.
-    let w = crop_window(&bbox([600.0, 300.0, 40.0, 80.0]), 0, W, H, 640, 384).unwrap();
+    let w = crop_window(
+        &bbox([600.0, 300.0, 40.0, 80.0]),
+        0.0,
+        W,
+        H,
+        640,
+        384,
+        WHOLE,
+    )
+    .unwrap();
     assert!((w.width / w.height - 640.0 / 384.0).abs() < 0.01);
+}
+
+/// The walker receding per 100 ms frame, at the 10 Hz the detector now runs
+/// at: [`WALK_AWAY`]'s sizes and drift interpolated, without the camera's
+/// pitch throws (nothing here moves the track with the camera).
+fn walk_at_10_hz() -> Vec<[f32; 4]> {
+    let mut out = Vec::new();
+    for pair in WALK_AWAY.windows(2) {
+        for k in 0..3 {
+            let t = k as f32 / 3.0;
+            let mut b: [f32; 4] =
+                std::array::from_fn(|i| pair[0][i] + (pair[1][i] - pair[0][i]) * t);
+            b[1] = 300.0;
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// While a designated subject is tracked, the detector's batches run only the
+/// crop around it, and the whole frame twice a second: at 10 Hz, one batch in
+/// five carries a whole-frame pass (with the crop beside it only once the
+/// crop magnifies the walker), and the walker stays locked.
+#[tokio::test]
+async fn crop_primary_runs_the_whole_frame_twice_a_second() {
+    let (e, _, log) = logged_follow_engine().await;
+    e.configure_crop_primary("det", None, 500_000_000);
+    let walk = walk_at_10_hz();
+    let at = |i: usize| desc_at(i as u64, 1_000_000_000 + i as u64 * 100_000_000);
+    let first = e
+        .infer_and_publish("det", &at(0), &frame_with(&bbox(walk[0])))
+        .await
+        .unwrap();
+    let id = e.designate("main", &first.detections[0]).await.unwrap();
+    log.lock().unwrap().clear();
+    let mut locked = 0;
+    let mut windowed = 0;
+    let frames = 20;
+    for (i, b) in walk.iter().enumerate().skip(1).take(frames) {
+        let batch = e
+            .infer_and_publish("det", &at(i), &frame_with(&bbox(*b)))
+            .await
+            .unwrap();
+        locked += batch
+            .detections
+            .iter()
+            .filter(|d| d.track_id == Some(id) && d.lock_state == Some(LockState::Locked))
+            .count();
+        // A crop-only batch names the window it looked in, around the walker.
+        if let Some(w) = batch.crop_window {
+            windowed += 1;
+            let walker = bbox(*b);
+            assert!(
+                w.x <= walker.x && w.x + w.width >= walker.x + walker.width,
+                "frame {i}: window {w:?} misses the walker {walker:?}"
+            );
+        }
+    }
+    let calls = log.lock().unwrap().clone();
+    let whole = calls.iter().filter(|s| **s == (W, H)).count();
+    let crops = calls.iter().filter(|s| **s == (MODEL_IN, MODEL_IN)).count();
+    assert_eq!(calls.len(), whole + crops, "{calls:?}");
+    // The whole frame ran every fifth batch (its first run is due half a
+    // second after the designating batch's).
+    assert_eq!(whole, 4, "{whole} whole-frame passes in 2 s");
+    assert!(crops >= frames - whole, "{crops} crops in {frames} batches");
+    assert_eq!(
+        windowed,
+        frames - whole,
+        "every crop-only batch names its window"
+    );
+    assert!(
+        locked >= frames - 1,
+        "locked on {locked} of {frames} batches"
+    );
+    let status = e.detection_status(&["main".to_string()], 0);
+    let b = &status.cameras["main"].batches;
+    assert_eq!(b.batches, frames as u64 + 1);
+    assert_eq!(b.full_frame_runs, whole as u64 + 1);
+}
+
+/// A crop model of its own runs the crop pass at its own input size: the
+/// window carries the magnification, so a 320 px crop holds the walker.
+#[tokio::test]
+async fn a_crop_model_runs_the_crop_at_its_own_input() {
+    let (e, _, log) = logged_follow_engine().await;
+    e.register_model(model("det.crop", ModelKind::Detection, 320, 320))
+        .await
+        .unwrap();
+    e.configure_crop_primary("det", Some("det.crop".into()), 500_000_000);
+    let (id, frames) = replay(&e, &WALK_AWAY[..6]).await;
+    assert!(log.lock().unwrap().contains(&(320, 320)));
+    assert!(!log.lock().unwrap().contains(&(MODEL_IN, MODEL_IN)));
+    let (state, b) = frames[2];
+    assert_eq!(state, Some(LockState::Locked), "track {id}");
+    assert!(iou(&b, &bbox(WALK_AWAY[3])) > 0.5);
+    // The crop model reports its own latency, and the detector's is the
+    // batch's inference time: a crop-only batch counts its crop, not 0.
+    let models = e.list_models().await;
+    let latency = |id: &str| models.iter().find(|m| m.id == id).unwrap().latency_ms;
+    assert!(latency("det.crop") > 0.0);
+    assert!(
+        latency("det") >= 0.9 * latency("det.crop"),
+        "detector {} ms, crop {} ms",
+        latency("det"),
+        latency("det.crop")
+    );
+}
+
+/// A designation asks the capture loop for a batch on the next frame, once.
+#[tokio::test]
+async fn a_designation_is_taken_once() {
+    let (e, _) = follow_engine().await;
+    assert!(!e.take_designation("main"));
+    e.designate("main", &person(bbox(WALK_AWAY[0]), 0.9))
+        .await
+        .unwrap();
+    assert!(e.take_designation("main"));
+    assert!(!e.take_designation("main"));
+}
+
+/// The tracker coasts in seconds: at 10 Hz a walker hidden for 2 s is still
+/// held (uncertain), where a coast counted in batches (8) would have dropped
+/// it after 0.9 s; hidden for 3 s it is lost.
+#[tokio::test]
+async fn a_ten_hz_lock_coasts_as_long_as_a_three_hz_one() {
+    let (e, _) = follow_engine().await;
+    let walker = bbox([617.0, 314.0, 67.0, 136.0]);
+    let at = |i: u64| desc_at(i, 1_000_000_000 + i * 100_000_000);
+    let first = e
+        .infer_and_publish("det", &at(0), &frame_with(&walker))
+        .await
+        .unwrap();
+    let id = e.designate("main", &first.detections[0]).await.unwrap();
+    e.infer_and_publish("det", &at(1), &frame_with(&walker))
+        .await
+        .unwrap();
+    let empty = BACKGROUND.repeat((W * H) as usize);
+    let mut state_at = Vec::new();
+    for i in 2..=32u64 {
+        let batch = e.infer_and_publish("det", &at(i), &empty).await.unwrap();
+        let s = batch
+            .detections
+            .iter()
+            .find(|d| d.track_id == Some(id))
+            .and_then(|d| d.lock_state);
+        state_at.push((i, s));
+    }
+    // Hidden from frame 2: at frame 21 (2.0 s) held, by frame 32 (3.1 s) lost.
+    assert!(state_at
+        .iter()
+        .filter(|(i, _)| *i <= 21)
+        .all(|(_, s)| *s == Some(LockState::Uncertain)));
+    assert!(state_at.iter().any(|(_, s)| *s == Some(LockState::Lost)));
 }
 
 #[test]

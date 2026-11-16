@@ -178,7 +178,9 @@ async fn fly(e: &VisionEngine) -> Vec<Flown> {
         .await
         .expect("designated");
     let mut out = Vec::new();
-    let mut misses = 0;
+    // The coast the crop is planned for runs in tracker steps of time since
+    // the last detection, as the engine plans it.
+    let mut last_seen_ms = replay::BATCHES[0].1;
     for i in 1..replay::BATCHES.len() {
         feed_until(replay::BATCHES[i].1);
         let (desc, pixels) = frame(i);
@@ -191,10 +193,14 @@ async fn fly(e: &VisionEngine) -> Vec<Flown> {
             (cx - (x + w / 2.0)).hypot(cy - (y + h / 2.0))
         });
         let seen = replay::BATCHES[i].3.is_some();
-        misses = if seen { 0 } else { misses + 1 };
+        if seen {
+            last_seen_ms = replay::BATCHES[i].1;
+        }
+        let coast_steps = (replay::BATCHES[i].1 - last_seen_ms) as f32 * 3.0 / 1000.0;
         let crop_holds_walker = match (seen, held_box, truth) {
             (false, Some(b), Some(t)) => Some(
-                super::crop::crop_window(&b, misses, W, H, 640, 640).is_some_and(|w| inside(&w, t)),
+                super::crop::crop_window(&b, coast_steps, W, H, 640, 640, Some(640.0 / H as f32))
+                    .is_some_and(|w| inside(&w, t)),
             ),
             _ => None,
         };
@@ -231,7 +237,8 @@ fn flaps_and_crop_misses(run: &[Flown]) -> (Vec<u64>, Vec<u64>) {
 /// after a pitch swing (plus the designed re-confirm at 755, after the walker
 /// left the detections for three batches); and once the walker leaves the
 /// detections for good (812 on, while the vehicle yaws) the coast holds where
-/// the walker was, so the crop window misses it, and the lock is lost.
+/// the walker was, so the crop window misses it, and the lock is lost once
+/// the coast budget (8 steps of 1/3 s after 800, at 888) runs out.
 #[tokio::test]
 async fn without_the_turn_the_lock_flaps_and_the_crop_loses_the_walker() {
     let e = engine(false).await;
@@ -239,14 +246,27 @@ async fn without_the_turn_the_lock_flaps_and_the_crop_loses_the_walker() {
     let (flaps, crop_misses) = flaps_and_crop_misses(&run);
     assert_eq!(flaps, [667, 677, 755, 788, 800], "{run:?}");
     assert_eq!(crop_misses, [812, 823, 833], "{run:?}");
-    assert_eq!(run.last().unwrap().lock, Some(LockState::Lost));
+    let lost: Vec<u64> = run
+        .iter()
+        .filter(|b| b.lock == Some(LockState::Lost))
+        .map(|b| b.frame_id)
+        .collect();
+    assert_eq!(lost, [888], "{run:?}");
+    assert_eq!(run.last().unwrap().lock, None);
     assert_eq!(e.turn_moves("main"), 0);
 }
 
 /// With the attitude, every batch the walker was detected on keeps it
 /// locked but the designed re-confirm, and while the walker is in view but
-/// undetected the moved prediction follows it (within 50 px) so the crop
-/// window takes it in.
+/// undetected the moved prediction follows it so the crop window takes it
+/// in. The crop taking the walker in is the contract; the centre distance
+/// bound (60 px) only catches a prediction gone wild. A coast cannot know
+/// the walker's 120 px jump in the 320 ms before 833, and the timed
+/// prediction, which runs the coast over the 3.3 steps of time since 800
+/// rather than 3 counted batches, ends 53 px off there (47.9 px counted in
+/// batches, already within 2.1 px of the old 50 px bound). Once the walker
+/// has been gone for the coast budget the lock is lost (888), as without the
+/// turn, and the last batch has no track to move.
 #[tokio::test]
 async fn moved_with_the_turn_the_lock_holds_and_the_crop_follows_the_walker() {
     let e = engine(true).await;
@@ -256,11 +276,18 @@ async fn moved_with_the_turn_the_lock_holds_and_the_crop_follows_the_walker() {
     assert!(crop_misses.is_empty(), "{run:?}");
     for b in run.iter().filter(|b| !b.seen) {
         if let Some(px) = b.miss_px {
-            assert!(px < 50.0, "frame {}: {px} px off the walker", b.frame_id);
+            assert!(px < 60.0, "frame {}: {px} px off the walker", b.frame_id);
         }
     }
-    // Moved on every batch after the first.
-    assert_eq!(e.turn_moves("main") as usize, run.len());
+    let lost = run
+        .iter()
+        .position(|b| b.lock == Some(LockState::Lost))
+        .expect("the coast budget runs out");
+    assert_eq!(run[lost].frame_id, 888, "{run:?}");
+    // Moved on every batch after the first while the track lived: through the
+    // batch that reported the loss, none after.
+    assert_eq!(e.turn_moves("main") as usize, lost + 1, "{run:?}");
+    assert!(lost + 1 < run.len(), "{run:?}");
 }
 
 #[test]

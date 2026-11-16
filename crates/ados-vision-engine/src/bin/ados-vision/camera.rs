@@ -178,6 +178,11 @@ pub(super) async fn run_camera(
                                         if let Ok(permit) =
                                             infer_sem.clone().try_acquire_owned()
                                         {
+                                            // A designation since the last batch
+                                            // looks at its subject on this frame.
+                                            if engine.take_designation(&camera_id) {
+                                                scheduler.make_all_due();
+                                            }
                                             let due = scheduler.take_due(now_ms);
                                             if !due.is_empty() {
                                                 let eng = engine.clone();

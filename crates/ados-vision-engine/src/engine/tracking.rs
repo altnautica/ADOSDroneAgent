@@ -15,32 +15,59 @@ impl VisionEngine {
     /// track is moved by the vehicle's turn since the previous batch's frame
     /// (see [`super::camera_motion`]), so everything below predicts from where
     /// the subject now appears. While the camera's tracker holds an
-    /// operator-designated track, the model also runs on a crop around the
-    /// track's predicted box (see [`super::crop`]) and those detections join
-    /// the whole frame's, so a subject too small for the whole-frame pass
-    /// stays detected. Boxes larger than the policy's `max_box_area_frac` of
-    /// the frame are dropped first, whatever the backend. When the tracker is
-    /// enabled, the detections pass through the camera's single-object
-    /// tracker so the locked object carries a stable `track_id` +
+    /// operator-designated track, the batch runs the crop pass around the
+    /// track's predicted box, and the whole frame only when its interval is up
+    /// (see [`super::crop`]); otherwise it runs the whole frame. Boxes larger
+    /// than the policy's `max_box_area_frac` of the frame are dropped first,
+    /// whatever the backend. When the tracker is enabled, the detections pass
+    /// through the camera's single-object tracker, advanced by the frame's
+    /// capture time, so the locked object carries a stable `track_id` +
     /// `lock_state`. Embeddings are extracted once per frame, when the re-id
     /// tracker or a subscriber needs them, and put on the detections only for
-    /// a subscriber.
+    /// a subscriber. The batch's inference time is recorded as the detector's
+    /// latency, and its stage times on the camera's status.
     pub async fn infer_and_publish(
         &self,
         model_id: &str,
         desc: &FrameDescriptor,
         frame: &[u8],
     ) -> Result<DetectionBatch> {
+        let ms_since =
+            |ts_ns: u64| ados_protocol::framebus::mono_ns().saturating_sub(ts_ns) as f32 / 1e6;
+        let mut times = super::batch_times::BatchTimes {
+            frame_age_ms: ms_since(desc.ts_ns),
+            ..Default::default()
+        };
         self.move_track_with_camera(desc).await;
-        let mut detections = self
-            .infer(model_id, frame, desc.width, desc.height, desc.format)
-            .await?;
-        // A failed crop pass costs only the crop: the whole frame's detections
-        // still publish.
-        match self.designated_crop_detections(model_id, desc, frame).await {
-            Ok(crop) => super::crop::merge_crop(&mut detections, crop),
-            Err(e) => {
-                tracing::warn!(model = model_id, camera = %desc.camera_id, error = %e, "designated_crop_infer_failed");
+        let plan = self.plan_batch(model_id, desc).await;
+        let mut infer_ms = 0.0;
+        let mut detections = if plan.whole {
+            let pass = self
+                .run_pass(model_id, frame, desc.width, desc.height, desc.format, None)
+                .await?;
+            let dets = pass.result?;
+            times.full_frame_ms = Some(pass.latency_ms);
+            times.add_stages(pass.stages);
+            infer_ms += pass.latency_ms;
+            dets
+        } else {
+            Vec::new()
+        };
+        if let Some(crop) = &plan.crop {
+            // A failed crop pass costs only the crop: whatever the whole frame
+            // found still publishes.
+            match self.run_crop_pass(model_id, desc, frame, crop).await {
+                Ok((found, ms, stages)) => {
+                    times.crop_ms = Some(ms);
+                    times.add_stages(stages);
+                    // The detector's latency is the batch's inference time,
+                    // whichever model ran the crop.
+                    infer_ms += ms;
+                    super::crop::merge_crop(&mut detections, found);
+                }
+                Err(e) => {
+                    tracing::warn!(model = %crop.model_id, camera = %desc.camera_id, error = %e, "designated_crop_infer_failed");
+                }
             }
         }
         super::demand::drop_oversized_boxes(
@@ -49,6 +76,7 @@ impl VisionEngine {
             desc.height,
             self.policy.max_box_area_frac,
         );
+        let track_start = std::time::Instant::now();
         let for_tracker = self.tracker_enabled && self.reid_enabled;
         let for_wire = self.embeddings_requested();
         let appearances = if for_tracker || for_wire {
@@ -66,12 +94,25 @@ impl VisionEngine {
         }
         let detections = if self.tracker_enabled {
             let apps = if for_tracker { appearances } else { None };
-            self.track(&desc.camera_id, detections, apps).await
+            self.track(&desc.camera_id, detections, apps, Some(desc.ts_ns))
+                .await
         } else {
             detections
         };
-        let batch = self.detection_batch(model_id, desc, detections);
+        times.track_ms = track_start.elapsed().as_secs_f32() * 1000.0;
+        let mut batch = self.detection_batch(model_id, desc, detections);
+        if !plan.whole {
+            batch.crop_window = plan.crop.as_ref().map(|c| c.window);
+        }
         self.publish_detection(batch.clone());
+        times.capture_to_publish_ms = ms_since(desc.ts_ns);
+        let now_ms = (ados_protocol::framebus::mono_ns() / 1_000_000) as i64;
+        // A batch whose only pass failed measured nothing: a 0 would drag the
+        // detector's latency towards a figure no batch took.
+        if plan.whole || times.crop_ms.is_some() {
+            self.record_timing(model_id, infer_ms, now_ms).await;
+        }
+        self.note_batch(desc, &times);
         Ok(batch)
     }
 
@@ -102,11 +143,12 @@ impl VisionEngine {
         } else {
             None
         };
-        self.track(camera_id, detections, appearances).await
+        self.track(camera_id, detections, appearances, None).await
     }
 
     /// The tracker step proper, on embeddings already extracted (or motion-only
-    /// with `None`). Extraction happens before the tracker lock is taken: it
+    /// with `None`), advanced to the frame's capture time `ts_ns` (one step
+    /// when `None`). Extraction happens before the tracker lock is taken: it
     /// takes the accelerator lease + the model lock, and keeping the lock order
     /// accel→models, distinct from the tracker lock, avoids any nesting.
     async fn track(
@@ -114,25 +156,31 @@ impl VisionEngine {
         camera_id: &str,
         detections: Vec<Detection>,
         appearances: Option<embeddings::FrameAppearances>,
+        ts_ns: Option<u64>,
     ) -> Vec<Detection> {
+        let candidates: Vec<Candidate> = match appearances {
+            Some(apps) => detections
+                .iter()
+                .cloned()
+                .zip(apps.per_detection)
+                .map(|(det, app)| match app {
+                    Some(a) => Candidate::with_appearance(det, a),
+                    None => Candidate::motion_only(det),
+                })
+                .collect(),
+            None => detections
+                .iter()
+                .cloned()
+                .map(Candidate::motion_only)
+                .collect(),
+        };
         let mut trackers = self.trackers.lock().await;
         let tracker = trackers
             .entry(camera_id.to_string())
             .or_insert_with(|| SingleObjectTracker::new(self.tracker_cfg));
-        let update = match appearances {
-            Some(apps) => {
-                let candidates: Vec<Candidate> = detections
-                    .iter()
-                    .cloned()
-                    .zip(apps.per_detection)
-                    .map(|(det, app)| match app {
-                        Some(a) => Candidate::with_appearance(det, a),
-                        None => Candidate::motion_only(det),
-                    })
-                    .collect();
-                tracker.update_with_appearance(&candidates)
-            }
-            None => tracker.update(&detections),
+        let update = match ts_ns {
+            Some(ts) => tracker.update_with_appearance_at(&candidates, ts),
+            None => tracker.update_with_appearance(&candidates),
         };
         merge_tracked(detections, update)
     }
@@ -151,14 +199,23 @@ impl VisionEngine {
     /// (the box the operator clicked), overriding the auto-lock. Returns the new
     /// track id. Builds the camera's tracker if it does not exist yet. The
     /// designation also holds detection on for the camera (the policy's
-    /// designation hold), so the lock has detections to follow.
+    /// designation hold), so the lock has detections to follow, and asks the
+    /// capture loop for a batch on the next frame
+    /// ([`Self::take_designation`]), so the first locked box follows the tap
+    /// by one frame and one crop pass.
     pub async fn designate(&self, camera_id: &str, target: &Detection) -> Option<u64> {
         self.grant_designation(camera_id, ados_protocol::framebus::mono_ns() / 1_000_000);
-        let mut trackers = self.trackers.lock().await;
-        let tracker = trackers
-            .entry(camera_id.to_string())
-            .or_insert_with(|| SingleObjectTracker::new(self.tracker_cfg));
-        tracker.designate(target)
+        let id = {
+            let mut trackers = self.trackers.lock().await;
+            let tracker = trackers
+                .entry(camera_id.to_string())
+                .or_insert_with(|| SingleObjectTracker::new(self.tracker_cfg));
+            tracker.designate(target)
+        };
+        if id.is_some() {
+            self.note_designation(camera_id);
+        }
+        id
     }
 
     /// Operator re-confirm: clear the ambiguity latch on the camera's tracker

@@ -28,6 +28,12 @@ struct OnnxModel {
     /// (the engine serializes inference on the accelerator lease anyway), so
     /// the session sits behind a mutex for interior mutability.
     session: Mutex<ort::session::Session>,
+    /// The detector's input tensor, kept across frames and filled in place:
+    /// several MB at 640x640, so no frame allocates one. Locked before the
+    /// session.
+    input: Mutex<Vec<f32>>,
+    /// The stage times of the last detector pass.
+    stages: Mutex<Option<StageTimes>>,
     /// The model's first input tensor name (e.g. `images`), captured at load.
     input_name: String,
     meta: ModelMetadata,
@@ -106,6 +112,8 @@ impl VisionBackend for OnnxBackend {
         }
         Ok(Box::new(OnnxModel {
             session: Mutex::new(session),
+            input: Mutex::new(Vec::new()),
+            stages: Mutex::new(None),
             input_name,
             meta,
         }))
@@ -115,8 +123,21 @@ impl VisionBackend for OnnxBackend {
     }
 }
 
-impl LoadedModel for OnnxModel {
-    fn infer(&self, frame: &[u8], w: u32, h: u32, f: FrameFormat) -> Result<Vec<Detection>> {
+impl OnnxModel {
+    /// One detector pass: `window` of the frame (`None`: all of it) resized
+    /// into the reused input tensor, run, and decoded to boxes in an
+    /// `out_w` x `out_h` image of that window.
+    #[allow(clippy::too_many_arguments)]
+    fn detect(
+        &self,
+        frame: &[u8],
+        w: u32,
+        h: u32,
+        f: FrameFormat,
+        window: Option<&BoundingBox>,
+        out_w: u32,
+        out_h: u32,
+    ) -> Result<Vec<Detection>> {
         if f != FrameFormat::Rgb24 {
             return Err(anyhow!(
                 "onnx backend requires rgb24 frames, got {f:?}; \
@@ -125,15 +146,25 @@ impl LoadedModel for OnnxModel {
         }
         let iw = self.meta.input_width;
         let ih = self.meta.input_height;
-        let chw = yolo::preprocess_rgb24_nchw(frame, w, h, iw, ih)
-            .ok_or_else(|| anyhow!("onnx preprocess failed (frame too small?)"))?;
-
-        let input = ort::value::Tensor::from_array(([1usize, 3, ih as usize, iw as usize], chw))?;
+        let t0 = Instant::now();
+        let mut chw = self
+            .input
+            .lock()
+            .map_err(|_| anyhow!("onnx input lock poisoned"))?;
+        if !yolo::preprocess_rgb24_nchw_into(frame, w, h, window, iw, ih, &mut chw) {
+            return Err(anyhow!("onnx preprocess failed (frame too small?)"));
+        }
+        let t1 = Instant::now();
+        let input = ort::value::TensorRef::from_array_view((
+            [1usize, 3, ih as usize, iw as usize],
+            chw.as_slice(),
+        ))?;
         let mut session = self
             .session
             .lock()
             .map_err(|_| anyhow!("onnx session lock poisoned"))?;
         let outputs = session.run(ort::inputs![self.input_name.as_str() => input])?;
+        let t2 = Instant::now();
         let value = outputs
             .iter()
             .next()
@@ -147,12 +178,44 @@ impl LoadedModel for OnnxModel {
             labels: &self.meta.output_classes,
             input_w: iw,
             input_h: ih,
-            frame_w: w,
-            frame_h: h,
+            frame_w: out_w,
+            frame_h: out_h,
             conf_threshold: ONNX_CONF_THRESHOLD,
             nms_iou: ONNX_NMS_IOU,
         };
-        Ok(yolo::decode(data, rows, cols, &params))
+        let found = yolo::decode(data, rows, cols, &params);
+        let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f32() * 1000.0;
+        if let Ok(mut s) = self.stages.lock() {
+            *s = Some(StageTimes {
+                preprocess_ms: ms(t0, t1),
+                run_ms: ms(t1, t2),
+                decode_ms: ms(t2, Instant::now()),
+            });
+        }
+        Ok(found)
+    }
+}
+
+impl LoadedModel for OnnxModel {
+    fn infer(&self, frame: &[u8], w: u32, h: u32, f: FrameFormat) -> Result<Vec<Detection>> {
+        self.detect(frame, w, h, f, None, w, h)
+    }
+
+    fn infer_window(
+        &self,
+        frame: &[u8],
+        w: u32,
+        h: u32,
+        f: FrameFormat,
+        window: &BoundingBox,
+        input_w: u32,
+        input_h: u32,
+    ) -> Result<Vec<Detection>> {
+        self.detect(frame, w, h, f, Some(window), input_w, input_h)
+    }
+
+    fn last_stages(&self) -> Option<StageTimes> {
+        self.stages.lock().ok().and_then(|s| *s)
     }
 
     fn embed(&self, crop: &[u8], w: u32, h: u32, f: FrameFormat) -> Result<Option<Vec<f32>>> {

@@ -80,6 +80,8 @@ impl VisionEngine {
             // scales to it.
             frame_width: desc.width,
             frame_height: desc.height,
+            // A whole-frame batch; a crop-only one sets its window.
+            crop_window: None,
             detections,
         }
     }

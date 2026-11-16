@@ -194,9 +194,16 @@ vision:
 }
 
 #[test]
-fn an_absent_detector_rate_is_three_hz_and_an_explicit_zero_is_unpaced() {
+fn an_absent_detector_rate_is_ten_hz_and_an_explicit_zero_is_unpaced() {
     let (_d, p) = write_tmp("vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n");
-    assert_eq!(VisionConfig::load_from(&p).detector.unwrap().rate_hz, 3.0);
+    let c = VisionConfig::load_from(&p);
+    let det = c.detector.as_ref().unwrap();
+    assert_eq!(det.rate_hz, 10.0);
+    assert_eq!(c.detector_threads(), 2);
+    // No crop model: the crop pass runs the detector. The whole frame runs
+    // twice a second while a designated subject is tracked on its crop.
+    assert!(det.crop_metadata().is_none());
+    assert_eq!(det.full_frame_interval_ns(), 500_000_000);
     let (_d0, p0) = write_tmp(
         "vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n    rate_hz: 0\n",
     );
@@ -206,6 +213,29 @@ fn an_absent_detector_rate_is_three_hz_and_an_explicit_zero_is_unpaced() {
         "vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n    threads: 0\n",
     );
     assert_eq!(VisionConfig::load_from(&pt).detector_threads(), 1);
+}
+
+#[test]
+fn a_crop_model_registers_beside_the_detector_and_the_whole_frame_rate_is_capped() {
+    let (_d, p) = write_tmp(
+        "vision:\n  detector:\n    model_id: det\n    model_path: /m640.onnx\n    head: yolo5\n    class_labels: [person]\n    crop_model_path: /m320.onnx\n    crop_input_size: 320\n    full_frame_hz: 1\n",
+    );
+    let det = VisionConfig::load_from(&p).detector.unwrap();
+    let crop = det.crop_metadata().unwrap();
+    assert_eq!(crop.id, "det.crop");
+    assert_eq!(crop.model_path.as_deref(), Some("/m320.onnx"));
+    assert_eq!(crop.output_classes, vec!["person".to_string()]);
+    assert_eq!((crop.input_width, crop.input_height), (320, 320));
+    assert_eq!(crop.head, ados_protocol::framebus::DetectionHead::Yolo5);
+    assert_eq!(det.full_frame_interval_ns(), 1_000_000_000);
+    // A whole-frame rate at the detector's rate (or off) runs it every batch.
+    for yaml in ["full_frame_hz: 10", "full_frame_hz: 0"] {
+        let (_d, p) = write_tmp(&format!(
+            "vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n    {yaml}\n"
+        ));
+        let det = VisionConfig::load_from(&p).detector.unwrap();
+        assert_eq!(det.full_frame_interval_ns(), 0, "{yaml}");
+    }
 }
 
 #[test]

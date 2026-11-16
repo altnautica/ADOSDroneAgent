@@ -208,6 +208,7 @@ fn strip_removes_only_the_embedding_attributes() {
         ts_ms: 0,
         frame_width: W,
         frame_height: H,
+        crop_window: None,
         detections: vec![only, both],
     };
     assert!(strip_embeddings(&mut batch));

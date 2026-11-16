@@ -47,6 +47,12 @@ fn interval_ms_for_rate(rate_hz: f32) -> u64 {
     }
 }
 
+/// How early a model counts as due: half a 30 fps frame. The loop offers
+/// frames, not instants, so a 100 ms interval met exactly by every third frame
+/// would, whenever that frame lands a hair early, wait for the fourth and run
+/// at 7.5 Hz instead of 10. Never more than half the interval.
+const FRAME_SLACK_MS: u64 = 16;
+
 impl PerceptionScheduler {
     pub fn new() -> Self {
         Self::default()
@@ -89,12 +95,25 @@ impl PerceptionScheduler {
         self.models.remove(model_id);
     }
 
-    /// Whether `model_id` is due to run at `now_ms` (never run, or its interval
-    /// has elapsed). Unknown models are not due.
+    /// Make every model due on the next tick, as if it had never run: a new
+    /// designation wants its first look at the subject on the next frame, not
+    /// at the end of the current interval.
+    pub fn make_all_due(&mut self) {
+        for m in self.models.values_mut() {
+            m.last_run_ms = None;
+        }
+    }
+
+    /// Whether `model_id` is due to run at `now_ms`: never run, or its
+    /// interval has elapsed to within [`FRAME_SLACK_MS`]. Unknown models are
+    /// not due.
     fn is_due(&self, model: &Scheduled, now_ms: u64) -> bool {
         match model.last_run_ms {
             None => true,
-            Some(last) => now_ms.saturating_sub(last) >= model.min_interval_ms,
+            Some(last) => {
+                let slack = FRAME_SLACK_MS.min(model.min_interval_ms / 2);
+                now_ms.saturating_sub(last) + slack >= model.min_interval_ms
+            }
         }
     }
 
@@ -215,5 +234,37 @@ mod tests {
         s.remove("m");
         assert!(s.is_empty());
         assert!(s.take_due(0).is_empty());
+    }
+
+    /// Frames at 30 fps, each stamped up to 2 ms early or late: a 10 Hz model
+    /// runs on every third frame, and a 3 Hz one on every tenth.
+    #[test]
+    fn a_paced_model_holds_its_rate_on_jittered_frames() {
+        for (rate, every) in [(10.0, 3u64), (3.0, 10)] {
+            let mut s = PerceptionScheduler::new();
+            s.upsert("m", rate, 5);
+            let ran: Vec<u64> = (0..300u64)
+                .filter(|i| {
+                    let jitter = [0i64, -2, 1, 2, -1][(*i % 5) as usize];
+                    let now = (*i as f64 * 1000.0 / 30.0).round() as i64 + jitter;
+                    !s.take_due(now.max(0) as u64).is_empty()
+                })
+                .collect();
+            let steps: Vec<u64> = ran.windows(2).map(|w| w[1] - w[0]).collect();
+            assert!(
+                steps.iter().all(|s| *s == every),
+                "{rate} Hz: frame steps {steps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn make_all_due_runs_the_next_tick() {
+        let mut s = PerceptionScheduler::new();
+        s.upsert("m", 10.0, 5);
+        assert_eq!(s.take_due(0), vec!["m"]);
+        assert!(s.take_due(33).is_empty());
+        s.make_all_due();
+        assert_eq!(s.take_due(34), vec!["m"]);
     }
 }

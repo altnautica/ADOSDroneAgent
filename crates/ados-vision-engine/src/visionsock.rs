@@ -622,6 +622,7 @@ mod tests {
             ts_ms: 0,
             frame_width: 640,
             frame_height: 480,
+            crop_window: None,
             detections: vec![],
         };
         let args = vision_rpc::publish_detection_args(&batch).unwrap();
@@ -712,6 +713,7 @@ mod tests {
             ts_ms: 5,
             frame_width: 640,
             frame_height: 480,
+            crop_window: None,
             detections: vec![Detection {
                 bbox: Some(BoundingBox {
                     x: 1.0,

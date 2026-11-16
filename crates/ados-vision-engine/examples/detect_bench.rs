@@ -170,11 +170,17 @@ fn main() -> Result<()> {
     }
 
     let mut latencies = Vec::with_capacity(frames.len());
+    let mut stages: [Vec<f64>; 3] = Default::default();
     for (path, (w, h, px)) in paths.iter().zip(&frames) {
         let t0 = Instant::now();
         let dets = model.infer(px, *w, *h, FrameFormat::Rgb24)?;
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         latencies.push(ms);
+        if let Some(s) = model.last_stages() {
+            stages[0].push(f64::from(s.preprocess_ms));
+            stages[1].push(f64::from(s.run_ms));
+            stages[2].push(f64::from(s.decode_ms));
+        }
         println!(
             "{}\t{w}x{h}\t{ms:.2} ms\t{} detections",
             path.file_name().unwrap_or_default().to_string_lossy(),
@@ -191,5 +197,19 @@ fn main() -> Result<()> {
         percentile(&sorted, 0.95),
         sorted[sorted.len() - 1]
     );
+    for (name, mut v) in ["preprocess", "inference", "decode"]
+        .into_iter()
+        .zip(stages)
+    {
+        if v.is_empty() {
+            continue;
+        }
+        v.sort_by(f64::total_cmp);
+        println!(
+            "{name}\tp50 {:.2} ms\tp95 {:.2} ms",
+            percentile(&v, 0.5),
+            percentile(&v, 0.95)
+        );
+    }
     Ok(())
 }

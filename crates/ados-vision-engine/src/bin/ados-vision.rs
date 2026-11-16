@@ -154,6 +154,48 @@ async fn main() {
         None
     };
 
+    // The detector's crop-primary schedule, and the model its crop pass runs
+    // when the config names one (the detector at a smaller input). A crop
+    // model that fails to load leaves the crop pass to the detector.
+    let crop_model_id: Option<String> = match &config.detector {
+        Some(det) => {
+            let crop_id = match det.crop_metadata() {
+                Some(meta) => {
+                    let id = meta.id.clone();
+                    match engine.register_model(meta).await {
+                        Ok((_, loaded)) => {
+                            tracing::info!(
+                                model = %id, backend_loaded = loaded,
+                                path = det.crop_model_path.as_deref().unwrap_or_default(),
+                                "crop model registered"
+                            );
+                            Some(id)
+                        }
+                        Err(e) => {
+                            tracing::error!(model = %id, error = %e, "crop model registration failed; the crop pass runs the detector");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            engine.configure_crop_primary(
+                &det.model_id,
+                crop_id.clone(),
+                det.full_frame_interval_ns(),
+            );
+            tracing::info!(
+                rate_hz = det.rate_hz,
+                full_frame_hz = det.full_frame_hz,
+                threads = det.threads,
+                crop_model = crop_id.as_deref().unwrap_or("detector"),
+                "detector schedule"
+            );
+            crop_id
+        }
+        None => None,
+    };
+
     // Register the appearance (re-id) model whenever one is configured. It is
     // loaded as a second engine-run model whose `embed` produces the embeddings
     // the re-id tracker associates on and that a subscriber can request on the
@@ -241,11 +283,13 @@ async fn main() {
     // them over the ONE accelerator. Sourced from the model registry (task-typed)
     // so an added detection model auto-schedules. The configured detector runs
     // at `detector.rate_hz` (an explicit 0 is unpaced); a plugin-registered
-    // detection model is unpaced.
+    // detection model is unpaced. The detector's crop model runs inside the
+    // detector's batches, never on its own.
     let paces: Vec<ModelPace> = {
         let ids = engine.models_for_kind(ModelKind::Detection).await;
         let default_priority = 100u8;
         ids.into_iter()
+            .filter(|id| crop_model_id.as_ref() != Some(id))
             .map(|id| {
                 let (rate_hz, priority) = match &config.detector {
                     Some(det) if det.model_id == id => {

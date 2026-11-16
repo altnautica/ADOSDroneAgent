@@ -228,35 +228,36 @@ impl VisionEngine {
         height: u32,
         format: FrameFormat,
     ) -> Result<Vec<Detection>> {
-        let (key, latency_ms, result) = self
-            .run_model_core(caller, model_id, frame, width, height, format)
+        let pass = self
+            .run_model_core(caller, model_id, frame, width, height, format, None)
             .await?;
-        if result.is_ok() {
+        if pass.result.is_ok() {
             let now_ms = (ados_protocol::framebus::mono_ns() / 1_000_000) as i64;
-            self.record_timing(&key, latency_ms, now_ms).await;
+            self.record_timing(&pass.key, pass.latency_ms, now_ms).await;
         }
-        result
+        pass.result
     }
 
-    /// [`Self::infer`] without a timing record, for an extra pass inside one
-    /// batch (the designated-track crop): the model's reported rate stays the
-    /// rate of published batches.
-    pub(super) async fn run_model_untimed(
+    /// One pass of an engine model inside a detector batch, on the whole
+    /// frame or on `window` of it (see [`LoadedModel::infer_window`]), with no
+    /// timing record: the batch records its own.
+    pub(super) async fn run_pass(
         &self,
         model_id: &str,
         frame: &[u8],
         width: u32,
         height: u32,
         format: FrameFormat,
-    ) -> Result<Vec<Detection>> {
-        self.run_model_core(None, model_id, frame, width, height, format)
-            .await?
-            .2
+        window: Option<&ados_protocol::framebus::BoundingBox>,
+    ) -> Result<Pass> {
+        self.run_model_core(None, model_id, frame, width, height, format, window)
+            .await
     }
 
-    /// Run the model under the accelerator lease. Returns the registry key it
-    /// ran under, the call's latency and the inference result; the outer error
-    /// is a refusal (unknown, plugin-side or unloaded model, closed lease).
+    /// Run the model under the accelerator lease, on the whole frame or on
+    /// `window` of it resized to the model's input. The outer error is a
+    /// refusal (unknown, plugin-side or unloaded model, closed lease).
+    #[allow(clippy::too_many_arguments)]
     async fn run_model_core(
         &self,
         caller: Option<&str>,
@@ -265,7 +266,8 @@ impl VisionEngine {
         width: u32,
         height: u32,
         format: FrameFormat,
-    ) -> Result<(String, f32, Result<Vec<Detection>>)> {
+        window: Option<&ados_protocol::framebus::BoundingBox>,
+    ) -> Result<Pass> {
         // Acquire the accelerator lease for the duration of the inference so two
         // models never contend for the shared NPU. The permit is held across the
         // blocking call below. While queued, this call is counted as a priority
@@ -281,7 +283,7 @@ impl VisionEngine {
         // Take a handle on the loaded model and release the registry lock before
         // the (possibly slow) backend call, so model listing and registration
         // never wait behind an inference.
-        let (key, loaded) = {
+        let (key, loaded, input) = {
             let models = self.models.lock().await;
             let key = match caller {
                 Some(owner) => {
@@ -311,10 +313,27 @@ impl VisionEngine {
                 .loaded
                 .clone()
                 .ok_or_else(|| anyhow!("model {model_id} has no loaded backend"))?;
-            (key, loaded)
+            (key, loaded, (reg.meta.input_width, reg.meta.input_height))
         };
         let t0 = std::time::Instant::now();
-        let result = run_blocking(|| loaded.infer(frame, width, height, format));
-        Ok((key, t0.elapsed().as_secs_f32() * 1000.0, result))
+        let result = run_blocking(|| match window {
+            None => loaded.infer(frame, width, height, format),
+            Some(w) => loaded.infer_window(frame, width, height, format, w, input.0, input.1),
+        });
+        Ok(Pass {
+            key,
+            latency_ms: t0.elapsed().as_secs_f32() * 1000.0,
+            stages: loaded.last_stages(),
+            result,
+        })
     }
+}
+
+/// One model pass: the registry key it ran under, its time, the backend's
+/// stage times when it measures them, and the inference result.
+pub(super) struct Pass {
+    pub(super) key: String,
+    pub(super) latency_ms: f32,
+    pub(super) stages: Option<crate::backend::StageTimes>,
+    pub(super) result: Result<Vec<Detection>>,
 }

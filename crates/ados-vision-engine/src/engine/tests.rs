@@ -370,6 +370,7 @@ async fn publish_detection_reaches_subscribers() {
         ts_ms: 0,
         frame_width: 640,
         frame_height: 480,
+        crop_window: None,
         detections: vec![Detection {
             bbox: Some(BoundingBox {
                 x: 0.0,

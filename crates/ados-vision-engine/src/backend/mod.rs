@@ -28,6 +28,17 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Where one detector pass spent its time, in milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StageTimes {
+    /// Resizing the frame (or a window of it) into the input tensor.
+    pub preprocess_ms: f32,
+    /// The model run itself.
+    pub run_ms: f32,
+    /// Decoding the output into boxes, with non-maximum suppression.
+    pub decode_ms: f32,
+}
+
 /// A loaded, ready-to-run model.
 pub trait LoadedModel: Send + Sync {
     /// Run inference on one raw frame in `format` at `width` x `height` and
@@ -39,6 +50,39 @@ pub trait LoadedModel: Send + Sync {
         height: u32,
         format: FrameFormat,
     ) -> Result<Vec<Detection>>;
+
+    /// Run inference on `window` (frame pixels) of a raw rgb24 frame, resized
+    /// to `input_w` x `input_h`, and return the detections in that resized
+    /// crop's pixels: what [`Self::infer`] returns on the cut-out crop. The
+    /// default cuts the crop out and runs [`Self::infer`] on it; a backend that
+    /// resizes into its own input tensor samples the window straight from the
+    /// frame instead, with no intermediate image.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_window(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+        window: &BoundingBox,
+        input_w: u32,
+        input_h: u32,
+    ) -> Result<Vec<Detection>> {
+        if format != FrameFormat::Rgb24 {
+            return Err(anyhow!("a crop is cut from rgb24 frames, got {format:?}"));
+        }
+        let crop =
+            ados_vision::reid::crop_resize_rgb24(frame, width, height, window, input_w, input_h)
+                .ok_or_else(|| anyhow!("the crop window holds no pixels of the frame"))?;
+        self.infer(&crop, input_w, input_h, FrameFormat::Rgb24)
+    }
+
+    /// The stage times of the last [`Self::infer`] or [`Self::infer_window`],
+    /// when the backend measures them (`None`, the default, when it does not:
+    /// a sidecar's stages run in another process).
+    fn last_stages(&self) -> Option<StageTimes> {
+        None
+    }
 
     /// Extract a re-id appearance embedding from a pre-cropped, model-input-sized
     /// `crop` (the engine crops + resizes a detection box to this model's input

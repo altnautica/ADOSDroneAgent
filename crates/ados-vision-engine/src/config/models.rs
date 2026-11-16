@@ -18,14 +18,31 @@ fn default_reid_height() -> u32 {
     256
 }
 
-/// The detector's pace when `detector.rate_hz` is absent: a few looks a second
-/// per camera, enough to acquire and hand a target to the tracker.
+/// The detector's pace when `detector.rate_hz` is absent: ten looks a second
+/// per camera, so a designated subject is measured every 100 ms and the
+/// follow loop never waits a third of a second for its next fix. Where the
+/// accelerator cannot keep up, frames are skipped (latest wins) and the
+/// detector runs as fast as it finishes.
 fn default_detector_rate_hz() -> f32 {
-    3.0
+    10.0
+}
+
+/// The whole-frame pass's pace while a designated subject is tracked on a
+/// crop: two looks a second at the whole scene, for a subject that leaves the
+/// crop and for the other people around it.
+fn default_full_frame_hz() -> f32 {
+    2.0
 }
 
 pub(super) fn default_threads() -> u32 {
     1
+}
+
+/// The detector's inference threads when `detector.threads` is absent: two,
+/// the most that still leaves a quad-core companion's other cores to the
+/// flight services, and what a two-big-core board runs fastest on.
+fn default_detector_threads() -> u32 {
+    2
 }
 
 /// A detector model the engine auto-loads and runs, at `rate_hz`, on each
@@ -52,7 +69,7 @@ pub struct DetectorConfig {
     /// detections carry no class name (the track id still flows).
     #[serde(default)]
     pub class_labels: Vec<String>,
-    /// Target inference rate in Hz, per camera. Absent ⇒ 3 Hz. An explicit
+    /// Target inference rate in Hz, per camera. Absent ⇒ 10 Hz. An explicit
     /// `0` (or less) is unpaced: run on every captured frame the accelerator
     /// is free for. Pacing lets this detector share the one accelerator with
     /// other models (`person@15Hz` + `depth@5Hz`) instead of monopolising it.
@@ -63,9 +80,29 @@ pub struct DetectorConfig {
     #[serde(default)]
     pub priority: Option<u8>,
     /// Inference threads the detector runs on (ONNX Runtime intra-op; inter-op
-    /// is one, and neither spin-waits). Default 1.
-    #[serde(default = "default_threads")]
+    /// is one, and neither spin-waits). Default 2.
+    #[serde(default = "default_detector_threads")]
     pub threads: u32,
+    /// The model file the crop pass runs, when it is not the detector itself:
+    /// the same detector exported at a smaller input (a 320 px crop holds a
+    /// designated subject as well as a 640 px one, at a quarter of the cost).
+    /// Its head and classes are the detector's; its input size is
+    /// `crop_input_size`, or the size a self-describing file states
+    /// (`ados.input`, read by the ONNX backend). Absent ⇒ the crop pass runs
+    /// the detector model.
+    #[serde(default)]
+    pub crop_model_path: Option<String>,
+    /// The crop model's square input size in pixels. Absent ⇒ the detector's
+    /// input size, which a self-describing file overrides.
+    #[serde(default)]
+    pub crop_input_size: Option<u32>,
+    /// While a designated subject is tracked, the batches between whole-frame
+    /// passes run only the crop around it; the whole frame runs at this rate
+    /// (Hz) to find a subject that left the crop and the people around it.
+    /// Absent ⇒ 2 Hz. At or above `rate_hz`, or `0`, every batch runs the
+    /// whole frame (and the crop only when it magnifies the subject).
+    #[serde(default = "default_full_frame_hz")]
+    pub full_frame_hz: f32,
 }
 
 impl DetectorConfig {
@@ -94,6 +131,31 @@ impl DetectorConfig {
                 _ => DetectionHead::Yolo8,
             },
         }
+    }
+
+    /// The crop pass's model, when `crop_model_path` names one: registered
+    /// as `<model_id>.crop`, with the detector's head and classes.
+    pub fn crop_metadata(&self) -> Option<ModelMetadata> {
+        let path = self.crop_model_path.as_ref()?;
+        let detector = self.to_metadata();
+        let size = self.crop_input_size.filter(|s| *s > 0);
+        Some(ModelMetadata {
+            id: format!("{}.crop", self.model_id),
+            model_path: Some(path.clone()),
+            input_width: size.unwrap_or(detector.input_width),
+            input_height: size.unwrap_or(detector.input_height),
+            ..detector
+        })
+    }
+
+    /// The whole-frame pass's interval while a designated subject is tracked
+    /// on a crop, in ns; `0` when every batch runs the whole frame.
+    pub fn full_frame_interval_ns(&self) -> u64 {
+        let fhz = self.full_frame_hz;
+        if !(fhz.is_finite() && fhz > 0.0) || (self.rate_hz > 0.0 && fhz >= self.rate_hz) {
+            return 0;
+        }
+        (1e9 / f64::from(fhz)).round() as u64
     }
 }
 
