@@ -46,10 +46,10 @@ const base: ChipFacts = {
 };
 
 describe("flight-state chip (flight-state.json rules)", () => {
-  it("reads Pilot · <Profile> in blue with the control mode below", () => {
+  it("reads <Profile> in blue with the control mode below", () => {
     const c = flightStateChip(base);
-    expect(c.text).toBe("Pilot · Normal");
-    expect(flightStateChip({ ...base, profile: "sport" }).text).toBe("Pilot · Sport");
+    expect(c.text).toBe("Normal");
+    expect(flightStateChip({ ...base, profile: "sport" }).text).toBe("Sport");
     expect(c.color).toBe("#2979FF");
     expect(c.secondary.map((l) => l.text)).toContain("ADOS Pilot");
   });

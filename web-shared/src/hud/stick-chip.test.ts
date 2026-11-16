@@ -62,12 +62,12 @@ describe("stick limits and command on the pilot frame", () => {
 
 describe("the chip while the sticks fly", () => {
   it("names the profile with its horizontal limit", () => {
-    expect(chip({ profile_limits: LIMITS }).text).toBe(`Pilot · Normal · ${limit("7")}`);
-    expect(chip({ profile: "sport", profile_limits: { ...LIMITS, profile: "sport", v_h_mps: 10 } }).text).toBe(`Pilot · Sport · ${limit("10")}`);
+    expect(chip({ profile_limits: LIMITS }).text).toBe(`Normal · ${limit("7")}`);
+    expect(chip({ profile: "sport", profile_limits: { ...LIMITS, profile: "sport", v_h_mps: 10 } }).text).toBe(`Sport · ${limit("10")}`);
     // A capped limit reads with its decimal.
-    expect(chip({ profile_limits: { ...LIMITS, v_h_mps: 2.5 } }).text).toBe(`Pilot · Normal · ${limit("2.5")}`);
+    expect(chip({ profile_limits: { ...LIMITS, v_h_mps: 2.5 } }).text).toBe(`Normal · ${limit("2.5")}`);
     // An agent without the limits shows the profile alone.
-    expect(chip({}).text).toBe("Pilot · Normal");
+    expect(chip({}).text).toBe("Normal");
   });
 
   it("shows horizontal and vertical speed while the sticks own the vehicle", () => {
