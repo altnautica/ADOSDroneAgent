@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.117.2] - 2026-11-16
+
 ### Fixed
 
 - In a confined place one `infeasible` route-check sample held the mission (`hold_reason` `route-infeasible`) for good: the hold had no way back to the mission, so a check that read infeasible once (a cell mapped from the floor before the climb re-mapped it, a scan tilted by the brake) stalled the flight until the stall skip or the operator. An infeasible verdict now holds only once every check has read it for 1 s (two checks a second apart), or at once when the vehicle could reach the pinch before a hold that waited stopped it: at the faster of its speed and the 0.5 m/s confined cap, over the wait, the flight controller's 0.8 s response and the stop at the profile's acceleration. The flight controller is held to 0.5 m/s while the verdict waits. A route hold resumes the mission (AUTO at its current item) once the route from where the vehicle holds has read anything but infeasible for 3 s, which ends the hold, any stall raised meanwhile and its skip countdown; a route that stays infeasible holds, counts down to its skip and asks the operator as before. While a mission holds, the route check covers the route it resumes: from where the vehicle holds to its current item, and on. Log lines `pilot_route_infeasible_hold` (`infeasible_ms`) and `pilot_supervisor_resume` (`route`).
