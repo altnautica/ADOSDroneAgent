@@ -13,6 +13,8 @@ export interface VehicleTelemetry {
   battery?: { voltage?: number | null; current?: number | null; remaining?: number | null };
   gps?: { fix_type?: number | null; satellites?: number | null; eph?: number | null };
   position?: { lat?: number | null; lon?: number | null; alt_rel?: number | null };
+  /** VFR_HUD ground speed and climb rate (+ up), m/s. */
+  velocity?: { groundspeed?: number | null; climb?: number | null };
   /** Distance to home (m), when the agent supplies it. */
   home_distance?: number | null;
   /** The FC's home position, absent until it reported one. */

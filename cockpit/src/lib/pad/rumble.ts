@@ -1,9 +1,8 @@
 // Controller rumble through the Gamepad API's `vibrationActuator`
-// (`dual-rumble`): 1 × 80 ms on a mode or skill change, 2 short on a warning,
+// (`dual-rumble`): 1 × 80 ms on a mode change, 2 short on a warning,
 // 3 × 300 ms on a critical, single pulses for the hold ramp and the RTH
-// countdown. `pilotFeedback` decides which pattern a pilot-state change earns,
-// so the pad also reports what happens without a button press (an owner or
-// skill change, a new warning).
+// countdown. Which pattern a pilot-state change earns is the shared feedback
+// table (`@/shared/hud/pilot-feedback`).
 
 import { RUMBLE, type RumblePulses } from "@/lib/pad/ds4-map";
 
@@ -52,30 +51,4 @@ export function playPattern(pad: Gamepad | null, pattern: RumblePattern): void {
 export function playPulse(pad: Gamepad | null, intensity: number, ms: number): void {
   const v = Math.max(0, Math.min(1, intensity));
   play(pad, 0, ms, v, v);
-}
-
-/** The pilot-state fields feedback watches. */
-export interface FeedbackView {
-  owner: string | null;
-  skillId: string | null;
-  controlMode: string | null;
-  armed: boolean;
-  /** Ids of readiness items with severity `warn` that are not ok, plus the
-   *  hold reason. */
-  warnings: readonly string[];
-  /** Ids of failing `block` items while armed, plus a running link-loss
-   *  countdown. */
-  criticals: readonly string[];
-}
-
-/** The pattern a change from `prev` to `next` earns (the strongest wins), or
- *  null. The first state seen earns nothing. */
-export function pilotFeedback(prev: FeedbackView | null, next: FeedbackView): RumblePattern | null {
-  if (!prev) return null;
-  if (next.criticals.some((c) => !prev.criticals.includes(c))) return "critical";
-  if (next.warnings.some((w) => !prev.warnings.includes(w))) return "warning";
-  if (prev.owner !== next.owner || prev.skillId !== next.skillId || prev.controlMode !== next.controlMode) {
-    return "mode_change";
-  }
-  return null;
 }

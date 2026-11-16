@@ -22,7 +22,7 @@ export interface ChipSources {
   /** Wall-clock ms the body was received. */
   receivedAtMs: number;
   nowMs: number;
-  telemetry: Pick<VehicleTelemetry, "home_distance" | "local_position"> | null | undefined;
+  telemetry: Pick<VehicleTelemetry, "home_distance" | "local_position" | "velocity"> | null | undefined;
   modeDetail: string | null;
   completeAgeMs: number | null;
 }
@@ -49,6 +49,9 @@ export function navStatusChip(s: ChipSources): ChipView | null {
       arAgeMs: ar ? s.nowMs - s.receivedAtMs + (ar.age_ms ?? 0) : 0,
       modeDetail: s.modeDetail,
       completeAgeMs: s.completeAgeMs,
+      speed: s.telemetry?.velocity
+        ? { hMps: s.telemetry.velocity.groundspeed ?? null, vMps: s.telemetry.velocity.climb ?? null }
+        : null,
     }),
   );
 }

@@ -159,7 +159,7 @@ export function parseNavFrame(raw: unknown): NavFrame | null {
     }
     case "pilot": {
       const data = parsePilotState(f.data);
-      return data ? { kind: "pilot", data } : null;
+      return data ? { kind: "pilot", data, raw: f.data } : null;
     }
     default:
       return null;

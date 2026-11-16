@@ -4,10 +4,11 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { engineContext, feedbackView } from "@/hooks/use-gamepad";
+import { engineContext } from "@/hooks/use-gamepad";
 import { tipsArmState, tourAirborne } from "@/lib/controller-tour";
 import { whenSatisfied } from "@/lib/pad/gesture-engine";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { feedbackAlert } from "@/shared/hud/pilot-feedback";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
@@ -19,11 +20,12 @@ afterEach(() => {
 });
 
 describe("an unknown arm state on the controller", () => {
-  it("reads as armed in the pad's feedback, with the blocking items critical", () => {
-    const v = feedbackView({ ...PILOT, armed: null, landed: null });
-    expect(v.armed).toBe(true);
-    expect(v.criticals).toContain("fc_profile");
-    expect(feedbackView({ ...PILOT, armed: false, landed: true }).armed).toBe(false);
+  it("reads as armed in the pad's feedback, with a new blocking item critical", () => {
+    const block = [{ id: "fc_profile", ok: false, severity: "block", msg: "" }];
+    const unknown = { owner: "idle", armed: null, landed: null, readiness: [] };
+    expect(feedbackAlert(unknown, { ...unknown, readiness: block })).toBe("critical");
+    const ground = { owner: "idle", armed: false, landed: true, readiness: [] };
+    expect(feedbackAlert(ground, { ...ground, readiness: block })).toBeNull();
   });
 
   it("keeps the on-ground gestures off while landed is unknown", () => {

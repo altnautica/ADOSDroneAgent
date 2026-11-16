@@ -17,7 +17,7 @@ const fixture = (name: string): unknown => JSON.parse(readFileSync(path.join(FIX
 const ar = parseArFrame(fixture("ar-frame.json"))!;
 const pilot = parsePilotState(fixture("pilot-frame.json"))!;
 const base = { homeDistM: null, modeDetail: null, completeAgeMs: null };
-const ctx = { homeDistM: null, localPos: null, arFrame: null, arAgeMs: 0, modeDetail: null, completeAgeMs: null };
+const ctx = { homeDistM: null, localPos: null, arFrame: null, arAgeMs: 0, modeDetail: null, completeAgeMs: null, speed: null };
 const wire = (extra: Record<string, unknown>) => parsePilotState({ ...(fixture("pilot-frame.json") as object), ...extra })!;
 
 describe("chip ETA from the ar frame", () => {
@@ -138,6 +138,7 @@ describe("chip golden cases (fixtures/chip-cases.json)", () => {
           arAgeMs: 0,
           modeDetail: i.mode_detail,
           completeAgeMs: i.complete_age_ms,
+          speed: null,
         }),
       );
       expect({

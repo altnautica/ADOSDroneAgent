@@ -76,6 +76,8 @@ export function useFlightChip(): ChipView | null {
       localPos: freshLocalPos(localPos),
       modeDetail: skillDetail,
       completeAgeMs: completeAt === null ? null : now - completeAt,
+      // The bottom row shows the horizontal and vertical speed.
+      speed: null,
       ...currentArFrame(),
     }),
   );

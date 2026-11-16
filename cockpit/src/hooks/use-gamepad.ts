@@ -28,8 +28,9 @@ import { padDisplayName, padKindOf } from "@/lib/pad/art";
 import { conditionSticks } from "@/lib/pad/conditioning";
 import { BUTTON_INDEX } from "@/lib/pad/ds4-map";
 import type { EngineContext } from "@/lib/pad/gesture-engine";
-import { pilotFeedback, playPattern, type FeedbackView } from "@/lib/pad/rumble";
+import { playPattern } from "@/lib/pad/rumble";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { feedbackAlert } from "@/shared/hud/pilot-feedback";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { specText } from "@/shared/hud/spec-text";
 import { overlayOpen } from "@/stores/cockpit-ui-store";
@@ -118,24 +119,6 @@ export function engineContext(): EngineContext {
   };
 }
 
-/** The pad's feedback (lightbar, rumble) for a pilot state. An unknown arm
- *  state (the pilot's FC link is down) counts as armed: possibly airborne. */
-export function feedbackView(p: PilotState): FeedbackView {
-  const armed = p.armed !== false;
-  const warnings = p.readiness.filter((r) => !r.ok && r.severity === "warn").map((r) => r.id);
-  if (p.holdReason) warnings.push(`hold:${p.holdReason}`);
-  const criticals = armed ? p.readiness.filter((r) => !r.ok && r.severity === "block").map((r) => r.id) : [];
-  if (p.linkLossInS !== null) criticals.push("link_loss");
-  return {
-    owner: p.owner,
-    skillId: p.skill ? `${p.skill.pluginId}:${p.skill.skillId}` : null,
-    controlMode: p.controlMode,
-    armed,
-    warnings,
-    criticals,
-  };
-}
-
 /** On a ground station's kiosk, follow the station's input state. */
 function useGroundStationInput(): void {
   const profile = useProfile();
@@ -188,17 +171,22 @@ export function useGamepad(): GamepadState {
     window.addEventListener("gamepadconnected", onConnect);
     window.addEventListener("gamepaddisconnected", onDisconnect);
 
-    let feedback: FeedbackView | null = null;
-    const offPilot = useNavStreamStore.subscribe((s, prev) => {
-      if (s.pilot === prev.pilot || !s.pilot) return;
-      const next = feedbackView(s.pilot.data);
-      const pattern = pilotFeedback(feedback, next);
-      feedback = next;
+    // Rumble from the spec's feedback rules over the raw pilot frames; a
+    // pilot state that goes stale is a lost state (critical), and the first
+    // frame after it earns nothing.
+    let lastRaw: unknown = null;
+    const feedback = (next: unknown) => {
+      const pattern = feedbackAlert(lastRaw, next);
+      lastRaw = next;
       if (pattern) playPattern(lastPad, pattern);
+    };
+    const offPilot = useNavStreamStore.subscribe((s, prev) => {
+      if (s.pilotRaw !== prev.pilotRaw && s.pilotRaw !== null) feedback(s.pilotRaw);
     });
 
     const poll = () => {
       raf = requestAnimationFrame(poll);
+      if (lastRaw !== null && !pilotFresh(useNavStreamStore.getState().pilot?.at, Date.now())) feedback(null);
       const pad = activePad(preferred);
       lastPad = pad;
       if ((pad != null) !== wasConnected) {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { navStatusChip, type ChipSources } from "@/hooks/use-flight-chip";
+import { specText } from "@/shared/hud/spec-text";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
 const pilot = JSON.parse(readFileSync(path.join(FIXTURES, "pilot-frame.json"), "utf8")) as Record<string, unknown>;
@@ -23,6 +24,18 @@ describe("dashboard flight-state chip", () => {
     expect(chip).not.toBeNull();
     expect(chip!.text).toContain("Follow");
     expect(chip!.dim).toBe(false);
+  });
+
+  it("shows the vehicle's horizontal and vertical speed while the sticks fly", () => {
+    const flying = { ...pilot, owner: "pilot", skill: null };
+    const chip = navStatusChip({
+      ...base,
+      body: { pilot: { age_ms: 100, data: flying } },
+      telemetry: { velocity: { groundspeed: 4.26, climb: 0.5 } },
+    });
+    const lines = chip!.secondary.map((l) => l.text);
+    expect(lines).toContain(specText("chip.stick.h_speed", { v: "4.3" }));
+    expect(lines).toContain(specText("chip.stick.v_speed", { v: "0.5" }));
   });
 
   it("dims a stale pilot entry and is absent without one", () => {

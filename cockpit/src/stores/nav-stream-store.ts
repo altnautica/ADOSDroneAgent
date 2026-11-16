@@ -41,7 +41,7 @@ export type NavFrame =
   | { kind: "follow"; data: FollowState }
   | { kind: "map"; data: MapStatus }
   | { kind: "follow_event"; data: FollowEvent }
-  | { kind: "pilot"; data: PilotState };
+  | { kind: "pilot"; data: PilotState; raw: unknown };
 
 export type NavLinkState = "idle" | "connected" | "reconnecting" | "closed";
 
@@ -54,6 +54,9 @@ export interface NavStreamState {
   event: Stamped<FollowEvent> | null;
   /** The command authority's state (owner, control mode, mission, …). */
   pilot: Stamped<PilotState> | null;
+  /** The same pilot frame as the agent sent it (snake_case), for the
+   *  controller feedback rules, which name wire fields. */
+  pilotRaw: unknown;
   occupancy: OccupancyGrid;
   /** Epoch ms of the last successful occupancy poll, or null. */
   occupancyAt: number | null;
@@ -88,6 +91,7 @@ const EMPTY = {
   map: null,
   event: null,
   pilot: null,
+  pilotRaw: null,
   occupancy: EMPTY_OCCUPANCY,
   occupancyAt: null,
   trail: [] as TrailPoint[],
@@ -126,7 +130,7 @@ export function reduceNavFrame(
     case "map":
       return { map: { data: frame.data, at } };
     case "pilot":
-      return { pilot: { data: frame.data, at } };
+      return { pilot: { data: frame.data, at }, pilotRaw: frame.raw };
     case "follow_event": {
       const ev = frame.data;
       if (ev.topic === "follow.reacquired") {

@@ -36,6 +36,12 @@ const base: ChipFacts = {
   speedCapMps: null,
   positionUnverified: null,
   speedCapReason: null,
+  profileLimitMps: null,
+  hSpeedMps: null,
+  vSpeedMps: null,
+  stickInputAgeMs: null,
+  minClearanceM: null,
+  marginM: null,
   ageMs: 100,
 };
 
