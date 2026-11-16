@@ -114,11 +114,13 @@ pub(super) fn parse_guided_setpoint(
 
 /// Parse a `flight.rate_setpoint.send` request into an [`AttitudeSetpoint`].
 ///
-/// Required: `type_mask` (an integer that fits u8; a set bit ignores that axis).
-/// The attitude quaternion is read as `qw`/`qx`/`qy`/`qz` (MAVLink `(w,x,y,z)`
-/// order) and the body rates as `body_roll_rate`/`body_pitch_rate`/
-/// `body_yaw_rate`, all defaulting to 0 when absent (an ignored axis is
-/// conventionally left unset); `thrust` likewise. The finiteness /
+/// Required: `type_mask` (an integer that fits u8; a set bit ignores that axis),
+/// and `thrust` unless the mask ignores throttle: the value is collective
+/// thrust and reaches the wire unchanged, so a commanded thrust is never
+/// defaulted. The attitude quaternion is read as `qw`/`qx`/`qy`/`qz` (MAVLink
+/// `(w,x,y,z)` order) and the body rates as `body_roll_rate`/
+/// `body_pitch_rate`/`body_yaw_rate`, all defaulting to 0 when absent (an
+/// ignored axis is conventionally left unset). The finiteness /
 /// unit-quaternion / thrust-range checks are NOT applied here — they live in
 /// [`AttitudeSetpoint::validate`], called by `build_message`, so the policy
 /// lives in one place.
@@ -131,7 +133,7 @@ pub(super) fn parse_rate_setpoint(
         None => return Err(HostError::Rpc("type_mask must be an integer".to_string())),
     };
 
-    Ok(ados_protocol::mavlink::AttitudeSetpoint {
+    let mut setpoint = ados_protocol::mavlink::AttitudeSetpoint {
         type_mask,
         q: [
             arg_f32(args, "qw")?,
@@ -142,6 +144,16 @@ pub(super) fn parse_rate_setpoint(
         body_roll_rate: arg_f32(args, "body_roll_rate")?,
         body_pitch_rate: arg_f32(args, "body_pitch_rate")?,
         body_yaw_rate: arg_f32(args, "body_yaw_rate")?,
-        thrust: arg_f32(args, "thrust")?,
-    })
+        thrust: 0.0,
+    };
+    match arg_f64_opt(args, "thrust")? {
+        Some(thrust) => setpoint.thrust = thrust as f32,
+        None if setpoint.commands_thrust() => {
+            return Err(HostError::Rpc(
+                "thrust is required unless type_mask ignores throttle (bit 6)".to_string(),
+            ))
+        }
+        None => {}
+    }
+    Ok(setpoint)
 }

@@ -92,7 +92,10 @@ impl RealHost {
         // before this runs. Single-shot like the guided sender: the host owns no
         // flight mode or schedule, so a caller holding an attitude must re-send
         // above the autopilot's setpoint timeout and must itself have the vehicle
-        // in a mode that accepts offboard attitude (e.g. GUIDED).
+        // in a mode that accepts offboard attitude (e.g. GUIDED). The plugin's
+        // thrust goes out unchanged as collective thrust, so a flight controller
+        // that would read it as a climb rate (or whose reading is unknown) gets
+        // nothing.
         let setpoint = parse_rate_setpoint(args)?;
 
         // Target: explicit args, else the autopilot observed on the router link.
@@ -121,6 +124,15 @@ impl RealHost {
                 ),
             ])),
             Some(client) => {
+                if setpoint.commands_thrust() {
+                    if let Some((reason, detail)) = self.thrust_semantics.reading().refusal() {
+                        return Ok(Value::Map(vec![
+                            (Value::from("sent"), Value::Boolean(false)),
+                            (Value::from("reason"), Value::from(reason)),
+                            (Value::from("detail"), Value::from(detail)),
+                        ]));
+                    }
+                }
                 if let Err(e) = client.send(&frame) {
                     return Ok(send_refused(e));
                 }

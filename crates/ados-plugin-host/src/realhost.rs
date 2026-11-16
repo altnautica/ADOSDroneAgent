@@ -65,6 +65,7 @@ mod media_relay;
 mod node_info;
 mod setpoint;
 mod telemetry;
+mod thrust_semantics;
 
 #[cfg(test)]
 use self::caps::*;
@@ -207,6 +208,10 @@ pub struct RealHost {
     /// The link to the ADOS pilot (motion lease, goals, stick nudges);
     /// `None` where no pilot runs.
     pilot: Option<Arc<crate::pilot_client::PilotClient>>,
+    /// How the flight controller reads a `SET_ATTITUDE_TARGET` thrust, from the
+    /// router's parameter cache; `flight.rate_setpoint.send` refuses a thrust
+    /// it would read as anything but thrust.
+    thrust_semantics: thrust_semantics::ThrustSemantics,
 }
 
 impl RealHost {
@@ -241,6 +246,9 @@ impl RealHost {
             mdns: mdns::MdnsRecords::default(),
             media_relay: media_relay::MediaRelay::default(),
             pilot: None,
+            thrust_semantics: thrust_semantics::ThrustSemantics::new(PathBuf::from(
+                thrust_semantics::PARAMS_PATH,
+            )),
         }
     }
 
@@ -274,6 +282,14 @@ impl RealHost {
     /// uses the canonical `/run/ados/offload-link.json` from [`Self::new`].
     pub fn with_offload_link_path(mut self, path: PathBuf) -> Self {
         self.offload_link_path = path;
+        self
+    }
+
+    /// Override the router parameter cache `flight.rate_setpoint.send` reads the
+    /// thrust semantics from (builder style, tests). Production uses the
+    /// router's `/var/lib/ados/params.json` from [`Self::new`].
+    pub fn with_params_path(mut self, path: PathBuf) -> Self {
+        self.thrust_semantics = thrust_semantics::ThrustSemantics::new(path);
         self
     }
 

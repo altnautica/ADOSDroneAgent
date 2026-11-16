@@ -39,8 +39,11 @@ pub trait FlightServices: Send + Sync + 'static {
     /// single-shot send: the host owns no flight mode or schedule, so the caller
     /// must re-send above the autopilot's setpoint-timeout rate and must itself
     /// have placed the vehicle in a mode that accepts offboard attitude (e.g.
-    /// GUIDED). The default returns `not_implemented` so
-    /// [`NoopHost`](super::NoopHost) stays inert.
+    /// GUIDED). `thrust` is collective thrust, required unless the type mask
+    /// ignores throttle, and goes out unchanged; a flight controller that would
+    /// read it as a climb rate (ArduCopter with `GUID_OPTIONS` bit 3 clear,
+    /// ArduSub) or whose reading is unknown answers `sent: false`. The default
+    /// returns `not_implemented` so [`NoopHost`](super::NoopHost) stays inert.
     fn rate_setpoint_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("flight.rate_setpoint.send"))
     }

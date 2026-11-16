@@ -296,8 +296,11 @@ class _PluginApiMixin(_IpcClientState):
 
     async def flight_rate_setpoint_send(self, setpoint: dict) -> dict:
         """Send an attitude/body-rate + thrust setpoint (SET_ATTITUDE_TARGET) to
-        the flight controller. The host forwards it to the MAVLink router, which
-        encodes the SET_ATTITUDE_TARGET message. Gated on the
+        the flight controller. The host encodes the SET_ATTITUDE_TARGET message
+        and forwards it to the MAVLink router, the setpoint's collective
+        ``thrust`` unchanged; it answers ``sent: False`` instead when the flight
+        controller would read that thrust as a climb rate (ArduCopter with
+        ``GUID_OPTIONS`` bit 3 clear) or its reading is unknown. Gated on the
         ``flight.rate_setpoint`` capability."""
         return (
             await self._send_request(

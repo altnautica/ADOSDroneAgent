@@ -45,6 +45,13 @@ pub(super) const ATTITUDE_TARGET_TYPEMASK_KNOWN_BITS: u8 = ATTMASK_BODY_ROLL_RAT
 /// or accumulates drift is caught here, on this side of the wire.
 pub(super) const QUAT_NORM_TOLERANCE: f32 = 1e-3;
 
+/// ArduCopter `GUID_OPTIONS` bit 3, "SetAttitudeTarget interprets Thrust As
+/// Thrust". With it set ArduCopter reads `SET_ATTITUDE_TARGET.thrust` as
+/// collective thrust; with it clear, as a climb rate (0.5 holds height). The
+/// agent sets it on an ArduPilot flight controller before a supervised launch,
+/// and the setup wizard writes it.
+pub const GUID_OPTIONS_THRUST: u32 = 1 << 3;
+
 /// A single `SET_ATTITUDE_TARGET` payload, frame-independent.
 ///
 /// This is a transport-agnostic data value, NOT a controller: building one and
@@ -72,7 +79,11 @@ pub struct AttitudeSetpoint {
     /// Body yaw rate, rad/s. Ignored when `BODY_YAW_RATE_IGNORE` is set.
     pub body_yaw_rate: f32,
     /// Collective thrust, normalized `0..1` (`-1..1` for reverse-thrust
-    /// vehicles). Ignored when `THROTTLE_IGNORE` is set.
+    /// vehicles). Ignored when `THROTTLE_IGNORE` is set. This is thrust, never
+    /// a climb rate: ArduCopter reads the field as thrust only while
+    /// [`GUID_OPTIONS_THRUST`] is set in its `GUID_OPTIONS` (with the bit clear
+    /// it reads a climb rate, 0.5 holding height), and ArduSub always reads a
+    /// climb rate.
     pub thrust: f32,
 }
 
@@ -141,6 +152,11 @@ impl AttitudeSetpoint {
         Ok(())
     }
 
+    /// Whether the setpoint commands thrust (`THROTTLE_IGNORE` clear).
+    pub fn commands_thrust(&self) -> bool {
+        self.type_mask & ATTMASK_THROTTLE_IGNORE == 0
+    }
+
     /// Validate, then build the typed [`MavMessage`] for this setpoint. The
     /// `target_system` / `target_component` address the vehicle; `time_boot_ms`
     /// is fixed at 0 (the autopilot does not require a monotonic stamp on an
@@ -167,6 +183,37 @@ impl AttitudeSetpoint {
                 type_mask,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod thrust_tests {
+    use super::*;
+
+    #[test]
+    fn guid_options_thrust_is_arducopter_bit_3() {
+        assert_eq!(GUID_OPTIONS_THRUST, 8);
+    }
+
+    #[test]
+    fn a_setpoint_commands_thrust_unless_it_ignores_throttle() {
+        let mut sp = AttitudeSetpoint {
+            type_mask: ATTMASK_BODY_ROLL_RATE_IGNORE
+                | ATTMASK_BODY_PITCH_RATE_IGNORE
+                | ATTMASK_BODY_YAW_RATE_IGNORE,
+            q: [1.0, 0.0, 0.0, 0.0],
+            body_roll_rate: 0.0,
+            body_pitch_rate: 0.0,
+            body_yaw_rate: 0.0,
+            thrust: 0.42,
+        };
+        assert!(sp.commands_thrust());
+        let MavMessage::SET_ATTITUDE_TARGET(d) = sp.build_message(1, 1).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(d.thrust, 0.42);
+        sp.type_mask |= ATTMASK_THROTTLE_IGNORE;
+        assert!(!sp.commands_thrust());
     }
 }
 

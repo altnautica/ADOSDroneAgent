@@ -156,6 +156,14 @@ impl PluginIpcClient {
     /// `target_component`). Single-shot by design, like the guided sender: the
     /// host owns no flight mode and no schedule, so a caller holding an attitude
     /// re-sends above the autopilot's setpoint timeout or the vehicle reverts.
+    ///
+    /// `thrust` is collective thrust, normalized `0..1`, required unless
+    /// `type_mask` ignores throttle (bit 6), and reaches the flight controller
+    /// unchanged. ArduCopter reads it as thrust only with `GUID_OPTIONS` bit 3
+    /// set, which the agent sets before a supervised launch and the setup wizard
+    /// writes; while the bit is clear (or not yet read) the host answers
+    /// `{"sent": false, "reason": "thrust_is_climb_rate"}` (or
+    /// `"thrust_semantics_unknown"`) and sends nothing.
     pub async fn flight_rate_setpoint(&self, args: Value) -> Result<Value, ClientError> {
         Ok(self
             .send_request("flight.rate_setpoint.send", "flight.rate_setpoint", args)

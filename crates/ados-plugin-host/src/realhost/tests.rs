@@ -3440,6 +3440,7 @@ fn mdns_methods_are_gated_on_the_network_capabilities() {
     );
 }
 
+mod rate_setpoint_tests;
 mod router_link_tests;
 
 #[test]

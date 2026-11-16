@@ -126,7 +126,9 @@ impl FlightClient {
 
     /// Send one attitude/body-rate + thrust setpoint (SET_ATTITUDE_TARGET).
     /// `args` is the setpoint map the host validates (`type_mask`, `qw`/`qx`/
-    /// `qy`/`qz`, `body_*_rate`, `thrust`).
+    /// `qy`/`qz`, `body_*_rate`, `thrust`). `thrust` is collective thrust,
+    /// sent unchanged; see [`PluginIpcClient::flight_rate_setpoint`] for when
+    /// the host refuses it.
     pub async fn rate_setpoint(&self, args: Value) -> Result<Value, ClientError> {
         self.ipc.flight_rate_setpoint(args).await
     }
