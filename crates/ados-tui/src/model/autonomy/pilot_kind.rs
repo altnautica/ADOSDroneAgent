@@ -212,6 +212,7 @@ fn mission_stall(v: &Value) -> Option<MissionStall> {
         wp_label: s(v, "wp_label"),
         since_ms: v.get("since_ms").and_then(Value::as_u64),
         skip_in_s: f(v, "skip_in_s"),
+        return_in_s: f(v, "return_in_s"),
         window_s: f(v, "window_s"),
     })
 }

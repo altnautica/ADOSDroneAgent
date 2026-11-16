@@ -185,7 +185,7 @@ describe("banners and voice", () => {
 
   it("speaks a mission stall, a blocked return and a skipped waypoint once each", () => {
     const p = { mission: { state: "active" }, banner: null, rthCountdownS: null, owner: "pilot", fcModeName: null, missionStall: null } as unknown as PilotState;
-    const stall = { kind: "mission", seq: 3, wpLabel: "3", sinceMs: 0, skipInS: 30, windowS: 15 };
+    const stall = { kind: "mission", seq: 3, wpLabel: "3", sinceMs: 0, skipInS: 30, returnInS: null, windowS: 15 };
     const stalled = { ...p, missionStall: stall } as PilotState;
     expect(voicePrompt(p, stalled)).toBe("Mission stalled. Holding.");
     expect(voicePrompt(stalled, { ...stalled, missionStall: { ...stall, skipInS: 29 } } as PilotState)).toBeNull();

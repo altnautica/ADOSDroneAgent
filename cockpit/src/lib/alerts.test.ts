@@ -71,7 +71,7 @@ describe("the status pill's pilot, agent, controller and pre-flight inputs", () 
   });
 
   it("raises a mission stall from a fresh pilot state only", () => {
-    const missionStall = { kind: "mission" as const, seq: 3, wpLabel: "3", sinceMs: 0, skipInS: 32.5, windowS: 15 };
+    const missionStall = { kind: "mission" as const, seq: 3, wpLabel: "3", sinceMs: 0, skipInS: 32.5, returnInS: null, windowS: 15 };
     const stalled = { ...base, pilot: pilot({ missionStall }), checks: [] };
     const fresh = pillAlerts({ alerts: [], readiness: [], prearm: undefined, storagePct: null, ...pillWiring(stalled) });
     expect(fresh.map((a) => [a.id, a.severity, a.text])).toEqual([["mission_stall", "critical", "No progress to waypoint 3 for 15 s · Skipping in 33 s"]]);

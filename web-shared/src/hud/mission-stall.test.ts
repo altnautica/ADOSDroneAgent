@@ -20,13 +20,14 @@ const stall = (over: Partial<MissionStall> = {}): MissionStall => ({
   wpLabel: "3",
   sinceMs: 0,
   skipInS: 32.5,
+  returnInS: null,
   windowS: 15,
   ...over,
 });
 
 describe("the stall frame through the parser", () => {
   it("reads mission_stall camel case", () => {
-    expect(golden.missionStall).toEqual({ kind: "mission", seq: 3, wpLabel: "3", sinceMs: 1793960000000, skipInS: 32.5, windowS: 15 });
+    expect(golden.missionStall).toEqual({ kind: "mission", seq: 3, wpLabel: "3", sinceMs: 1793960000000, skipInS: 32.5, returnInS: null, windowS: 15 });
   });
 
   it("reads the mission target and gaps", () => {
@@ -48,7 +49,7 @@ describe("the stall frame through the parser", () => {
 
   it("reads a return stall with no countdown", () => {
     const s = parsePilotState({ ...raw, mission_stall: { kind: "return", seq: null, wp_label: null, since_ms: 5, skip_in_s: null, window_s: 20 } })!.missionStall;
-    expect(s).toEqual({ kind: "return", seq: null, wpLabel: null, sinceMs: 5, skipInS: null, windowS: 20 });
+    expect(s).toEqual({ kind: "return", seq: null, wpLabel: null, sinceMs: 5, skipInS: null, returnInS: null, windowS: 20 });
   });
 });
 
@@ -68,6 +69,26 @@ describe("the stall overlay", () => {
     const o = missionStallOverlay(stall({ skipInS: null, windowS: 14.6 }))!;
     expect(o.titleKey).toBe("flow.mission_stall.title_hold");
     expect(o.title).toBe("No progress to waypoint 3 for 15 s · Holding for you");
+  });
+
+  it("reads a confined operator wait counting down to the return", () => {
+    const s = parsePilotState({ ...raw, mission_stall: { kind: "mission", seq: 3, wp_label: "3", since_ms: 5, skip_in_s: null, return_in_s: 44.2, window_s: 15 } })!.missionStall;
+    expect(s).toEqual({ kind: "mission", seq: 3, wpLabel: "3", sinceMs: 5, skipInS: null, returnInS: 44.2, windowS: 15 });
+  });
+
+  it("counts a confined operator wait down to the return home", () => {
+    const o = missionStallOverlay(stall({ skipInS: null, returnInS: 44.2 }))!;
+    expect(o.severity).toBe("critical");
+    expect(o.titleKey).toBe("flow.mission_stall.title_return");
+    expect(o.titleArgs).toEqual({ wp: "3", window_s: 15, in_s: 45 });
+    expect(o.title).toBe("No progress to waypoint 3 for 15 s · No operator · Returning home in 45 s");
+    expect(o.actions.map((a) => a.label)).toEqual(["Skip waypoint", "Return", "Land here"]);
+  });
+
+  it("words the return banners", () => {
+    expect(specText("pilot.banner.mission_stalled_return", { wp: "3", in_s: 45 })).toBe("No progress to waypoint 3 · No operator · Returning home in 45 s");
+    expect(specText("pilot.banner.mission_stalled_returning", { wp: "3" })).toBe("No operator answered · Returning home along the flown path (SmartRTL)");
+    expect(specText("pilot.banner.mission_stalled_landing", { wp: "3" })).toBe("No operator answered · Position unverified · Landing here");
   });
 
   it("renders a blocked return with Land here only", () => {
@@ -148,7 +169,7 @@ describe("the stall in the status pill", () => {
 });
 
 describe("the stall overlay shadows its banners", () => {
-  const shadowed = ["pilot.banner.mission_stalled", "pilot.banner.mission_stalled_hold", "pilot.banner.return_blocked"];
+  const shadowed = ["pilot.banner.mission_stalled", "pilot.banner.mission_stalled_hold", "pilot.banner.mission_stalled_return", "pilot.banner.return_blocked"];
 
   it("hides the stall banners while the overlay shows", () => {
     for (const key of shadowed) expect(stallShadowsBanner(key, golden.missionStall)).toBe(true);
@@ -160,6 +181,8 @@ describe("the stall overlay shadows its banners", () => {
     for (const key of shadowed) expect(stallShadowsBanner(key, null)).toBe(false);
     expect(stallShadowsBanner("pilot.banner.route_infeasible", golden.missionStall)).toBe(false);
     expect(stallShadowsBanner("pilot.banner.mission_wp_skipped", golden.missionStall)).toBe(false);
+    expect(stallShadowsBanner("pilot.banner.mission_stalled_returning", golden.missionStall)).toBe(false);
+    expect(stallShadowsBanner("pilot.banner.mission_stalled_landing", golden.missionStall)).toBe(false);
     expect(stallShadowsBanner(null, golden.missionStall)).toBe(false);
   });
 });

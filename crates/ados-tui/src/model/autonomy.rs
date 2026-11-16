@@ -164,6 +164,10 @@ pub struct MissionStall {
     /// Seconds to the automatic action (skip, or land for a return); `None`
     /// holds for the operator.
     pub skip_in_s: Option<f64>,
+    /// Seconds until the vehicle flies SmartRTL home on its own: a mission
+    /// held for the operator in a confined place (no skip left) that no
+    /// operator has answered; `None` otherwise.
+    pub return_in_s: Option<f64>,
     pub window_s: Option<f64>,
 }
 

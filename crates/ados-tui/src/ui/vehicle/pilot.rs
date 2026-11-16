@@ -87,6 +87,7 @@ fn countdown_rows(core: &Core, p: &Pilot, age_ms: u64, now_ms: u64, stale: bool)
     if let Some(s) = &p.mission_stall {
         let mut s = s.clone();
         s.skip_in_s = s.skip_in_s.map(|v| v - elapsed_s);
+        s.return_in_s = s.return_in_s.map(|v| v - elapsed_s);
         let view = stall_view(&s);
         let title = format!("{} {}", core.sym.err, view.title);
         out.extend(phrase_rows(t, "Stall", &title, critical, stale));

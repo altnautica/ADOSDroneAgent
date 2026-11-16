@@ -81,12 +81,16 @@ pub fn stall_view(s: &MissionStall) -> StallView {
     let window = s
         .window_s
         .map_or_else(|| "—".into(), |w| (w.round() as i64).to_string());
-    let title = match &in_s {
-        Some(in_s) => spec_text(
+    let title = match (&in_s, s.return_in_s.map(ceil_s)) {
+        (Some(in_s), _) => spec_text(
             "flow.mission_stall.title",
             &[("wp", &wp), ("window_s", &window), ("in_s", in_s)],
         ),
-        None => spec_text(
+        (None, Some(return_in_s)) => spec_text(
+            "flow.mission_stall.title_return",
+            &[("wp", &wp), ("window_s", &window), ("in_s", &return_in_s)],
+        ),
+        (None, None) => spec_text(
             "flow.mission_stall.title_hold",
             &[("wp", &wp), ("window_s", &window)],
         ),
@@ -255,6 +259,43 @@ mod tests {
         assert_eq!(
             v.title,
             "No progress to waypoint 3 for 15 s · Holding for you"
+        );
+    }
+
+    #[test]
+    fn a_confined_operator_wait_counts_down_to_the_return_home() {
+        let mut f = golden();
+        f["mission_stall"]["skip_in_s"] = Value::Null;
+        f["mission_stall"]["return_in_s"] = json!(44.2);
+        let s = pilot_of(f).mission_stall.unwrap();
+        assert_eq!(s.return_in_s, Some(44.2));
+        let v = stall_view(&s);
+        assert_eq!(
+            v.title,
+            "No progress to waypoint 3 for 15 s · No operator · Returning home in 45 s"
+        );
+        assert_eq!(
+            v.actions,
+            vec![StallAction::Skip, StallAction::Return, StallAction::Land]
+        );
+    }
+
+    #[test]
+    fn the_return_banners_read_the_spec() {
+        assert_eq!(
+            spec_text(
+                "pilot.banner.mission_stalled_return",
+                &[("wp", "3"), ("in_s", "45")]
+            ),
+            "No progress to waypoint 3 · No operator · Returning home in 45 s"
+        );
+        assert_eq!(
+            spec_text("pilot.banner.mission_stalled_returning", &[("wp", "3")]),
+            "No operator answered · Returning home along the flown path (SmartRTL)"
+        );
+        assert_eq!(
+            spec_text("pilot.banner.mission_stalled_landing", &[("wp", "3")]),
+            "No operator answered · Position unverified · Landing here"
         );
     }
 

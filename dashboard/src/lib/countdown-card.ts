@@ -48,7 +48,9 @@ export function countdownCard(pilot: PilotState | null, ageMs: number, nowMs: nu
         }
       : null;
   const s = pilot.missionStall;
-  const stall = missionStallOverlay(s && s.skipInS !== null ? { ...s, skipInS: s.skipInS - elapsedS } : s);
+  const stall = missionStallOverlay(
+    s && { ...s, skipInS: s.skipInS === null ? null : s.skipInS - elapsedS, returnInS: s.returnInS === null ? null : s.returnInS - elapsedS },
+  );
   if (!banner && !lowBattery && !stall) return null;
   return { banner, lowBattery, stall };
 }

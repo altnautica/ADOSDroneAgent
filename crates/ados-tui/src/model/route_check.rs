@@ -219,9 +219,10 @@ pub fn place_label(class: &str) -> String {
 }
 
 /// The pilot banners a shown stall overlay repeats: hidden while it shows.
-const SHADOWED_BANNERS: [&str; 3] = [
+const SHADOWED_BANNERS: [&str; 4] = [
     "pilot.banner.mission_stalled",
     "pilot.banner.mission_stalled_hold",
+    "pilot.banner.mission_stalled_return",
     "pilot.banner.return_blocked",
 ];
 
@@ -340,6 +341,7 @@ mod tests {
             wp_label: None,
             since_ms: None,
             skip_in_s: None,
+            return_in_s: None,
             window_s: None,
         };
         for key in SHADOWED_BANNERS {
@@ -348,6 +350,10 @@ mod tests {
         }
         assert!(!stall_shadows_banner(
             "pilot.banner.route_infeasible",
+            Some(&stall)
+        ));
+        assert!(!stall_shadows_banner(
+            "pilot.banner.mission_stalled_returning",
             Some(&stall)
         ));
     }

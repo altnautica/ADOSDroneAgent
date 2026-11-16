@@ -60,6 +60,21 @@ describe("the countdown card on the golden stall frame", () => {
     expect(countdownCard(golden, 2500, NOW)?.stall?.title).toBe("No progress to waypoint 3 for 15 s · Skipping in 30 s");
   });
 
+  it("counts a confined operator wait down to the return home, then shows the returning banner", () => {
+    const waiting = parsePilotState({
+      ...raw,
+      banner: { text_key: "pilot.banner.mission_stalled_return", args: { wp: "3", in_s: 45 }, until_ms: null },
+      mission_stall: { kind: "mission", seq: 3, wp_label: "3", since_ms: 1, skip_in_s: null, return_in_s: 44.2, window_s: 15 },
+    })!;
+    const card = countdownCard(waiting, 0, NOW)!;
+    expect(card.stall?.title).toBe("No progress to waypoint 3 for 15 s · No operator · Returning home in 45 s");
+    expect(card.stall?.actions.map((a) => a.action)).toEqual(["mission_skip", "rth", "land"]);
+    expect(card.banner).toBeNull();
+    expect(countdownCard(waiting, 2500, NOW)?.stall?.title).toBe("No progress to waypoint 3 for 15 s · No operator · Returning home in 42 s");
+    const returning = parsePilotState({ ...raw, banner: { text_key: "pilot.banner.mission_stalled_returning", args: { wp: "3" }, until_ms: null }, mission_stall: null })!;
+    expect(countdownCard(returning, 0, NOW)?.banner).toBe("No operator answered · Returning home along the flown path (SmartRTL)");
+  });
+
   it("offers Land here only for a blocked return", () => {
     const ret = parsePilotState({ ...raw, banner: null, mission_stall: { kind: "return", seq: null, wp_label: null, since_ms: 1, skip_in_s: 12, window_s: 20 } })!;
     const card = countdownCard(ret, 0, NOW)!;
