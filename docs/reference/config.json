@@ -4367,6 +4367,36 @@
       "type": "array"
     },
     {
+      "default": null,
+      "description": "Crop Input Size",
+      "enum": null,
+      "key": "vision.detector.crop_input_size",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Crop Model Path",
+      "enum": null,
+      "key": "vision.detector.crop_model_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": 2.0,
+      "description": "Full Frame Hz",
+      "enum": null,
+      "key": "vision.detector.full_frame_hz",
+      "maximum": null,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
+    },
+    {
       "default": "",
       "description": "Head",
       "enum": null,
@@ -4427,7 +4457,7 @@
       "type": "integer|null"
     },
     {
-      "default": 3.0,
+      "default": 10.0,
       "description": "Rate Hz",
       "enum": null,
       "key": "vision.detector.rate_hz",
@@ -4437,7 +4467,7 @@
       "type": "number"
     },
     {
-      "default": 1,
+      "default": 2,
       "description": "Threads",
       "enum": null,
       "key": "vision.detector.threads",
