@@ -436,6 +436,8 @@ fn jittered_goal_arrivals_keep_the_brake_armed() {
     // Past the arming delay before the jitter starts.
     w.run(40);
     let tick = |w: &mut World, ms: u64| {
+        // Each tick's own limits, not the frame's latch.
+        w.p.state_published();
         w.now += ms;
         w.feed();
         w.p.tick(w.now);
