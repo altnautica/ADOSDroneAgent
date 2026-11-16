@@ -7,7 +7,7 @@ use ados_protocol::pilot::{AvoidMode, Goal, GoalKind, Request};
 use serde_json::{json, Value};
 
 use super::harness::World;
-use super::safety::wall_scan;
+use super::safety::{wall_scan, G};
 use crate::core::control::brake_limit;
 use crate::core::{limit, ShadowCmd, SHADOW_MAX_AGE_MS};
 use crate::fc::MASK_POS_VEL_YAW;
@@ -327,19 +327,19 @@ fn the_brake_attributes_its_cut() {
     let mut o = Obstacles::new();
     // A block 4 m ahead: the stopping distance to it cuts 5 m/s.
     block(&mut o, [4.5, 0.0], [0.5, 2.0]);
-    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [5.0, 0.0], 3.0, 1.5, 0);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [5.0, 0.0], 3.0, G, 0);
     assert!(b.cut, "{b:?}");
     assert_eq!(b.by & limit::OBSTACLE, limit::OBSTACLE, "{b:?}");
     assert_eq!(b.by & limit::OBSTACLE_CLOSING, 0, "no scan closing: {b:?}");
     // Nothing in reach: no cut, nothing named.
-    let open = brake_limit(&o, [-20.0, 0.0], [0.0, 0.0], [-1.0, 0.0], 3.0, 1.5, 0);
+    let open = brake_limit(&o, [-20.0, 0.0], [0.0, 0.0], [-1.0, 0.0], 3.0, G, 0);
     assert!(!open.cut && open.by == 0, "{open:?}");
     // Inside the hard-stop distance.
-    let close = brake_limit(&o, [3.3, 0.0], [0.0, 0.0], [1.0, 0.0], 3.0, 1.5, 0);
+    let close = brake_limit(&o, [3.3, 0.0], [0.0, 0.0], [1.0, 0.0], 3.0, G, 0);
     assert!(close.close);
     assert_eq!(close.by & limit::HARD_STOP, limit::HARD_STOP, "{close:?}");
     // Inside the margin moving along the block: the push back out.
-    let along = brake_limit(&o, [2.8, 2.5], [0.0, 0.0], [0.0, 0.3], 3.0, 1.5, 0);
+    let along = brake_limit(&o, [2.8, 2.5], [0.0, 0.0], [0.0, 0.3], 3.0, G, 0);
     assert_eq!(along.by & limit::PUSH, limit::PUSH, "{along:?}");
 }
 

@@ -20,7 +20,7 @@ use crate::modes::{copter, plane};
 use crate::obstacles::{level_hit, Level, Obstacles};
 
 /// A 1.5 m margin on a vehicle of the default body radius.
-const G: BrakeGeom = BrakeGeom {
+pub(super) const G: BrakeGeom = BrakeGeom {
     margin: 1.5,
     body_m: DEFAULT_BODY_RADIUS_M,
 };
@@ -355,7 +355,7 @@ fn hover_ask_after(crown: impl Fn(u64, usize) -> f32) -> Braked {
             1000 + 100 * k,
         );
     }
-    brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [6.0, 0.0], 3.0, 1.5, 2900)
+    brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [6.0, 0.0], 3.0, G, 2900)
 }
 
 #[test]
@@ -435,7 +435,7 @@ fn replayed_follow_past_leafy_crowns_is_not_stopped_by_their_jitter() {
             continue;
         }
         checked += 1;
-        let b = brake_limit(&o, pos, vel, ask, 3.0, 1.5, now);
+        let b = brake_limit(&o, pos, vel, ask, 3.0, G, now);
         let toward = geo::dot(b.v, dir);
         assert!(
             toward >= 0.1,
@@ -494,7 +494,7 @@ fn a_wall_approached_through_range_noise_still_brakes_a_lagging_estimate() {
         (closing - 2.2).abs() < 0.3,
         "measured {closing:.2} m/s closing on a wall approached at 2.2 m/s"
     );
-    let lagging = brake_limit(&o, [0.0, 0.0], [0.7, 0.0], [2.2, 0.0], 3.0, 1.5, now);
+    let lagging = brake_limit(&o, [0.0, 0.0], [0.7, 0.0], [2.2, 0.0], 3.0, G, now);
     let known = stop_cap(d - crate::obstacles::CELL_M / 2.0, 2.2, 3.0, 1.5);
     assert!(
         lagging.cut && lagging.v[0] <= known + 0.1,
@@ -529,8 +529,8 @@ fn replayed_column_approach_brakes_a_lagging_estimate_as_the_true_speed() {
             let (pos, ask, now) = ingest_frame(&mut o, f);
             let lagging = geo::scale(v2_of(&f["vel_ne"]), scale);
             let dir = geo::scale(ask, 1.0 / geo::norm(ask));
-            let allowed = geo::dot(brake_limit(&o, pos, lagging, ask, 3.0, 1.5, now).v, dir);
-            let known = brake_limit(&o, pos, v2_of(&f["truth_vel_ne"]), ask, 3.0, 1.5, now);
+            let allowed = geo::dot(brake_limit(&o, pos, lagging, ask, 3.0, G, now).v, dir);
+            let known = brake_limit(&o, pos, v2_of(&f["truth_vel_ne"]), ask, 3.0, G, now);
             let known = geo::dot(known.v, dir);
             assert!(
                 allowed <= known + 0.05,

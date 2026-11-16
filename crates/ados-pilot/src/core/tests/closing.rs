@@ -5,7 +5,7 @@ use std::f32::consts::TAU;
 
 use serde_json::{json, Value};
 
-use super::safety::wall_scan;
+use super::safety::{wall_scan, G};
 use crate::core::control::{brake_limit, stop_cap};
 use crate::geo::{self, V2};
 use crate::obstacles::{Level, Obstacles, CELL_M};
@@ -273,7 +273,7 @@ fn a_creep_toward_a_wall_holds_outside_the_flown_hold() {
         for k in 0..6u64 {
             o.ingest_scan(&wall_scan(raw), LEVEL, [0.0, 0.0], 1000 + 100 * k);
         }
-        let b = brake_limit(&o, [0.0, 0.0], [0.05, 0.0], [1.0, 0.0], A_H, MARGIN, 1500);
+        let b = brake_limit(&o, [0.0, 0.0], [0.05, 0.0], [1.0, 0.0], A_H, G, 1500);
         assert!(
             b.v[0] <= 1e-3,
             "{raw:.2} m from the wall the brake still allows {:.2} m/s toward it",
