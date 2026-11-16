@@ -13,7 +13,7 @@ const CENTER_COMPONENTS: usize = 2;
 /// a random walk for the size.
 ///
 /// State is `[cx, cy, w, h, vx, vy, vw, vh]`, the box center, size, and their
-/// per-frame velocities. Each of the four box components is an independent
+/// per-step velocities. Each of the four box components is an independent
 /// 1-D sub-filter (position + velocity), which keeps the math small,
 /// allocation-free, and exact without a matrix library while giving the same
 /// predict/update behaviour as the full 8-state form for this layout.
@@ -56,24 +56,24 @@ impl BoxKalman {
         }
     }
 
-    /// Advance the state by one frame (dt is folded into the tuned process noise
-    /// for a fixed-rate stream; we treat one advance as one unit step).
-    pub(super) fn predict(&mut self) {
-        let q = self.process_noise;
+    /// Advance the state by `dt` steps (a step is [`TrackerConfig::step_s`];
+    /// the velocities are per step and the process noise is per step).
+    pub(super) fn predict(&mut self, dt: f32) {
+        let q = self.process_noise * dt;
         for i in 0..4 {
             if i >= CENTER_COMPONENTS {
                 // Size: a random walk, no velocity to extrapolate.
                 self.p_pos[i] += q;
                 continue;
             }
-            // x = F x : pos += vel, vel unchanged.
-            self.pos[i] += self.vel[i];
+            // x = F x : pos += vel·dt, vel unchanged.
+            self.pos[i] += self.vel[i] * dt;
             // P = F P F^T + Q for the 2x2 constant-velocity block.
             let pp = self.p_pos[i];
             let pv = self.p_vel[i];
             let ppv = self.p_pv[i];
-            self.p_pos[i] = pp + 2.0 * ppv + pv + q;
-            self.p_pv[i] = ppv + pv;
+            self.p_pos[i] = pp + 2.0 * dt * ppv + dt * dt * pv + q;
+            self.p_pv[i] = ppv + dt * pv;
             self.p_vel[i] = pv + q;
         }
     }

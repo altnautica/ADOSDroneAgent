@@ -156,12 +156,12 @@ fn synthetic_descriptors_separate_target_and_distractor() {
 fn kalman_predicts_constant_velocity() {
     let cfg = TrackerConfig::default();
     let mut kf = BoxKalman::new(&obj(0.0, 0.0).bbox.unwrap(), &cfg);
-    kf.predict();
+    kf.predict(1.0);
     kf.update(&obj(10.0, 0.0).bbox.unwrap());
-    kf.predict();
+    kf.predict(1.0);
     kf.update(&obj(20.0, 0.0).bbox.unwrap());
     let before = center(&kf.bbox()).0;
-    kf.predict();
+    kf.predict(1.0);
     let after = center(&kf.bbox()).0;
     assert!(
         after > before,
@@ -177,7 +177,7 @@ fn velocity_is_clamped_against_a_jitter_spike() {
         ..TrackerConfig::default()
     };
     let mut kf = BoxKalman::new(&obj(0.0, 0.0).bbox.unwrap(), &cfg);
-    kf.predict();
+    kf.predict(1.0);
     // A 500px jump in one step: without the clamp the learned velocity would
     // be near 500; it must be bounded to max_velocity.
     kf.update(&obj(500.0, 0.0).bbox.unwrap());
@@ -286,11 +286,11 @@ fn coast_keeps_the_box_size() {
         &det(616.0, 306.0, 66.0, 131.0, 0.6, "person").bbox.unwrap(),
         &cfg,
     );
-    kf.predict();
+    kf.predict(1.0);
     kf.update(&det(631.0, 292.0, 38.0, 93.0, 0.3, "person").bbox.unwrap());
     let measured = kf.bbox();
     for _ in 0..cfg.max_coast_frames {
-        kf.predict();
+        kf.predict(1.0);
     }
     let coasted = kf.bbox();
     assert!(
@@ -1117,4 +1117,137 @@ fn moving_with_the_camera_needs_a_track_and_a_finite_mapping() {
     );
     let (b, _) = t.designated_prediction().unwrap();
     assert_eq!((b.x, b.y), (70.0, 110.0));
+}
+
+/// Timed updates at `hz` on `frames(i)`, from a designation on `obj(100, 100)`;
+/// returns each update's lock state and time in seconds.
+fn timed_run(
+    hz: f64,
+    n: usize,
+    frames: impl Fn(usize) -> Vec<Detection>,
+) -> Vec<(f64, Option<LockState>)> {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    t.designate(&obj(100.0, 100.0));
+    (0..n)
+        .map(|i| {
+            let ts_s = i as f64 / hz;
+            let cands: Vec<Candidate> = frames(i).into_iter().map(Candidate::motion_only).collect();
+            let u = t.update_with_appearance_at(&cands, (ts_s * 1e9) as u64);
+            (ts_s, u.detection.and_then(|d| d.lock_state))
+        })
+        .collect()
+}
+
+#[test]
+fn a_timed_coast_lasts_the_same_seconds_at_any_detector_rate() {
+    // The budget is 8 steps of 1/3 s: a lock unseen for 2.5 s holds, one
+    // unseen for 3.1 s is lost, whether the detector runs at 3, 10 or 30 Hz.
+    for hz in [3.0, 10.0, 30.0] {
+        let seen_until = 1.0;
+        let states = timed_run(hz, (5.0 * hz) as usize, |i| {
+            if (i as f64) / hz <= seen_until {
+                vec![obj(100.0, 100.0)]
+            } else {
+                Vec::new()
+            }
+        });
+        let lost_at = states
+            .iter()
+            .find(|(_, s)| *s == Some(LockState::Lost))
+            .map(|(t, _)| t - seen_until)
+            .unwrap_or_else(|| panic!("{hz} Hz: the coast never ended"));
+        assert!(
+            (2.5..=3.1).contains(&lost_at),
+            "{hz} Hz: lost {lost_at:.2} s after the last sighting"
+        );
+        assert!(states
+            .iter()
+            .filter(|(t, _)| *t > seen_until && *t - seen_until < 2.5)
+            .all(|(_, s)| *s == Some(LockState::Uncertain)));
+    }
+}
+
+#[test]
+fn a_timed_prediction_moves_the_subject_by_its_speed_in_pixels_per_second() {
+    // A subject crossing at 60 px/s, seen at 10 Hz: 100 ms after the last
+    // frame it is predicted about 6 px on, not one 1/3 s step (20 px) on.
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    t.designate(&obj(100.0, 100.0));
+    let x_at = |i: u64| 100.0 + 6.0 * i as f32;
+    for i in 0..30u64 {
+        t.update_with_appearance_at(
+            &[Candidate::motion_only(obj(x_at(i), 100.0))],
+            i * 100_000_000,
+        );
+    }
+    let (b, _) = t.designated_prediction_at(30 * 100_000_000).unwrap();
+    let ahead = b.x - x_at(29);
+    assert!(
+        (4.5..=7.5).contains(&ahead),
+        "predicted {ahead:.1} px ahead"
+    );
+}
+
+#[test]
+fn a_designation_after_an_idle_detector_gates_one_step_not_the_idle_time() {
+    // The detector last ran 9 s ago. The operator designates a subject; the
+    // next frame misses it but sees someone else 200 px away. The gate is one
+    // step wide, as for any fresh designation, so the other person is not
+    // reported as the locked subject.
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    for i in 0..4u64 {
+        t.update_with_appearance_at(
+            &[Candidate::motion_only(obj(100.0, 100.0))],
+            i * 333_000_000,
+        );
+    }
+    t.designate(&obj(500.0, 100.0)).expect("designated");
+    let u =
+        t.update_with_appearance_at(&[Candidate::motion_only(obj(700.0, 100.0))], 10_000_000_000);
+    let d = u.detection.expect("the designated track is held");
+    assert_ne!(d.lock_state, Some(LockState::Locked), "{d:?}");
+    assert!((d.bbox.unwrap().x - 500.0).abs() < 1.0, "{d:?}");
+}
+
+#[test]
+fn a_gap_longer_than_the_coast_budget_loses_the_track() {
+    // Locked at 10 Hz, then no batch for 4 s (12 steps, over the 8-step
+    // budget): the next frame reports the loss rather than re-associating a
+    // box under a gate that has grown across the whole gap.
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let id = t.designate(&obj(100.0, 100.0)).unwrap();
+    for i in 0..10u64 {
+        let u = t.update_with_appearance_at(
+            &[Candidate::motion_only(obj(100.0, 100.0))],
+            i * 100_000_000,
+        );
+        assert_eq!(u.track_id, Some(id));
+    }
+    let u =
+        t.update_with_appearance_at(&[Candidate::motion_only(obj(100.0, 100.0))], 4_900_000_000);
+    assert_eq!(u.track_id, None);
+    assert_eq!(
+        u.detection.and_then(|d| d.lock_state),
+        Some(LockState::Lost)
+    );
+}
+
+#[test]
+fn a_gap_of_exactly_the_coast_budget_keeps_the_track() {
+    // Locked at 10 Hz, then no batch for 3 s: the eight coasted steps of the
+    // budget plus the step that ends them, as an untimed track re-associates
+    // on the frame after eight misses. The subject is still the subject.
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let id = t.designate(&obj(100.0, 100.0)).unwrap();
+    for i in 0..10u64 {
+        let u = t.update_with_appearance_at(
+            &[Candidate::motion_only(obj(100.0, 100.0))],
+            i * 100_000_000,
+        );
+        assert_eq!(u.track_id, Some(id));
+    }
+    let u =
+        t.update_with_appearance_at(&[Candidate::motion_only(obj(100.0, 100.0))], 3_900_000_000);
+    assert_eq!(u.track_id, Some(id), "{u:?}");
+    assert!(u.measured, "{u:?}");
 }

@@ -6,16 +6,33 @@ use super::scoring::{reported, Decision};
 use super::{Candidate, SingleObjectTracker, Track, TrackState, TrackUpdate};
 
 impl SingleObjectTracker {
-    /// A track exists: predict, score in-gate candidates by the combined cue,
-    /// associate / coast / hold-on-ambiguity, and run the lifecycle.
-    pub(super) fn advance(&mut self, mut track: Track, candidates: &[&Candidate]) -> TrackUpdate {
-        track.kf.predict();
+    /// A track exists: predict `dt` steps, score in-gate candidates by the
+    /// combined cue, associate / coast / hold-on-ambiguity, and run the
+    /// lifecycle.
+    pub(super) fn advance(
+        &mut self,
+        mut track: Track,
+        candidates: &[&Candidate],
+        dt: f32,
+    ) -> TrackUpdate {
+        track.kf.predict(dt);
         let predicted = track.kf.bbox();
         let gate = self.max_gate_dist(&track, &predicted);
 
+        // A gap longer than the coast budget leaves the gate too wide to
+        // associate anything as this subject: the track is lost, whatever the
+        // frame holds. The budget counts coasted steps; the step that ends a
+        // full-budget coast may still re-associate, as an untimed update after
+        // exactly `max_coast_frames` misses always could.
+        let over_budget = track.coast_steps + dt > self.cfg.max_coast_frames as f32 + 1.0;
+
         // Score every in-gate candidate. The decision uses the best score, the
         // appearance gate, and the appearance margin to the runner-up.
-        let scored = self.score_in_gate(&track, &predicted, gate, candidates);
+        let scored = if over_budget {
+            Vec::new()
+        } else {
+            self.score_in_gate(&track, &predicted, gate, candidates)
+        };
 
         match self.decide(&track, &scored) {
             Decision::Associate { idx, blend } => {
@@ -33,7 +50,7 @@ impl SingleObjectTracker {
                         .expect("associated candidate carries a bbox"),
                 );
                 track.hits += 1;
-                track.misses = 0;
+                track.coast_steps = 0.0;
                 // Class-continuity guard: do not silently adopt a different
                 // class label. Keep the original on a class change (the
                 // ambiguity / appearance gate already vetted the box).
@@ -125,13 +142,13 @@ impl SingleObjectTracker {
                 // Two appearance-ambiguous candidates: NEVER silently pick one.
                 // Hold on the prediction, flag re-designation, keep the id while
                 // within the coast budget. This is the never-silent backstop.
-                track.misses += 1;
+                track.coast_steps += dt;
                 track.hits = 0;
-                self.hold_or_drop(track, predicted, assoc, true)
+                self.hold_or_drop(track, predicted, assoc, true, dt)
             }
             Decision::None => {
                 // No association this frame.
-                track.misses += 1;
+                track.coast_steps += dt;
                 track.hits = 0;
                 match track.state {
                     // A tentative track that misses before confirming is dropped
@@ -149,7 +166,7 @@ impl SingleObjectTracker {
                     }
                     TrackState::Confirmed | TrackState::Coasting => {
                         let assoc = track.assoc_confidence;
-                        self.hold_or_drop(track, predicted, assoc, false)
+                        self.hold_or_drop(track, predicted, assoc, false, dt)
                     }
                     TrackState::Idle => unreachable!("advancing a track in Idle"),
                 }
@@ -167,8 +184,9 @@ impl SingleObjectTracker {
         predicted: BoundingBox,
         prev_assoc: f32,
         ambiguous: bool,
+        dt: f32,
     ) -> TrackUpdate {
-        if track.misses > self.cfg.max_coast_frames {
+        if track.coast_steps > self.cfg.max_coast_frames as f32 {
             // Real loss: drop the lock. A future detection re-acquires under a
             // fresh id. Clear the ambiguity latch, there is no lock to confirm.
             self.needs_redesignation = false;
@@ -192,8 +210,10 @@ impl SingleObjectTracker {
         track.state = TrackState::Coasting;
         // Nothing confirms the velocity this frame: damp it, so a coast holds
         // near the last measurement instead of running on (see
-        // `TrackerConfig::coast_velocity_decay`).
-        track.kf.damp_center_velocity(self.cfg.coast_velocity_decay);
+        // `TrackerConfig::coast_velocity_decay`, per step).
+        track
+            .kf
+            .damp_center_velocity(self.cfg.coast_velocity_decay.powf(dt));
         // Remember whether this coast is an ambiguity hold or a genuine miss, so
         // the re-association out of it knows whether it owes a re-confirm frame.
         track.coast_ambiguous = ambiguous;
@@ -202,7 +222,7 @@ impl SingleObjectTracker {
         track.reconfirming = false;
         // Association confidence decays with the coast length so a long hold
         // reads as a weak identity claim on the wire.
-        let assoc = (prev_assoc / (1.0 + track.misses as f32)).clamp(0.0, 1.0);
+        let assoc = (prev_assoc / (1.0 + track.coast_steps)).clamp(0.0, 1.0);
         track.assoc_confidence = assoc;
         if ambiguous {
             self.needs_redesignation = true;

@@ -87,7 +87,18 @@ pub struct SingleObjectTracker {
     /// Latched while the current lock is asking for operator re-designation
     /// (cleared on a fresh seed or an explicit [`Self::redesignate`]).
     needs_redesignation: bool,
+    /// The capture time of the frame the last timed update ran on.
+    last_ts_ns: Option<u64>,
 }
+
+/// The least a timed update advances, in steps: two frames stamped alike
+/// still move the model a little rather than not at all.
+const MIN_STEP: f32 = 0.01;
+
+/// The most a timed update advances, in steps: past the default coast budget
+/// many times over, so a long gap still ends a coast while the covariance
+/// stays finite.
+const MAX_STEP: f32 = 64.0;
 
 impl std::fmt::Debug for SingleObjectTracker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -107,8 +118,9 @@ struct Track {
     state: TrackState,
     /// Consecutive associated frames (for tentative→confirmed).
     hits: u32,
-    /// Consecutive missed frames (for coast→lost).
-    misses: u32,
+    /// Steps since the last measurement (for coast→lost, the coast gate, the
+    /// coast velocity decay and the coast's confidence).
+    coast_steps: f32,
     /// Class label of the locked object, carried through coasts.
     class_label: String,
     /// Last measured confidence, carried through coasts.
@@ -159,6 +171,7 @@ impl SingleObjectTracker {
             next_id: 1,
             appearance,
             needs_redesignation: false,
+            last_ts_ns: None,
         }
     }
 
@@ -175,19 +188,30 @@ impl SingleObjectTracker {
         self.track.as_ref().map_or(TrackState::Idle, |t| t.state)
     }
 
-    /// Consecutive frames the current track has gone without a measurement
-    /// (0 when it was measured on the last frame, or there is no track). The
-    /// box size of a coasting track is that many frames old.
-    pub fn misses(&self) -> u32 {
-        self.track.as_ref().map_or(0, |t| t.misses)
+    /// Steps the current track has gone without a measurement (0 when it was
+    /// measured on the last update, or there is no track). The box size of a
+    /// coasting track is that many steps old.
+    pub fn coast_steps(&self) -> f32 {
+        self.track.as_ref().map_or(0.0, |t| t.coast_steps)
     }
 
-    /// Where the operator-designated track is expected on the next frame, and
-    /// its class label: the box the next [`Self::update`] gates on. `None` when
-    /// there is no track, the track was seeded automatically, or it is not live
-    /// (tentative). A caller uses this to look for the designated subject more
-    /// closely (a detector pass on a crop around it) before the next update.
+    /// Where the operator-designated track is expected one step ahead, and
+    /// its class label: the box the next untimed [`Self::update`] gates on.
+    /// `None` when there is no track, the track was seeded automatically, or
+    /// it is not live (tentative). A caller uses this to look for the
+    /// designated subject more closely (a detector pass on a crop around it)
+    /// before the next update.
     pub fn designated_prediction(&self) -> Option<(BoundingBox, &str)> {
+        self.designated_prediction_steps(1.0)
+    }
+
+    /// [`Self::designated_prediction`] for the frame captured at `ts_ns`: the
+    /// box the next [`Self::update_with_appearance_at`] on that frame gates on.
+    pub fn designated_prediction_at(&self, ts_ns: u64) -> Option<(BoundingBox, &str)> {
+        self.designated_prediction_steps(self.steps_to(ts_ns))
+    }
+
+    fn designated_prediction_steps(&self, dt: f32) -> Option<(BoundingBox, &str)> {
         let track = self.track.as_ref()?;
         if !track.operator_designated
             || !matches!(track.state, TrackState::Confirmed | TrackState::Coasting)
@@ -195,7 +219,7 @@ impl SingleObjectTracker {
             return None;
         }
         let mut kf = track.kf.clone();
-        kf.predict();
+        kf.predict(dt);
         Some((kf.bbox(), track.class_label.as_str()))
     }
 
@@ -251,12 +275,15 @@ impl SingleObjectTracker {
     /// [`update`]: Self::update
     pub fn designate(&mut self, detection: &Detection) -> Option<u64> {
         self.track = None;
+        // The seed is this frame's measurement: the next update advances one
+        // step from it, not across the time since the last batch.
+        self.last_ts_ns = None;
         let cand = Candidate::motion_only(detection.clone());
         let _ = self.seed(&[&cand], true);
         self.track.as_ref().map(|t| t.id)
     }
 
-    /// Advance one frame on a list of wire detections, motion-only (no
+    /// Advance one step on a list of wire detections, motion-only (no
     /// appearance descriptors). Each detection is wrapped as a [`Candidate`]
     /// with no appearance, so association falls back to the motion gate plus the
     /// class-continuity guard. Kept for callers / tests that have no descriptor
@@ -270,7 +297,7 @@ impl SingleObjectTracker {
         self.update_with_appearance(&candidates)
     }
 
-    /// Advance one frame on a list of [`Candidate`]s carrying appearance
+    /// Advance one step on a list of [`Candidate`]s carrying appearance
     /// descriptors. This is the real path: the caller extracts a descriptor per
     /// candidate from the frame pixels, or a synthetic harness
     /// supplies one. Association is appearance-first (the most appearance-similar
@@ -279,6 +306,37 @@ impl SingleObjectTracker {
     /// the ambiguity guard refuses to silently pick between two
     /// appearance-indistinguishable objects.
     pub fn update_with_appearance(&mut self, candidates: &[Candidate]) -> TrackUpdate {
+        self.step(candidates, 1.0)
+    }
+
+    /// [`Self::update_with_appearance`] on a frame captured at `ts_ns`
+    /// (monotonic): the motion model and the coast advance by the time since
+    /// the previous timed update, in steps of [`TrackerConfig::step_s`]. The
+    /// first timed update advances one step.
+    pub fn update_with_appearance_at(
+        &mut self,
+        candidates: &[Candidate],
+        ts_ns: u64,
+    ) -> TrackUpdate {
+        let dt = self.steps_to(ts_ns);
+        self.last_ts_ns = Some(ts_ns);
+        self.step(candidates, dt)
+    }
+
+    /// The steps from the last timed update to `ts_ns`: one when there is
+    /// none, never less than [`MIN_STEP`] (a frame stamped with the previous
+    /// one's time) nor more than [`MAX_STEP`].
+    fn steps_to(&self, ts_ns: u64) -> f32 {
+        match self.last_ts_ns {
+            Some(last) if self.cfg.step_s > 0.0 => {
+                let dt_s = ts_ns.saturating_sub(last) as f64 / 1e9;
+                ((dt_s / f64::from(self.cfg.step_s)) as f32).clamp(MIN_STEP, MAX_STEP)
+            }
+            _ => 1.0,
+        }
+    }
+
+    fn step(&mut self, candidates: &[Candidate], dt: f32) -> TrackUpdate {
         // Filter out detections below the confidence floor up front, and any
         // box-less percept (a mask/pose/depth-only reading): this is a 2D-box
         // tracker, so a candidate with no `bbox` is not a follow target.
@@ -291,7 +349,7 @@ impl SingleObjectTracker {
 
         match self.track.take() {
             None => self.seed(&eligible, false),
-            Some(track) => self.advance(track, &eligible),
+            Some(track) => self.advance(track, &eligible, dt),
         }
     }
 
@@ -340,7 +398,7 @@ impl SingleObjectTracker {
                         TrackState::Tentative
                     },
                     hits: 1,
-                    misses: 0,
+                    coast_steps: 0.0,
                     class_label: det.class_label.clone(),
                     confidence: det.confidence,
                     assoc_confidence: det.confidence,

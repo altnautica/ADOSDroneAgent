@@ -4,6 +4,13 @@ use ados_protocol::framebus::Detection;
 
 /// Tuning for the tracker. Defaults are chosen for a hand-held / airborne
 /// camera at a few tens of frames per second; all are overridable.
+///
+/// Every per-frame setting (the coast budget, gate growth, velocity decay,
+/// process noise and velocity cap) is per *step* of [`Self::step_s`]. An
+/// untimed update is one step; a timed update
+/// ([`super::SingleObjectTracker::update_with_appearance_at`]) is the time
+/// since the previous one in steps, so a coast lasts the same seconds and the
+/// motion model the same pixels per second whatever rate the detector runs at.
 #[derive(Debug, Clone, Copy)]
 pub struct TrackerConfig {
     /// Minimum IoU between a candidate detection and the predicted box for the
@@ -21,7 +28,7 @@ pub struct TrackerConfig {
     /// units of standard deviations of the position estimate added to the base
     /// gate. Zero reproduces a fixed gate.
     pub gate_sigma: f32,
-    /// How much the center-distance gate widens per missed frame of a coast,
+    /// How much the center-distance gate widens per step of a coast,
     /// as a multiple of the predicted box's diagonal, up to
     /// [`Self::max_coast_gate_diag`]. A camera on a moving vehicle shifts the
     /// whole image by a pitch or yaw step between batches, and a coast that
@@ -41,18 +48,22 @@ pub struct TrackerConfig {
     pub min_confidence: f32,
     /// Consecutive associated frames before a tentative track is confirmed.
     pub confirm_hits: u32,
-    /// Consecutive missed frames a confirmed track coasts (predict-only) before
-    /// it is declared lost. Brief occlusion stays inside this budget and keeps
-    /// the id; exceeding it drops the lock.
+    /// Steps a confirmed track coasts (predict-only) without a measurement
+    /// before it is declared lost. Brief occlusion stays inside this budget and
+    /// keeps the id; exceeding it drops the lock. With timed updates the budget
+    /// is `max_coast_frames × step_s` seconds.
     pub max_coast_frames: u32,
+    /// The time one step of the per-frame settings stands for, in seconds: the
+    /// detector interval the defaults were tuned at (3 Hz).
+    pub step_s: f32,
     /// Measurement noise: how much a single detection box is trusted versus the
     /// prediction. Higher ⇒ smoother (trust the model more), lower ⇒ snappier
     /// (trust the detection more). In the same units as the bbox (pixels).
     pub measurement_noise: f32,
-    /// Process noise: how much the motion model is allowed to drift per frame.
+    /// Process noise: how much the motion model is allowed to drift per step.
     /// Higher ⇒ the filter adapts faster to acceleration / turns.
     pub process_noise: f32,
-    /// Largest velocity (pixels/frame, per box component) a single Kalman update
+    /// Largest velocity (pixels/step, per box component) a single Kalman update
     /// may inject into the estimate. One jittered detection box must not be able
     /// to slam a huge velocity into the filter (which would then overshoot the
     /// next prediction and shake the lock loose). Clamping the per-update
@@ -125,6 +136,7 @@ impl Default for TrackerConfig {
             max_size_ratio: 2.0,
             confirm_hits: 2,
             max_coast_frames: 8,
+            step_s: 1.0 / 3.0,
             measurement_noise: 4.0,
             process_noise: 1.0,
             max_velocity: 40.0,

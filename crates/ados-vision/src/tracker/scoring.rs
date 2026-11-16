@@ -7,12 +7,12 @@ use super::{Appearance, Candidate, SingleObjectTracker, Track, TrackState};
 impl SingleObjectTracker {
     /// The live association gate distance: the base center-distance gate widened
     /// by the filter's position uncertainty and, through a coast, by
-    /// `coast_gate_growth` diagonals per missed frame (capped at
+    /// `coast_gate_growth` diagonals per step without a measurement (capped at
     /// `max_coast_gate_diag`). A confidently-tracked object has a tight gate.
     pub(super) fn max_gate_dist(&self, track: &Track, predicted: &BoundingBox) -> f32 {
         let diag = (predicted.width * predicted.width + predicted.height * predicted.height).sqrt();
         let base = self.cfg.max_center_dist_diag;
-        let grown = (base + self.cfg.coast_gate_growth * track.misses as f32)
+        let grown = (base + self.cfg.coast_gate_growth * track.coast_steps)
             .min(self.cfg.max_coast_gate_diag.max(base));
         let sigma = self.cfg.gate_sigma * track.kf.center_pos_std();
         diag * grown + sigma
