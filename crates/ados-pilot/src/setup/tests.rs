@@ -437,6 +437,37 @@ fn the_battery_step_moves_the_capacity_reserve_with_the_capacity() {
     assert_eq!(s.param("BATT_CRT_MAH"), 1000.0);
 }
 
+/// The battery step keeps an operator's reserve above the floor: a 30 % low
+/// and 15 % critical on an unchanged capacity (a voltage-only
+/// recalibration) stay, and move with the capacity as shares of it; a level
+/// under its floor rises to it.
+#[test]
+fn the_battery_step_keeps_a_reserve_above_the_floor() {
+    let run = |low: f32, crt: f32, capacity: f32| {
+        let mut p = ap_copter_params();
+        p.insert("BATT_CAPACITY".into(), 5000.0);
+        p.insert("BATT_LOW_MAH".into(), low);
+        p.insert("BATT_CRT_MAH".into(), crt);
+        let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
+        s.e.run_step(G, "battery", s.now);
+        s.wait_step("battery", StepState::WaitingUser);
+        s.act(
+            G,
+            "battery",
+            "apply",
+            json!({"capacity_mah": capacity, "measured_v": 0}),
+        );
+        s.until(|s| s.e.current_view().is_none(), 30_000);
+        assert_eq!(s.step_state(G, "battery"), StepState::Done);
+        (s.param("BATT_LOW_MAH"), s.param("BATT_CRT_MAH"))
+    };
+    assert_eq!(run(1500.0, 750.0, 5000.0), (1500.0, 750.0));
+    assert_eq!(run(1500.0, 750.0, 10000.0), (3000.0, 1500.0));
+    assert_eq!(run(500.0, 250.0, 5000.0), (1000.0, 500.0));
+    // A critical level at or above low falls back to its floor.
+    assert_eq!(run(0.0, 1500.0, 5000.0), (1000.0, 500.0));
+}
+
 #[test]
 fn ados_profile_sets_land_on_a_copter_without_gnss() {
     // GNSS: low = SmartRTL or Land, critical = Land.

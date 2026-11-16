@@ -170,17 +170,42 @@ fn round_to(value: f64, precision: i32) -> f64 {
 /// tune writes stay as a backstop for a wrong capacity or current sensor.
 pub const CAPACITY_RESERVE: [(&str, f32); 2] = [("BATT_LOW_MAH", 0.20), ("BATT_CRT_MAH", 0.10)];
 
-/// The [`CAPACITY_RESERVE`] levels for a pack of `capacity_mah`, whole mAh;
-/// none for a capacity ArduPilot treats as unset, against which any mAh
-/// level trips at once. The `battery` step (which sets the capacity) and the
-/// `initial_params` step both write them, so they always follow the
-/// capacity.
-pub fn capacity_levels(capacity_mah: f32) -> impl Iterator<Item = (&'static str, f32)> {
-    let set = capacity_mah > crate::batt_failsafe::CAPACITY_MIN_MAH;
-    CAPACITY_RESERVE
-        .into_iter()
-        .filter(move |_| set)
-        .map(move |(name, frac)| (name, (capacity_mah * frac).round()))
+/// The levels on charge used for a pack of `capacity_mah`, whole mAh; none
+/// for a capacity ArduPilot treats as unset, against which any mAh level
+/// trips at once. `before` reads the FC's values before the write. Each
+/// level keeps the share of the old capacity the FC held (an operator's
+/// 30 % reserve stays 30 % of a recalibrated or new pack) unless that is
+/// below its [`CAPACITY_RESERVE`] floor or not a share at all; critical
+/// falls back to its floor when it would not stay below low (ArduPilot
+/// refuses an inverted pair). The `battery` step (which sets the capacity)
+/// and the `initial_params` step both write them, so they always follow
+/// the capacity.
+pub fn capacity_levels(
+    capacity_mah: f32,
+    before: impl Fn(&str) -> Option<f32>,
+) -> Option<[(&'static str, f32); 2]> {
+    if capacity_mah <= crate::batt_failsafe::CAPACITY_MIN_MAH {
+        return None;
+    }
+    let old_capacity =
+        before("BATT_CAPACITY").filter(|c| *c > crate::batt_failsafe::CAPACITY_MIN_MAH);
+    let share = |name: &str, floor: f32| {
+        let kept = old_capacity
+            .zip(before(name))
+            .map(|(c, l)| l / c)
+            .filter(|f| *f < 1.0)
+            .unwrap_or(0.0);
+        kept.max(floor)
+    };
+    let [(low_name, low_floor), (crt_name, crt_floor)] = CAPACITY_RESERVE;
+    let low = share(low_name, low_floor);
+    let crt = Some(share(crt_name, crt_floor))
+        .filter(|c| *c < low)
+        .unwrap_or(crt_floor);
+    Some([
+        (low_name, (capacity_mah * low).round()),
+        (crt_name, (capacity_mah * crt).round()),
+    ])
 }
 
 /// The initial tune parameters, ported from Mission Planner's

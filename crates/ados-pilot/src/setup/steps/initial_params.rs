@@ -177,7 +177,8 @@ impl Step for InitialParams {
                 }
             }
             let capacity = cx.params.get("BATT_CAPACITY").unwrap_or(0.0);
-            for (name, v) in ardupilot_copter::capacity_levels(capacity) {
+            let levels = ardupilot_copter::capacity_levels(capacity, |n| cx.params.get(n));
+            for (name, v) in levels.into_iter().flatten() {
                 if cx.params.has(name) {
                     written.push((name.into(), v));
                 }

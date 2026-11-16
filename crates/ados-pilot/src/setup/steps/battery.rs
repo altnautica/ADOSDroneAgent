@@ -140,11 +140,12 @@ impl Step for Battery {
             self.needs_reboot = true;
             result.insert("monitor".into(), json!(MONITOR_ANALOG));
         }
+        let levels = ardupilot_copter::capacity_levels(capacity, |n| cx.params.get(n));
         cx.params.set(cap_name, capacity);
         if cx.adapter.fw == Fw::ArduPilot
             && matches!(cx.adapter.class, Class::Multirotor | Class::Vtol)
         {
-            for (name, v) in ardupilot_copter::capacity_levels(capacity) {
+            for (name, v) in levels.into_iter().flatten() {
                 if cx.params.has(name) {
                     cx.params.set(name, v);
                 }
