@@ -7,7 +7,7 @@ use std::f32::consts::TAU;
 
 use serde_json::{json, Value};
 
-use crate::obstacles::{Level, Obstacles};
+use crate::obstacles::{Level, Obstacles, SCAN_CLOSING_MAX_MPS};
 
 fn f32s(v: &Value) -> Vec<f32> {
     v.as_array()
@@ -41,7 +41,7 @@ fn a_column_lifted_over_the_slice_by_a_braking_pitch_stays_an_obstacle() {
         };
         let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                           "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
-        o.ingest_scan(&scan, level, [p[0], p[1]], now);
+        o.ingest_scan(&scan, level, [p[0], p[1]], SCAN_CLOSING_MAX_MPS, now);
         o.rebuild([p[0], p[1]], now);
         if !(3219..=4087).contains(&t) {
             continue;

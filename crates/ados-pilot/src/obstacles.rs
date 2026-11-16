@@ -80,6 +80,7 @@ pub fn scan_returns(payload: &Value) -> usize {
 /// scan: a post 2 m abeam at 3 m/s sweeps 7° (more than a 5° sector) per
 /// 10 Hz scan.
 pub const HANDOVER_SECTORS: usize = 2;
+pub use closing::SCAN_CLOSING_MAX_MPS;
 
 /// The 5° sector (of `n`) of a bearing, radians clockwise from north.
 fn sector_of(bearing: f32, n: usize) -> usize {
@@ -116,6 +117,8 @@ pub struct Obstacles {
     horizon: Vec<V2>,
     /// When the current scan arrived (`None`: no scan yet).
     scan_ms: Option<u64>,
+    /// The current scan's capture stamp (`t_ns`), when it carried one.
+    scan_stamp_ns: Option<u64>,
     /// Closing speed toward each world sector (north = 0, clockwise, 5°)
     /// measured from the scans themselves: the range rate of the sector's
     /// nearest return over the last scans, while it behaves like one surface
@@ -203,8 +206,19 @@ impl Obstacles {
         self.pose_sigma
     }
 
-    /// Ingest a `plugin.world-engine.scan` payload.
-    pub fn ingest_scan(&mut self, payload: &Value, level: Level, pos_ne: V2, now_ms: u64) {
+    /// Ingest a `plugin.world-engine.scan` payload. `closing_max_mps` is the
+    /// fastest closing speed a standing obstacle can show this scan (the
+    /// brake's trust bound on the vehicle's own speed, or
+    /// [`SCAN_CLOSING_MAX_MPS`] when that speed is unknown): a sector whose
+    /// nearest range falls faster counts as closing at this.
+    pub fn ingest_scan(
+        &mut self,
+        payload: &Value,
+        level: Level,
+        pos_ne: V2,
+        closing_max_mps: f32,
+        now_ms: u64,
+    ) {
         if payload
             .get("frame")
             .and_then(Value::as_str)
@@ -241,8 +255,13 @@ impl Obstacles {
                 (ground, true) => self.horizon.push(ground.ne),
             }
         }
-        self.update_closing(level.yaw, now_ms);
+        // The scan's own capture time: delivery jitter (two scans arriving
+        // 50 ms apart though captured 100 ms apart) must not double a range
+        // rate.
+        let stamp_ns = payload.get("t_ns").and_then(Value::as_u64);
+        self.update_closing(level.yaw, stamp_ns, closing_max_mps, now_ms);
         self.scan_ms = Some(now_ms);
+        self.scan_stamp_ns = stamp_ns;
     }
 
     /// How old the current scan is, ms (`None`: no scan yet).
@@ -301,55 +320,6 @@ impl Obstacles {
         let (fwd, taken) = walk(1, n - 1);
         let (back, _) = walk(n - 1, n - 1 - taken);
         Some((near.range_m, near.ne, fwd + back))
-    }
-
-    /// Each world sector's closing speed after this scan; a gap over
-    /// [`SCAN_MAX_AGE_MS`] since the last scan starts every sector afresh. A
-    /// return in a sector that had none last scan continues the track of a
-    /// sector up to [`HANDOVER_SECTORS`] away whose last range it follows
-    /// ([`closing::RangeTrack::continues`]): an obstacle off the flight line
-    /// sweeps across sectors as the vehicle passes it, and its closing speed
-    /// must not restart at each one.
-    fn update_closing(&mut self, yaw: f32, now_ms: u64) {
-        const N: usize = ados_protocol::pilot::SECTORS;
-        let mut nearest = [f32::INFINITY; N];
-        for h in &self.hits {
-            let s = sector_of(yaw + h.body_bearing, N);
-            nearest[s] = nearest[s].min(h.range_m);
-        }
-        let gap = self
-            .scan_ms
-            .is_none_or(|t| now_ms.saturating_sub(t) > SCAN_MAX_AGE_MS);
-        if self.tracks.len() != N {
-            self.tracks = vec![closing::RangeTrack::default(); N];
-            self.closing = vec![0.0; N];
-        }
-        let tracks = &self.tracks;
-        let handover: [Option<closing::RangeTrack>; N] = std::array::from_fn(|s| {
-            if gap || !nearest[s].is_finite() || !tracks[s].is_empty() {
-                return None;
-            }
-            (1..=HANDOVER_SECTORS)
-                .flat_map(|k| [(s + N - k) % N, (s + k) % N])
-                .filter_map(|j| Some((tracks[j].continues(now_ms, nearest[s])?, j)))
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .map(|(_, j)| tracks[j])
-        });
-        for (((track, c), r), from) in self
-            .tracks
-            .iter_mut()
-            .zip(&mut self.closing)
-            .zip(nearest)
-            .zip(&handover)
-        {
-            if gap {
-                track.clear();
-            }
-            if let Some(from) = from {
-                track.adopt(from);
-            }
-            *c = track.push(now_ms, r);
-        }
     }
 
     /// Closing speed toward the world direction `dir` (unit) measured from

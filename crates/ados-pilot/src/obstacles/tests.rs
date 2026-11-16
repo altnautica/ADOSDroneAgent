@@ -88,7 +88,7 @@ fn a_return_over_the_flight_slice_stays_an_obstacle_marked_overhead() {
     ranges[0] = 6.57;
     let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
         "angle_increment_rad": std::f64::consts::TAU / 360.0, "ranges_m": ranges});
-    o.ingest_scan(&scan, l(4.0), [0.0, 0.0], 1000);
+    o.ingest_scan(&scan, l(4.0), [0.0, 0.0], SCAN_CLOSING_MAX_MPS, 1000);
     // Every safety reader sees it.
     let near = o.nearest_hit_m().expect("an obstacle");
     assert!((near - 6.57 * 4f32.to_radians().cos()).abs() < 1e-3);
@@ -118,7 +118,7 @@ fn scan_hits_feed_rays_sectors_and_raw_minimum() {
         yaw: 0.0,
         agl: Some(4.0),
     };
-    o.ingest_scan(&scan, level, [0.0, 0.0], 1000);
+    o.ingest_scan(&scan, level, [0.0, 0.0], SCAN_CLOSING_MAX_MPS, 1000);
     o.rebuild([0.0, 0.0], 1000);
     let d = o.ray_distance([0.0, 0.0], [1.0, 0.0], 20.0, 1000).unwrap();
     assert!((d - 3.0).abs() < 0.3, "ray {d}");
@@ -169,6 +169,7 @@ fn camera_projection_marks_cells_on_the_obstacle() {
             agl: Some(3.0),
         },
         [0.0, 0.0],
+        SCAN_CLOSING_MAX_MPS,
         0,
     );
     o.rebuild([0.0, 0.0], 0);
@@ -218,6 +219,7 @@ fn wall_ahead_at_10_m() -> Obstacles {
             agl: Some(3.0),
         },
         [0.0, 0.0],
+        SCAN_CLOSING_MAX_MPS,
         0,
     );
     o.rebuild([0.0, 0.0], 0);

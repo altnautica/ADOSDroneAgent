@@ -39,6 +39,8 @@ pub const HANDOVER_SLACK_M: f32 = 0.1;
 /// it. A fit that fails its residual drops it at once.
 pub const CLOSING_HOLD_SCANS: u8 = 3;
 
+use super::{sector_of, HANDOVER_SECTORS, SCAN_MAX_AGE_MS};
+
 /// The last [`CLOSING_SCANS`] nearest ranges of one sector, oldest first,
 /// and the closing speed they last measured.
 #[derive(Debug, Clone, Copy)]
@@ -170,5 +172,74 @@ impl RangeTrack {
             return Some(0.0);
         }
         Some(closing.max(0.0))
+    }
+}
+
+impl super::Obstacles {
+    /// Each world sector's closing speed after this scan; a gap over
+    /// [`SCAN_MAX_AGE_MS`] since the last scan starts every sector afresh. A
+    /// return in a sector that had none last scan continues the track of a
+    /// sector up to [`HANDOVER_SECTORS`] away whose last range it follows
+    /// ([`RangeTrack::continues`]): an obstacle off the flight line
+    /// sweeps across sectors as the vehicle passes it, and its closing speed
+    /// must not restart at each one. Each scan is timed by its own capture
+    /// stamp when it carries one, else by its arrival, so delivery jitter
+    /// cannot scale a range rate; a scan that changes between the two
+    /// clocks starts every sector afresh. A closing speed faster than
+    /// `closing_max_mps` counts as that bound.
+    pub(super) fn update_closing(
+        &mut self,
+        yaw: f32,
+        stamp_ns: Option<u64>,
+        closing_max_mps: f32,
+        now_ms: u64,
+    ) {
+        const N: usize = ados_protocol::pilot::SECTORS;
+        let mut nearest = [f32::INFINITY; N];
+        for h in &self.hits {
+            let s = sector_of(yaw + h.body_bearing, N);
+            nearest[s] = nearest[s].min(h.range_m);
+        }
+        let arrival_gap = self
+            .scan_ms
+            .is_none_or(|t| now_ms.saturating_sub(t) > SCAN_MAX_AGE_MS);
+        let stamp_gap = match (stamp_ns, self.scan_stamp_ns) {
+            (Some(s), Some(p)) => s <= p || (s - p) / 1_000_000 > SCAN_MAX_AGE_MS,
+            (None, None) => false,
+            _ => true,
+        };
+        let gap = arrival_gap || stamp_gap;
+        let t_ms = stamp_ns.map_or(now_ms, |s| s / 1_000_000);
+        if self.tracks.len() != N {
+            self.tracks = vec![RangeTrack::default(); N];
+            self.closing = vec![0.0; N];
+        }
+        let tracks = &self.tracks;
+        let handover: [Option<RangeTrack>; N] = std::array::from_fn(|s| {
+            if gap || !nearest[s].is_finite() || !tracks[s].is_empty() {
+                return None;
+            }
+            (1..=HANDOVER_SECTORS)
+                .flat_map(|k| [(s + N - k) % N, (s + k) % N])
+                .filter_map(|j| Some((tracks[j].continues(t_ms, nearest[s])?, j)))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, j)| tracks[j])
+        });
+        for (((track, c), r), from) in self
+            .tracks
+            .iter_mut()
+            .zip(&mut self.closing)
+            .zip(nearest)
+            .zip(&handover)
+        {
+            if gap {
+                track.clear();
+            }
+            if let Some(from) = from {
+                track.adopt(from);
+            }
+            // `min` (not `clamp`): a NaN bound keeps the measured rate.
+            *c = track.push(t_ms, r).min(closing_max_mps);
+        }
     }
 }

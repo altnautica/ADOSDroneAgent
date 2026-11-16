@@ -17,7 +17,7 @@ use crate::core::Reply;
 use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
 use crate::geo;
 use crate::modes::{copter, plane};
-use crate::obstacles::{level_hit, Level, Obstacles};
+use crate::obstacles::{level_hit, Level, Obstacles, SCAN_CLOSING_MAX_MPS};
 
 /// A 1.5 m margin on a vehicle of the default body radius.
 pub(super) const G: BrakeGeom = BrakeGeom {
@@ -272,7 +272,13 @@ fn a_lagging_velocity_estimate_does_not_make_the_brake_late() {
     };
     let mut o = Obstacles::new();
     for (k, d) in [4.44f32, 4.16, 3.88, 3.60].iter().enumerate() {
-        o.ingest_scan(&wall_scan(*d), level, [0.0, 0.0], 1000 + 100 * k as u64);
+        o.ingest_scan(
+            &wall_scan(*d),
+            level,
+            [0.0, 0.0],
+            SCAN_CLOSING_MAX_MPS,
+            1000 + 100 * k as u64,
+        );
     }
     o.rebuild([0.0, 0.0], 1300);
     let b = brake_limit(&o, [0.0, 0.0], [1.6, 0.0], [1.6, 0.0], 3.0, G, 1300);
@@ -285,7 +291,13 @@ fn a_lagging_velocity_estimate_does_not_make_the_brake_late() {
     // is the closing speed and the ask stands.
     let mut s = Obstacles::new();
     for k in 0..4u64 {
-        s.ingest_scan(&wall_scan(3.6), level, [0.0, 0.0], 1000 + 100 * k);
+        s.ingest_scan(
+            &wall_scan(3.6),
+            level,
+            [0.0, 0.0],
+            SCAN_CLOSING_MAX_MPS,
+            1000 + 100 * k,
+        );
     }
     s.rebuild([0.0, 0.0], 1300);
     let c = brake_limit(&s, [0.0, 0.0], [1.6, 0.0], [1.6, 0.0], 3.0, G, 1300);
@@ -303,8 +315,20 @@ fn a_new_nearest_surface_is_not_a_closing_speed() {
         agl: Some(2.5),
     };
     let mut o = Obstacles::new();
-    o.ingest_scan(&wall_scan(8.0), level, [0.0, 0.0], 1000);
-    o.ingest_scan(&wall_scan(2.0), level, [0.0, 0.0], 1100);
+    o.ingest_scan(
+        &wall_scan(8.0),
+        level,
+        [0.0, 0.0],
+        SCAN_CLOSING_MAX_MPS,
+        1000,
+    );
+    o.ingest_scan(
+        &wall_scan(2.0),
+        level,
+        [0.0, 0.0],
+        SCAN_CLOSING_MAX_MPS,
+        1100,
+    );
     assert!(
         o.max_scan_closing(1100) < 1.0,
         "closing {}",
@@ -314,8 +338,20 @@ fn a_new_nearest_surface_is_not_a_closing_speed() {
     // within what a scan pair accepts, yet a standing vehicle closes on
     // nothing that fast, so an ask toward the post 3 m out stands.
     let mut p = Obstacles::new();
-    p.ingest_scan(&wall_scan(4.0), level, [0.0, 0.0], 1000);
-    p.ingest_scan(&wall_scan(3.0), level, [0.0, 0.0], 1100);
+    p.ingest_scan(
+        &wall_scan(4.0),
+        level,
+        [0.0, 0.0],
+        SCAN_CLOSING_MAX_MPS,
+        1000,
+    );
+    p.ingest_scan(
+        &wall_scan(3.0),
+        level,
+        [0.0, 0.0],
+        SCAN_CLOSING_MAX_MPS,
+        1100,
+    );
     p.rebuild([0.0, 0.0], 1100);
     let b = brake_limit(&p, [0.0, 0.0], [0.0, 0.0], [1.0, 0.0], 3.0, G, 1100);
     assert!(b.v[0] > 0.9, "a hover braked by a new surface: {:?}", b.v);
@@ -352,6 +388,7 @@ fn hover_ask_after(crown: impl Fn(u64, usize) -> f32) -> Braked {
             &crowns_scan(|i| crown(k, i)),
             level,
             [0.0, 0.0],
+            SCAN_CLOSING_MAX_MPS,
             1000 + 100 * k,
         );
     }
@@ -404,7 +441,7 @@ fn ingest_frame(o: &mut Obstacles, f: &Value) -> ([f32; 2], [f32; 2], u64) {
     };
     let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                       "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
-    o.ingest_scan(&scan, level, pos, now);
+    o.ingest_scan(&scan, level, pos, SCAN_CLOSING_MAX_MPS, now);
     o.rebuild(pos, now);
     (pos, v2_of(&f["ask_ne"]), now)
 }
@@ -476,7 +513,13 @@ fn noisy_wall_approach(d0: f32, scans: u64, closing: impl Fn(u64) -> f32) -> (Ob
                 *r = json!(x + 0.04 * (h as f64 / 1000.0 - 0.5));
             }
         }
-        o.ingest_scan(&scan, level, [0.0, 0.0], 1000 + 100 * k);
+        o.ingest_scan(
+            &scan,
+            level,
+            [0.0, 0.0],
+            SCAN_CLOSING_MAX_MPS,
+            1000 + 100 * k,
+        );
     }
     o.rebuild([0.0, 0.0], 1000 + 100 * (scans - 1));
     (o, d)
@@ -545,7 +588,6 @@ fn replayed_column_approach_brakes_a_lagging_estimate_as_the_true_speed() {
         );
     }
 }
-
 #[test]
 fn the_push_never_closes_on_a_nearer_post() {
     // A wall 1.3 m east fills many sectors, a post 1.05 m west one or two:
@@ -633,7 +675,7 @@ fn replayed_column_approach_never_allows_more_than_it_can_stop_from() {
         let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                           "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
         let mut o = Obstacles::new();
-        o.ingest_scan(&scan, level, pos, 1000);
+        o.ingest_scan(&scan, level, pos, SCAN_CLOSING_MAX_MPS, 1000);
         o.rebuild(pos, 1000);
         let b = brake_limit(&o, pos, vel, [8.0, 0.0], 3.0, G, 1000);
         let truth = num("truth_to_column_m");
@@ -656,7 +698,7 @@ fn replayed_column_approach_never_allows_more_than_it_can_stop_from() {
     let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                       "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
     let mut o = Obstacles::new();
-    o.ingest_scan(&scan, level, [0.0, 0.0], 1000);
+    o.ingest_scan(&scan, level, [0.0, 0.0], SCAN_CLOSING_MAX_MPS, 1000);
     let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [2.0, 0.0], 3.0, G, 1000);
     assert!((b.v[0] - 2.0).abs() < 1e-3, "{:?}", b.v);
 }
