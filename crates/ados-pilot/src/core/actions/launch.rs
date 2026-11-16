@@ -74,6 +74,12 @@ impl Pilot {
             .and_then(Value::as_f64)
             .map(|v| v as f32)
             .unwrap_or(default_alt);
+        // With no RC transmitter the climb stops at the height cap.
+        let alt_m = if self.rc_receiver().is_present() {
+            alt_m
+        } else {
+            alt_m.min(self.settings.pilot.max_alt())
+        };
         let when_done = a
             .get("when_done")
             .and_then(Value::as_str)

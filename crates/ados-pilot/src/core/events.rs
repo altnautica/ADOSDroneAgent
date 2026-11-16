@@ -191,6 +191,9 @@ impl Pilot {
             self.touchdown = Default::default();
             self.sup.stall.new_flight();
             self.lidar.new_flight();
+            self.failsafe
+                .instances
+                .armed(now_ms, crate::link_watch::ARM_LIVE_MS);
         }
         if !was_armed && self.fc.armed && self.owner() == Owner::Idle && !self.in_guided() {
             self.set_owner(Owner::FcMode, "fc-mode");

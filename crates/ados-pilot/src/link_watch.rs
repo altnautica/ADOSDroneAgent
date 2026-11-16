@@ -21,6 +21,10 @@ use ados_protocol::pilot::InputSession;
 /// The `src` reported for the legacy timer's surfaces.
 pub const LEGACY: &str = "surface";
 
+/// An instance heard within this before arming is live and watched in the
+/// flight: three of the surfaces' 1 s `hb`.
+pub const ARM_LIVE_MS: u64 = 3000;
+
 #[derive(Debug, Clone)]
 struct Instance {
     src: String,
@@ -134,6 +138,24 @@ impl Instances {
     /// that speak after it.
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// On arming: the flight watches the instances that are live now. One
+    /// silent for `live_ms` or more (an app the OS killed, a reloaded tab
+    /// that came back under a new `sid`, a closed dashboard) is forgotten,
+    /// and so is a legacy timer as quiet: left in, it would fire the
+    /// link-loss action right after take-off. A live surface sends `hb`
+    /// every second, so it stays.
+    pub fn armed(&mut self, now_ms: u64, live_ms: u64) {
+        self.map
+            .retain(|_, i| now_ms.saturating_sub(i.last_ms) < live_ms);
+        if self
+            .legacy_last_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) >= live_ms)
+        {
+            self.legacy_last_ms = None;
+            self.legacy_fired = false;
+        }
     }
 }
 

@@ -61,12 +61,18 @@ fn run_with(w: &mut World, ms: u64, live: &[(&str, &str)]) {
 }
 
 /// Declared with no RC with the FC's no-RC posture (RC failsafe off, the
-/// fence), airborne in GUIDED, flown by the phone's pilot.
-fn flying() -> World {
+/// fence), on the ground.
+fn grounded() -> World {
     let mut w = World::new();
     w.p.settings.pilot.rc_receiver = RcReceiver::Absent;
     w.p.fc.params.insert("FS_THR_ENABLE".into(), 0.0);
     fence(&mut w);
+    w
+}
+
+/// [`grounded`], then airborne in GUIDED, flown by the phone's pilot.
+fn flying() -> World {
+    let mut w = grounded();
     w.airborne(copter::GUIDED);
     hb(&mut w, PHONE, "android");
     let r = act(&mut w, PHONE, "android", "take_control");
@@ -75,6 +81,37 @@ fn flying() -> World {
     assert_eq!(w.p.owner(), Owner::Pilot);
     w.sent.clear();
     w
+}
+
+/// Surfaces that went quiet before arming (a tab reloaded under a new
+/// `sid`, a closed dashboard sending no `sid`) are not watched in the
+/// flight: no return right after take-off. The phone, quiet only for the
+/// second before arming, still is.
+#[test]
+fn surfaces_quiet_before_arming_are_not_watched() {
+    let mut w = grounded();
+    hb(&mut w, TAB, "mc");
+    w.p.on_request_from(
+        Request::Hb {
+            src: "dashboard".into(),
+        },
+        None,
+        w.now,
+    );
+    w.run(20_000);
+    hb(&mut w, PHONE, "android");
+    w.run(1_000);
+    w.airborne(copter::GUIDED);
+    run_with(&mut w, 12_000, &[(PHONE, "android")]);
+    assert!(!returned(&w), "mode {}", w.mode);
+    assert_eq!(w.p.failsafe.instances.unrecovered(), None);
+
+    let mut w = grounded();
+    hb(&mut w, PHONE, "android");
+    w.run(1_000);
+    w.airborne(copter::GUIDED);
+    w.run(10_500);
+    assert!(returned(&w), "the phone was live at arming: mode {}", w.mode);
 }
 
 fn returned(w: &World) -> bool {
@@ -275,6 +312,25 @@ fn no_follow_starts_into_the_link_loss_return() {
     w.run(500);
     assert_eq!(w.mode, copter::SMART_RTL);
     assert_eq!(w.set_modes(copter::GUIDED), 0);
+}
+
+/// The operator's own return (no instance lost): a skill asking for the
+/// lease is refused `failsafe` while the FC flies it, with an RC
+/// transmitter or without; a GUIDED switch would cancel the return.
+#[test]
+fn no_skill_starts_into_an_operator_return() {
+    for rc in [RcReceiver::Present, RcReceiver::Absent] {
+        let mut w = grounded();
+        w.p.settings.pilot.rc_receiver = rc;
+        w.airborne(copter::GUIDED);
+        w.action("rth");
+        w.run(500);
+        assert!(returned(&w), "{rc:?}: mode {}", w.mode);
+        assert!(!w.p.state(w.now).fc_failsafe, "{rc:?}");
+        let l = lease_reply(&mut w);
+        assert_eq!(l.err.as_deref(), Some("failsafe"), "{rc:?}: {l:?}");
+        assert_eq!(w.set_modes(copter::GUIDED), 0, "{rc:?}");
+    }
 }
 
 /// A lost instance blocks a new follow until it speaks again.

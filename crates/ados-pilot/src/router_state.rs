@@ -40,11 +40,16 @@ pub fn mission_of(mut snapshot: Value) -> Value {
             .into_iter()
             .map(|i| {
                 let zero = |k: &str| i.get(k).and_then(Value::as_i64) == Some(0);
+                // The item's height above home where its frame gives one
+                // (MAV_FRAME_GLOBAL_RELATIVE_ALT(_INT)).
+                let rel = matches!(i.get("frame").and_then(Value::as_u64), Some(3 | 6));
+                let up_m = i.get("alt_m").filter(|_| rel).cloned();
                 serde_json::json!({
                     "seq": i.get("seq").cloned().unwrap_or(Value::Null),
                     "cmd": i.get("cmd").cloned().unwrap_or(Value::Null),
                     "ned": i.get("ned").cloned().unwrap_or(Value::Null),
                     "here": zero("lat_e7") && zero("lon_e7"),
+                    "up_m": up_m.unwrap_or(Value::Null),
                 })
             })
             .collect();

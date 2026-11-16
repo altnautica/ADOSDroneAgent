@@ -33,6 +33,9 @@ pub struct RouteItem {
     /// Latitude and longitude 0: ArduPilot flies the item where the vehicle
     /// is (a land or waypoint "here").
     pub here: bool,
+    /// The item's height above home, metres, where its frame gives one
+    /// (relative altitude frames); the height of an item flown "here".
+    pub up_m: Option<f32>,
 }
 
 /// The mission feed's route (`route`, `items_truncated`, `route_stale`,
@@ -75,6 +78,7 @@ pub fn route_of(payload: &Value) -> RouteFeed {
                 cmd,
                 ned,
                 here: i.get("here").and_then(Value::as_bool).unwrap_or(false),
+                up_m: i.get("up_m").and_then(Value::as_f64).map(|v| v as f32),
             })
         })
         .collect();

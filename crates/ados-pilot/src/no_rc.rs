@@ -72,12 +72,29 @@ pub fn profile(
 /// The profile rows the RC declaration decides: the RC failsafe, and with
 /// `absent` the fence. The setup step that takes the declaration writes
 /// them, so the profile written before it settles under the new one.
+///
+/// With `present`, a fence the FC still holds exactly as the no-RC posture
+/// wrote it (`current` reads the FC's values) is that posture's backstop,
+/// not one the operator set: it is turned off (`FENCE_ENABLE 0`), else an
+/// RC flight past 70 m or above 50 m would meet a return nobody asked for.
+/// Any other fence is left as it is.
 pub fn declaration_rows(
     fw: Firmware,
     class: VehicleClass,
     rc: RcReceiver,
-) -> impl Iterator<Item = ProfileParam> {
-    profile(fw, class, rc).filter(|r| r.name == FS_THR || r.name.starts_with("FENCE_"))
+    current: impl Fn(&str) -> Option<f32>,
+) -> Vec<ProfileParam> {
+    let mut rows: Vec<ProfileParam> = profile(fw, class, rc)
+        .filter(|r| r.name == FS_THR || r.name.starts_with("FENCE_"))
+        .collect();
+    let copter = fw == Firmware::Ardupilot && class == VehicleClass::Multirotor;
+    let posture_fence = COPTER_FENCE
+        .iter()
+        .all(|r| current(r.name).is_some_and(|v| (v - r.value).abs() < 1e-3));
+    if copter && rc.is_present() && posture_fence {
+        rows.push(p("FENCE_ENABLE", &[], 0.0));
+    }
+    rows
 }
 
 /// Every parameter name the profile may read, under either declaration.

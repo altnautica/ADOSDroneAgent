@@ -152,6 +152,42 @@ fn a_mission_past_the_no_rc_caps_is_refused() {
     assert_eq!(launch_mission(&mut w, inside), None);
 }
 
+/// A take-off flown "here" (latitude and longitude 0) has no position but
+/// climbs to its own height: past the cap it is refused, in a frame with no
+/// height above home it is unchecked, inside it launches.
+#[test]
+fn a_take_off_here_is_held_to_the_no_rc_ceiling() {
+    let takeoff = |frame: u8, up: f32| {
+        json!({"seq": 1, "cmd": 22, "frame": frame, "lat_e7": 0, "lon_e7": 0, "alt_m": up,
+               "ned": null})
+    };
+    let mut w = no_rc();
+    assert_eq!(
+        launch_mission(&mut w, vec![takeoff(3, 60.0), wp(2, 10.0, 5.0)]).as_deref(),
+        Some("beyond_no_rc_caps")
+    );
+    assert_eq!(
+        launch_mission(&mut w, vec![takeoff(10, 30.0), wp(2, 10.0, 5.0)]).as_deref(),
+        Some("route_unchecked")
+    );
+    assert_eq!(
+        launch_mission(&mut w, vec![takeoff(3, 30.0), wp(2, 10.0, 5.0)]),
+        None
+    );
+}
+
+/// A launch asked to climb past the height cap stops at it.
+#[test]
+fn a_launch_climbs_no_higher_than_the_no_rc_ceiling() {
+    let mut w = no_rc();
+    assert_eq!(
+        err(&w.action_args("launch", json!({"alt_m": 60.0}))),
+        None
+    );
+    w.run(3_000);
+    assert_eq!(w.agl, Some(NO_RC_MAX_ALT_M));
+}
+
 #[test]
 fn with_rc_the_same_mission_launches() {
     let mut w = no_rc();

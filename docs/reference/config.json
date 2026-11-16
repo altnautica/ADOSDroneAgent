@@ -2238,6 +2238,19 @@
       "type": "number|null"
     },
     {
+      "default": "present",
+      "description": "Rc Receiver",
+      "enum": [
+        "present",
+        "absent"
+      ],
+      "key": "pilot.rc_receiver",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": 45,
       "description": "Return Blocked Land After S",
       "enum": null,

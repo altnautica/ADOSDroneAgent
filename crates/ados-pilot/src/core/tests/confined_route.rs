@@ -393,6 +393,7 @@ fn the_legs_follow_the_fc_through_skips_unplaced_items_and_an_origin() {
         cmd: 16,
         ned,
         here,
+        up_m: None,
     };
     let p = |n: f32| Some([n, 0.0, -5.0]);
     let items = [

@@ -253,7 +253,9 @@ impl Step for AdosIntro {
         // this one decides (the RC failsafe, the fence) are written here.
         let mut applied = Vec::new();
         if let Some(fw) = firmware(cx.adapter.fw) {
-            for row in crate::no_rc::declaration_rows(fw, vehicle_class(cx.adapter.class), rc) {
+            let current = |n: &str| cx.params.get(n);
+            let rows = crate::no_rc::declaration_rows(fw, vehicle_class(cx.adapter.class), rc, current);
+            for row in rows {
                 let name = std::iter::once(row.name)
                     .chain(row.alt_names.iter().copied())
                     .find(|n| cx.params.has(n));

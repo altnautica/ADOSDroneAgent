@@ -6,12 +6,18 @@
 use ados_protocol::pilot::{ControlMode, PlaceClass, RcReceiver, Readiness, Severity};
 use serde_json::json;
 
+use super::control::RouteItem;
 use super::{Out, Pilot};
 use crate::config::LinkLossAction;
 use crate::flows::banner;
 
 /// A link-loss wait above this, seconds, warns with no RC transmitter.
 pub const NO_RC_LINK_LOSS_WARN_S: u32 = 15;
+
+/// Navigation items that climb to their own height when flown "here"
+/// (latitude and longitude 0): WAYPOINT, the LOITERs, TAKEOFF,
+/// CONTINUE_AND_CHANGE_ALT, LOITER_TO_ALT, SPLINE_WAYPOINT.
+const HEIGHT_CMDS: [u16; 8] = [16, 17, 18, 19, 22, 30, 31, 82];
 
 /// RC_CHANNELS that a receiver feeds: the first four channels in range.
 fn rc_valid(ch: &[u16; 18]) -> bool {
@@ -152,13 +158,19 @@ impl Pilot {
     /// pilot does not clamp an FC-flown mission, so a launch into it or a
     /// resume is refused while any waypoint lies beyond either cap
     /// (`beyond_no_rc_caps`), or while the route cannot be read whole
-    /// (`route_unchecked`). Waypoints flown "here" stay where the vehicle is.
+    /// (`route_unchecked`). Items flown "here" stay where the vehicle is
+    /// across, but a climbing one (a take-off, a waypoint) is held to the
+    /// height cap by its own height above home.
     pub(super) fn no_rc_route_check(&self) -> Result<(), String> {
         if self.rc_receiver().is_present() {
             return Ok(());
         }
         let feed = self.route.feed();
-        let unplaced = feed.items.iter().any(|i| i.ned.is_none() && !i.here);
+        let climbs_here = |i: &RouteItem| i.here && HEIGHT_CMDS.contains(&i.cmd);
+        let unplaced = feed
+            .items
+            .iter()
+            .any(|i| (i.ned.is_none() && !i.here) || (climbs_here(i) && i.up_m.is_none()));
         if feed.truncated || feed.stale || unplaced {
             tracing::warn!(target: "ados_pilot", reason = "route_unchecked", no_rc = true, "pilot_mission_refused");
             return Err("route_unchecked".into());
@@ -172,7 +184,7 @@ impl Pilot {
         let beyond = feed.items.iter().find(|i| {
             i.ned.is_some_and(|p| {
                 crate::geo::dist([p[0], p[1]], home) > max_dist || home_d - p[2] > max_alt
-            })
+            }) || (climbs_here(i) && i.up_m.is_some_and(|u| u > max_alt))
         });
         if let Some(i) = beyond {
             tracing::warn!(
