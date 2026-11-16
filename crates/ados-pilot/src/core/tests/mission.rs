@@ -127,7 +127,7 @@ fn no_when_done_without_a_launch_that_armed_one() {
     let mut w = World::new();
     let args = json!({"after": "hold", "alt_m": 3.0, "when_done": "rth"});
     assert!(ok(&w.action_args("launch", args)));
-    w.run(3000);
+    w.fly_takeoff(30_000);
     assert_eq!(w.p.owner(), Owner::Pilot);
     w.mode = copter::AUTO;
     w.run(100);

@@ -8,7 +8,7 @@
 //! is judged only once the vehicle flies at it. A launched mission and a
 //! ground station's go through the same code.
 
-use ados_protocol::pilot::{Owner, RouteState};
+use ados_protocol::pilot::{Owner, Request, RouteState};
 use serde_json::{json, Value};
 
 use super::confined::{area, confined, map, mission, ok, post, run_seen, seen, speed_changes};
@@ -389,8 +389,12 @@ fn a_launched_mission_holds_and_resumes_through_the_same_code() {
         "launch",
         json!({"after": "mission", "alt_m": 5.0})
     )));
+    // The lift-off climbs for several seconds and the ground station's
+    // heartbeat keeps its link alive meanwhile: a silent link would trip the
+    // operator link loss once the hold makes the pilot fly.
     let t0 = w.now;
     while w.set_modes(copter::AUTO) == 0 {
+        w.req(Request::Hb { src: "mc".into() });
         run_seen(&mut w, 100);
         assert!(w.now < t0 + 30_000, "never in AUTO");
     }
