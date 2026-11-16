@@ -238,23 +238,16 @@ impl Pilot {
         } else {
             &[]
         };
+        // The steady take-off's and airframe health's parameters.
+        let liftoff: &[&[&str]] = if ardupilot {
+            &[crate::liftoff::PARAMS, crate::airframe::PARAMS]
+        } else {
+            &[]
+        };
         // Under either RC declaration: the fence rows are read in advance.
         let mut names: Vec<&str> = crate::no_rc::all_names(fw, class)
             .chain(EXTRA_PARAMS.iter().copied())
-            .chain(
-                ardupilot
-                    .then_some(crate::liftoff::PARAMS)
-                    .unwrap_or_default()
-                    .iter()
-                    .copied(),
-            )
-            .chain(
-                ardupilot
-                    .then_some(crate::airframe::PARAMS)
-                    .unwrap_or_default()
-                    .iter()
-                    .copied(),
-            )
+            .chain(liftoff.iter().flat_map(|p| p.iter().copied()))
             .chain(batt.iter().chain(batt_legacy).copied())
             .chain(sensors.iter().map(String::as_str))
             .collect();
