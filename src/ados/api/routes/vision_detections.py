@@ -244,8 +244,9 @@ def _current(batch: dict | None) -> dict:
     if batch is None or not _is_fresh(batch):
         return {"detections": [], "stale": True, "available": True}
     reply = {**batch, "available": True}
-    if batch.get("crop_window") is not None:
-        full = _full_by_camera.get(batch.get("camera_id"))
+    camera = batch.get("camera_id")
+    if batch.get("crop_window") is not None and isinstance(camera, str):
+        full = _full_by_camera.get(camera)
         if full is not None and _is_fresh(full):
             reply["full_frame"] = full
     return reply
