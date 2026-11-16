@@ -82,9 +82,11 @@ pub fn declaration_rows(
 
 /// Every parameter name the profile may read, under either declaration.
 pub fn all_names(fw: Firmware, class: VehicleClass) -> impl Iterator<Item = &'static str> {
-    let fence = (fw == Firmware::Ardupilot && class == VehicleClass::Multirotor)
-        .then_some(COPTER_FENCE)
-        .unwrap_or(&[]);
+    let fence: &[ProfileParam] = if fw == Firmware::Ardupilot && class == VehicleClass::Multirotor {
+        COPTER_FENCE
+    } else {
+        &[]
+    };
     crate::fc_profile::all_names(fw, class).chain(fence.iter().map(|r| r.name))
 }
 
