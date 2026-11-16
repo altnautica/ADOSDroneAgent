@@ -7,6 +7,7 @@ use ados_protocol::pilot::{AvoidMode, AvoidState, Goal, GoalKind, Owner, VelMode
 use super::goal_ref::{
     approach, leash, GoalRef, APPROACH_DECEL_SHARE, ASK_SMOOTH_S, SHAPER_REPORT_MPS,
 };
+use super::subject_guard::Subject;
 use super::{
     geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_NO_VANTAGE,
     HOLD_OBSTACLE_CLOSE, HOLD_OBSTACLE_STALE,
@@ -35,6 +36,8 @@ struct Shape {
     capped: bool,
     home: V2,
     max_dist: f32,
+    /// The subject a skill's goal names, for the subject brake.
+    subject: Option<Subject>,
 }
 
 impl Pilot {
@@ -71,6 +74,10 @@ impl Pilot {
                 None => (None, 0.0, pos[2], None, None),
             },
         };
+        // The subject brake's track is kept on every tick, held or not; the
+        // climb clear gives the highest setpoint down position allowed.
+        let guard = self.track_subject(pos, now_ms);
+        let floor_d = guard.and_then(|g| g.1);
         if self.obstacle_data_stale(now_ms) {
             // Unknown obstacles: hold where the vehicle was when the data
             // went stale, with no push (nothing is seen to push from). The
@@ -140,6 +147,7 @@ impl Pilot {
             capped: self.speed_capped(now_ms),
             home,
             max_dist,
+            subject: guard.map(|g| g.0),
         };
         let target = if close { None } else { self.plan.target };
         let Some(target) = target else {
@@ -163,6 +171,10 @@ impl Pilot {
             // hold where it ends. The brake's push walks the hold back out
             // of the margin.
             let hold_d = self.plan_hold.map_or(pos[2], |h| h[2]);
+            let hold_d = match floor_d {
+                Some(f) if f < hold_d => clamp_d(f, 0.0, pos[2], agl, FLOOR_AGL_M, max_alt).0,
+                _ => hold_d,
+            };
             let mut r = self.goal_ref(pos_ne, yaw, now_ms);
             let mut limits = 0;
             let v = self.fly_shaped(&mut r, [0.0, 0.0], &shape, &mut limits, now_ms);
@@ -243,14 +255,13 @@ impl Pilot {
         let yaw_cmd = r.slew_yaw(want_yaw, &shape.gl, dt);
         r.at_ms = now_ms;
         self.goal_ref = Some(r);
-        let (goal_d, vd) = clamp_d(
-            goal_d,
-            goal.as_ref().map_or(0.0, |g| g.vd),
-            pos[2],
-            agl,
-            FLOOR_AGL_M,
-            max_alt,
-        );
+        // Climbing clear of the subject: the setpoint is raised to the climb
+        // floor, never lowered to it, and a descending feed-forward dropped.
+        let (goal_d, vd) = match (floor_d, goal.as_ref().map_or(0.0, |g| g.vd)) {
+            (Some(f), vd) if f < goal_d => (f, vd.min(0.0)),
+            (_, vd) => (goal_d, vd),
+        };
+        let (goal_d, vd) = clamp_d(goal_d, vd, pos[2], agl, FLOOR_AGL_M, max_alt);
         let sp = [r.p[0], r.p[1], goal_d];
         self.setpoint = Some(sp);
         // The FC's pull toward the reference is held so the commanded speed
@@ -287,7 +298,8 @@ impl Pilot {
     /// acceleration slow it first ([`Pilot::soft_brake`]), the shaper holds
     /// its acceleration and jerk, then the safety limits cut what it flies
     /// at once: the speed cap, the obstacle brake on the profile's stick
-    /// acceleration ([`Pilot::goal_brake`]) and the geofence. Moves the
+    /// acceleration ([`Pilot::goal_brake`]), the subject brake on the same
+    /// acceleration ([`Pilot::subject_cut`]) and the geofence. Moves the
     /// reference point on the velocity flown and returns that velocity.
     fn fly_shaped(
         &mut self,
@@ -328,6 +340,22 @@ impl Pilot {
             v = braked;
             p = s.pos;
             r.cut(p, v);
+        }
+        if let Some(subject) = &s.subject {
+            let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
+            if let Some((cut, slide_capped)) =
+                self.subject_cut(subject, s.pos, fc_ask, v, s.v_cap, now_ms)
+            {
+                // A safety cut, flown from the vehicle's own position as
+                // the obstacle brake's is.
+                *limits |= limit::SUBJECT;
+                if slide_capped {
+                    *limits |= s.speed_by;
+                }
+                v = cut;
+                p = s.pos;
+                r.cut(p, v);
+            }
         }
         let fenced = geofence(s.pos, s.home, s.max_dist, v);
         if geo::dist(fenced, v) > 1e-3 {

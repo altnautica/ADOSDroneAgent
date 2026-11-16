@@ -24,6 +24,7 @@ mod shaping;
 mod sloped_leg;
 mod stale;
 mod stall_return;
+mod subject;
 mod supervisor;
 mod take;
 mod touchdown;
