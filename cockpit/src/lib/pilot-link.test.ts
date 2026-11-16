@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   connectPilotLink,
+  PILOT_SID,
   pilotLinkSource,
   releasePilotInput,
   sendPilotAction,
@@ -46,7 +47,7 @@ let disconnect: () => void;
 /** The fixture frame as this surface would send it: its `src`, and its own
  *  values for the per-sample fields (session, seq, clock, action id). */
 function expected(name: string, frame: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...shared[name], src: "cockpit" };
+  const out: Record<string, unknown> = { ...shared[name], src: "cockpit", sid: PILOT_SID };
   for (const k of ["session", "seq", "t_ms", "id"]) if (k in out) out[k] = frame[k];
   return out;
 }
@@ -54,7 +55,7 @@ function expected(name: string, frame: Record<string, unknown>): Record<string, 
 const last = () => sent[sent.length - 1];
 
 beforeAll(async () => {
-  vi.stubGlobal("window", {});
+  vi.stubGlobal("window", { addEventListener: () => {}, removeEventListener: () => {} });
   vi.stubGlobal("location", { protocol: "http:", host: "drone.local" });
   vi.stubGlobal("WebSocket", FakeSocket);
   disconnect = link.connectPilotLink("cockpit");
@@ -106,6 +107,14 @@ describe("cockpit pilot frames match the agent fixture", () => {
     }
     const hb = sent.find((f) => f.op === "hb");
     expect(hb).toEqual(expected("hb", hb!));
+    // Closing the link says goodbye, after releasing the sticks.
+    expect(sent.slice(-2).map((f) => f.op)).toEqual(["release", "bye"]);
+    expect(last()).toEqual(expected("bye", last()));
+  });
+
+  it("every frame carries this page's one instance id", () => {
+    expect(PILOT_SID).toMatch(/^[0-9a-f]{32}$/);
+    expect(sent.every((f) => f.sid === PILOT_SID)).toBe(true);
   });
 });
 

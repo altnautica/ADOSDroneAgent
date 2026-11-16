@@ -70,6 +70,10 @@ pub struct LocalPos {
     pub vd: f32,
 }
 
+/// An FC boot time this far behind the last one means the FC rebooted
+/// (slack for frames reordered on the link).
+pub const REBOOT_BACKSTEP_MS: u32 = 5_000;
+
 /// Everything decoded from FC traffic.
 #[derive(Debug, Clone, Default)]
 pub struct FcState {
@@ -106,6 +110,10 @@ pub struct FcState {
     pub flow: Option<Stamped<Flow>>,
     /// The EKF's start on external navigation and the stillness since.
     pub extnav: extnav::ExtNavStart,
+    /// The newest FC `time_boot_ms` (ATTITUDE).
+    pub boot_ms: u32,
+    /// Counts FC reboots seen (boot time running backwards, or a new sysid).
+    pub boot_epoch: u32,
 }
 
 impl FcState {
@@ -118,6 +126,9 @@ impl FcState {
                     || h.mavtype == MavType::MAV_TYPE_GCS
                 {
                     return None;
+                }
+                if self.sysid != 0 && self.sysid != sysid {
+                    self.boot_epoch += 1;
                 }
                 self.sysid = sysid;
                 self.compid = compid;
@@ -139,6 +150,12 @@ impl FcState {
                 }
             }
             MavMessage::ATTITUDE(a) => {
+                if self.from_fc(sysid, compid) {
+                    if a.time_boot_ms.saturating_add(REBOOT_BACKSTEP_MS) < self.boot_ms {
+                        self.boot_epoch += 1;
+                    }
+                    self.boot_ms = a.time_boot_ms;
+                }
                 let v = Attitude {
                     roll: a.roll,
                     pitch: a.pitch,

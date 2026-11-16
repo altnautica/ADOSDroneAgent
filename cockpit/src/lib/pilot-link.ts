@@ -7,7 +7,11 @@
 //   - pilot `action`s (pause, take_control, launch, profile:…), each answered
 //     by an `action_result` matched on its id;
 //   - a 1 Hz `hb` while no input streams, which is the surface heartbeat the
-//     pilot's link-loss failsafe watches.
+//     pilot's link-loss failsafe watches;
+//   - `bye` when the cockpit leaves on purpose (the link closes or the page
+//     goes away).
+// Every frame carries this page's instance id (`sid`), kept across redials,
+// so the pilot watches each open cockpit's link on its own.
 // The server pushes the `pilot` state at 10 Hz; it lands in the nav-stream
 // store through the same parser the nav stream uses, so every reader sees one
 // pilot state whichever socket delivered it.
@@ -65,6 +69,15 @@ function newSessionId(): number {
 /** This surface's stick session id (a u32), fixed for the page's lifetime. */
 export const PILOT_SESSION: number = typeof crypto !== "undefined" ? newSessionId() : 1;
 
+function newInstanceId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** This page's surface instance id (32 hex), fixed for the page's lifetime. */
+export const PILOT_SID: string = typeof crypto !== "undefined" ? newInstanceId() : "0".repeat(32);
+
 let socket: WebSocket | null = null;
 let src: PilotSource = "cockpit";
 let seq = 0;
@@ -73,7 +86,7 @@ const pendingActions = new Map<string, { resolve: (r: ActionResult) => void; tim
 
 function send(frame: Record<string, unknown>): boolean {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-  socket.send(JSON.stringify(frame));
+  socket.send(JSON.stringify({ ...frame, sid: PILOT_SID }));
   return true;
 }
 
@@ -219,13 +232,18 @@ export function connectPilotLink(source: PilotSource): () => void {
 
   void connect();
 
+  const bye = () => send({ op: "bye", src });
+  window.addEventListener("pagehide", bye);
+
   return () => {
     closed = true;
+    window.removeEventListener("pagehide", bye);
     controller.abort();
     clearInterval(hb);
     clearTimeout(reconnectTimer ?? undefined);
     clearTimeout(silentTimer ?? undefined);
     releasePilotInput();
+    bye();
     for (const [id, w] of pendingActions) {
       clearTimeout(w.timer);
       w.resolve({ ok: false, err: "closed" });

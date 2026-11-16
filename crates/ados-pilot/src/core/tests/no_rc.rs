@@ -426,6 +426,52 @@ fn the_readiness_rows_of_the_posture() {
     assert!(!item(&w, "rc_seen").unwrap().ok, "a latch");
 }
 
+/// The RC-seen latch belongs to one FC boot: an FC reboot (its boot time
+/// running backwards) clears it, a boot time running on keeps it.
+#[test]
+fn an_fc_reboot_clears_the_rc_seen_latch() {
+    use ados_protocol::mavlink::ardupilotmega::{MavMessage, ATTITUDE_DATA};
+    let attitude = |t: u32| {
+        MavMessage::ATTITUDE(ATTITUDE_DATA {
+            time_boot_ms: t,
+            roll: 0.0,
+            pitch: 0.0,
+            yaw: 0.0,
+            rollspeed: 0.0,
+            pitchspeed: 0.0,
+            yawspeed: 0.0,
+        })
+    };
+    let (fc, comp) = (super::harness::FC_SYS, super::harness::FC_COMP);
+    let mut w = World::new();
+    w.p.settings.pilot.rc_receiver = RcReceiver::Absent;
+    w.run(100);
+    w.p.fc.rc = Some(crate::fc::Stamped {
+        v: [1500; 18],
+        at_ms: w.now,
+    });
+    w.run(100);
+    assert!(!item(&w, "rc_seen").unwrap().ok);
+    w.p.fc.rc = None;
+    let now = w.now;
+    w.p.on_fc(fc, comp, &attitude(600_000), now);
+    // The harness's FC then reports boot time 0, 600 s back: a reboot.
+    w.run(100);
+    assert!(item(&w, "rc_seen").unwrap().ok, "the FC rebooted");
+    // RC seen after the reboot latches again, and holds while the boot time
+    // does not run backwards.
+    w.p.fc.rc = Some(crate::fc::Stamped {
+        v: [1500; 18],
+        at_ms: w.now,
+    });
+    w.run(100);
+    w.p.fc.rc = None;
+    let epoch = w.p.fc.boot_epoch;
+    w.run(100);
+    assert_eq!(w.p.fc.boot_epoch, epoch, "no reboot");
+    assert!(!item(&w, "rc_seen").unwrap().ok, "still latched");
+}
+
 /// RC appearing in flight with no RC declared raises an alert.
 #[test]
 fn rc_seen_in_flight_alerts() {

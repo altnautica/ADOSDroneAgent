@@ -95,6 +95,32 @@ fn use_ados_declares_an_rc_transmitter_and_puts_the_rc_failsafe_back() {
     );
 }
 
+/// Leaving the no-RC posture lifts the posture's FC fence; a fence the
+/// operator set some other way is left alone.
+#[test]
+fn use_ados_lifts_the_no_rc_fence_and_only_that_fence() {
+    for (radius, lifted) in [(70.0, true), (300.0, false)] {
+        let mut p = ap_copter_params();
+        for (k, v) in [
+            ("FS_THR_ENABLE", 0.0),
+            ("FENCE_ENABLE", 1.0),
+            ("FENCE_TYPE", 3.0),
+            ("FENCE_RADIUS", radius),
+            ("FENCE_ALT_MAX", 50.0),
+            ("FENCE_ACTION", 5.0),
+        ] {
+            p.insert(k.into(), v);
+        }
+        let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
+        intro(&mut s);
+        s.act(G, "ados_intro", "use_ados", json!({}));
+        s.until(|s| s.step_state(G, "ados_intro") == StepState::Done, 10_000);
+        assert_eq!(s.param("FS_THR_ENABLE"), 5.0, "radius {radius}");
+        let fence = if lifted { 0.0 } else { 1.0 };
+        assert_eq!(s.param("FENCE_ENABLE"), fence, "radius {radius}");
+    }
+}
+
 #[test]
 fn no_rc_is_not_offered_in_a_confined_place_nor_on_a_plane() {
     let mut s = copter_with_fence();

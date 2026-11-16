@@ -117,13 +117,14 @@ describe("the dashboard's pilot actions", () => {
     sockets[0].open();
     await vi.advanceTimersByTimeAsync(PILOT_HB_MS * 3);
     expect(sockets[0].sent.filter((f) => f.op === "hb")).toHaveLength(3);
-    expect(sockets[0].sent.find((f) => f.op === "hb")).toEqual({ op: "hb", src: "dashboard" });
+    expect(sockets[0].sent.find((f) => f.op === "hb")).toEqual({ op: "hb", src: "dashboard", sid: link.sid });
     sockets[0].close();
     await vi.advanceTimersByTimeAsync(REDIAL_MS);
     expect(sockets).toHaveLength(2);
     sockets[1].open();
     await vi.advanceTimersByTimeAsync(PILOT_HB_MS);
-    expect(sockets[1].sent).toEqual([{ op: "hb", src: "dashboard" }]);
+    // The redialled link keeps the page's instance id.
+    expect(sockets[1].sent).toEqual([{ op: "hb", src: "dashboard", sid: link.sid }]);
   });
 
   it("fails a pending action when the link drops", async () => {
@@ -133,5 +134,17 @@ describe("the dashboard's pilot actions", () => {
     await settle();
     sockets[0].close();
     expect(await r).toEqual({ ok: false, err: "no pilot link" });
+  });
+
+  it("tags every frame with one instance id and says bye on close", async () => {
+    void link.send("land");
+    await settle();
+    sockets[0].open();
+    await vi.advanceTimersByTimeAsync(PILOT_HB_MS);
+    expect(link.sid).toMatch(/^[0-9a-f]{32}$/);
+    expect(newLink().sid).not.toBe(link.sid);
+    link.close();
+    expect(sockets[0].sent.map((f) => f.op)).toEqual(["action", "hb", "bye"]);
+    expect(sockets[0].sent.every((f) => f.sid === link.sid && f.src === "dashboard")).toBe(true);
   });
 });

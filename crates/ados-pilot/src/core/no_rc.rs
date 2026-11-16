@@ -89,10 +89,14 @@ impl Pilot {
         refused.then_some("rc_receiver_absent")
     }
 
-    /// Latch an RC receiver seen since the pilot connected to the FC, and,
-    /// with no RC transmitter declared, alert when one appears in flight
-    /// (readiness does not gate in flight).
+    /// Latch an RC receiver seen since the pilot connected to the FC or the
+    /// FC last rebooted, and, with no RC transmitter declared, alert when one
+    /// appears in flight (readiness does not gate in flight).
     pub(super) fn watch_rc(&mut self, now_ms: u64) {
+        if self.failsafe.rc_seen_epoch != self.fc.boot_epoch {
+            self.failsafe.rc_seen_epoch = self.fc.boot_epoch;
+            self.failsafe.rc_seen = false;
+        }
         if self.fc.rc.as_ref().is_some_and(|r| rc_valid(&r.v)) && !self.failsafe.rc_seen {
             self.failsafe.rc_seen = true;
             if !self.settings.pilot.rc_receiver.is_present() && self.fc.armed {

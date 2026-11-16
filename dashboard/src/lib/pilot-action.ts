@@ -10,6 +10,10 @@
 // loss, so a surface that acted must keep answering rather than fall silent
 // after one frame. State frames the server pushes are ignored: the dashboard
 // reads the pilot from the nav-status poll.
+//
+// Every frame carries the page's instance id (`sid`), kept across redials, so
+// the pilot watches each open dashboard's link on its own; the page says
+// `bye` when it goes away.
 
 import { mintWsTicket, ticketProtocols } from "@/shared/ws-ticket";
 
@@ -49,6 +53,13 @@ export interface PilotLinkDeps {
 
 const OPEN = 1;
 
+/** A surface instance id: 32 hex. */
+export function newInstanceId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** One pilot link for the page. */
 export class PilotActionLink {
   private socket: SocketLike | null = null;
@@ -58,6 +69,8 @@ export class PilotActionLink {
   private seq = 0;
   private closed = false;
   private readonly pending = new Map<string, { resolve: (r: ActionResult) => void; timer: ReturnType<typeof setTimeout> }>();
+  /** This link's surface instance id. */
+  readonly sid = newInstanceId();
 
   constructor(private readonly deps: PilotLinkDeps) {}
 
@@ -73,18 +86,25 @@ export class PilotActionLink {
         resolve({ ok: false, err: "no response" });
       }, ACTION_TIMEOUT_MS);
       this.pending.set(id, { resolve, timer });
-      socket.send(JSON.stringify({ op: "action", name, src: PILOT_SRC, id }));
+      this.frame({ op: "action", name, id });
     });
   }
 
-  /** Close the link for good: pending actions answer "no pilot link". */
+  /** Close the link for good, saying `bye`: pending actions answer "no
+   *  pilot link". */
   close(): void {
     this.closed = true;
+    this.frame({ op: "bye" });
     clearInterval(this.hb ?? undefined);
     clearTimeout(this.redial ?? undefined);
     this.socket?.close();
     this.socket = null;
     this.failPending("no pilot link");
+  }
+
+  /** Send one frame with this surface's name and instance id, if open. */
+  private frame(f: Record<string, unknown>): void {
+    if (this.socket?.readyState === OPEN) this.socket.send(JSON.stringify({ ...f, src: PILOT_SRC, sid: this.sid }));
   }
 
   /** The open socket, dialling it when there is none. */
@@ -123,9 +143,7 @@ export class PilotActionLink {
       socket.onopen = () => {
         clearTimeout(timer);
         clearInterval(this.hb ?? undefined);
-        this.hb = setInterval(() => {
-          if (this.socket?.readyState === OPEN) this.socket.send(JSON.stringify({ op: "hb", src: PILOT_SRC }));
-        }, PILOT_HB_MS);
+        this.hb = setInterval(() => this.frame({ op: "hb" }), PILOT_HB_MS);
         resolve(socket);
       };
     });
@@ -159,10 +177,14 @@ let link: PilotActionLink | null = null;
 
 /** Send a pilot action over the page's pilot link (opened on first use). */
 export function sendPilotAction(name: string): Promise<ActionResult> {
-  link ??= new PilotActionLink({
-    dial: (url, protocols) => new WebSocket(url, protocols) as unknown as SocketLike,
-    ticket: () => mintWsTicket(PILOT_STREAM_SCOPE),
-    url: () => `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${PILOT_STREAM_PATH}`,
-  });
+  if (!link) {
+    link = new PilotActionLink({
+      dial: (url, protocols) => new WebSocket(url, protocols) as unknown as SocketLike,
+      ticket: () => mintWsTicket(PILOT_STREAM_SCOPE),
+      url: () => `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${PILOT_STREAM_PATH}`,
+    });
+    const page = link;
+    window.addEventListener("pagehide", () => page.close(), { once: true });
+  }
   return link.send(name);
 }

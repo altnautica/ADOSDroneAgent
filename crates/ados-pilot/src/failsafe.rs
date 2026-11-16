@@ -19,11 +19,13 @@ pub struct Failsafe {
     /// Each operator instance's own timer, watched with no RC transmitter
     /// ([`crate::link_watch`]). Fed alongside the shared timer.
     pub instances: crate::link_watch::Instances,
-    /// An RC receiver fed the FC since the pilot connected to it: with no RC
-    /// transmitter declared, a bound receiver blocks arming (an RC mode
-    /// switch could put the FC in a mode whose RC loss nothing catches).
-    /// Never reset on disarm.
+    /// An RC receiver fed the FC since the pilot connected to it or the FC
+    /// last rebooted: with no RC transmitter declared, a bound receiver
+    /// blocks arming (an RC mode switch could put the FC in a mode whose RC
+    /// loss nothing catches). Never reset on disarm.
     pub rc_seen: bool,
+    /// The FC boot epoch `rc_seen` belongs to ([`crate::fc::FcState::boot_epoch`]).
+    pub rc_seen_epoch: u32,
 }
 
 impl Failsafe {
