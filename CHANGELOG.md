@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.118.0] - 2026-11-16
+
 ### Added
 
 - Pilot: the pilot frame (the nav `pilot` kind and the `pilot.v1` state message) carries `command`, what the pilot flew on its latest control tick of a skill goal or a goto: the skill's own goal, the point the goal aims at, the horizontal velocity asked before any limit (the goal's feed-forward plus the pilot's pull toward its point, or the velocity a goal commands), the velocity the setpoint asks of the flight controller (the setpoint's velocity plus the position-loop pull toward its position, that pull held so the sum stays within the goal's speed limit), the setpoint's velocity and horizontal acceleration (`sp_acc_ne`), the goal's speed limit, every limit that changed the asked velocity on any tick since the previous frame (`speed`, `nav_cap`, `shaper`, `hard_stop`, `obstacle`, `obstacle_closing`, `seen_space`, `clearance`, `push`, `subject`, `geofence`, `hold`; the speed limit that bound first, so `nav_cap` leads when a speed cap, GNSS-denied or confined, is below the goal's own limit, then the rest in the order applied) and every hold reason in force on those ticks (`hold_reasons`). While the pilot holds, the aim point, the asked velocity and the speed limit are kept, so asked against commanded shows the hold. Positions and velocities are in the flight controller's local NED (`frame: fc_local_ned`). Omitted while the pilot flies no goal. In `ados-protocol`: `PilotCommand`, `COMMAND_LIMITS` and `FRAME_FC_LOCAL_NED`.
