@@ -334,3 +334,67 @@ fn a_sigma_step_in_flight_never_holds_a_leg_the_match_keeps_clear() {
     );
     assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
 }
+
+/// The narrow of `a_sigma_step_in_flight_never_holds_a_leg_the_match_keeps_clear`,
+/// mapped at σ 0.1 (base 0.05), the vehicle in AUTO at `n` toward `item`.
+fn narrow_mapped(n: f32, item: u32) -> World {
+    let narrow = |n: f32, e: f32| (15.0..16.0).contains(&n) && bore(n, e);
+    let mut w = World::new();
+    confined(&mut w);
+    w.airborne(crate::modes::copter::AUTO);
+    w.pos = [n, 0.0, -5.0];
+    pose(&mut w, 0.05);
+    w.run(100);
+    route(&mut w, "active", item, &LINE);
+    for _ in 0..3 {
+        payload_then(&mut w, &area(&|_, _| false), 0.1);
+    }
+    for _ in 0..3 {
+        payload_then(&mut w, &area(&narrow), 0.1);
+    }
+    assert_eq!(check(&w).state, RouteState::Feasible, "{:?}", check(&w));
+    w
+}
+
+#[test]
+fn a_pinch_within_the_stopping_reach_holds_at_once_while_sigma_settles() {
+    // Just short of the narrow: under the whole σ its tight stretch is
+    // within the stopping reach, so the settle window does not delay the hold.
+    let mut w = narrow_mapped(13.6, 3);
+    let brakes = w.set_modes(crate::modes::copter::BRAKE);
+    for _ in 0..2 {
+        pose(&mut w, 0.11);
+        w.run(100);
+    }
+    assert_eq!(w.set_modes(crate::modes::copter::BRAKE), brakes + 1);
+    assert_eq!(
+        w.p.state(w.now).hold_reason.as_deref(),
+        Some("route-infeasible")
+    );
+}
+
+#[test]
+fn a_leg_still_tight_once_sigma_settles_holds_on_the_first_settled_check() {
+    // σ 0.1 → 0.2 with the narrow beyond the stopping reach: no hold while
+    // σ settles, then the first settled check still reads it tight and holds
+    // at once (its verdict has stood longer than the confirm time).
+    let mut w = narrow_mapped(9.0, 2);
+    let brakes = w.set_modes(crate::modes::copter::BRAKE);
+    pose(&mut w, 0.2);
+    let rose = w.now;
+    while w.now < rose + 1900 {
+        w.run(100);
+        pose(&mut w, 0.2);
+    }
+    assert_eq!(w.set_modes(crate::modes::copter::BRAKE), brakes, "settling");
+    assert_eq!(check(&w).state, RouteState::Infeasible, "{:?}", check(&w));
+    while w.now < rose + 2000 + 1100 {
+        w.run(100);
+        pose(&mut w, 0.2);
+    }
+    assert_eq!(w.set_modes(crate::modes::copter::BRAKE), brakes + 1);
+    assert_eq!(
+        w.p.state(w.now).hold_reason.as_deref(),
+        Some("route-infeasible")
+    );
+}

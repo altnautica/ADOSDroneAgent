@@ -55,8 +55,8 @@ pub struct Bar {
     pub sigma: Option<f32>,
     /// The least σ the pose has published; `None` while no match holds the
     /// pose to the map (a pose the matcher calls lost, a position the pilot
-    /// does not vouch for, σ risen within the settle time): every obstacle
-    /// then needs the whole σ.
+    /// does not vouch for, σ risen within the settle time, σ at the
+    /// matcher's cap): every obstacle then needs the whole σ.
     pub base: Option<f32>,
 }
 
