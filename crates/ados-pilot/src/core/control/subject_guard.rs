@@ -1,8 +1,12 @@
 //! The subject brake: the subject a skill's goal names (`subject_ne`) is a
-//! person on the ground, and the pilot keeps the vehicle clear of them at
-//! the profile's stick acceleration whatever the skill asks. It needs no
-//! obstacle sensor, so it holds with avoidance off too. While the subject is
-//! near, the vehicle also climbs to fly clear over them.
+//! person on the ground, and the pilot keeps the vehicle clear of them
+//! whatever the skill asks. Like the obstacle brake it has two tiers: a soft
+//! one on the goal profile's acceleration slows what the goal asks before
+//! the shaper ([`Pilot::subject_soft`]), and a hard one on the profile's
+//! stick acceleration cuts what the shaper flies when the subject closes
+//! faster than the goal profile can slow ([`Pilot::subject_cut`]). It needs
+//! no obstacle sensor, so it holds with avoidance off too. While the subject
+//! is near, the vehicle also climbs to fly clear over them.
 
 use ados_protocol::pilot::{AvoidState, Owner};
 
@@ -31,6 +35,15 @@ pub const SUBJECT_PUSH_PER_S: f32 = 1.0;
 pub const SUBJECT_VEL_SMOOTH_S: f32 = 0.5;
 /// Goals further apart than this give no velocity: it restarts from zero.
 const SUBJECT_VEL_GAP_MS: u64 = 500;
+/// A subject stepping faster than this between goals, m/s, is no person
+/// moving but a new subject (a re-designation or a re-acquisition): it is
+/// named afresh, its velocity restarting from zero.
+pub const SUBJECT_JUMP_MPS: f32 = 8.0;
+/// No braking for the subject, soft or hard, until this long after it is
+/// named (its first goal after none, a restart of its velocity, a step
+/// faster than [`SUBJECT_JUMP_MPS`], a new lease or owner): the tracker's
+/// acquisition settles first. The climb clear does not wait.
+pub const SUBJECT_ARM_MS: u64 = 3000;
 /// The vehicle climbs clear once the subject is within this of the kept
 /// distance, metres.
 pub const SUBJECT_CLIMB_ZONE_M: f32 = 3.0;
@@ -43,22 +56,25 @@ pub const SUBJECT_CLEAR_M: f32 = 1.0;
 
 /// What the pilot keeps of the subject across ticks: the lease whose goals
 /// named it, the latest subject and its goal's arrival, its smoothed
-/// velocity, and whether the vehicle is climbing clear.
+/// velocity, when it was named, and whether the vehicle is climbing clear.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SubjectTrack {
     lease_id: Option<u64>,
     last: Option<(V2, u64)>,
     vel: V2,
+    named_ms: u64,
     climbing: bool,
 }
 
 /// One tick's subject: where it is, the horizontal distance kept from it
-/// (centre to the vehicle's CG), and its velocity.
+/// (centre to the vehicle's CG), its velocity, and whether the brake is
+/// armed ([`SUBJECT_ARM_MS`]).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Subject {
     pub ne: V2,
     pub keep: f32,
     pub vel: V2,
+    pub armed: bool,
 }
 
 impl Pilot {
@@ -90,11 +106,16 @@ impl Pilot {
                 ..SubjectTrack::default()
             };
         }
-        match t.last {
-            Some((_, prev_ms)) if at_ms == prev_ms => {}
+        let raw = match t.last {
             Some((prev, prev_ms)) if at_ms > prev_ms && at_ms - prev_ms <= SUBJECT_VEL_GAP_MS => {
                 let dt = (at_ms - prev_ms) as f32 / 1000.0;
-                let raw = geo::scale(geo::sub(ne, prev), 1.0 / dt);
+                Some((geo::scale(geo::sub(ne, prev), 1.0 / dt), dt))
+            }
+            _ => None,
+        };
+        match (t.last, raw) {
+            (Some((_, prev_ms)), _) if at_ms == prev_ms => {}
+            (_, Some((raw, dt))) if geo::norm(raw) <= SUBJECT_JUMP_MPS => {
                 let k = (dt / SUBJECT_VEL_SMOOTH_S).min(1.0);
                 t.vel = geo::add(t.vel, geo::scale(geo::sub(raw, t.vel), k));
                 t.last = Some((ne, at_ms));
@@ -102,8 +123,10 @@ impl Pilot {
             _ => {
                 t.vel = [0.0, 0.0];
                 t.last = Some((ne, at_ms));
+                t.named_ms = at_ms;
             }
         }
+        let armed = now_ms >= t.named_ms + SUBJECT_ARM_MS;
         let body = self.settings.pilot.body_radius_m();
         let keep = SUBJECT_BODY_RADIUS_M
             + body
@@ -123,32 +146,24 @@ impl Pilot {
         } else {
             None
         };
-        Some((Subject { ne, keep, vel }, floor_d))
+        let subject = Subject {
+            ne,
+            keep,
+            vel,
+            armed,
+        };
+        Some((subject, floor_d))
     }
 
-    /// The subject brake on a goal setpoint flown from `pos`: `ask` is what
-    /// the FC would fly (the shaped velocity `v` plus its position loop's
-    /// pull). Along the line to the subject, both are held relative to the
-    /// subject's own speed along it, as the obstacle brake holds a closing
-    /// speed: outside [`Subject::keep`], to the subject's speed away (an
-    /// approach counts against) plus what still stops the closing between
-    /// them that far short of it, after the FC's lag, at the profile's stick
-    /// acceleration ([`stop_cap`]); inside it, to backing away at the
+    /// The direction from `pos` to the subject and the most a velocity may
+    /// go along it, held relative to the subject's own speed along it as
+    /// the obstacle brake holds a closing speed: outside [`Subject::keep`],
+    /// the subject's speed away (an approach counts against) plus what
+    /// still stops the closing between them that far short of it, after the
+    /// FC's lag, at `a` ([`stop_cap`]); inside it, backing away at the
     /// subject's approach (no credit for it walking away) plus
-    /// [`SUBJECT_PUSH_PER_S`] per metre inside. When either breaks the
-    /// cap, `ask` with its motion toward the subject cut to the cap is
-    /// returned, to fly from where the vehicle is: its sideways part is kept
-    /// within `v_cap` (the vehicle slides round the subject), its motion
-    /// away never is; with whether `v_cap` cut the slide.
-    pub(super) fn subject_cut(
-        &mut self,
-        s: &Subject,
-        pos: V2,
-        ask: V2,
-        v: V2,
-        v_cap: f32,
-        now_ms: u64,
-    ) -> Option<(V2, bool)> {
+    /// [`SUBJECT_PUSH_PER_S`] per metre inside.
+    fn subject_cap(&self, s: &Subject, pos: V2, a: f32, now_ms: u64) -> (V2, f32) {
         let vel = self
             .fc
             .fresh_local(now_ms)
@@ -166,19 +181,71 @@ impl Pilot {
         let s_u = geo::dot(s.vel, u);
         let cap = if d > s.keep {
             let closing = (geo::dot(vel, u) - s_u).max(0.0);
-            s_u + stop_cap(d, closing, self.limits_now(now_ms).a_h, s.keep)
+            s_u + stop_cap(d, closing, a, s.keep)
         } else {
             s_u.min(0.0) - SUBJECT_PUSH_PER_S * (s.keep - d)
         };
-        let toward = geo::dot(ask, u);
-        if toward <= cap && geo::dot(v, u) <= cap {
+        (u, cap)
+    }
+
+    /// The soft tier, before the shaper: what a goal asks (`want`, within
+    /// `v_cap`) held to the subject cap ([`Pilot::subject_cap`]) at the goal
+    /// limits' acceleration `a_h`, so the shaped velocity slows for the
+    /// subject on the goal profile, well before the hard tier would have to
+    /// cut it. `None` while unarmed or when nothing is cut.
+    pub(super) fn subject_soft(
+        &mut self,
+        s: &Subject,
+        pos: V2,
+        want: V2,
+        a_h: f32,
+        v_cap: f32,
+        now_ms: u64,
+    ) -> Option<V2> {
+        if !s.armed {
             return None;
         }
-        let along = toward.min(cap).min(v_cap);
-        let side = geo::sub(ask, geo::scale(u, toward));
-        let room = (v_cap * v_cap - along * along).max(0.0).sqrt();
-        let capped = geo::norm(side) > room + 1e-3;
-        let cut = geo::add(geo::scale(u, along), geo::clamp_len(side, room));
+        let (u, cap) = self.subject_cap(s, pos, a_h, now_ms);
+        if geo::dot(want, u) <= cap {
+            return None;
+        }
+        let (held, _) = hold_along(want, u, cap, v_cap);
+        // As the obstacle brake's soft tier: the avoid state says the brake
+        // slowed the goal.
+        self.brake_avoid = if progress(want, held) < STOPPED_MPS {
+            AvoidState::Blocked
+        } else {
+            AvoidState::Detour
+        };
+        Some(held)
+    }
+
+    /// The hard tier, a safety cut on a goal setpoint flown from `pos`:
+    /// `ask` is what the FC would fly (the shaped velocity `v` plus its
+    /// position loop's pull). Both are held to the subject cap
+    /// ([`Pilot::subject_cap`]) at the profile's stick acceleration. When
+    /// either breaks it, `ask` with its motion toward the subject cut to the
+    /// cap is returned, to fly from where the vehicle is: its sideways part
+    /// is kept within `v_cap` (the vehicle slides round the subject), its
+    /// motion away never is; with whether `v_cap` cut the slide. `None`
+    /// while unarmed or when nothing is cut.
+    pub(super) fn subject_cut(
+        &mut self,
+        s: &Subject,
+        pos: V2,
+        ask: V2,
+        v: V2,
+        v_cap: f32,
+        now_ms: u64,
+    ) -> Option<(V2, bool)> {
+        if !s.armed {
+            return None;
+        }
+        let (u, cap) = self.subject_cap(s, pos, self.limits_now(now_ms).a_h, now_ms);
+        if geo::dot(ask, u) <= cap && geo::dot(v, u) <= cap {
+            return None;
+        }
+        let (cut, capped) = hold_along(ask, u, cap, v_cap);
         self.brake_avoid = if progress(ask, cut) < STOPPED_MPS {
             AvoidState::Blocked
         } else {
@@ -186,4 +253,19 @@ impl Pilot {
         };
         Some((cut, capped))
     }
+}
+
+/// `v` with its part along `u` held to at most `cap` (and `v_cap` toward),
+/// its sideways part kept within what `v_cap` leaves; motion away along `u`
+/// is never cut. With whether `v_cap` cut the sideways part.
+fn hold_along(v: V2, u: V2, cap: f32, v_cap: f32) -> (V2, bool) {
+    let toward = geo::dot(v, u);
+    let along = toward.min(cap).min(v_cap);
+    let side = geo::sub(v, geo::scale(u, toward));
+    let room = (v_cap * v_cap - along * along).max(0.0).sqrt();
+    let capped = geo::norm(side) > room + 1e-3;
+    (
+        geo::add(geo::scale(u, along), geo::clamp_len(side, room)),
+        capped,
+    )
 }

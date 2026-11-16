@@ -1,12 +1,14 @@
 //! The subject brake: the subject a skill's goal names (`subject_ne`) is a
-//! person the vehicle keeps clear of at the profile's stick acceleration,
-//! whatever the skill commands, and climbs clear over while near. With
-//! avoidance off: the brake needs no obstacle sensor.
+//! person the vehicle keeps clear of whatever the skill commands, slowing
+//! for them on the goal profile and cut at the profile's stick acceleration
+//! when that is not enough, once the subject has been named for 3 s; and it
+//! climbs clear over them while near. With avoidance off: the brake needs no
+//! obstacle sensor.
 
 use ados_protocol::pilot::{Goal, GoalKind, Request, VelMode};
 
 use super::harness::World;
-use super::shaping::{fly_for, flying};
+use super::shaping::{fly_for, flying, peak_acc_jerk, A_MAX, JERK};
 use crate::core::control::stop_cap;
 
 /// The distance kept from the subject with no sigma, centre to CG: its
@@ -15,6 +17,8 @@ const KEEP: f32 = 1.3;
 /// The climb floor above ground: the 2 m body, the vehicle's 0.4 m and the
 /// 1 m clearance over it.
 const FLOOR_AGL: f32 = 3.4;
+/// How long after a subject is named the brake holds off, ms.
+const ARM_MS: u64 = 3000;
 
 /// A follow goal commanding `vn` north at height `d` (NED), naming
 /// `subject`.
@@ -48,42 +52,82 @@ fn limits(w: &World) -> Vec<String> {
         .collect()
 }
 
-/// Flying a commanded 2 m/s north, the goal names its subject 3 m ahead.
-/// The setpoint's speed toward it is cut at once to what still stops
-/// outside the kept distance at the stick acceleration, and the vehicle
-/// never comes inside it. Before, the pilot flew the 2 m/s into them.
-#[test]
-fn a_command_straight_at_the_subject_is_held_to_the_stop_cap() {
+fn subject_cut(w: &World) -> bool {
+    limits(w).contains(&"subject".to_owned())
+}
+
+/// A world flying with a subject standing `dist` m north, named and held
+/// still until the arming delay is all but over: the next tick is armed.
+fn armed_at(dist: f32) -> (World, u64, [f32; 2]) {
     let (mut w, id) = flying();
-    fly_for(&mut w, id, 5_000, |_, _| follow(2.0, None, -5.0));
-    assert!((w.vel[0] - 2.0).abs() < 0.02, "cruising {:.2}", w.vel[0]);
-    let subject = [w.pos[0] + 3.0, w.pos[1]];
+    let subject = [w.pos[0] + dist, w.pos[1]];
+    fly_for(&mut w, id, ARM_MS - 20, |_, _| {
+        follow(0.0, Some(subject), -5.0)
+    });
+    assert!(w.vel[0].abs() < 1e-3, "moved before armed");
+    (w, id, subject)
+}
+
+/// A commanded 2 m/s straight at a standing subject 14 m ahead: on every
+/// tick the setpoint's speed toward them stays within what still stops
+/// outside the kept distance at the stick acceleration, and the vehicle
+/// stops outside it. Before, the pilot flew the 2 m/s into them.
+#[test]
+fn a_command_straight_at_the_subject_stops_outside_the_kept_distance() {
+    let (mut w, id, subject) = armed_at(14.0);
     let a_h = w.p.limits_now(w.now).a_h;
-    let cap = stop_cap(3.0, w.vel[0], a_h, KEEP);
-    send(&mut w, id, follow(2.0, Some(subject), -5.0));
-    w.run(20);
-    let (v, _) = setpoint(&w);
-    assert!(
-        v[0] <= cap + 1e-3,
-        "toward the subject {:.2} > cap {cap:.2}",
-        v[0]
-    );
-    assert!(v[0] < 1.9, "toward the subject {:.2}", v[0]);
-    assert!(
-        limits(&w).contains(&"subject".to_owned()),
-        "{:?}",
-        limits(&w)
-    );
     let mut nearest = f32::INFINITY;
+    let mut braked = false;
     let t0 = w.now;
-    while w.now < t0 + 5_000 {
+    while w.now < t0 + 12_000 {
         if (w.now - t0).is_multiple_of(100) {
             send(&mut w, id, follow(2.0, Some(subject), -5.0));
         }
+        let (d, closing) = (subject[0] - w.pos[0], w.vel[0]);
         w.run(20);
-        nearest = nearest.min((subject[0] - w.pos[0]).hypot(subject[1] - w.pos[1]));
+        let (v, _) = setpoint(&w);
+        let cap = stop_cap(d, closing, a_h, KEEP);
+        assert!(
+            v[0] <= cap + 1e-3,
+            "{d:.2} m off: {:.2} m/s toward, the stick stop allows {cap:.2}",
+            v[0]
+        );
+        braked |= subject_cut(&w);
+        nearest = nearest.min(subject[0] - w.pos[0]);
     }
+    assert!(braked, "never braked for the subject");
     assert!(nearest >= KEEP, "came within {nearest:.2} m of the subject");
+    assert!(w.vel[0].abs() < 0.05, "still flying {:.2} m/s", w.vel[0]);
+}
+
+/// The same approach is slowed by the soft tier on the goal profile: the
+/// flown velocity keeps the goal acceleration and jerk all the way to the
+/// stop, so the hard tier never steps it (a step would be a tilt).
+#[test]
+fn a_subject_approached_on_the_goal_profile_is_slowed_without_a_cut() {
+    let (mut w, id, subject) = armed_at(14.0);
+    let mut gaps = Vec::new();
+    let v = fly_for(&mut w, id, 12_000, |w, _| {
+        gaps.push(subject[0] - w.pos[0]);
+        follow(2.0, Some(subject), -5.0)
+    });
+    let (a, j) = peak_acc_jerk(&v);
+    let worst = v
+        .windows(2)
+        .enumerate()
+        .max_by(|x, y| {
+            let dv = |p: &[[f32; 2]]| (p[1][0] - p[0][0]).abs();
+            dv(x.1).total_cmp(&dv(y.1))
+        })
+        .map(|(i, p)| (i, p[0][0], p[1][0], gaps[(i + 1) / 5]));
+    assert!(
+        a <= A_MAX + 0.05,
+        "peak acceleration {a:.2} m/s² at {worst:?}"
+    );
+    assert!(j <= JERK + 0.1, "peak jerk {j:.2} m/s³");
+    let gap = subject[0] - w.pos[0];
+    assert!(gap >= KEEP, "stopped {gap:.2} m off");
+    assert!(w.vel[0].abs() < 0.05, "still flying {:.2} m/s", w.vel[0]);
 }
 
 /// The subject 1 m away, inside the kept 1.3 m: whether the skill
@@ -92,8 +136,7 @@ fn a_command_straight_at_the_subject_is_held_to_the_stop_cap() {
 #[test]
 fn inside_the_kept_distance_the_vehicle_backs_away() {
     for vn in [0.0, 1.0] {
-        let (mut w, id) = flying();
-        let subject = [w.pos[0] + 1.0, w.pos[1]];
+        let (mut w, id, subject) = armed_at(1.0);
         send(&mut w, id, follow(vn, Some(subject), -5.0));
         w.run(20);
         let (v, _) = setpoint(&w);
@@ -102,12 +145,72 @@ fn inside_the_kept_distance_the_vehicle_backs_away() {
             "asked {vn}: setpoint {:.2} m/s toward the subject",
             v[0]
         );
-        assert!(
-            limits(&w).contains(&"subject".to_owned()),
-            "{:?}",
-            limits(&w)
-        );
+        assert!(subject_cut(&w), "{:?}", limits(&w));
     }
+}
+
+/// For 3 s after a subject is first named, and again after its goals
+/// stopped for more than 0.5 s, the brake holds off: a subject named 1 m
+/// away is not pushed from until then.
+#[test]
+fn the_brake_waits_three_seconds_after_the_subject_is_named() {
+    let (mut w, id) = flying();
+    let subject = [w.pos[0] + 1.0, w.pos[1]];
+    let hold = |w: &mut World, ms: u64| {
+        let t0 = w.now;
+        while w.now < t0 + ms {
+            if (w.now - t0).is_multiple_of(100) {
+                send(w, id, follow(0.0, Some(subject), -5.0));
+            }
+            w.run(20);
+            assert!(!subject_cut(w), "braked {} ms after naming", w.now - t0);
+            assert!(setpoint(w).0[0].abs() < 1e-3, "moved");
+        }
+    };
+    hold(&mut w, ARM_MS - 100);
+    fly_for(&mut w, id, 300, |_, _| follow(0.0, Some(subject), -5.0));
+    assert!(setpoint(&w).0[0] < -0.1, "not backing away once armed");
+    assert!(subject_cut(&w));
+    // The goals stop for 0.6 s: the subject's velocity restarts, and with
+    // it the wait.
+    w.run(600);
+    w.vel = [0.0; 3];
+    let subject = [w.pos[0] + 1.0, w.pos[1]];
+    let t0 = w.now;
+    while w.now < t0 + ARM_MS - 200 {
+        if (w.now - t0).is_multiple_of(100) {
+            send(&mut w, id, follow(0.0, Some(subject), -5.0));
+        }
+        w.run(20);
+        assert!(!subject_cut(&w), "braked {} ms after the gap", w.now - t0);
+    }
+}
+
+/// A subject that steps faster than 8 m/s between goals (a re-designation
+/// or a re-acquisition) is a new subject: no velocity is read from the
+/// step, and the brake waits 3 s again. Read as motion, the 5 m step onto
+/// the vehicle would have backed it away at metres per second.
+#[test]
+fn a_subject_jump_is_named_afresh() {
+    let (mut w, id, _) = armed_at(6.0);
+    let near = [w.pos[0] + 1.0, w.pos[1]];
+    let t0 = w.now;
+    while w.now < t0 + ARM_MS - 100 {
+        if (w.now - t0).is_multiple_of(100) {
+            send(&mut w, id, follow(0.0, Some(near), -5.0));
+        }
+        w.run(20);
+        assert!(!subject_cut(&w), "braked {} ms after the jump", w.now - t0);
+        assert!(setpoint(&w).0[0].abs() < 1e-3, "moved after the jump");
+    }
+    fly_for(&mut w, id, 120, |_, _| follow(0.0, Some(near), -5.0));
+    let v = setpoint(&w).0[0];
+    // Armed again: the push from 0.3 m inside, and no approach read.
+    assert!(
+        (-0.35..=-0.28).contains(&v),
+        "backing away at {:.2} m/s",
+        -v
+    );
 }
 
 /// A subject walking at 1.5 m/s onto a vehicle commanded to stay: the
@@ -118,12 +221,12 @@ fn inside_the_kept_distance_the_vehicle_backs_away() {
 fn a_subject_coming_on_is_kept_clear_of() {
     const WALK: f32 = 1.5;
     let (mut w, id) = flying();
-    let start = w.pos[0] + 6.0;
+    let start = w.pos[0] + 9.0;
     let mut subject = [start, w.pos[1]];
     let mut nearest = f32::INFINITY;
     let mut retreat_from = None;
     let t0 = w.now;
-    while w.now < t0 + 8_000 {
+    while w.now < t0 + 10_000 {
         let t = (w.now - t0) as f32 / 1000.0;
         if (w.now - t0).is_multiple_of(100) {
             subject = [start - WALK * t, w.pos[1]];
@@ -133,14 +236,14 @@ fn a_subject_coming_on_is_kept_clear_of() {
         w.run(20);
         nearest = nearest.min(d);
         let (v, _) = setpoint(&w);
-        if t > 3.0 && d < KEEP {
+        if t > 4.5 && d < KEEP {
             assert!(
                 v[0] <= -WALK + 1e-2,
                 "inside at {d:.2} m backing away at only {:.2} m/s",
                 -v[0]
             );
         }
-        if t >= 6.0 && retreat_from.is_none() {
+        if t >= 8.0 && retreat_from.is_none() {
             retreat_from = Some(w.pos[0]);
         }
     }
@@ -159,12 +262,17 @@ fn the_subject_sigma_widens_the_kept_distance() {
     for (sigma, inside) in [(1.0, true), (0.0, false)] {
         let (mut w, id) = flying();
         let subject = [w.pos[0] + 2.5, w.pos[1]];
-        let mut g = follow(0.0, Some(subject), -5.0);
-        g.subject_sigma_m = Some(sigma);
-        send(&mut w, id, g);
+        let goal = move || {
+            let mut g = follow(0.0, Some(subject), -5.0);
+            g.subject_sigma_m = Some(sigma);
+            g
+        };
+        fly_for(&mut w, id, ARM_MS - 20, |_, _| goal());
+        assert!(setpoint(&w).0[0].abs() < 1e-3, "moved before armed");
+        send(&mut w, id, goal());
         w.run(20);
         let (v, _) = setpoint(&w);
-        let cut = limits(&w).contains(&"subject".to_owned());
+        let cut = subject_cut(&w);
         if inside {
             // Kept 1.3 + 1.5 m: 0.3 m inside.
             assert!(v[0] <= -0.3 + 1e-3, "sigma {sigma}: {:.2} m/s", v[0]);
@@ -180,8 +288,9 @@ fn the_subject_sigma_widens_the_kept_distance() {
 /// (3 m beyond the kept distance) the setpoint climbs to 3.4 m, the
 /// vehicle's extent 1 m over a 2 m person, and holds it until the subject
 /// is a further 1 m off. A subject far off, or a goal that names none,
-/// leaves the height asked. Each move of the subject comes after a gap in
-/// the goals, so it reads as no velocity.
+/// leaves the height asked. The climb does not wait for the brake to arm.
+/// Each move of the subject comes after a gap in the goals, so it reads as
+/// no velocity.
 #[test]
 fn near_the_subject_the_vehicle_climbs_clear() {
     let (mut w, id) = flying();
@@ -222,21 +331,22 @@ fn a_goal_without_a_subject_is_unchanged() {
     let (v, d) = setpoint(&w);
     assert!((v[0] - 2.0).abs() < 0.02, "flying {:.2}", v[0]);
     assert!((d + 1.5).abs() < 0.01, "d {d:.2}");
-    assert!(!limits(&w).contains(&"subject".to_owned()));
+    assert!(!subject_cut(&w));
 }
 
 /// Following a subject who walks away at 1.4 m/s, settling 3 m behind
-/// them from 6 m: the vehicle closes on the subject's own pace plus its
-/// catch-up, and the brake judges only that relative closing, so it never
-/// cuts. A brake on the vehicle's own speed alone cut each catch-up.
+/// them from 6 m: the brake judges only the closing between them, so the
+/// catch-up flies on the goal profile with no cut, and the settled follow
+/// is not braked at all.
 #[test]
 fn following_a_subject_walking_away_is_not_cut() {
     const WALK: f32 = 1.4;
     let (mut w, id) = flying();
     let start = w.pos[0] + 6.0;
-    let mut cut = Vec::new();
+    let mut braked_late = Vec::new();
+    let mut v = Vec::new();
     let t0 = w.now;
-    while w.now < t0 + 12_000 {
+    while w.now < t0 + 14_000 {
         if (w.now - t0).is_multiple_of(100) {
             let s = start + WALK * (w.now - t0) as f32 / 1000.0;
             let mut g = Goal::new(GoalKind::Follow, [s - 3.0, 0.0, -5.0], 6.0);
@@ -245,11 +355,15 @@ fn following_a_subject_walking_away_is_not_cut() {
             send(&mut w, id, g);
         }
         w.run(20);
-        if limits(&w).contains(&"subject".to_owned()) {
-            cut.push((w.now - t0) as f32 / 1000.0);
+        v.push([w.vel[0], w.vel[1]]);
+        if w.now - t0 > 8_000 && subject_cut(&w) {
+            braked_late.push((w.now - t0) as f32 / 1000.0);
         }
     }
-    assert!(cut.is_empty(), "cut at {cut:?} s");
+    let (a, j) = peak_acc_jerk(&v);
+    assert!(a <= A_MAX + 0.05, "peak acceleration {a:.2} m/s²");
+    assert!(j <= JERK + 0.1, "peak jerk {j:.2} m/s³");
+    assert!(braked_late.is_empty(), "braked at {braked_late:?} s");
     let s = start + WALK * (w.now - t0) as f32 / 1000.0;
     let gap = s - w.pos[0];
     assert!((gap - 3.0).abs() < 0.3, "{gap:.2} m behind");

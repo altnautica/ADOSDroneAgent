@@ -294,13 +294,15 @@ impl Pilot {
         self.mav(m);
     }
 
-    /// One shaped tick toward `want`: the brake's caps at the goal
-    /// acceleration slow it first ([`Pilot::soft_brake`]), the shaper holds
-    /// its acceleration and jerk, then the safety limits cut what it flies
-    /// at once: the speed cap, the obstacle brake on the profile's stick
-    /// acceleration ([`Pilot::goal_brake`]), the subject brake on the same
-    /// acceleration ([`Pilot::subject_cut`]) and the geofence. Moves the
-    /// reference point on the velocity flown and returns that velocity.
+    /// One shaped tick toward `want`: the brakes' caps at the goal
+    /// acceleration slow it first (the obstacle brake's
+    /// [`Pilot::soft_brake`], the subject brake's [`Pilot::subject_soft`]),
+    /// the shaper holds its acceleration and jerk, then the safety limits
+    /// cut what it flies at once: the speed cap, the obstacle brake on the
+    /// profile's stick acceleration ([`Pilot::goal_brake`]), the subject
+    /// brake on the same acceleration ([`Pilot::subject_cut`]) and the
+    /// geofence. Moves the reference point on the velocity flown and returns
+    /// that velocity.
     fn fly_shaped(
         &mut self,
         r: &mut GoalRef,
@@ -315,8 +317,14 @@ impl Pilot {
             r.ask,
             geo::scale(geo::sub(want, r.ask), (s.dt / ASK_SMOOTH_S).min(1.0)),
         );
-        let (want, by) = self.soft_brake(s.pos, r.ask, s.gl.a_h, now_ms);
+        let (mut want, by) = self.soft_brake(s.pos, r.ask, s.gl.a_h, now_ms);
         *limits |= by;
+        if let Some(subject) = &s.subject {
+            if let Some(held) = self.subject_soft(subject, s.pos, want, s.gl.a_h, s.v_cap, now_ms) {
+                *limits |= limit::SUBJECT;
+                want = held;
+            }
+        }
         let mut v = r.sh.track(want, s.gl.a_h, s.gl.jerk, s.dt);
         if geo::dist(v, want) > SHAPER_REPORT_MPS {
             *limits |= limit::SHAPER;
