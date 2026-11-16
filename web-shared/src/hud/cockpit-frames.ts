@@ -126,6 +126,43 @@ export interface ReadinessItem {
   msg: string;
 }
 
+export const LIFTOFF_PHASES = ["spool", "level", "probe", "lift", "climb", "done", "stopped"] as const;
+export type LiftoffPhase = (typeof LIFTOFF_PHASES)[number];
+
+/** A steady take-off on an ArduPilot multirotor: its phase, its status
+ *  line ("Spinning up", "Take-off stopped"), the longer line where a surface
+ *  has room ("Climbing to 3 m"; null when the agent sends none), whether it
+ *  loads a learned trim or probes for one, and the tilt from rest. */
+export interface LaunchLiftoff {
+  phase: LiftoffPhase;
+  text: string;
+  detail: string | null;
+  trim: "learned" | "probe" | null;
+  tiltDeg: number | null;
+}
+
+export interface LaunchSequence {
+  step: "checks" | "arm" | "takeoff" | "after" | "done";
+  after: string | null;
+  error: string | null;
+  /** Present while the take-off is a steady take-off; absent from an agent
+   *  without one. */
+  liftoff?: LaunchLiftoff | null;
+}
+
+function parseLiftoff(v: unknown): LaunchLiftoff | null {
+  const o = obj(v);
+  const phase = o ? oneOf(o.phase, LIFTOFF_PHASES) : null;
+  if (!o || !phase) return null;
+  return {
+    phase,
+    text: str(o.text) ?? "",
+    detail: str(o.detail) || null,
+    trim: oneOf(o.trim, ["learned", "probe"] as const),
+    tiltDeg: num(o.tilt_deg),
+  };
+}
+
 export interface PilotState {
   owner: PilotOwner;
   ownerLabel: string | null;
@@ -161,7 +198,7 @@ export interface PilotState {
   mission: MissionState | null;
   inputSession: { src: string; label: string; session: number | null } | null;
   gate: { pending: boolean; progress: number } | null;
-  sequence: { step: "checks" | "arm" | "takeoff" | "after" | "done"; after: string | null; error: string | null } | null;
+  sequence: LaunchSequence | null;
   banner: { textKey: string; args: Record<string, unknown>; untilMs: number | null } | null;
   rthCountdownS: number | null;
   /** A mission or return that stopped making progress; null while none. */
@@ -273,7 +310,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     mission: parseMission(p.mission),
     inputSession: is && str(is.src) !== null ? { src: is.src as string, label: str(is.label) ?? (is.src as string), session: num(is.session) } : null,
     gate: gate ? { pending: gate.pending === true, progress: Math.min(1, Math.max(0, num(gate.progress) ?? 0)) } : null,
-    sequence: seq && seqStep ? { step: seqStep, after: str(seq.after), error: str(seq.error) } : null,
+    sequence: seq && seqStep ? { step: seqStep, after: str(seq.after), error: str(seq.error), liftoff: parseLiftoff(seq.liftoff) } : null,
     banner:
       banner && str(banner.text_key) !== null
         ? { textKey: banner.text_key as string, args: obj(banner.args) ?? {}, untilMs: num(banner.until_ms) }

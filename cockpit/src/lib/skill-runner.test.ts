@@ -7,14 +7,17 @@ import { forgetCommandedModes } from "@/lib/fc-failsafe";
 import { BUILTIN_SKILL_BY_ID, resolveSkillState, type Skill, type SkillContext } from "@/lib/skills";
 import { onToast } from "@/shared/api/toast";
 import { useConfirmStore } from "@/stores/confirm-store";
+import { usePreflightStore } from "@/stores/preflight-store";
+import { LAUNCH } from "@/lib/cockpit-flow";
 
 const ctxNow = vi.hoisted(() => ({ ctx: { fcConnected: true, live: true, armed: true } as SkillContext }));
 vi.mock("@/hooks/use-skill-context", () => ({ skillContextNow: () => ctxNow.ctx }));
 
-const actions = vi.hoisted(() => [] as { name: string; answer: (r: ActionResult) => void }[]);
+const actions = vi.hoisted(() => [] as { name: string; args?: Record<string, unknown>; answer: (r: ActionResult) => void }[]);
 vi.mock("@/lib/pilot-link", () => ({
   // The app's TypeScript lib predates Promise.withResolvers.
-  sendPilotAction: (name: string) => new Promise<ActionResult>((answer) => actions.push({ name, answer })),
+  sendPilotAction: (name: string, args?: Record<string, unknown>) =>
+    new Promise<ActionResult>((answer) => actions.push({ name, args, answer })),
 }));
 const B = BUILTIN_SKILL_BY_ID;
 const pilotCtx: SkillContext = {
@@ -108,6 +111,44 @@ describe("arm and disarm gates on every route", () => {
     ctxNow.ctx = { ...pilotCtx, pilot: { ...pilotCtx.pilot!, landed: true } };
     void executeSkill(B.disarm!);
     expect(actions.map((a) => a.name)).toEqual(["disarm"]);
+  });
+});
+
+describe("take off", () => {
+  const onGround: SkillContext = {
+    ...pilotCtx,
+    armed: false,
+    pilot: { ...pilotCtx.pilot!, armed: false, landed: true },
+  };
+
+  beforeEach(() => {
+    usePreflightStore.setState({ passed: true });
+    ctxNow.ctx = onGround;
+  });
+
+  it("is the pilot's launch to the chosen height, holding there", () => {
+    void executeSkill(B.takeoff!, { altitudeM: 7 });
+    expect(actions.map((a) => [a.name, a.args])).toEqual([["launch", { after: "hold", alt_m: 7 }]]);
+  });
+
+  it("climbs to the launch default when no height was chosen", () => {
+    void executeSkill(B.takeoff!);
+    expect(actions.map((a) => [a.name, a.args])).toEqual([["launch", { after: "hold", alt_m: LAUNCH.altDefaultM }]]);
+  });
+
+  it("sends the height on the command route when no pilot runs", async () => {
+    let sent: unknown;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      sent = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ status: "ok", ack: { observed: true, accepted: true, result: 0, result_name: "ACCEPTED" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    ctxNow.ctx = { fcConnected: true, live: true, armed: false, pilot: null };
+    await executeSkill(B.takeoff!, { altitudeM: 7 });
+    expect(actions).toHaveLength(0);
+    expect(sent).toEqual({ cmd: "takeoff", args: [7] });
   });
 });
 

@@ -129,3 +129,44 @@ describe("the battery failsafe item", () => {
     expect(html).toMatch(/preflight-fix-battery-failsafe"[^>]*min-h-\[40px\]/);
   });
 });
+
+describe("the steady take-off and Balance check rows", () => {
+  afterEach(() => serverPilot(null));
+
+  const NOSE = "Balance: nose-heavy. Off by about 35 mm. Move the battery back.";
+  const SATURATED = specText("readiness.airframe_balance.saturated", { pct: 93 });
+  const OFF = specText("readiness.supervised_liftoff.off");
+  const pilotWith = (readiness: unknown[], armed = false) => parsePilotState({ ...demoPilotData(0), armed, readiness })!;
+
+  it("warns or blocks with the pilot's words, offering I rebalanced it on the airframe balance row", () => {
+    const items = pilotReadinessItems(
+      {
+        data: pilotWith([
+          { id: "airframe_balance", ok: false, severity: "warn", msg: NOSE },
+          { id: "supervised_liftoff", ok: false, severity: "warn", msg: OFF },
+        ]),
+        at: NOW - 200,
+      },
+      NOW,
+    );
+    expect(items).toEqual([
+      { id: "pilot:airframe_balance", label: NOSE, state: "warn", fix: "airframe_reset" },
+      { id: "pilot:supervised_liftoff", label: OFF, state: "warn" },
+    ]);
+    const blocked = pilotReadinessItems({ data: pilotWith([{ id: "airframe_balance", ok: false, severity: "block", msg: SATURATED }]), at: NOW - 200 }, NOW);
+    expect(blocked).toEqual([{ id: "pilot:airframe_balance", label: SATURATED, state: "fail", fix: "airframe_reset" }]);
+    expect(checklistPassable(blocked)).toBe(false);
+  });
+
+  it("offers no reset while armed", () => {
+    const armed = pilotWith([{ id: "airframe_balance", ok: false, severity: "warn", msg: NOSE }], true);
+    expect(pilotReadinessItems({ data: armed, at: NOW - 200 }, NOW)[0].fix).toBeUndefined();
+  });
+
+  it("renders the reset on the checklist", () => {
+    serverPilot({ data: pilotWith([{ id: "airframe_balance", ok: false, severity: "block", msg: SATURATED }]), at: Date.now() - 200 });
+    const html = renderToStaticMarkup(createElement(PreflightSheet));
+    expect(html).toContain('data-testid="preflight-airframe-reset"');
+    expect(html).toContain("I rebalanced it");
+  });
+});

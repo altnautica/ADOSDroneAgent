@@ -73,10 +73,18 @@ function isLinkFailure(e: unknown): boolean {
   return !(e instanceof ApiError) || e.status === 0 || e.status >= 502;
 }
 
+/** The pilot action a built-in sends. Take off is the pilot's launch to the
+ *  chosen height that then holds there, as the Launch sheet sends it, so the
+ *  height is never dropped and an ArduPilot multirotor lifts off level. */
+function pilotRequest(skill: Skill, b: BuiltinBinding, altitudeM: number | undefined): [string, Record<string, unknown>?] {
+  if (skill.id === "takeoff") return ["launch", { after: "hold", alt_m: altitudeM ?? LAUNCH.altDefaultM }];
+  return [b.pilotAction];
+}
+
 async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | undefined): Promise<void> {
   const route = builtinRoute(skill, skillContextNow());
   if (route === "pilot") {
-    const r = await sendPilotAction(b.pilotAction);
+    const r = await sendPilotAction(...pilotRequest(skill, b, altitudeM));
     report(r.ok ? { text: `${skill.label}: ${resultWord("ACCEPTED")}`, kind: "ok" } : { text: `${skill.label}: ${refusalText(r.err)}`, kind: "err" });
     return;
   }

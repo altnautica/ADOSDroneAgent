@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { vehicleLiveness } from "@/hooks/use-vehicle-liveness";
 import {
+  airframeResetAlertId,
   batteryFixAlertId,
   FOLLOW_PLUGIN_ID,
   freshNavFrames,
@@ -339,5 +340,37 @@ describe("follow actions from the Home card", () => {
       [url, "PUT", { key: "operator_resume_seq", value: 5 }],
       [url, "PUT", { key: "active", value: false }],
     ]);
+  });
+});
+
+describe("the steady take-off and Balance check rows on the pill", () => {
+  const NOSE = "Balance: nose-heavy. Off by about 35 mm. Move the battery back.";
+  const OFF = specText("readiness.supervised_liftoff.off");
+  const pilotWith = (severity: "warn" | "block", armed: boolean) =>
+    parsePilotState({
+      ...raw,
+      armed,
+      readiness: [
+        { id: "airframe_balance", ok: false, severity, msg: NOSE },
+        { id: "supervised_liftoff", ok: false, severity: "warn", msg: OFF },
+      ],
+    });
+
+  it("lists both rows with their words and level, and offers I rebalanced it while disarmed", () => {
+    for (const [severity, level] of [
+      ["warn", "warning"],
+      ["block", "critical"],
+    ] as const) {
+      const pilot = pilotWith(severity, false);
+      const alerts = homePill({ ...base, pilot }).alerts;
+      expect(alerts.find((a) => a.id === "pilot:airframe_balance")).toMatchObject({ text: NOSE, severity: level });
+      expect(alerts.find((a) => a.id === "pilot:supervised_liftoff")).toMatchObject({ text: OFF, severity: "warning" });
+      expect(airframeResetAlertId({ pilot, telemetry: groundTel })).toBe("pilot:airframe_balance");
+    }
+  });
+
+  it("offers no reset while armed or without a pilot", () => {
+    expect(airframeResetAlertId({ pilot: pilotWith("warn", true), telemetry: groundTel })).toBeNull();
+    expect(airframeResetAlertId({ pilot: null, telemetry: groundTel })).toBeNull();
   });
 });

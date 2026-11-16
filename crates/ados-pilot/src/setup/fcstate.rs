@@ -110,6 +110,9 @@ pub struct FcState {
     /// Sequence number of the last STATUSTEXT (0 = none yet).
     pub text_seq: u64,
     pub rates: VecDeque<RateSample>,
+    /// The rate-loop integrators and motor outputs (PID_TUNING and
+    /// SERVO_OUTPUT_RAW) the supervised lift-off reads.
+    pub loop_rates: crate::fc::rates::Rates,
 }
 
 impl FcState {
@@ -386,6 +389,8 @@ impl FcState {
                     self.texts.pop_front();
                 }
             }
+            MavMessage::PID_TUNING(p) => self.loop_rates.on_pid(p, now_ms),
+            MavMessage::SERVO_OUTPUT_RAW(s) => self.loop_rates.on_servo(s, now_ms),
             _ => {}
         }
     }

@@ -73,6 +73,9 @@ impl FakeFc {
                 self.mag = Some((now, fit));
             }
             MAV_CMD_DO_CANCEL_MAG_CAL => self.mag = None,
+            MAV_CMD_SET_MESSAGE_INTERVAL if c.param1 as u32 == 194 => {
+                self.rate_streams = c.param2 > 0.0;
+            }
             MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN => {
                 self.reboots += 1;
                 self.rebooting_until = Some(if self.script.reboot_returns {

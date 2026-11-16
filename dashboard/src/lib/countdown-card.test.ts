@@ -146,3 +146,28 @@ describe("the stall in the Home status pill", () => {
     expect(homePill({ ...inputs, pilotAgeMs: 5000 }).alerts.some((a) => a.id === "mission_stall")).toBe(false);
   });
 });
+
+describe("a steady take-off on the countdown card", () => {
+  const launching = (sequence: Record<string, unknown>, banner: unknown = null) =>
+    parsePilotState({ ...raw, banner, mission_stall: null, sequence: { step: "takeoff", after: "hold", ...sequence } })!;
+
+  it("shows its status line and detail while the launch runs", () => {
+    const pilot = launching({
+      error: null,
+      liftoff: { phase: "probe", text: "Checking balance", detail: "Adjusting trim, try 2 of 6", trim: "probe", tilt_deg: 1.2 },
+    });
+    expect(countdownCard(pilot, 0, NOW)?.liftoff).toBe("Checking balance. Adjusting trim, try 2 of 6");
+    expect(render(pilot)).toContain('data-testid="countdown-liftoff"');
+  });
+
+  it("shows the stop's reason on the launch-failed banner, once", () => {
+    const reason = "Take-off stopped. No climb margin. Lighten the drone or rebalance it.";
+    const pilot = launching(
+      { error: "liftoff_saturated", liftoff: { phase: "stopped", text: "Take-off stopped", detail: "No climb margin.", trim: "probe", tilt_deg: 2 } },
+      { text_key: "pilot.banner.launch_failed", args: { reason }, until_ms: null },
+    );
+    const card = countdownCard(pilot, 0, NOW)!;
+    expect(card.banner).toBe(`Launch failed: ${reason}`);
+    expect(card.liftoff).toBeNull();
+  });
+});

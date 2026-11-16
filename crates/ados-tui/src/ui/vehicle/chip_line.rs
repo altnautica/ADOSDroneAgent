@@ -49,6 +49,21 @@ impl VehicleTab {
         (fresh && p.armed == Some(false)).then_some(p.place_class.as_str())
     }
 
+    /// "I rebalanced it" answers now: a fresh pilot kind that reports itself
+    /// disarmed with its airframe balance check failing (a warning or a
+    /// block).
+    pub(super) fn airframe_reset_offered(&self, core: &Core) -> bool {
+        let Some(p) = self.auto.as_ref().and_then(|a| a.pilot.as_ref()) else {
+            return false;
+        };
+        let fresh = !p.stale && self.aged(core, p.age_ms) < stale_after_ms();
+        fresh
+            && p.armed == Some(false)
+            && p.readiness
+                .iter()
+                .any(|r| r.id == "airframe_balance" && !r.ok)
+    }
+
     /// The status pill's alerts, from the readings the tab holds. Readings
     /// hidden as stale feed nothing but the link and agent items.
     pub(super) fn alerts(&self, core: &Core) -> Vec<PillAlert> {
@@ -121,6 +136,7 @@ impl VehicleTab {
                 alerts: &alerts,
                 gimbal: self.gimbal,
                 place_key: self.place_offered(core).is_some(),
+                airframe_key: self.airframe_reset_offered(core),
                 now_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as u64),

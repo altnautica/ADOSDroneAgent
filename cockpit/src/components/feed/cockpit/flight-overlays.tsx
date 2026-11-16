@@ -1,5 +1,6 @@
 // The flow overlays over the video: a running launch sequence with its
-// Abort, the 3 s handover banner, the "Centre sticks to take control" gate
+// Abort (and, on a supervised lift-off, what it is doing on the ground in
+// the pilot's words), the 3 s handover banner, the "Centre sticks to take control" gate
 // ring, "Sticks are with <surface>" with its hold-to-take-over, the link-loss
 // countdown, the cancellable low-battery RTH countdown, and the persistent
 // mission stall (Skip waypoint, Return, Land here; Land here only for a
@@ -22,6 +23,7 @@ import { bannerSeverity, holdMs, launchRunning, launchStepName, lowBatteryLine, 
 import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/shared/hud/link-loss";
+import { launchLiftoffLine } from "@/shared/hud/liftoff";
 import { missionStallOverlay, stallShadowsBanner, type MissionStallButton } from "@/shared/hud/mission-stall";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
@@ -96,6 +98,7 @@ export function FlightOverlays() {
   const banner = stallShadowsBanner(pilot.banner?.textKey, pilot.missionStall) ? null : visibleBanner(pilot.banner, bannerSeen?.at ?? now, now);
   const elsewhere = sticksElsewhere(pilot);
   const seq = launchRunning(pilot.sequence) ? pilot.sequence : null;
+  const liftoffLine = launchLiftoffLine(seq);
   const stall = missionStallOverlay(pilot.missionStall);
 
   return (
@@ -106,8 +109,14 @@ export function FlightOverlays() {
           data-testid="launch-sequence"
           className="chrome-panel pointer-events-auto flex items-center gap-[12px] px-[14px] py-[6px]"
         >
-          <span className="text-[15px] font-semibold">
-            {specText("chip.taking_off", { step: launchStepName(seq.step) })}
+          <span className="flex flex-col">
+            <span className="text-[15px] font-semibold">{specText("chip.taking_off", { step: launchStepName(seq.step) })}</span>
+            {liftoffLine ? (
+              <span className="text-[13px]" data-testid="launch-liftoff" data-phase={seq.liftoff?.phase}>
+                <span className="font-semibold">{liftoffLine.status}</span>
+                {liftoffLine.detail ? <span className="opacity-90"> · {liftoffLine.detail}</span> : null}
+              </span>
+            ) : null}
           </span>
           <button
             type="button"

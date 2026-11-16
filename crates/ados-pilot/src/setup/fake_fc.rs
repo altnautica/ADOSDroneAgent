@@ -118,6 +118,13 @@ pub struct FakeFc {
     /// AUTOPILOT_VERSION `uid` and `uid2` (the extension, sent as a raw frame).
     pub uid: u64,
     pub uid2: Option<[u8; 18]>,
+    /// An airframe on its skids that flies SET_ATTITUDE_TARGET in GUIDED
+    /// (the supervised lift-off); `None`: such targets are ignored.
+    pub airframe: Option<crate::liftoff::sim::Airframe>,
+    /// The airframe flies the attitude and position targets (GUIDED, armed).
+    af_engaged: bool,
+    /// PID_TUNING was asked for with SET_MESSAGE_INTERVAL.
+    rate_streams: bool,
 }
 
 impl FakeFc {
@@ -160,6 +167,9 @@ impl FakeFc {
             reboots: 0,
             uid: 0x00C0_FFEE_1234_5678,
             uid2: None,
+            airframe: None,
+            af_engaged: false,
+            rate_streams: false,
         }
     }
 
@@ -284,6 +294,21 @@ impl FakeFc {
                 }
             }
             MavMessage::COMMAND_LONG(c) => self.command(c, now),
+            MavMessage::SET_ATTITUDE_TARGET(t) => {
+                if let Some(af) = self.airframe.as_mut() {
+                    let q = t.q;
+                    let roll = (2.0 * (q[0] * q[1] + q[2] * q[3]))
+                        .atan2(1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
+                    let pitch = (2.0 * (q[0] * q[2] - q[3] * q[1])).clamp(-1.0, 1.0).asin();
+                    af.target = Some(([roll, pitch, af.att[2]], t.thrust));
+                    self.af_engaged = true;
+                }
+            }
+            MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) if self.af_engaged => {
+                if let Some(af) = self.airframe.as_mut() {
+                    af.goal_h = Some(-s.z);
+                }
+            }
             _ => {}
         }
     }

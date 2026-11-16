@@ -252,6 +252,10 @@ pub struct Pilot {
     /// The step of a running launch sequence: a known step other than
     /// `done`, with no error.
     pub launch_step: Option<String>,
+    /// While that launch is a supervised lift-off: what it is doing, in the
+    /// pilot's words ("Levelling on the ground"). A stop's reason reads on
+    /// the launch-failed banner.
+    pub liftoff_text: Option<String>,
     /// The FC flies an RTL or land of its own (a failsafe, not an operator's
     /// mode change); the agent omits `fc_failsafe` while it is false.
     pub fc_failsafe: bool,

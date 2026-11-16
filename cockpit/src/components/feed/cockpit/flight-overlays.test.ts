@@ -131,6 +131,39 @@ describe("a refused Abort from the flight overlay", () => {
   });
 });
 
+describe("a steady take-off on the flight overlay", () => {
+  it("shows its status line and detail under the launch step", async () => {
+    pilot({
+      sequence: {
+        step: "takeoff",
+        after: "hold",
+        error: null,
+        liftoff: { phase: "level", text: "Setting trim", detail: "Loading this airframe's learned balance", trim: "learned", tiltDeg: 0.3 },
+      },
+    });
+    await mount();
+    const line = document.querySelector("[data-testid=launch-liftoff]");
+    expect(line?.textContent).toBe("Setting trim · Loading this airframe's learned balance");
+    expect(line?.getAttribute("data-phase")).toBe("level");
+  });
+
+  it("shows the stop's reason on the launch-failed banner", async () => {
+    const reason = "Take-off stopped. The drone started to tip. Motors off.";
+    pilot({
+      sequence: {
+        step: "takeoff",
+        after: "hold",
+        error: "liftoff_tipping",
+        liftoff: { phase: "stopped", text: "Take-off stopped", detail: "The drone started to tip. Motors off.", trim: "probe", tiltDeg: 1 },
+      },
+      banner: { textKey: "pilot.banner.launch_failed", args: { reason }, untilMs: null },
+    });
+    await mount();
+    expect(document.querySelector("[data-testid=launch-sequence]")).toBeNull();
+    expect(document.querySelector("[data-testid=handover-banner]")?.textContent).toBe(specText("pilot.banner.launch_failed", { reason }));
+  });
+});
+
 describe("the mission stall overlay", () => {
   const raw = JSON.parse(
     readFileSync(path.resolve(__dirname, "../../../../../crates/ados-control/tests/fixtures/pilot-frame-stall.json"), "utf8"),

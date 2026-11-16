@@ -16,6 +16,7 @@
 import type { NavStatusBody, NavStatusEntry } from "@/hooks/use-nav-status";
 import { apiFetch } from "@/shared/api-fetch";
 import { BATTERY_FAILSAFE_ID, batteryFailsafeFixable } from "@/shared/hud/battery-failsafe-fix";
+import { AIRFRAME_BALANCE_ID, airframeResettable } from "@/shared/hud/liftoff";
 import { aglMarkText, bottomRowAgl } from "@/shared/hud/chip-inputs";
 import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
@@ -101,6 +102,14 @@ export function poseAgeText(nav: NavState | null | undefined): string | null {
 export function batteryFixAlertId(i: Pick<HomeStatusInputs, "pilot" | "telemetry" | "armSources">): string | null {
   const item = i.pilot?.readiness.find((r) => r.id === BATTERY_FAILSAFE_ID);
   return item && batteryFailsafeFixable(item, pillArmed(i.armSources ?? i)) ? `pilot:${BATTERY_FAILSAFE_ID}` : null;
+}
+
+/** The pill alert id that carries "I rebalanced it" (the pilot's
+ *  `airframe_reset`), or null: the fresh pilot's airframe balance item
+ *  warning or blocking, on a vehicle known to be disarmed. */
+export function airframeResetAlertId(i: Pick<HomeStatusInputs, "pilot" | "telemetry" | "armSources">): string | null {
+  const item = i.pilot?.readiness.find((r) => r.id === AIRFRAME_BALANCE_ID);
+  return item && airframeResettable(item, pillArmed(i.armSources ?? i)) ? `pilot:${AIRFRAME_BALANCE_ID}` : null;
 }
 
 /** The pill and its alert list, from the cockpit's inputs. The dashboard

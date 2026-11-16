@@ -1,7 +1,10 @@
 //! Take-off, hold and landing sequences the air-wizard steps share.
 //!
 //! The setup engine holds owner `tuning` for the whole air wizard, so these
-//! sequences are the only setpoint source while they run.
+//! sequences are the only setpoint source while they run. An ArduPilot
+//! multirotor takes off with the supervised lift-off (`flight/liftoff.rs`).
+
+mod liftoff;
 
 use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavFrame, MavVtolState};
 
@@ -40,6 +43,8 @@ pub struct Hop {
     alt_m: f32,
     /// Hold point `(n, e, d)` and yaw (rad) for copter holds.
     pub hold: Option<([f32; 3], f32)>,
+    /// The supervised lift-off, on an ArduPilot multirotor.
+    sup: Option<liftoff::Supervised>,
 }
 
 impl Default for Hop {
@@ -50,6 +55,7 @@ impl Default for Hop {
             sent_ms: 0,
             alt_m: 0.0,
             hold: None,
+            sup: None,
         }
     }
 }
@@ -111,6 +117,7 @@ impl Hop {
     pub fn start(&mut self, cx: &mut Cx, alt_m: f32) {
         self.alt_m = alt_m;
         self.hold = None;
+        self.sup = None;
         self.leg_ms = cx.now;
         self.sent_ms = 0;
         self.leg = if airborne(cx) {
@@ -123,6 +130,8 @@ impl Hop {
         };
         if self.leg == Leg::Holding {
             self.capture_hold(cx);
+        } else if self.leg == Leg::Arming && liftoff::applies(cx) {
+            self.sup = Some(liftoff::Supervised::default());
         }
         anchor_box(cx);
     }
@@ -162,6 +171,10 @@ impl Hop {
                     self.leg = Leg::Failed("takeoff_timeout");
                     return;
                 }
+                if self.sup.is_some() {
+                    self.arm_supervised(cx);
+                    return;
+                }
                 if cx.adapter.fw == Fw::Px4 {
                     // OFFBOARD needs setpoints streaming before the switch.
                     if let Some((l, _)) = cx.fc.local {
@@ -185,6 +198,10 @@ impl Hop {
                 }
             }
             Leg::TakingOff => {
+                if self.sup.is_some() {
+                    self.lift_supervised(cx);
+                    return;
+                }
                 let h = height(cx).unwrap_or(0.0);
                 if h >= self.alt_m * 0.9 {
                     self.leg = Leg::Holding;
@@ -247,6 +264,67 @@ impl Hop {
                     set_mode(cx, m);
                 }
             }
+        }
+    }
+
+    /// GUIDED, the FC set up for the lift-off, then armed: the lift-off
+    /// begins.
+    fn arm_supervised(&mut self, cx: &mut Cx) {
+        if !in_mode(cx, Mode::Guided) {
+            if self.resend(cx) {
+                set_mode(cx, Mode::Guided);
+            }
+            return;
+        }
+        let Some(sup) = self.sup.as_mut() else {
+            return;
+        };
+        match sup.prepared(cx) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                self.leg = Leg::Failed(e);
+                return;
+            }
+        }
+        if !cx.fc.armed {
+            if self.resend(cx) {
+                cx.out.arm(true);
+            }
+            return;
+        }
+        if let Some(sup) = self.sup.as_mut() {
+            sup.begin(cx, self.alt_m);
+        }
+        self.leg = Leg::TakingOff;
+        self.leg_ms = cx.now;
+    }
+
+    /// The lift-off each tick until it handed over and the hop's height is
+    /// reached; a stop on the ground fails the hop with the stop's code.
+    fn lift_supervised(&mut self, cx: &mut Cx) {
+        let Some(sup) = self.sup.as_mut() else {
+            return;
+        };
+        let lift = sup.tick(cx);
+        let stopped = sup.stopped();
+        match lift {
+            liftoff::Lift::Stopped(code) => {
+                self.leg = Leg::Failed(code);
+                return;
+            }
+            liftoff::Lift::HandedOver if height(cx).unwrap_or(0.0) >= self.alt_m * 0.9 => {
+                self.leg = Leg::Holding;
+                self.leg_ms = cx.now;
+                self.capture_hold(cx);
+                return;
+            }
+            _ => {}
+        }
+        if !cx.fc.armed && !stopped {
+            self.leg = Leg::Failed("disarmed");
+        } else if cx.now.saturating_sub(self.leg_ms) > liftoff::TAKEOFF_TIMEOUT_MS && !stopped {
+            self.leg = Leg::Failed("takeoff_timeout");
         }
     }
 }

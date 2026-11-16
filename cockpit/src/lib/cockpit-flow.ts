@@ -162,8 +162,9 @@ export interface ChecklistItem {
   id: string;
   label: string;
   state: "pass" | "warn" | "fail";
-  /** The item offers the battery failsafe fix (`batteryFailsafeFixable`). */
-  fix?: "battery_failsafe";
+  /** The item offers a one-tap fix: the battery failsafe fix
+   *  (`batteryFailsafeFixable`) or "I rebalanced it" (`airframeResettable`). */
+  fix?: "battery_failsafe" | "airframe_reset";
 }
 
 /** Whether the checklist can be passed: no failing item. */

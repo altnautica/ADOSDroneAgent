@@ -116,13 +116,16 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             .get("setup_step")
             .and_then(Value::as_str)
             .map(str::to_string),
-        launch_step: d.get("sequence").filter(|q| q.is_object()).and_then(|q| {
-            let step = q.get("step")?.as_str()?;
-            let running = LAUNCH_STEPS.contains(&step)
-                && step != "done"
-                && q.get("error").and_then(Value::as_str).is_none();
-            running.then(|| step.to_string())
-        }),
+        launch_step: running_launch(d).map(|q| q["step"].as_str().unwrap_or_default().to_string()),
+        liftoff_text: running_launch(d)
+            .and_then(|q| q.get("liftoff"))
+            .and_then(|l| {
+                let text = l.get("text")?.as_str().filter(|t| !t.is_empty())?;
+                Some(match l.get("detail").and_then(Value::as_str) {
+                    Some(detail) if !detail.is_empty() => format!("{text} · {detail}"),
+                    _ => text.to_string(),
+                })
+            }),
         fc_failsafe: d.get("fc_failsafe").and_then(Value::as_bool) == Some(true),
         failsafe_cause: one_of(d, "failsafe_cause", &["fc", "rc_or_failsafe"]),
         setup_abort: d
@@ -188,6 +191,17 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         age_ms,
         stale,
     }
+}
+
+/// The `sequence` of a running launch: a known step other than `done`, with
+/// no error.
+fn running_launch(d: &Value) -> Option<&Value> {
+    let q = d.get("sequence").filter(|q| q.is_object())?;
+    let step = q.get("step")?.as_str()?;
+    let running = LAUNCH_STEPS.contains(&step)
+        && step != "done"
+        && q.get("error").and_then(Value::as_str).is_none();
+    running.then_some(q)
 }
 
 /// A banner with a text key; each arg as text (a JSON string as itself,

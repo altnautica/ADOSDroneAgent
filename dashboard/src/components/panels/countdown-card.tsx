@@ -1,4 +1,5 @@
-// The Home countdown card (`@/lib/countdown-card`): the pilot's banner, the
+// The Home countdown card (`@/lib/countdown-card`): the pilot's banner, a
+// supervised lift-off's line during a launch, the
 // low-battery return countdown with Cancel, and the mission stall with Skip
 // waypoint, Return and Land here. Each button sends its pilot action over the
 // page's pilot link; a refusal or a timeout shows under the buttons.
@@ -71,6 +72,11 @@ export function CountdownCard({ card, send }: CountdownCardProps) {
       {card.banner ? (
         <div role="status" data-testid="countdown-banner" className="rounded-md border border-border px-3 py-1.5 text-sm font-medium">
           {card.banner}
+        </div>
+      ) : null}
+      {card.liftoff ? (
+        <div role="status" data-testid="countdown-liftoff" className="rounded-md border border-border px-3 py-1.5 text-sm">
+          {card.liftoff}
         </div>
       ) : null}
       {refusal ? (

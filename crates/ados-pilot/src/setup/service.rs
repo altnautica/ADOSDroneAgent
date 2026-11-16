@@ -106,6 +106,9 @@ async fn run(
                         .collect(),
                     place_class: status.place_class,
                     rc_receiver: status.rc_receiver,
+                    supervised_liftoff: status.supervised_liftoff,
+                    liftoff_trim: status.liftoff_trim,
+                    liftoff_hover: status.liftoff_hover,
                 };
                 let owner_tuning = *handle.owner.borrow() == Owner::Tuning;
                 let (msgs, effects, out_frames, need, step, abort) = {
@@ -215,6 +218,7 @@ async fn apply(inner: &Arc<Inner>, handle: &PilotHandle, eff: Effect) {
         }
         Effect::SetRcAdosPosition(n) => handle.set_rc_ados_position(n).await,
         Effect::SetRcReceiver(rc) => handle.set_rc_receiver(rc).await,
+        Effect::LiftoffOutcome(o) => handle.liftoff_outcome(o).await,
     }
 }
 

@@ -36,7 +36,8 @@ pub struct FcLink {
     pub version_frames: broadcast::Sender<Vec<u8>>,
 }
 
-/// What the setup engine watches: readiness and the surface link.
+/// What the setup engine watches: readiness, the surface link and what its
+/// take-off needs for a supervised lift-off.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SetupView {
     pub readiness: Vec<ados_protocol::pilot::Readiness>,
@@ -46,6 +47,12 @@ pub struct SetupView {
     pub place_class: ados_protocol::pilot::PlaceClass,
     /// `pilot.rc_receiver`: the `ados_profile` step writes its values.
     pub rc_receiver: ados_protocol::pilot::RcReceiver,
+    /// `pilot.supervised_liftoff`.
+    pub supervised_liftoff: bool,
+    /// The airframe's learned trim for the connected FC.
+    pub liftoff_trim: Option<crate::airframe::Trim>,
+    /// The hover thrust a lift-off ramps against.
+    pub liftoff_hover: f32,
     /// The airframe record to file under the FC identity (`None` until the
     /// identity is known); filed again whenever its `rev` moves.
     pub airframe: Option<crate::airframe::Save>,
@@ -68,6 +75,8 @@ pub enum CoreCmd {
     SetupAbort(Option<String>),
     /// The setup engine is about to ask the FC for this custom mode.
     SetupMode(u32),
+    /// What a setup take-off's supervised lift-off found.
+    LiftoffOutcome(crate::airframe::LiftoffOutcome),
     /// The FC identity is known: its stored airframe record and the
     /// wizard's propeller size.
     AirframeLoad {
@@ -147,6 +156,9 @@ impl PilotHandle {
                 prop_in,
             })
             .await;
+    /// Hand a setup lift-off's outcome to airframe health.
+    pub async fn liftoff_outcome(&self, o: crate::airframe::LiftoffOutcome) {
+        let _ = self.cmd.send(CoreCmd::LiftoffOutcome(o)).await;
     }
 }
 
@@ -281,6 +293,9 @@ impl Core {
                             link_lost: self.pilot.link_lost(t),
                             place_class: s.place_class,
                             rc_receiver: self.pilot.rc_receiver(),
+                            supervised_liftoff: self.pilot.settings.pilot.supervised_liftoff,
+                            liftoff_trim: self.pilot.airframe.trim(),
+                            liftoff_hover: self.pilot.liftoff_hover(),
                             airframe: self.pilot.airframe.save(),
                         };
                         self.status_tx.send_if_modified(|v| {
@@ -335,6 +350,7 @@ impl Core {
                     Some(CoreCmd::SetupStep(step)) => self.pilot.setup_step = step,
                     Some(CoreCmd::SetupAbort(key)) => self.pilot.setup_abort = key,
                     Some(CoreCmd::SetupMode(mode)) => self.pilot.note_setup_mode(mode, now()),
+                    Some(CoreCmd::LiftoffOutcome(o)) => self.pilot.airframe.note_liftoff(&o, now()),
                     Some(CoreCmd::AirframeLoad { uid, record, prop_in }) => {
                         self.pilot.load_airframe(&uid, record, prop_in)
                     }

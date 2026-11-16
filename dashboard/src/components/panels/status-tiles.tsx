@@ -22,6 +22,7 @@ import { liveData } from "@/lib/freshness";
 import { chipTextColor } from "@/lib/chip-color";
 import { countdownCard } from "@/lib/countdown-card";
 import {
+  airframeResetAlertId,
   batteryFixAlertId,
   freshNavFrames,
   homeFollow,
@@ -40,6 +41,8 @@ import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
 import { severityClasses } from "@/shared/format";
 import { BATTERY_FAILSAFE_FIX_KEY, BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
+import { AIRFRAME_RESET_ACTION, AIRFRAME_RESET_KEY } from "@/shared/hud/liftoff";
+import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
 import { placeMargins } from "@/shared/place-class";
 import { rerunStep } from "@/shared/setup-wizard/client";
@@ -184,6 +187,14 @@ function VehicleStatus() {
   const liveTelemetry = liveData(tel, VEHICLE_TELEMETRY_POLL_MS, now) ?? null;
   const pill = homePill({ ...inputs, nav: fresh.nav, armSources: { pilot: fresh.pilot, telemetry: liveTelemetry } });
   const fixAlertId = batteryFixAlertId({ pilot: fresh.pilot, telemetry: liveTelemetry });
+  const resetAlertId = airframeResetAlertId({ pilot: fresh.pilot, telemetry: liveTelemetry });
+  const [resetRefusal, setResetRefusal] = useState<string | null>(null);
+  const resetAirframe = () => {
+    setResetRefusal(null);
+    void sendPilotAction(AIRFRAME_RESET_ACTION).then((r) =>
+      setResetRefusal(r.ok ? null : `${specText(AIRFRAME_RESET_KEY)}: ${refusalText(r.err)}`),
+    );
+  };
   const poseAge = poseAgeText(fresh.nav);
   const follow = homeFollow(fresh.follow);
   const lines = homeStatusLines({
@@ -230,10 +241,24 @@ function VehicleStatus() {
                   >
                     {specText(BATTERY_FAILSAFE_FIX_KEY)}
                   </Link>
+                ) : a.id === resetAlertId ? (
+                  <button
+                    type="button"
+                    onClick={resetAirframe}
+                    data-testid="status-airframe-reset"
+                    className="font-semibold underline max-md:inline-flex max-md:min-h-11 max-md:items-center"
+                  >
+                    {specText(AIRFRAME_RESET_KEY)}
+                  </button>
                 ) : null}
               </li>
             ))}
           </ul>
+        ) : null}
+        {resetRefusal ? (
+          <span role="status" data-testid="status-airframe-reset-refusal" className="mt-1 block text-destructive">
+            {resetRefusal}
+          </span>
         ) : null}
       </details>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono text-muted-foreground">

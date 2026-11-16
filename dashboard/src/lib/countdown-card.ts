@@ -1,13 +1,16 @@
 // The Home countdown card: what the pilot is about to do on its own, with
 // the operator's way out. It shows the pilot's banner (spec text, while its
-// slot lasts), the low-battery return countdown with Cancel (`rth_cancel`),
-// and the persistent mission stall (`mission-stall`: Skip waypoint, Return,
+// slot lasts; a failed launch's banner carries the lift-off's stop reason),
+// a supervised lift-off's line while a launch lifts off (what it does on the
+// ground in the pilot's words), the low-battery return countdown with Cancel
+// (`rth_cancel`), and the persistent mission stall (`mission-stall`: Skip waypoint, Return,
 // Land here; Land here only for a blocked return). While the stall shows, its
 // own banners stay hidden: the stall carries the live countdown. The
 // countdowns read the last polled frame minus its age, so they keep counting
 // between polls. Null with nothing to show.
 
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { launchLiftoffLine, liftoffLineText } from "@/shared/hud/liftoff";
 import { countdownS } from "@/shared/hud/format";
 import { missionStallOverlay, stallShadowsBanner, type MissionStallOverlay } from "@/shared/hud/mission-stall";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
@@ -20,6 +23,9 @@ export interface CountdownButton {
 
 export interface CountdownCardModel {
   banner: string | null;
+  /** A running launch's supervised lift-off, in the pilot's words (a stop's
+   *  reason reads on the launch-failed banner instead). */
+  liftoff: string | null;
   lowBattery: { title: string; warning: string; cancel: CountdownButton } | null;
   stall: MissionStallOverlay | null;
 }
@@ -51,6 +57,9 @@ export function countdownCard(pilot: PilotState | null, ageMs: number, nowMs: nu
   const stall = missionStallOverlay(
     s && { ...s, skipInS: s.skipInS === null ? null : s.skipInS - elapsedS, returnInS: s.returnInS === null ? null : s.returnInS - elapsedS },
   );
-  if (!banner && !lowBattery && !stall) return null;
-  return { banner, lowBattery, stall };
+  const seq = pilot.sequence;
+  const lo = seq && seq.error === null && seq.step !== "done" ? launchLiftoffLine(seq) : null;
+  const liftoff = lo ? liftoffLineText(lo) : null;
+  if (!banner && !liftoff && !lowBattery && !stall) return null;
+  return { banner, liftoff, lowBattery, stall };
 }

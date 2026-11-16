@@ -21,6 +21,8 @@ pub enum Effect {
     /// Declare `pilot.rc_receiver` (`present` | `absent`), applied after the
     /// control mode it comes with.
     SetRcReceiver(ados_protocol::pilot::RcReceiver),
+    /// What a supervised lift-off found, for the pilot's airframe health.
+    LiftoffOutcome(crate::airframe::LiftoffOutcome),
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +120,37 @@ impl Outbox {
             MavCmd::MAV_CMD_NAV_TAKEOFF,
             [0.0, 0.0, 0.0, f32::NAN, f32::NAN, f32::NAN, alt_m],
         );
+    }
+
+    /// A forced disarm (`param2` 21196): the FC disarms whatever its
+    /// landed state says. Sent only with the aircraft on its skids.
+    pub fn force_disarm(&mut self) {
+        self.cmd(
+            MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+            [0.0, 21196.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        );
+    }
+
+    /// SET_ATTITUDE_TARGET: roll, pitch, yaw (rad) and collective thrust
+    /// (0..1, thrust only with `GUID_OPTIONS` bit 3 set).
+    pub fn attitude_target(&mut self, roll: f32, pitch: f32, yaw: f32, thrust: f32) {
+        let m = self.tx().attitude_target(roll, pitch, yaw, thrust);
+        self.msgs.push(m);
+    }
+
+    /// A position target moving at `vel` (local NED), with yaw (rad).
+    pub fn position_moving(&mut self, pos: [f32; 3], vel: [f32; 3], yaw: f32) {
+        let m = self
+            .tx()
+            .setpoint(crate::fc::MASK_POS_VEL_YAW, pos, vel, yaw, 0.0);
+        self.msgs.push(m);
+    }
+
+    fn tx(&self) -> crate::fc::Tx {
+        crate::fc::Tx {
+            sysid: self.target.0,
+            compid: self.target.1,
+        }
     }
 
     pub fn message_interval(&mut self, msg_id: u32, hz: f32) {

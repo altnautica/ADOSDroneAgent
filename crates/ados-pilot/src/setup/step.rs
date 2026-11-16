@@ -27,6 +27,14 @@ pub struct PilotInputs {
     /// `pilot.rc_receiver`: with `absent` the `ados_profile` step writes the
     /// RC failsafe off and the FC fence ([`crate::no_rc::profile`]).
     pub rc_receiver: ados_protocol::pilot::RcReceiver,
+    /// `pilot.supervised_liftoff`: an ArduPilot multirotor's take-off is the
+    /// supervised lift-off, not the FC's own NAV_TAKEOFF.
+    pub supervised_liftoff: bool,
+    /// The airframe's learned trim (`None`: the lift-off probes for it).
+    pub liftoff_trim: Option<crate::airframe::Trim>,
+    /// The hover thrust the lift-off ramps against, as the pilot's launch
+    /// uses it (the learned hover, else `MOT_THST_HOVER`).
+    pub liftoff_hover: f32,
 }
 
 /// Values carried between steps and persisted per aircraft.

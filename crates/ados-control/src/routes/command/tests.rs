@@ -983,3 +983,6 @@ async fn the_command_gate_agrees_with_the_status_fc_flag() {
 
 #[path = "reposition_tests.rs"]
 mod reposition;
+
+#[path = "pilot_tests.rs"]
+mod pilot;

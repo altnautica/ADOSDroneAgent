@@ -5,7 +5,9 @@
 // and on-board storage (`usePreflightItems`). A failing blocker keeps "Checks
 // done" disabled; warnings are shown and accepted by passing. A stale pilot
 // state's items read not reported and fail, so a frozen frame never passes
-// the first arm.
+// the first arm. A failing airframe balance item offers "I rebalanced it",
+// which clears the airframe the pilot learned (its answer shows on the ack
+// line).
 
 import { CircleAlert, CircleCheck, CircleX } from "lucide-react";
 
@@ -13,9 +15,22 @@ import { Sheet } from "@/components/ui/sheet";
 import { usePreflightItems } from "@/hooks/use-preflight-items";
 import { fixBatteryFailsafe } from "@/lib/aircraft-setup";
 import { checklistPassable } from "@/lib/cockpit-flow";
+import { sendPilotAction } from "@/lib/pilot-link";
 import { BATTERY_FAILSAFE_FIX_KEY } from "@/shared/hud/battery-failsafe-fix";
+import { AIRFRAME_RESET_ACTION, AIRFRAME_RESET_KEY } from "@/shared/hud/liftoff";
+import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
+import { useConfirmStore } from "@/stores/confirm-store";
 import { usePreflightStore } from "@/stores/preflight-store";
+
+/** "I rebalanced it": the pilot forgets the airframe it learned; the answer
+ *  shows on the cockpit's ack line. */
+function resetAirframe(): void {
+  void sendPilotAction(AIRFRAME_RESET_ACTION).then((r) => {
+    const label = specText(AIRFRAME_RESET_KEY);
+    useConfirmStore.getState().setAck(r.ok ? { text: label, kind: "ok" } : { text: `${label}: ${refusalText(r.err)}`, kind: "err" });
+  });
+}
 
 export function PreflightSheet() {
   const pass = usePreflightStore((s) => s.pass);
@@ -61,6 +76,15 @@ export function PreflightSheet() {
                 className="ml-auto min-h-[40px] shrink-0 rounded-md border border-primary px-[0.6rem] text-[0.8rem] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
               >
                 {specText(BATTERY_FAILSAFE_FIX_KEY)}
+              </button>
+            ) : i.fix === "airframe_reset" ? (
+              <button
+                type="button"
+                onClick={resetAirframe}
+                data-testid="preflight-airframe-reset"
+                className="ml-auto min-h-[40px] shrink-0 rounded-md border border-primary px-[0.6rem] text-[0.8rem] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+              >
+                {specText(AIRFRAME_RESET_KEY)}
               </button>
             ) : null}
           </li>

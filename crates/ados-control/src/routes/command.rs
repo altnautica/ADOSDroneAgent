@@ -24,6 +24,10 @@
 //!
 //! Every command but `reposition` maps to a `COMMAND_LONG` (`reposition`
 //! carries a global position, so it is a `COMMAND_INT`; see `reposition.rs`).
+//! While the pilot's state is fresh, `takeoff` is not a frame at all: it is
+//! the pilot's `launch {after: "hold", alt_m}` in every control mode
+//! (`routes/pilot/command.rs`), so the pilot runs the lift-off; the
+//! `NAV_TAKEOFF` below goes out only with no live pilot.
 //! `arm`/`disarm`/`takeoff`/`land` are
 //! autopilot-agnostic (the same `MAV_CMD` and params on ArduPilot and PX4).
 //! `rtl`/`mode` set a flight mode via `MAV_CMD_DO_SET_MODE` (176), and the mode
@@ -367,8 +371,25 @@ pub async fn execute_command(
     }
 
     let cmd = req.cmd.to_lowercase();
-    // In `ados` control mode the flight primitives are pilot actions.
-    if let Some(resp) = crate::routes::pilot::command::via_pilot(&state, &cmd).await {
+    // A take-off is the pilot's launch while the pilot is live, to the height
+    // asked for (checked as the raw path checks it), else the pilot's own
+    // launch height for the vehicle.
+    let pilot_args = if cmd == "takeoff" {
+        if let Err(err) = takeoff_altitude(&req.args) {
+            return err.into_response();
+        }
+        let alt_m = req.args.first().and_then(|a| match a {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        });
+        Some(crate::routes::pilot::command::launch_args(alt_m))
+    } else {
+        None
+    };
+    // In `ados` control mode the flight primitives are pilot actions; a
+    // take-off is the pilot's launch in every control mode.
+    if let Some(resp) = crate::routes::pilot::command::via_pilot(&state, &cmd, pilot_args).await {
         return resp;
     }
     let target = crate::fc_target::fc_target(&state);

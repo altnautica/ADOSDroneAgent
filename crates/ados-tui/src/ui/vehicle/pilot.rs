@@ -5,7 +5,9 @@
 //! tightest point, the control mode and profile, who holds the sticks, the
 //! gimbal, obstacle avoidance, the mission progress, the link-loss action or
 //! countdown, the height above ground with its source, and the status pill's
-//! alerts. The stall overlay hides the stall's own banners while it shows.
+//! alerts (the airframe balance alert with its "I rebalanced it" key while it
+//! answers). A steady take-off shows its status line and detail under the launch.
+//! The stall overlay hides the stall's own banners while it shows.
 //! Every word is the cockpit spec's. A row from a stale pilot kind (a failed
 //! read, or a kind past the spec's stale age counting the time since the last
 //! good read) is dim and marked "(stale)". On a short terminal the chip,
@@ -67,14 +69,18 @@ pub struct PilotInputs<'a> {
     pub gimbal: Option<bool>,
     /// Whether the place key answers now (a fresh, disarmed pilot).
     pub place_key: bool,
+    /// Whether "I rebalanced it" answers now (a fresh, disarmed pilot with
+    /// its airframe balance check failing).
+    pub airframe_key: bool,
     /// Wall-clock now (epoch ms), for the banner's end time.
     pub now_ms: u64,
 }
 
 /// The pilot's countdowns and banner, critical first: the mission stall
-/// with the keys that answer it, the low-battery return, then the banner.
-/// Each countdown counts down by the frame's age (`age_ms`) since the pilot
-/// sent it.
+/// with the keys that answer it, the low-battery return, then a running
+/// launch's lift-off line and the banner (a failed launch's banner carries
+/// the lift-off's stop reason). Each countdown counts down by the frame's
+/// age (`age_ms`) since the pilot sent it.
 fn countdown_rows(core: &Core, p: &Pilot, age_ms: u64, now_ms: u64, stale: bool) -> Vec<Row> {
     let t = &core.theme;
     let elapsed_s = if age_ms == u64::MAX {
@@ -108,6 +114,13 @@ fn countdown_rows(core: &Core, p: &Pilot, age_ms: u64, now_ms: u64, stale: bool)
             critical,
             stale,
         ));
+    }
+    if let Some(text) = p
+        .liftoff_text
+        .as_deref()
+        .filter(|_| p.launch_step.is_some())
+    {
+        out.extend(phrase_rows(t, "Take-off", text, t.bright(), stale));
     }
     // The stall overlay carries the live countdown: its own banners hide.
     let banner = p
@@ -223,8 +236,10 @@ fn op_text(op: &str) -> String {
 
 /// The alert count and one line per alert. The alerts are computed now from
 /// the readings the tab holds (an aged pilot kind adds its own "not
-/// answering" item), so they never read as stale with the pilot kind.
-fn alert_rows(core: &Core, alerts: &[PillAlert]) -> Vec<Row> {
+/// answering" item), so they never read as stale with the pilot kind. The
+/// Balance check alert carries its key on the next line (the narrow column
+/// never cuts it off) while "I rebalanced it" answers.
+fn alert_rows(core: &Core, alerts: &[PillAlert], airframe_key: bool) -> Vec<Row> {
     let t = &core.theme;
     let count = alerts_count_text(alerts.len()).unwrap_or_else(|| "–".into());
     let mut out = vec![(kv_text(t, "Alerts", LABEL, count), true)];
@@ -238,6 +253,16 @@ fn alert_rows(core: &Core, alerts: &[PillAlert]) -> Vec<Row> {
             Span::styled(format!("{sym} {}", a.text), Style::default().fg(color)),
         ]);
         out.push((line, false));
+        if airframe_key && a.id == "pilot:airframe_balance" {
+            let key = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("b {}", spec_text("readiness.airframe_balance.reset", &[])),
+                    t.bright(),
+                ),
+            ]);
+            out.push((key, false));
+        }
     }
     out
 }
@@ -256,7 +281,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         // Nothing publishes the pilot kind: the chip's absent state.
         let state = kv_text(t, "State", LABEL, spec_text("chip.no_pilot", &[]));
         let mut out = vec![(state, true)];
-        out.extend(alert_rows(core, i.alerts));
+        out.extend(alert_rows(core, i.alerts, false));
         return out;
     };
     let p_stale = p.stale || i.age_ms >= stale_after_ms();
@@ -458,7 +483,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         None => stale(kv_text(t, "AGL", LABEL, "–".to_string())),
     };
     out.push((agl, false));
-    out.extend(alert_rows(core, i.alerts));
+    out.extend(alert_rows(core, i.alerts, i.airframe_key));
     out
 }
 

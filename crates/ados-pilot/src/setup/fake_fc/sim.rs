@@ -87,15 +87,17 @@ impl FakeFc {
                     lon,
                     ..Default::default()
                 }));
-            self.queue
-                .push_back(MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
-                    x: self.n,
-                    y: self.e,
-                    z: -self.alt,
-                    ..Default::default()
-                }));
-            self.queue
-                .push_back(MavMessage::ATTITUDE(ATTITUDE_DATA::default()));
+            if self.airframe.is_none() {
+                self.queue
+                    .push_back(MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
+                        x: self.n,
+                        y: self.e,
+                        z: -self.alt,
+                        ..Default::default()
+                    }));
+                self.queue
+                    .push_back(MavMessage::ATTITUDE(ATTITUDE_DATA::default()));
+            }
             let climb = (self.alt - self.tel_alt) / 0.1;
             self.tel_alt = self.alt;
             self.queue.push_back(MavMessage::VFR_HUD(VFR_HUD_DATA {
@@ -111,6 +113,51 @@ impl FakeFc {
                 ..Default::default()
             }));
         }
+        self.airframe_telemetry();
+    }
+
+    /// With an airframe: its attitude and local position every tick, and the
+    /// rate-loop and motor streams once asked for, while armed.
+    fn airframe_telemetry(&mut self) {
+        let Some(af) = self.airframe.as_ref() else {
+            return;
+        };
+        let mut msgs = vec![
+            MavMessage::ATTITUDE(ATTITUDE_DATA {
+                roll: af.att[0],
+                pitch: af.att[1],
+                yaw: af.att[2],
+                ..Default::default()
+            }),
+            MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
+                x: self.n,
+                y: self.e,
+                z: -self.alt,
+                vz: if self.af_engaged { -af.vz } else { 0.0 },
+                ..Default::default()
+            }),
+        ];
+        if self.armed && self.rate_streams {
+            for (axis, i) in [
+                (PidTuningAxis::PID_TUNING_ROLL, af.i[0]),
+                (PidTuningAxis::PID_TUNING_PITCH, af.i[1]),
+            ] {
+                msgs.push(MavMessage::PID_TUNING(PID_TUNING_DATA {
+                    I: i,
+                    axis,
+                    ..Default::default()
+                }));
+            }
+            let o = af.motors();
+            msgs.push(MavMessage::SERVO_OUTPUT_RAW(SERVO_OUTPUT_RAW_DATA {
+                servo1_raw: o[0],
+                servo2_raw: o[1],
+                servo3_raw: o[2],
+                servo4_raw: o[3],
+                ..Default::default()
+            }));
+        }
+        self.queue.extend(msgs);
     }
 
     pub(super) fn physics(&mut self, now: u64) {
@@ -133,7 +180,27 @@ impl FakeFc {
         let dt = TICK as f32 / 1000.0;
         if !self.armed {
             self.alt = 0.0;
+            if let Some(af) = self.airframe.as_mut() {
+                // Disarmed: back on the skids, the next take-off its own.
+                *af = crate::liftoff::sim::Airframe::new(af.hover, af.trim);
+                self.af_engaged = false;
+                self.takeoff_alt = None;
+            }
             return;
+        }
+        if self.af_engaged {
+            if self.custom_mode == 4 {
+                let af = self.airframe.as_mut().expect("engaged with an airframe");
+                af.armed = true;
+                for _ in 0..TICK / 5 {
+                    af.step(0.005);
+                }
+                self.alt = af.h;
+                return;
+            }
+            // Out of GUIDED: the FC's own mode flies from here.
+            self.af_engaged = false;
+            self.takeoff_alt = Some(self.alt);
         }
         self.vtol_physics(now, dt);
         let plane_tune = self

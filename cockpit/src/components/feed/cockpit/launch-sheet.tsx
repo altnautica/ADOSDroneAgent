@@ -6,7 +6,9 @@
 // pre-flight checklist gate (the first arm of a session), sets a changed place
 // class (`place_class:<class>`) and sends the pilot's `launch` action; the
 // sequence's progress (checks → arm → take off → after) shows as a step
-// strip, and Abort brakes to a hold (or disarms while still on the ground).
+// strip, with a supervised lift-off's own line (what it does on the ground,
+// or why it stopped there), and Abort brakes to a hold (or disarms while
+// still on the ground).
 // In the confined class the pilot's route check of the loaded mission shows
 // below the place. Ranges, defaults and texts come from the spec.
 
@@ -24,6 +26,7 @@ import { skillVisibleFor } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { PLACE_CLASSES, type PlaceClass } from "@/shared/hud/cockpit-frames";
 import { refusalText } from "@/shared/hud/refusal";
+import { launchLiftoffLine, liftoffLineText } from "@/shared/hud/liftoff";
 import { placeClassAction, placeClassLabel } from "@/shared/hud/route-check";
 import { specText } from "@/shared/hud/spec-text";
 import { placeExplainLine, placeMargins, type PlaceMargins } from "@/shared/place-class";
@@ -36,6 +39,8 @@ function LaunchSteps() {
   const seq = usePilot()?.data.sequence ?? null;
   if (!seq) return null;
   const at = LAUNCH_STEPS.indexOf(seq.step);
+  const lo = launchLiftoffLine(seq);
+  const liftoff = lo ? liftoffLineText(lo) : null;
   return (
     <div className="flex flex-col gap-[0.3rem]" data-testid="launch-steps">
       <ol className="flex gap-[0.25rem]">
@@ -58,7 +63,15 @@ function LaunchSteps() {
           </li>
         ))}
       </ol>
-      {seq.error ? <p className="text-[0.78rem] text-err">{refusalText(seq.error)}</p> : null}
+      {seq.error ? (
+        <p className="text-[0.78rem] text-err" data-testid="launch-error">
+          {liftoff ?? refusalText(seq.error)}
+        </p>
+      ) : liftoff ? (
+        <p className="text-[0.78rem]" data-testid="launch-liftoff-line">
+          {liftoff}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -4,7 +4,9 @@
 //! status pill's alerts), the autonomy block, and the sensor/clock row. While
 //! a fresh mission stall shows, `s`, `r` and `l` answer it (Skip waypoint,
 //! Return, Land here; Land here only for a blocked return) through
-//! `POST /api/command`, which hands them to the pilot in ADOS control.
+//! `POST /api/command`, which hands them to the pilot in ADOS control. While
+//! a fresh, disarmed pilot's airframe balance check fails, `b` ("I rebalanced
+//! it") asks the pilot to forget the airframe it learned (`airframereset`).
 
 use std::time::Instant;
 
@@ -60,6 +62,10 @@ const COMMAND_PATH: &str = "/api/command";
 const STALL_TAG: &str = "stall";
 /// The reply tag of a place-class change.
 const PLACE_TAG: &str = "place";
+/// The reply tag of "I rebalanced it".
+const AIRFRAME_TAG: &str = "airframe";
+/// The `/api/command` name of the pilot's `airframe_reset`.
+pub(crate) const AIRFRAME_RESET_COMMAND: &str = "airframereset";
 
 /// `POST /api/command` with `cmd`, its words carried for the reply's toast.
 fn command_request(tag: &'static str, cmd: &str, label: String) -> Request {
@@ -85,6 +91,15 @@ pub(crate) fn stall_request(action: StallAction) -> Request {
 /// `place_class:<class>`).
 pub(crate) fn place_request(class: &str) -> Request {
     command_request(PLACE_TAG, &place_command(class), place_label(class))
+}
+
+/// The request "I rebalanced it" sends: the pilot's `airframe_reset`.
+pub(crate) fn airframe_reset_request() -> Request {
+    command_request(
+        AIRFRAME_TAG,
+        AIRFRAME_RESET_COMMAND,
+        spec_text("readiness.airframe_balance.reset", &[]),
+    )
 }
 
 #[derive(Default)]
@@ -182,6 +197,9 @@ impl Tab for VehicleTab {
         };
         if self.place_offered(core).is_some() {
             ctx.push(Ctx::Page(PageKeys::Place));
+        }
+        if self.airframe_reset_offered(core) {
+            ctx.push(Ctx::Page(PageKeys::Airframe));
         }
         ctx
     }
@@ -352,6 +370,13 @@ impl Tab for VehicleTab {
             core.submit(place_request(other_place_class(current)));
             return true;
         }
+        if cmd == Command::AirframeReset {
+            if !self.airframe_reset_offered(core) {
+                return false;
+            }
+            core.submit(airframe_reset_request());
+            return true;
+        }
         let action = match cmd {
             Command::StallSkip => StallAction::Skip,
             Command::StallReturn => StallAction::Return,
@@ -370,7 +395,7 @@ impl Tab for VehicleTab {
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
         let Purpose::Page {
-            tag: STALL_TAG | PLACE_TAG,
+            tag: STALL_TAG | PLACE_TAG | AIRFRAME_TAG,
             data,
         } = &reply.purpose
         else {

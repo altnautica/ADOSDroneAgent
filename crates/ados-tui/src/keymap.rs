@@ -52,6 +52,9 @@ pub enum PageKeys {
     /// The Vehicle tab while a fresh pilot reports it is disarmed: the place
     /// class can change.
     Place,
+    /// The Vehicle tab while a fresh, disarmed pilot reports its airframe
+    /// balance check failing: "I rebalanced it" clears what it learned.
+    Airframe,
 }
 
 /// Every user command.
@@ -148,6 +151,8 @@ pub enum Command {
     StallLand,
     // the place class
     PlaceClass,
+    // the airframe balance check
+    AirframeReset,
 }
 
 /// A key: its code and the modifiers that must be held. SHIFT is ignored for
@@ -327,6 +332,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Page(P::Stall), ch('l'), C::StallLand, "l", Some("land"), "Land here"),
     b(Page(P::ReturnStall), ch('l'), C::StallLand, "l", Some("land"), "Land here"),
     b(Page(P::Place), ch('c'), C::PlaceClass, "c", Some("place"), "Switch the place class (open / confined)"),
+    b(Page(P::Airframe), ch('b'), C::AirframeReset, "b", Some("rebalanced"), "I rebalanced it: clear the learned airframe balance"),
     // --- lists -------------------------------------------------------------
     b(List, kp(K::Up), C::Up, "↑↓", Some("move"), "Move"),
     b(List, ch('k'), C::Up, "k", None, "Move up"),
