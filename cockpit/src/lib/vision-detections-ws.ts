@@ -16,6 +16,7 @@
 import type {
   CockpitDetection,
   CockpitDetectionBatch,
+  DetectionBox,
   LockState,
 } from "@/stores/detections-store";
 import { ReconnectBackoff } from "@/lib/reconnect-backoff";
@@ -65,6 +66,7 @@ interface WireDetectionBatch {
   frame_width?: unknown;
   frame_height?: unknown;
   detections?: unknown;
+  crop_window?: unknown;
 }
 
 function num(v: unknown): number {
@@ -77,6 +79,16 @@ function str(v: unknown): string {
 
 function lockState(v: unknown): LockState | null {
   return v === "locked" || v === "uncertain" || v === "lost" ? v : null;
+}
+
+/** A wire box with four finite numbers, else null. */
+function wireBox(v: unknown): DetectionBox | null {
+  if (!v || typeof v !== "object") return null;
+  const b = v as Record<string, unknown>;
+  const ok = (n: unknown) => typeof n === "number" && Number.isFinite(n);
+  return ok(b.x) && ok(b.y) && ok(b.width) && ok(b.height)
+    ? { x: b.x as number, y: b.y as number, width: b.width as number, height: b.height as number }
+    : null;
 }
 
 function mapDetection(raw: WireDetection): CockpitDetection {
@@ -125,6 +137,8 @@ export function mapWireBatch(
     frameWidth: num(raw.frame_width) || DEFAULT_FRAME_WIDTH,
     frameHeight: num(raw.frame_height) || DEFAULT_FRAME_HEIGHT,
     detections,
+    // Set only on a crop-only batch: its detections cover just this window.
+    cropWindow: wireBox(raw.crop_window),
   };
 }
 

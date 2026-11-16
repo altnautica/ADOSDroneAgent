@@ -57,12 +57,26 @@ export function connectGroundDetectionPoll(opts: ConnectGroundDetectionPollOptio
     if (cancelled) return;
     let fresh = false;
     try {
-      const mapped = mapWireBatch((await apiFetch<unknown>(url)) as never);
+      const body = (await apiFetch<unknown>(url)) as { full_frame?: unknown } | null;
+      const mapped = mapWireBatch(body as never);
       if (mapped) {
         const key = `${mapped.cameraId ?? ""}:${mapped.frameId}`;
         fresh = key !== lastFrame;
         lastFrame = key;
-        if (fresh) useDetectionsStore.getState().setBatch(mapped);
+        if (fresh) {
+          const store = useDetectionsStore.getState();
+          // A crop-only batch's reply carries the newest whole-frame batch,
+          // which a poll may never have seen: it seeds the boxes held outside
+          // the crop.
+          const full =
+            mapped.cropWindow && body?.full_frame && typeof body.full_frame === "object"
+              ? mapWireBatch(body.full_frame as never)
+              : null;
+          if (full && full.tsMs > (store.fullByCamera[full.cameraId]?.tsMs ?? -1)) {
+            store.setBatch(full);
+          }
+          store.setBatch(mapped);
+        }
       }
     } catch {
       // A silent relayed drone yields no new batch; the overlay ages the last

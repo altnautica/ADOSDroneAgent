@@ -112,3 +112,12 @@ describe("parseWireDetectionJson", () => {
     expect(parseWireDetectionJson(JSON.stringify({ v: 99, detections: [] }))).toBeNull();
   });
 });
+
+describe("crop_window", () => {
+  it("maps a crop-only batch's window and leaves a whole-frame batch without one", () => {
+    const crop = mapWireBatch({ v: 3, detections: [], crop_window: { x: 10, y: 20, width: 30, height: 40 } });
+    expect(crop?.cropWindow).toEqual({ x: 10, y: 20, width: 30, height: 40 });
+    expect(mapWireBatch({ v: 3, detections: [] })?.cropWindow).toBeNull();
+    expect(mapWireBatch({ v: 3, detections: [], crop_window: { x: 1 } })?.cropWindow).toBeNull();
+  });
+});

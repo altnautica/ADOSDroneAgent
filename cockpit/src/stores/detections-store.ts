@@ -90,8 +90,39 @@ export interface CockpitDetectionBatch {
   frameWidth: number;
   frameHeight: number;
   detections: CockpitDetection[];
+  /** Set only on a crop-only batch: its detections cover just this window
+   *  (frame pixels), and the overlay holds the camera's latest whole-frame
+   *  boxes outside it (`holdOutsideCrop`). Absent from older agents. */
+  cropWindow?: DetectionBox | null;
   /** Epoch ms this cockpit received the batch, stamped by `setBatch`. */
   receivedAt: number;
+}
+
+/** How long a whole-frame batch's boxes are held outside later crop windows,
+ *  by capture time (`tsMs`). */
+export const CROP_HOLD_MS = 1000;
+
+/**
+ * The detections to draw for `batch`, given the camera's latest whole-frame
+ * batch `full`. A batch without `cropWindow` replaces everything. A crop-only
+ * batch draws its own detections plus `full`'s boxes whose centre lies outside
+ * the window, minus any whose track id the crop batch reports, while `full` is
+ * no more than `CROP_HOLD_MS` older than `batch`.
+ */
+export function holdOutsideCrop(
+  full: Omit<CockpitDetectionBatch, "receivedAt"> | null | undefined,
+  batch: Omit<CockpitDetectionBatch, "receivedAt">,
+): CockpitDetection[] {
+  const win = batch.cropWindow;
+  if (!win || !full || batch.tsMs - full.tsMs > CROP_HOLD_MS) return batch.detections;
+  const seen = new Set(batch.detections.flatMap((d) => (d.trackId != null ? [d.trackId] : [])));
+  const held = full.detections.filter((d) => {
+    if (!d.bbox || (d.trackId != null && seen.has(d.trackId))) return false;
+    const cx = d.bbox.x + d.bbox.width / 2;
+    const cy = d.bbox.y + d.bbox.height / 2;
+    return cx < win.x || cx > win.x + win.width || cy < win.y || cy > win.y + win.height;
+  });
+  return [...batch.detections, ...held];
 }
 
 interface DetectionsState {
@@ -101,6 +132,9 @@ interface DetectionsState {
   /** Newest batch per camera id, so a multi-camera node can pick the batch that
    *  belongs to the active video leg. */
   byCamera: Record<string, CockpitDetectionBatch>;
+  /** Newest batch without a crop window per camera: the boxes a crop-only
+   *  batch holds outside its window. */
+  fullByCamera: Record<string, CockpitDetectionBatch>;
   /** Replace the latest batch (and its per-camera entry). `receivedAt` is
    *  stamped here so callers do not have to. */
   setBatch: (batch: Omit<CockpitDetectionBatch, "receivedAt">) => void;
@@ -111,13 +145,21 @@ interface DetectionsState {
 export const useDetectionsStore = create<DetectionsState>((set) => ({
   latest: null,
   byCamera: {},
+  fullByCamera: {},
   setBatch: (batch) =>
     set((state) => {
-      const stamped: CockpitDetectionBatch = { ...batch, receivedAt: Date.now() };
+      const stamped: CockpitDetectionBatch = {
+        ...batch,
+        detections: holdOutsideCrop(state.fullByCamera[batch.cameraId], batch),
+        receivedAt: Date.now(),
+      };
       return {
         latest: stamped,
         byCamera: { ...state.byCamera, [stamped.cameraId]: stamped },
+        fullByCamera: batch.cropWindow
+          ? state.fullByCamera
+          : { ...state.fullByCamera, [stamped.cameraId]: stamped },
       };
     }),
-  clear: () => set({ latest: null, byCamera: {} }),
+  clear: () => set({ latest: null, byCamera: {}, fullByCamera: {} }),
 }));

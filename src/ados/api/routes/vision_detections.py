@@ -103,6 +103,12 @@ _CAMERA_WAIT_S = _LATEST_MAX_AGE_MS / 2000
 # replayed.
 _latest_by_camera: dict[str, dict] = {}
 
+# The newest batch without a ``crop_window`` seen for each camera. A crop-only
+# batch covers just its window, so a poller that sees one also needs the last
+# whole-frame batch to hold the other boxes; the latest reply carries it as
+# ``full_frame``.
+_full_by_camera: dict[str, dict] = {}
+
 # The WS close reason when the engine socket cannot be reached: the same
 # ``available: false`` the latest poll reports, so a client tells "vision off"
 # apart from "nothing detected". Well under the 123-byte close-reason limit.
@@ -215,9 +221,10 @@ def _remember(batch: dict) -> None:
     ts_ms = batch.get("ts_ms")
     if not isinstance(camera, str) or not isinstance(ts_ms, int):
         return
-    held = _latest_by_camera.get(camera)
-    if held is None or held.get("ts_ms", -1) <= ts_ms:
-        _latest_by_camera[camera] = batch
+    for cache, keep in ((_latest_by_camera, True), (_full_by_camera, batch.get("crop_window") is None)):
+        held = cache.get(camera)
+        if keep and (held is None or held.get("ts_ms", -1) <= ts_ms):
+            cache[camera] = batch
 
 
 def _is_fresh(batch: dict) -> bool:
@@ -230,10 +237,18 @@ def _is_fresh(batch: dict) -> bool:
 
 
 def _current(batch: dict | None) -> dict:
-    """The reply for ``batch``: it, if fresh, else the stale empty shape."""
+    """The reply for ``batch``: it, if fresh, else the stale empty shape.
+
+    A crop-only batch also carries its camera's newest whole-frame batch as
+    ``full_frame`` while that one is fresh."""
     if batch is None or not _is_fresh(batch):
         return {"detections": [], "stale": True, "available": True}
-    return {**batch, "available": True}
+    reply = {**batch, "available": True}
+    if batch.get("crop_window") is not None:
+        full = _full_by_camera.get(batch.get("camera_id"))
+        if full is not None and _is_fresh(full):
+            reply["full_frame"] = full
+    return reply
 
 
 async def _read_batch(reader: asyncio.StreamReader, timeout: float) -> dict | None:

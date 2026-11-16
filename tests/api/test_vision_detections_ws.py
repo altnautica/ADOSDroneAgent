@@ -376,3 +376,25 @@ def test_get_latest_for_a_camera_keeps_its_newest_batch(camera_cache):
     assert camera_cache["belly"]["frame_id"] == 5
     assert route._current(camera_cache["belly"])["frame_id"] == 5
     assert route._current(_batch("belly", 6, age_ms=5_000))["stale"] is True
+
+
+def test_get_latest_carries_the_whole_frame_batch_with_a_crop_only_one(camera_cache):
+    """A crop-only batch covers just its window: the reply also carries the
+    camera's newest whole-frame batch, so a poller can hold the boxes outside
+    the crop."""
+    route._full_by_camera.clear()
+    try:
+        full = _batch("main", 1, age_ms=300)
+        crop = {**_batch("main", 2), "crop_window": {"x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0}}
+        route._remember(full)
+        route._remember(crop)
+        reply = route._current(camera_cache["main"])
+        assert reply["frame_id"] == 2
+        assert reply["full_frame"]["frame_id"] == 1
+        # A whole-frame batch replaces everything and carries none.
+        assert "full_frame" not in route._current(full)
+        # A stale whole-frame batch is not held.
+        route._full_by_camera["main"] = _batch("main", 0, age_ms=5_000)
+        assert "full_frame" not in route._current(crop)
+    finally:
+        route._full_by_camera.clear()

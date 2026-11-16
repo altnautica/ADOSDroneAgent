@@ -8,7 +8,13 @@ import { useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/shared/api-fetch";
 import { LEASE_OWNER } from "@/lib/lease-owner";
-import { holdDetectionLease, layoutVideoBoxes, parseLatestDetections, type DetectionFrame } from "@/lib/video-detections";
+import {
+  holdDetectionLease,
+  holdOutsideCrop,
+  layoutVideoBoxes,
+  parseLatestDetections,
+  type DetectionFrame,
+} from "@/lib/video-detections";
 
 const POLL_MS = 200;
 const LEASE_RENEW_MS = 2000;
@@ -42,6 +48,8 @@ export function VideoDetections({
     ro.observe(box);
 
     let inFlight: AbortController | null = null;
+    // The newest whole-frame batch: a crop-only batch holds its boxes outside the crop.
+    let full: DetectionFrame | null = null;
     const poll = () => {
       if (inFlight || document.visibilityState === "hidden") return;
       const ac = new AbortController();
@@ -50,7 +58,12 @@ export function VideoDetections({
         .then((body) => {
           const f = parseLatestDetections(body, cameraId);
           const v = videoRef.current;
-          setFrame(f ? { f, videoW: v?.videoWidth ?? 0, videoH: v?.videoHeight ?? 0 } : null);
+          // A crop-only reply carries the newest whole-frame batch the poll
+          // itself may never have seen.
+          const carried = f?.cropWindow ? f.fullFrame : f;
+          if (carried && (!full || carried.tsMs >= full.tsMs)) full = carried;
+          const shown = f ? holdOutsideCrop(full, f) : null;
+          setFrame(shown ? { f: shown, videoW: v?.videoWidth ?? 0, videoH: v?.videoHeight ?? 0 } : null);
         })
         .catch(() => setFrame(null))
         .finally(() => {

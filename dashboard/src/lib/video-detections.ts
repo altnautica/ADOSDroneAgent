@@ -19,6 +19,13 @@ export interface DetectionFrame {
   frameW: number;
   frameH: number;
   boxes: { x: number; y: number; w: number; h: number; label: string; trackId: number | null; locked: boolean }[];
+  /** Capture stamp of the batch (host monotonic ms). */
+  tsMs: number;
+  /** Set only on a crop-only batch: its boxes cover just this window. */
+  cropWindow: { x: number; y: number; w: number; h: number } | null;
+  /** With a crop-only batch, the camera's newest whole-frame batch the reply
+   *  carried (`full_frame`), so a poller holds the boxes outside the crop. */
+  fullFrame?: DetectionFrame | null;
 }
 
 const DEFAULT_FRAME_W = 640;
@@ -55,7 +62,39 @@ export function parseLatestDetections(body: unknown, cameraId: string): Detectio
       locked: d.lock_state === "locked",
     });
   }
-  return { frameW: num(b.frame_width) || DEFAULT_FRAME_W, frameH: num(b.frame_height) || DEFAULT_FRAME_H, boxes };
+  const cw = b.crop_window && typeof b.crop_window === "object" ? (b.crop_window as Record<string, unknown>) : null;
+  const [cx, cy, cwW, cwH] = [num(cw?.x), num(cw?.y), num(cw?.width), num(cw?.height)];
+  return {
+    frameW: num(b.frame_width) || DEFAULT_FRAME_W,
+    frameH: num(b.frame_height) || DEFAULT_FRAME_H,
+    tsMs: num(b.ts_ms) ?? 0,
+    cropWindow: cx !== null && cy !== null && cwW !== null && cwH !== null ? { x: cx, y: cy, w: cwW, h: cwH } : null,
+    boxes,
+    fullFrame:
+      b.full_frame && typeof b.full_frame === "object"
+        ? parseLatestDetections({ ...(b.full_frame as Record<string, unknown>), available: true }, cameraId)
+        : null,
+  };
+}
+
+/** How long a whole-frame batch's boxes are held outside later crop windows. */
+export const CROP_HOLD_MS = 1000;
+
+/** The frame to draw for `f`, given the camera's latest whole-frame batch
+ *  `full`: a crop-only frame adds `full`'s boxes whose centre lies outside the
+ *  window, minus track ids `f` reports, while `full` is at most
+ *  `CROP_HOLD_MS` older. A frame without a crop window replaces everything. */
+export function holdOutsideCrop(full: DetectionFrame | null, f: DetectionFrame): DetectionFrame {
+  const win = f.cropWindow;
+  if (!win || !full || f.tsMs - full.tsMs > CROP_HOLD_MS) return f;
+  const seen = new Set(f.boxes.flatMap((b) => (b.trackId !== null ? [b.trackId] : [])));
+  const held = full.boxes.filter((b) => {
+    if (b.trackId !== null && seen.has(b.trackId)) return false;
+    const mx = b.x + b.w / 2;
+    const my = b.y + b.h / 2;
+    return mx < win.x || mx > win.x + win.w || my < win.y || my > win.y + win.h;
+  });
+  return { ...f, boxes: [...f.boxes, ...held] };
 }
 
 /** The boxes in panel px for a `object-contain` video of `videoW`×`videoH`
