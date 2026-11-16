@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.117.0] - 2026-11-16
+
+### Fixed
+
+- Lidar health counted scan arrivals, never what the scans saw: a lidar delivering scans with no return in any bin (a blocked window, a sensor reporting zeros) read `ok`, and the obstacle brake treated the empty scan as open space. The pilot now counts the bins of each `plugin.world-engine.scan` that returned a surface (a finite range above 0.05 m) and reads a new lidar state `no_returns` once the scans have carried none for `thresholds.lidar.no_returns_ms` (1000 ms in `cockpit-spec/sensor-health.json`), with the readiness warning "Lidar sees nothing: its scans have no returns". Where an empty scan cannot be open air, the pilot does not take it as obstacle data: the last scan's obstacles stay, so the brake never reads a sudden blackout as free space, and once they are older than the scan age limit (500 ms) the obstacle data is stale (obstacles unknown, never clear: the pilot holds and flies no horizontal motion command; the vertical stick stays live while scans keep arriving, so climbing or descending out of the scan plane resolves it). That is in a confined place (`pilot.place_class` `confined`), or armed while the last surface the lidar saw this flight must still be in the planar scan. A surface counts when it is not the floor, at least 2 m wide, and in the same place over 3 scans in a row: walls, buildings, hedges, cars and trees, never a stray return, a person or another drone. Still in the scan means the vehicle has moved less than the 12 m reach less that surface's range less 1 m, and the scan plane at the surface has moved less than 0.5 m up or down (the height change plus the roll or pitch change, judged when the returns stopped, over the distance to it). A vehicle that flew away from, climbed above or was tilted off the last surface, or never saw one this flight, reads an empty scan as open air and only warns.
+
+### Added
+
+- Breaking: `ados-protocol`'s `LidarState` has a `NoReturns` variant (`"no_returns"` on the wire) and is now `#[non_exhaustive]`, so later states stay additive; a `match` on it outside the crate needs a catch-all arm.
+- The control API's sensors route reads `no_returns` by the same rule without a pilot (its lidar view gains `empty_ms`) and passes the pilot's `no_returns` through, which before fell back to `absent`. The terminal UI words and tones it like the other lidar states.
+- Cockpit and dashboard: the proximity radar shows "No returns" (`radar.no_returns` in `cockpit-spec/setup-strings.json`) in the warning tone for a fresh scan with no return, where it showed CLEAR. A radar return is now a finite range above 0.05 m, the pilot's rule, so a scan of only near-zero bins no longer reads as an obstacle at 0.0 m. The shared sensor-health model reads the new state as "Lidar no returns".
+
 ## [0.115.1] - 2026-11-16
 
 ### Fixed
