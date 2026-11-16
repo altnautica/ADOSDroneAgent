@@ -29,6 +29,13 @@ pub const SUBJECT_SIGMA_MAX_M: f32 = 1.5;
 /// Inside the kept distance the vehicle backs away at this many m/s per
 /// metre inside it, on top of the subject's own approach.
 pub const SUBJECT_PUSH_PER_S: f32 = 1.0;
+/// The soft tier keeps this much further off than the hard tier, metres:
+/// the shaper's jerk-limited lag past the soft cap then ends before the
+/// hard boundary, so an approach on the goal profile is never cut.
+pub const SUBJECT_SOFT_EXTRA_M: f32 = 0.4;
+/// Outside the kept distance the hard tier acts only within this of it,
+/// metres; further off the soft tier alone slows the vehicle.
+pub const SUBJECT_HARD_ZONE_M: f32 = 1.0;
 /// The subject's velocity, taken from successive goals, is smoothed over
 /// this long, seconds: a tracker's jitter on a standing subject reads as
 /// little motion.
@@ -155,15 +162,15 @@ impl Pilot {
         Some((subject, floor_d))
     }
 
-    /// The direction from `pos` to the subject and the most a velocity may
-    /// go along it, held relative to the subject's own speed along it as
-    /// the obstacle brake holds a closing speed: outside [`Subject::keep`],
-    /// the subject's speed away (an approach counts against) plus what
-    /// still stops the closing between them that far short of it, after the
-    /// FC's lag, at `a` ([`stop_cap`]); inside it, backing away at the
-    /// subject's approach (no credit for it walking away) plus
-    /// [`SUBJECT_PUSH_PER_S`] per metre inside.
-    fn subject_cap(&self, s: &Subject, pos: V2, a: f32, now_ms: u64) -> (V2, f32) {
+    /// The direction from `pos` to the subject, the most a velocity may go
+    /// along it, and the distance to it. The cap is held relative to the
+    /// subject's own speed along the line, as the obstacle brake holds a
+    /// closing speed: outside `keep`, the subject's speed away (an approach
+    /// counts against) plus what still stops the closing between them that
+    /// far short of it, after the FC's lag, at `a` ([`stop_cap`]); inside
+    /// it, backing away at the subject's approach (no credit for it walking
+    /// away) plus [`SUBJECT_PUSH_PER_S`] per metre inside.
+    fn subject_cap(&self, s: &Subject, pos: V2, keep: f32, a: f32, now_ms: u64) -> (V2, f32, f32) {
         let vel = self
             .fc
             .fresh_local(now_ms)
@@ -179,20 +186,21 @@ impl Pilot {
         };
         // The subject's speed along the line, positive moving away.
         let s_u = geo::dot(s.vel, u);
-        let cap = if d > s.keep {
+        let cap = if d > keep {
             let closing = (geo::dot(vel, u) - s_u).max(0.0);
-            s_u + stop_cap(d, closing, a, s.keep)
+            s_u + stop_cap(d, closing, a, keep)
         } else {
-            s_u.min(0.0) - SUBJECT_PUSH_PER_S * (s.keep - d)
+            s_u.min(0.0) - SUBJECT_PUSH_PER_S * (keep - d)
         };
-        (u, cap)
+        (u, cap, d)
     }
 
     /// The soft tier, before the shaper: what a goal asks (`want`, within
     /// `v_cap`) held to the subject cap ([`Pilot::subject_cap`]) at the goal
-    /// limits' acceleration `a_h`, so the shaped velocity slows for the
-    /// subject on the goal profile, well before the hard tier would have to
-    /// cut it. `None` while unarmed or when nothing is cut.
+    /// limits' acceleration `a_h`, kept [`SUBJECT_SOFT_EXTRA_M`] further
+    /// off than the hard tier's, so the shaped velocity slows and settles
+    /// for the subject on the goal profile before the hard tier would have
+    /// to cut it. `None` while unarmed or when nothing is cut.
     pub(super) fn subject_soft(
         &mut self,
         s: &Subject,
@@ -205,7 +213,8 @@ impl Pilot {
         if !s.armed {
             return None;
         }
-        let (u, cap) = self.subject_cap(s, pos, a_h, now_ms);
+        let keep = s.keep + SUBJECT_SOFT_EXTRA_M;
+        let (u, cap, _) = self.subject_cap(s, pos, keep, a_h, now_ms);
         if geo::dot(want, u) <= cap {
             return None;
         }
@@ -223,12 +232,14 @@ impl Pilot {
     /// The hard tier, a safety cut on a goal setpoint flown from `pos`:
     /// `ask` is what the FC would fly (the shaped velocity `v` plus its
     /// position loop's pull). Both are held to the subject cap
-    /// ([`Pilot::subject_cap`]) at the profile's stick acceleration. When
-    /// either breaks it, `ask` with its motion toward the subject cut to the
-    /// cap is returned, to fly from where the vehicle is: its sideways part
-    /// is kept within `v_cap` (the vehicle slides round the subject), its
-    /// motion away never is; with whether `v_cap` cut the slide. `None`
-    /// while unarmed or when nothing is cut.
+    /// ([`Pilot::subject_cap`]) at the profile's stick acceleration, inside
+    /// the kept distance and within [`SUBJECT_HARD_ZONE_M`] of it; further
+    /// off only the soft tier acts. When either breaks the cap, `ask` with
+    /// its motion toward the subject cut to the cap is returned, to fly from
+    /// where the vehicle is: its sideways part is kept within `v_cap` (the
+    /// vehicle slides round the subject), its motion away never is; with
+    /// whether `v_cap` cut the slide. `None` while unarmed or when nothing
+    /// is cut.
     pub(super) fn subject_cut(
         &mut self,
         s: &Subject,
@@ -241,7 +252,11 @@ impl Pilot {
         if !s.armed {
             return None;
         }
-        let (u, cap) = self.subject_cap(s, pos, self.limits_now(now_ms).a_h, now_ms);
+        let a_h = self.limits_now(now_ms).a_h;
+        let (u, cap, d) = self.subject_cap(s, pos, s.keep, a_h, now_ms);
+        if d >= s.keep + SUBJECT_HARD_ZONE_M {
+            return None;
+        }
         if geo::dot(ask, u) <= cap && geo::dot(v, u) <= cap {
             return None;
         }

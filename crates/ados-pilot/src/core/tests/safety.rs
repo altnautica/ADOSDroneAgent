@@ -842,7 +842,10 @@ fn a_hard_stop_after_a_shaped_stop_holds_at_the_vehicle() {
     scan_for(&mut w, &wall_scan(4.0), 600);
     assert_eq!(w.p.state(w.now).hold_reason.as_deref(), Some("blocked"));
     let lead = w.last_setpoint().unwrap().x - w.pos[0];
-    assert!(lead > 0.2, "the shaped stop's reference leads by {lead:.2} m");
+    assert!(
+        lead > 0.2,
+        "the shaped stop's reference leads by {lead:.2} m"
+    );
     w.vel = [0.0; 3];
     let mut held = None;
     for _ in 0..10 {
@@ -1191,7 +1194,10 @@ fn a_commanded_stop_on_a_detour_stays_still() {
         fastest = fastest.max(geo::norm(fc_ask(&w, [0.0, 0.0])));
     }
     assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Detour);
-    assert!(fastest < 0.05, "a commanded stop flew up to {fastest:.2} m/s");
+    assert!(
+        fastest < 0.05,
+        "a commanded stop flew up to {fastest:.2} m/s"
+    );
 }
 
 #[test]
