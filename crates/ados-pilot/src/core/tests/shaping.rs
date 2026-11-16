@@ -244,3 +244,47 @@ fn a_heading_step_turns_at_the_goal_rate() {
         "ended at {last}"
     );
 }
+
+/// A goal 30 m out over a scan with no return, flown with avoidance on:
+/// the soft brake holds what the goal asks to what the vehicle can stop
+/// from inside the space it has seen, so the shaped velocity never breaks
+/// the safety brake's cap and only the soft brake slows the goal. Every
+/// frame whose command names the seen-space limit reports the goal slowed
+/// (`detour`), never `clear`. Before, the soft brake left the avoid state
+/// clear while it held the vehicle back.
+#[test]
+fn a_goal_slowed_by_the_soft_brake_reports_it() {
+    let (mut w, id) = flying();
+    w.p.settings.pilot.avoid = AvoidMode::Brake;
+    let empty = serde_json::json!({"frame": "body_frd", "angle_start_rad": 0.0,
+        "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": vec![0.0f32; 360]});
+    let mut braked = 0;
+    let t0 = w.now;
+    while w.now < t0 + 8_000 {
+        if (w.now - t0).is_multiple_of(100) {
+            w.p.on_feed("plugin.world-engine.scan", &empty, w.now);
+            w.req(Request::Goal {
+                lease_id: id,
+                goal: follow(30.0, 0.0),
+            });
+        }
+        w.run(20);
+        let s = serde_json::to_value(w.p.state(w.now)).unwrap();
+        let seen = s["command"]["limits"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|l| l == "seen_space"));
+        if seen {
+            braked += 1;
+            assert_eq!(
+                s["avoid_state"],
+                "detour",
+                "t {} ms, v {:.2}: {}",
+                w.now - t0,
+                w.vel[0],
+                s["command"]
+            );
+        }
+    }
+    assert!(braked > 50, "the brake slowed {braked} frames");
+    assert!(w.vel[0] > 1.0, "the goal is flown: {:.2} m/s", w.vel[0]);
+}
