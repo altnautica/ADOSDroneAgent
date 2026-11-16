@@ -1251,3 +1251,34 @@ fn a_gap_of_exactly_the_coast_budget_keeps_the_track() {
     assert_eq!(u.track_id, Some(id), "{u:?}");
     assert!(u.measured, "{u:?}");
 }
+
+#[test]
+fn a_coast_reports_about_the_same_confidence_after_a_second_at_any_rate() {
+    // Locked, then one second without the subject: the coast's association
+    // confidence falls with the seconds coasted, not with how many batches
+    // the detector ran in them. At 3 Hz the second divides it by 24; at 10 Hz
+    // it must not fall orders of magnitude further.
+    let coast_assoc = |interval_ns: u64| {
+        let mut t = SingleObjectTracker::new(TrackerConfig::default());
+        t.designate(&obj(100.0, 100.0)).unwrap();
+        let mut ts = 0;
+        for _ in 0..4 {
+            t.update_with_appearance_at(&[Candidate::motion_only(obj(100.0, 100.0))], ts);
+            ts += interval_ns;
+        }
+        let locked = ts - interval_ns;
+        let mut last = None;
+        while ts - locked <= 1_000_000_000 {
+            last = t.update_with_appearance_at(&[], ts).detection;
+            ts += interval_ns;
+        }
+        last.and_then(|d| d.assoc_confidence).expect("coasting")
+    };
+    let at3 = coast_assoc(333_333_333);
+    let at10 = coast_assoc(100_000_000);
+    assert!(at3 > 0.0, "{at3}");
+    assert!(
+        at10 > at3 / 3.0 && at10 < at3 * 3.0,
+        "3 Hz {at3}, 10 Hz {at10}"
+    );
+}

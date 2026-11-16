@@ -221,8 +221,10 @@ impl SingleObjectTracker {
         // re-association out of this coast owes its own re-confirm frame.
         track.reconfirming = false;
         // Association confidence decays with the coast length so a long hold
-        // reads as a weak identity claim on the wire.
-        let assoc = (prev_assoc / (1.0 + track.coast_steps)).clamp(0.0, 1.0);
+        // reads as a weak identity claim on the wire. The divisor applies per
+        // step (`powf(dt)`), so the decay over a coast's seconds does not grow
+        // with the detector's rate.
+        let assoc = (prev_assoc / (1.0 + track.coast_steps).powf(dt)).clamp(0.0, 1.0);
         track.assoc_confidence = assoc;
         if ambiguous {
             self.needs_redesignation = true;
