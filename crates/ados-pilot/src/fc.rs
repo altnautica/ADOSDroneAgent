@@ -294,6 +294,12 @@ impl FcState {
             MavMessage::SERVO_OUTPUT_RAW(s) if self.from_fc(sysid, compid) => {
                 self.rates.on_servo(s, now_ms);
             }
+            MavMessage::VFR_HUD(h) if self.from_fc(sysid, compid) => {
+                self.rates.throttle = Some(Stamped {
+                    v: f32::from(h.throttle) / 100.0,
+                    at_ms: now_ms,
+                });
+            }
             _ => {}
         }
         None

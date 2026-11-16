@@ -62,6 +62,10 @@ pub struct WizardData {
     pub box_latlon: Option<(i32, i32)>,
     /// Measured cruise throttle (%), first flight.
     pub cruise_throttle: Option<f32>,
+    /// Airframe health for this aircraft: the learned trim, hover throttle
+    /// and motor headroom, and whether its last supervised lift-off stopped
+    /// for a saturated motor. Kept by the pilot, filed here.
+    pub airframe: Option<crate::airframe::Record>,
 }
 
 /// Everything a step may read or drive during one call.

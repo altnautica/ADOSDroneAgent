@@ -42,6 +42,10 @@ fn drone_table_streams_the_autonomy_inputs() {
     assert_eq!(rate(t, 24), Some(5.0), "GPS_RAW_INT");
     assert_eq!(rate(t, 100), Some(20.0), "OPTICAL_FLOW");
     assert_eq!(rate(t, 193), Some(5.0), "EKF_STATUS_REPORT");
+    // The supervised lift-off and airframe health read the rate loop and
+    // the motor outputs, at the lift-off's own 25 Hz.
+    assert_eq!(rate(t, 36), Some(25.0), "SERVO_OUTPUT_RAW");
+    assert_eq!(rate(t, 194), Some(25.0), "PID_TUNING");
     assert_eq!(rate(t, 105), None, "no capture streams outside a capture");
     // Every base stream is requested, at its base rate unless raised.
     for &(id, hz) in BASE_RATES {

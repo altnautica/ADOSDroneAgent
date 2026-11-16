@@ -74,6 +74,10 @@ async fn run(
     let mut needed: Option<Option<String>> = None;
     let mut step_sent: Option<Option<&'static str>> = None;
     let mut abort_sent: Option<Option<String>> = None;
+    // Airframe health: the FC identity and propeller size last handed to the
+    // pilot, and the record revision last filed.
+    let mut airframe_sent: Option<(String, Option<f32>)> = None;
+    let mut airframe_rev: Option<u64> = None;
     loop {
         tokio::select! {
             v = version_frames.recv() => if let Ok(frame) = v {
@@ -114,6 +118,28 @@ async fn run(
                     let ob = e.outbox();
                     (ob.take_msgs(), ob.take_effects(), e.frames(now), e.setup_needed(now), step, abort)
                 };
+                // Airframe health: the pilot's record is filed whenever it
+                // saves; the stored one goes to the pilot once the FC identity
+                // is known, and again with a new propeller size.
+                let load = {
+                    let mut e = inner.engine.lock().expect("engine lock");
+                    if let Some(s) = status.airframe.as_ref().filter(|s| airframe_rev != Some(s.record.rev)) {
+                        if e.airframe().is_some_and(|(u, _, _)| u == s.uid) {
+                            e.set_airframe(&s.uid, s.record.clone(), now);
+                            airframe_rev = Some(s.record.rev);
+                        }
+                    }
+                    e.airframe()
+                        .filter(|(u, _, p)| airframe_sent.as_ref().is_none_or(|(su, sp)| su != u || sp != p))
+                        .map(|(u, r, p)| (u.to_owned(), r.cloned(), p))
+                };
+                if let Some((uid, record, prop_in)) = load {
+                    if airframe_sent.as_ref().is_none_or(|(u, _)| *u != uid) {
+                        airframe_rev = Some(record.as_ref().map_or(0, |r| r.rev));
+                    }
+                    airframe_sent = Some((uid.clone(), prop_in));
+                    handle.airframe_load(uid, record, prop_in).await;
+                }
                 for m in msgs {
                     if let Some(mode) = commanded_mode(&m) {
                         handle.setup_mode(mode).await;

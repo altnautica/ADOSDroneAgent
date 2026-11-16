@@ -108,6 +108,30 @@ impl Pilot {
         })
     }
 
+    /// The setup engine knows the FC identity: its stored airframe record
+    /// and the wizard's propeller size.
+    pub fn load_airframe(
+        &mut self,
+        uid: &str,
+        record: Option<crate::airframe::Record>,
+        prop_in: Option<f32>,
+    ) {
+        let tip = self.settings.pilot.prop_tip_radius_m;
+        self.airframe.load(uid, record, prop_in, tip);
+    }
+
+    /// `airframe_reset`: the operator rebalanced the airframe; what was
+    /// learned for this FC is forgotten (the next lift-off probes again).
+    /// On the ground only.
+    pub(super) fn airframe_reset(&mut self) -> Result<(), String> {
+        if self.fc.armed && !self.fc.landed() {
+            return Err("airborne".into());
+        }
+        self.airframe.reset();
+        tracing::info!(target: "ados_pilot", "pilot_airframe_reset");
+        Ok(())
+    }
+
     pub fn set_rc_ados_position(&mut self, slot: u8) {
         self.settings.control.rc_ados_position = slot;
         self.out.push(Out::Persist {

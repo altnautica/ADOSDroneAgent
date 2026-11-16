@@ -38,6 +38,13 @@ pub struct ProfileParam {
     /// In an open place the row accepts any value in this band (`value`
     /// is written when it is outside); a confined place does not check it.
     pub open_band: Option<(f32, f32)>,
+    /// `value` is a bitmask: the row wants those bits set and leaves the
+    /// operator's other bits as they are.
+    pub bits: bool,
+    /// The pilot sets the row itself before the flight that needs it (the
+    /// supervised lift-off): the wizard writes it, readiness does not check
+    /// it.
+    pub pilot_sets: bool,
 }
 
 /// `ATC_INPUT_TC` for camera flight in an open place, seconds: 0.15-0.2.
@@ -93,6 +100,8 @@ pub(crate) const fn p(
         reboot: false,
         confined_max: None,
         open_band: None,
+        bits: false,
+        pilot_sets: false,
     }
 }
 
@@ -125,9 +134,20 @@ impl ProfileParam {
         }
     }
 
+    const fn bits_set(self) -> Self {
+        ProfileParam { bits: true, ..self }
+    }
+
+    const fn set_by_pilot(self) -> Self {
+        ProfileParam {
+            pilot_sets: true,
+            ..self
+        }
+    }
     /// What the row wants in `place`.
     pub fn want(&self, place: PlaceClass) -> Want {
         match (place, self.confined_max, self.open_band) {
+            _ if self.bits => Want::Bits(self.value as u32),
             (PlaceClass::Confined, Some(max), _) => Want::Within(max),
             (PlaceClass::Confined, None, Some(_)) => Want::Any,
             (_, _, Some((lo, hi))) => Want::Between(lo, hi),
@@ -136,7 +156,8 @@ impl ProfileParam {
     }
 
     /// The value the setup wizard writes in `place` over `have`: `have`
-    /// itself when it already satisfies the row there.
+    /// itself when it already satisfies the row there; for a bitmask row,
+    /// `have` with the row's bits ORed in.
     pub fn value_in(&self, place: PlaceClass, have: Option<f32>) -> f32 {
         let want = self.want(place);
         match want {
@@ -145,6 +166,7 @@ impl ProfileParam {
             Want::Between(..) | Want::Any => {
                 have.filter(|h| want.accepts(*h)).unwrap_or(self.value)
             }
+            Want::Bits(b) => (have.map_or(0, |h| h as u32) | b) as f32,
         }
     }
 }
@@ -160,6 +182,8 @@ pub enum Want {
     Between(f32, f32),
     /// Whatever the FC has.
     Any,
+    /// These bits set, whatever the others.
+    Bits(u32),
 }
 
 impl Want {
@@ -169,6 +193,7 @@ impl Want {
             Want::Within(max) => v > 0.0 && v <= max + 1e-4,
             Want::Between(lo, hi) => v >= lo - 1e-4 && v <= hi + 1e-4,
             Want::Any => true,
+            Want::Bits(b) => v >= 0.0 && (v as u32) & b == b,
         }
     }
 }
@@ -180,6 +205,7 @@ impl fmt::Display for Want {
             Want::Within(max) => write!(f, "> 0 and ≤ {max} in a confined place"),
             Want::Between(lo, hi) => write!(f, "{lo} to {hi}"),
             Want::Any => write!(f, "any value"),
+            Want::Bits(b) => write!(f, "bits {b} set"),
         }
     }
 }
@@ -210,6 +236,22 @@ const COPTER: &[ProfileParam] = &[
     p("SRTL_ACCURACY", &[], 2.0).confined_at_most(CONFINED_SRTL_ACCURACY_MAX_M),
     // A softer attitude input for the fixed camera (see OPEN_INPUT_TC_S).
     p("ATC_INPUT_TC", &[], OPEN_INPUT_TC_S.0).open_within(OPEN_INPUT_TC_S),
+    // The supervised lift-off: SET_ATTITUDE_TARGET thrust read as thrust,
+    // and PID_TUNING for roll and pitch. Neither changes manual flight.
+    p(
+        "GUID_OPTIONS",
+        &[],
+        ados_protocol::mavlink::GUID_OPTIONS_THRUST as f32,
+    )
+    .bits_set()
+    .set_by_pilot(),
+    p(
+        "GCS_PID_MASK",
+        &[],
+        crate::liftoff::GCS_PID_ROLL_PITCH as f32,
+    )
+    .bits_set()
+    .set_by_pilot(),
 ];
 
 const PLANE: &[ProfileParam] = &[
@@ -401,5 +443,39 @@ mod tests {
         assert_eq!(row.value_in(PlaceClass::Open, Some(0.18)), 0.18);
         assert_eq!(row.value_in(PlaceClass::Open, None), 0.15);
         assert_eq!(row.value_in(PlaceClass::Confined, Some(0.1)), 0.1);
+    }
+
+    fn row(name: &str) -> &'static ProfileParam {
+        COPTER.iter().find(|r| r.name == name).unwrap()
+    }
+
+    #[test]
+    fn the_lift_off_rows_want_their_bits_set_and_keep_the_operators_others() {
+        let guid = row("GUID_OPTIONS");
+        let pid = row("GCS_PID_MASK");
+        assert_eq!(guid.want(PlaceClass::Open), Want::Bits(8));
+        assert_eq!(pid.want(PlaceClass::Confined), Want::Bits(3));
+        assert!(guid.pilot_sets && pid.pilot_sets);
+        // The wizard ORs the bits in.
+        for place in [PlaceClass::Open, PlaceClass::Confined] {
+            assert_eq!(guid.value_in(place, None), 8.0);
+            assert_eq!(guid.value_in(place, Some(0.0)), 8.0);
+            assert_eq!(guid.value_in(place, Some(1.0)), 9.0);
+            assert_eq!(guid.value_in(place, Some(9.0)), 9.0);
+            assert_eq!(pid.value_in(place, Some(4.0)), 7.0);
+        }
+        // Set with other bits passes; missing a bit does not.
+        let check = |r, v: f32| check_row(r, PlaceClass::Open, |_| Some(v));
+        assert_eq!(check(guid, 9.0), RowCheck::Ok);
+        assert_eq!(check(pid, 7.0), RowCheck::Ok);
+        assert_eq!(
+            check(pid, 1.0),
+            RowCheck::Mismatch {
+                name: "GCS_PID_MASK",
+                have: 1.0,
+                want: Want::Bits(3)
+            }
+        );
+        assert_eq!(Want::Bits(8).to_string(), "bits 8 set");
     }
 }

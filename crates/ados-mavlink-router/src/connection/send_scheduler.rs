@@ -49,10 +49,12 @@ const BASE_RATES: &[(u32, f32)] = &[
 /// NED position and velocity the guided setpoints are expressed in, the
 /// downward rangefinder that gives height above ground, the optical flow and
 /// the EKF status the flow-and-range position hold is judged by, attitude at
-/// the rate an external-navigation odometry stamps roll and pitch from, and
-/// the GNSS fix at the rate a GNSS-loss source switch watches. The router
-/// owns these rates so the plugins that read them never send competing
-/// requests.
+/// the rate an external-navigation odometry stamps roll and pitch from, the
+/// GNSS fix at the rate a GNSS-loss source switch watches, and the rate
+/// loop and motor outputs the pilot's supervised lift-off and airframe
+/// health read (PID_TUNING needs `GCS_PID_MASK`; at the lift-off's own
+/// rate, so a refresh never lowers it). The router owns these rates so the
+/// plugins that read them never send competing requests.
 const DRONE_RATES: &[(u32, f32)] = &[
     (0, 1.0),    // HEARTBEAT
     (30, 50.0),  // ATTITUDE
@@ -70,6 +72,8 @@ const DRONE_RATES: &[(u32, f32)] = &[
     (42, 2.0),   // MISSION_CURRENT (mission state)
     (100, 20.0), // OPTICAL_FLOW
     (193, 5.0),  // EKF_STATUS_REPORT
+    (36, 25.0),  // SERVO_OUTPUT_RAW (motor outputs)
+    (194, 25.0), // PID_TUNING (roll and pitch rate loop)
 ];
 
 /// [`DRONE_RATES`] plus the sensor streams a capture session records: the
@@ -97,6 +101,8 @@ const CAPTURE_RATES: &[(u32, f32)] = &[
     (42, 2.0),    // MISSION_CURRENT
     (100, 20.0),  // OPTICAL_FLOW
     (193, 5.0),   // EKF_STATUS_REPORT
+    (36, 25.0),   // SERVO_OUTPUT_RAW
+    (194, 25.0),  // PID_TUNING
 ];
 
 /// The stream table for a node of `profile`: a visor always records sensor

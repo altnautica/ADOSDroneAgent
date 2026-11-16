@@ -141,9 +141,10 @@ fn profile_item(
     let mut unread = false;
     // The battery actions are the `battery_failsafe` item's: their right
     // value depends on the GNSS sources and the place class. The RC
-    // failsafe and the fence follow the RC declaration.
+    // failsafe and the fence follow the RC declaration. The rows the pilot
+    // sets itself before the flight that needs them are not checked.
     let rows = crate::no_rc::profile(fw, class, rc)
-        .filter(|r| !crate::batt_failsafe::ACTIONS.contains(&r.name));
+        .filter(|r| !r.pilot_sets && !crate::batt_failsafe::ACTIONS.contains(&r.name));
     for row in rows {
         match check_row(&row, place, |n| fc.params.get(n).copied()) {
             RowCheck::Ok => {}

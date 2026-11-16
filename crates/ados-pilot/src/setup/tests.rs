@@ -1854,3 +1854,5 @@ fn vtol_air_wizard_flies_every_step() {
 
 mod no_rc;
 mod safety;
+
+mod airframe;

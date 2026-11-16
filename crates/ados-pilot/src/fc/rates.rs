@@ -30,6 +30,9 @@ pub struct Rates {
     pub pitch: Option<Stamped<PidAxis>>,
     /// SERVO_OUTPUT_RAW outputs 1..8 of port 0, µs.
     pub servo: Option<Stamped<[u16; 8]>>,
+    /// VFR_HUD throttle, 0..1: ArduPilot's throttle before its battery
+    /// compensation, in the units the rate-loop terms are mixed against.
+    pub throttle: Option<Stamped<f32>>,
 }
 
 impl Rates {
@@ -83,5 +86,12 @@ impl Rates {
             .as_ref()
             .filter(|s| now_ms.saturating_sub(s.at_ms) < max_age_ms)
             .map(|s| &s.v[..n.min(8)])
+    }
+
+    /// The throttle while younger than `max_age_ms`.
+    pub fn fresh_throttle(&self, now_ms: u64, max_age_ms: u64) -> Option<f32> {
+        self.throttle
+            .filter(|s| now_ms.saturating_sub(s.at_ms) < max_age_ms)
+            .map(|s| s.v)
     }
 }

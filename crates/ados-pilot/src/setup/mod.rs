@@ -1394,4 +1394,25 @@ impl Engine {
     pub fn data(&self) -> &WizardData {
         &self.state.data
     }
+
+    /// The FC identity, its stored airframe record and the wizard's
+    /// propeller size, once the identity is known.
+    pub fn airframe(&self) -> Option<(&str, Option<&crate::airframe::Record>, Option<f32>)> {
+        Some((
+            self.uid.as_deref()?,
+            self.state.data.airframe.as_ref(),
+            self.state.data.prop_in,
+        ))
+    }
+
+    /// File the pilot's airframe record for the FC `uid` in its state;
+    /// ignored for any other FC.
+    pub fn set_airframe(&mut self, uid: &str, record: crate::airframe::Record, now: u64) {
+        if self.uid.as_deref() != Some(uid) {
+            return;
+        }
+        crate::airframe::log_record("pilot_airframe_saved", uid, &record);
+        self.state.data.airframe = Some(record);
+        self.persist(now);
+    }
 }

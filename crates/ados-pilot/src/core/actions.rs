@@ -122,6 +122,7 @@ impl Pilot {
             "land" => self.do_land(now_ms),
             "rth" => self.do_rth("operator", now_ms),
             "mission_skip" => self.mission_skip(true, now_ms),
+            "airframe_reset" => self.airframe_reset(),
             "goto" => self.surface_goto(args, now_ms),
             "pause" => {
                 self.cancel_low_battery("pause");

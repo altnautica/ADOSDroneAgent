@@ -413,3 +413,15 @@ fn absent_smartrtl_blocks_while_another_absent_row_is_skipped() {
     assert_eq!(r.severity, Severity::Block);
     assert!(r.msg.contains("SRTL_POINTS absent"), "{}", r.msg);
 }
+
+/// The lift-off rows are the pilot's to set before a supervised lift-off:
+/// an FC with them clear still passes `fc_profile`.
+#[test]
+fn the_lift_off_bits_never_fail_the_profile() {
+    let mut fc = gnss_free_copter(1.0, 1.0);
+    fc.params.insert("GUID_OPTIONS".into(), 1.0);
+    fc.params.insert("GCS_PID_MASK".into(), 0.0);
+    let items = all(&fc, ControlMode::Ados);
+    let profile = find(&items, "fc_profile").unwrap();
+    assert!(profile.ok, "{profile:?}");
+}

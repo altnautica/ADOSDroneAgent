@@ -46,6 +46,9 @@ pub struct SetupView {
     pub place_class: ados_protocol::pilot::PlaceClass,
     /// `pilot.rc_receiver`: the `ados_profile` step writes its values.
     pub rc_receiver: ados_protocol::pilot::RcReceiver,
+    /// The airframe record to file under the FC identity (`None` until the
+    /// identity is known); filed again whenever its `rev` moves.
+    pub airframe: Option<crate::airframe::Save>,
 }
 
 /// Commands from the setup engine to the core.
@@ -65,6 +68,13 @@ pub enum CoreCmd {
     SetupAbort(Option<String>),
     /// The setup engine is about to ask the FC for this custom mode.
     SetupMode(u32),
+    /// The FC identity is known: its stored airframe record and the
+    /// wizard's propeller size.
+    AirframeLoad {
+        uid: String,
+        record: Option<crate::airframe::Record>,
+        prop_in: Option<f32>,
+    },
 }
 
 /// Handle the setup engine uses to take and give back the `tuning` owner.
@@ -120,6 +130,23 @@ impl PilotHandle {
     /// out, so the FC's change to it reads as the operator's, not a failsafe.
     pub async fn setup_mode(&self, mode: u32) {
         let _ = self.cmd.send(CoreCmd::SetupMode(mode)).await;
+    }
+
+    /// Hand the FC identity's stored airframe record to airframe health.
+    pub async fn airframe_load(
+        &self,
+        uid: String,
+        record: Option<crate::airframe::Record>,
+        prop_in: Option<f32>,
+    ) {
+        let _ = self
+            .cmd
+            .send(CoreCmd::AirframeLoad {
+                uid,
+                record,
+                prop_in,
+            })
+            .await;
     }
 }
 
@@ -254,6 +281,7 @@ impl Core {
                             link_lost: self.pilot.link_lost(t),
                             place_class: s.place_class,
                             rc_receiver: self.pilot.rc_receiver(),
+                            airframe: self.pilot.airframe.save(),
                         };
                         self.status_tx.send_if_modified(|v| {
                             let changed = *v != view;
@@ -307,6 +335,9 @@ impl Core {
                     Some(CoreCmd::SetupStep(step)) => self.pilot.setup_step = step,
                     Some(CoreCmd::SetupAbort(key)) => self.pilot.setup_abort = key,
                     Some(CoreCmd::SetupMode(mode)) => self.pilot.note_setup_mode(mode, now()),
+                    Some(CoreCmd::AirframeLoad { uid, record, prop_in }) => {
+                        self.pilot.load_airframe(&uid, record, prop_in)
+                    }
                     None => {}
                 },
             }

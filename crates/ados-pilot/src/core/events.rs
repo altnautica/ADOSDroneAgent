@@ -248,6 +248,13 @@ impl Pilot {
                     .iter()
                     .copied(),
             )
+            .chain(
+                ardupilot
+                    .then_some(crate::airframe::PARAMS)
+                    .unwrap_or_default()
+                    .iter()
+                    .copied(),
+            )
             .chain(batt.iter().chain(batt_legacy).copied())
             .chain(sensors.iter().map(String::as_str))
             .collect();
