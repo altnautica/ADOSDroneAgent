@@ -75,7 +75,7 @@ All thresholds live in [`TrackerConfig`](https://docs.rs/ados-vision/latest/ados
 
 ### [`yolo`](https://docs.rs/ados-vision/latest/ados_vision/yolo/index.html)
 
-[`decode`](https://docs.rs/ados-vision/latest/ados_vision/yolo/fn.decode.html) turns a raw output tensor into detections in source-frame pixels. It supports the transposed `[1, 4+nc, anchors]` YOLOv8/v11 head (no objectness) and the `[1, anchors, 5+nc]` YOLOv5/v7 head, transposes a head delivered the other way round automatically, scales boxes by `frame / input`, applies the confidence gate and runs class-agnostic NMS. [`preprocess_rgb24_nchw`](https://docs.rs/ados-vision/latest/ados_vision/yolo/fn.preprocess_rgb24_nchw.html) does the matching stretch resize into an NCHW float tensor.
+[`decode`](https://docs.rs/ados-vision/latest/ados_vision/yolo/fn.decode.html) turns a raw output tensor into detections in source-frame pixels. It supports the transposed `[1, 4+nc, anchors]` YOLOv8/v11 head (no objectness) and the `[1, anchors, 5+nc]` YOLOv5/v7 head, transposes a head delivered the other way round automatically, scales boxes by `frame / input`, applies the confidence gate and runs class-agnostic NMS. [`preprocess_rgb24_nchw_into`](https://docs.rs/ados-vision/latest/ados_vision/yolo/fn.preprocess_rgb24_nchw_into.html) does the matching stretch resize of a frame window into a reused NCHW float tensor.
 
 ### [`reid`](https://docs.rs/ados-vision/latest/ados_vision/reid/index.html)
 

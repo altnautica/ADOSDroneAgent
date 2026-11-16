@@ -115,22 +115,30 @@ pub fn decode(data: &[f32], rows: usize, cols: usize, p: &DecodeParams) -> Vec<D
     out
 }
 
-/// Preprocess a raw RGB24 frame into a model input tensor: bilinear-resize to
-/// `(input_w, input_h)`, scale to `[0, 1]`, and lay it out channel-planar NCHW
-/// (`[3, input_h, input_w]` flattened, R plane then G then B). Returns `None`
-/// when a dimension is zero or the frame buffer is too small.
+/// Preprocess a raw RGB24 frame into a model input tensor in `out`: bilinear-
+/// resize `window` (frame pixels, clamped to the frame; `None` is the whole
+/// frame) to `(input_w, input_h)`, scale to `[0, 1]`, and lay it out
+/// channel-planar NCHW (`[3, input_h, input_w]` flattened, R plane then G then
+/// B). `out` is resized to the tensor's length only when it differs, so a
+/// buffer kept across frames is filled in place with no allocation. Returns
+/// `false` (leaving `out` unspecified) when a dimension is zero, the frame
+/// buffer is too small or the window holds less than a pixel.
 ///
 /// The simple stretch resize (not a letterbox) is deliberate: it matches the
 /// `frame / input` box scale-back in [`decode`], so preprocessing and decoding
 /// stay box-consistent. A
-/// letterbox would have to land in both decoders at once.
-pub fn preprocess_rgb24_nchw(
+/// letterbox would have to land in both decoders at once. A window is sampled
+/// exactly as cutting it out with [`crate::reid::crop_resize_rgb24`] at the
+/// input size would, without the intermediate 8-bit image.
+pub fn preprocess_rgb24_nchw_into(
     frame: &[u8],
     frame_w: u32,
     frame_h: u32,
+    window: Option<&BoundingBox>,
     input_w: u32,
     input_h: u32,
-) -> Option<Vec<f32>> {
+    out: &mut Vec<f32>,
+) -> bool {
     let (fw, fh, iw, ih) = (
         frame_w as usize,
         frame_h as usize,
@@ -138,31 +146,61 @@ pub fn preprocess_rgb24_nchw(
         input_h as usize,
     );
     if fw == 0 || fh == 0 || iw == 0 || ih == 0 || frame.len() < fw * fh * 3 {
-        return None;
+        return false;
     }
-    let mut out = vec![0f32; 3 * ih * iw];
-    let plane = ih * iw;
-    let sx = fw as f32 / iw as f32;
-    let sy = fh as f32 / ih as f32;
-    let sample = |y: usize, x: usize, c: usize| frame[(y * fw + x) * 3 + c] as f32;
-    for oy in 0..ih {
-        let fy = ((oy as f32 + 0.5) * sy - 0.5).clamp(0.0, (fh - 1) as f32);
-        let y0 = fy.floor() as usize;
-        let y1 = (y0 + 1).min(fh - 1);
-        let wy = fy - y0 as f32;
-        for ox in 0..iw {
-            let fx = ((ox as f32 + 0.5) * sx - 0.5).clamp(0.0, (fw - 1) as f32);
-            let x0 = fx.floor() as usize;
-            let x1 = (x0 + 1).min(fw - 1);
-            let wx = fx - x0 as f32;
-            for c in 0..3 {
-                let top = sample(y0, x0, c) * (1.0 - wx) + sample(y0, x1, c) * wx;
-                let bot = sample(y1, x0, c) * (1.0 - wx) + sample(y1, x1, c) * wx;
-                out[c * plane + oy * iw + ox] = (top * (1.0 - wy) + bot * wy) / 255.0;
+    let (x0, y0, sw, sh) = match window {
+        None => (0.0, 0.0, fw as f32, fh as f32),
+        Some(b) => {
+            let x0 = b.x.clamp(0.0, fw as f32);
+            let y0 = b.y.clamp(0.0, fh as f32);
+            let x1 = (b.x + b.width).clamp(0.0, fw as f32);
+            let y1 = (b.y + b.height).clamp(0.0, fh as f32);
+            if x1 - x0 < 1.0 || y1 - y0 < 1.0 {
+                return false;
             }
+            (x0, y0, x1 - x0, y1 - y0)
+        }
+    };
+    let plane = ih * iw;
+    if out.len() != 3 * plane {
+        out.resize(3 * plane, 0.0);
+    }
+    let (r_plane, rest) = out.split_at_mut(plane);
+    let (g_plane, b_plane) = rest.split_at_mut(plane);
+    let stride = fw * 3;
+    let (max_x, max_y) = ((fw - 1) as f32, (fh - 1) as f32);
+    let sx = sw / iw as f32;
+    let sy = sh / ih as f32;
+    const INV_255: f32 = 1.0 / 255.0;
+    for oy in 0..ih {
+        let fy = (y0 + (oy as f32 + 0.5) * sy - 0.5).clamp(0.0, max_y);
+        let ylo = fy as usize;
+        let yhi = (ylo + 1).min(fh - 1);
+        let wy = fy - ylo as f32;
+        let top = &frame[ylo * stride..ylo * stride + stride];
+        let bot = &frame[yhi * stride..yhi * stride + stride];
+        let row = oy * iw;
+        for ox in 0..iw {
+            let fx = (x0 + (ox as f32 + 0.5) * sx - 0.5).clamp(0.0, max_x);
+            let xlo = fx as usize;
+            let xhi = (xlo + 1).min(fw - 1);
+            let wx = fx - xlo as f32;
+            let (a, b) = (xlo * 3, xhi * 3);
+            let (w00, w01) = ((1.0 - wx) * (1.0 - wy), wx * (1.0 - wy));
+            let (w10, w11) = ((1.0 - wx) * wy, wx * wy);
+            let px = |c: usize| {
+                (f32::from(top[a + c]) * w00
+                    + f32::from(top[b + c]) * w01
+                    + f32::from(bot[a + c]) * w10
+                    + f32::from(bot[b + c]) * w11)
+                    * INV_255
+            };
+            r_plane[row + ox] = px(0);
+            g_plane[row + ox] = px(1);
+            b_plane[row + ox] = px(2);
         }
     }
-    Some(out)
+    true
 }
 
 /// Read element `(r, c)` of the row-major buffer.
@@ -462,7 +500,8 @@ mod tests {
             0, 255, 0, // (1,0) green
             255, 255, 255, // (1,1) white
         ];
-        let t = preprocess_rgb24_nchw(&frame, 2, 2, 2, 2).unwrap();
+        let mut t = Vec::new();
+        assert!(preprocess_rgb24_nchw_into(&frame, 2, 2, None, 2, 2, &mut t));
         assert_eq!(t.len(), 3 * 2 * 2);
         // R plane (channel 0): [r(0,0), r(0,1), r(1,0), r(1,1)] = [1,0,0,1].
         assert!((t[0] - 1.0).abs() < 1e-3); // (0,0) red R=1
@@ -474,8 +513,77 @@ mod tests {
 
     #[test]
     fn preprocess_rejects_bad_dims_or_short_buffer() {
-        assert!(preprocess_rgb24_nchw(&[0; 12], 0, 2, 2, 2).is_none());
-        assert!(preprocess_rgb24_nchw(&[0; 3], 2, 2, 2, 2).is_none()); // too short
+        let mut t = Vec::new();
+        assert!(!preprocess_rgb24_nchw_into(
+            &[0; 12], 0, 2, None, 2, 2, &mut t
+        ));
+        assert!(!preprocess_rgb24_nchw_into(
+            &[0; 3], 2, 2, None, 2, 2, &mut t
+        )); // too short
+        let sliver = BoundingBox {
+            x: 1.5,
+            y: 0.0,
+            width: 4.0,
+            height: 2.0,
+        };
+        assert!(!preprocess_rgb24_nchw_into(
+            &[0; 12],
+            2,
+            2,
+            Some(&sliver),
+            2,
+            2,
+            &mut t
+        ));
+    }
+
+    #[test]
+    fn a_window_is_sampled_as_its_crop_would_be_and_the_buffer_is_reused() {
+        // A 64x48 gradient frame; the window resized into 32x32 matches the
+        // 8-bit crop of the same window to within the crop's rounding.
+        let (fw, fh) = (64u32, 48u32);
+        let frame: Vec<u8> = (0..fw * fh * 3)
+            .map(|i| ((i * 7 + (i / 3) % 13) % 251) as u8)
+            .collect();
+        let window = BoundingBox {
+            x: 10.3,
+            y: 5.7,
+            width: 20.0,
+            height: 30.0,
+        };
+        let crop = crate::reid::crop_resize_rgb24(&frame, fw, fh, &window, 32, 32).unwrap();
+        let mut from_crop = Vec::new();
+        assert!(preprocess_rgb24_nchw_into(
+            &crop,
+            32,
+            32,
+            None,
+            32,
+            32,
+            &mut from_crop
+        ));
+        let mut direct = Vec::with_capacity(3 * 32 * 32);
+        let ptr = direct.as_ptr();
+        assert!(preprocess_rgb24_nchw_into(
+            &frame,
+            fw,
+            fh,
+            Some(&window),
+            32,
+            32,
+            &mut direct
+        ));
+        assert_eq!(
+            direct.as_ptr(),
+            ptr,
+            "a buffer of the right size is filled in place"
+        );
+        let worst = from_crop
+            .iter()
+            .zip(&direct)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst <= 0.6 / 255.0, "worst difference {worst}");
     }
 
     #[test]
