@@ -176,15 +176,10 @@ impl Step for InitialParams {
                     written.push((name, v));
                 }
             }
-            if let Some(cap) = cx
-                .params
-                .get("BATT_CAPACITY")
-                .filter(|c| *c > crate::batt_failsafe::CAPACITY_MIN_MAH)
-            {
-                for (name, frac) in ardupilot_copter::CAPACITY_RESERVE {
-                    if cx.params.has(name) {
-                        written.push((name.into(), (cap * frac).round()));
-                    }
+            let capacity = cx.params.get("BATT_CAPACITY").unwrap_or(0.0);
+            for (name, v) in ardupilot_copter::capacity_levels(capacity) {
+                if cx.params.has(name) {
+                    written.push((name.into(), v));
                 }
             }
         }

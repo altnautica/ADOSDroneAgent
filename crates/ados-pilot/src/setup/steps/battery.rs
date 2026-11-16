@@ -1,9 +1,12 @@
 //! `battery`: monitor type, capacity, cell count from voltage, and the
-//! voltage multiplier corrected against a multimeter reading.
+//! voltage multiplier corrected against a multimeter reading. On an
+//! ArduPilot copter or VTOL the battery levels on charge used follow the new
+//! capacity ([`ardupilot_copter::capacity_levels`]).
 
 use serde_json::{json, Map, Value};
 
-use crate::setup::fcstate::Fw;
+use crate::setup::adapters::ardupilot_copter;
+use crate::setup::fcstate::{Class, Fw};
 use crate::setup::schema::{input_number, obj, Action};
 use crate::setup::step::{
     arg_f32, step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore,
@@ -138,6 +141,15 @@ impl Step for Battery {
             result.insert("monitor".into(), json!(MONITOR_ANALOG));
         }
         cx.params.set(cap_name, capacity);
+        if cx.adapter.fw == Fw::ArduPilot
+            && matches!(cx.adapter.class, Class::Multirotor | Class::Vtol)
+        {
+            for (name, v) in ardupilot_copter::capacity_levels(capacity) {
+                if cx.params.has(name) {
+                    cx.params.set(name, v);
+                }
+            }
+        }
         let reported = cx.fc.battery_v.unwrap_or(0.0);
         if measured > 1.0 && reported > 1.0 {
             let mult = cx.params.get(mult_name).ok_or("missing_param")?;

@@ -412,6 +412,31 @@ fn initial_params_sets_the_capacity_reserve() {
     assert!((s.param("BATT_LOW_VOLT") - 14.4).abs() < 1e-4);
 }
 
+/// A new pack's capacity in the `battery` step moves the levels on charge
+/// used with it: levels left from a 2200 mAh pack would be 4.4 % and 2.2 %
+/// of a 10000 mAh one, and the pilot's reserve reads its trigger from them.
+#[test]
+fn the_battery_step_moves_the_capacity_reserve_with_the_capacity() {
+    let mut p = ap_copter_params();
+    p.insert("BATT_CAPACITY".into(), 2200.0);
+    p.insert("BATT_LOW_MAH".into(), 440.0);
+    p.insert("BATT_CRT_MAH".into(), 220.0);
+    let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
+    s.e.run_step(G, "battery", s.now);
+    s.wait_step("battery", StepState::WaitingUser);
+    s.act(
+        G,
+        "battery",
+        "apply",
+        json!({"capacity_mah": 10000, "measured_v": 0}),
+    );
+    s.until(|s| s.e.current_view().is_none(), 30_000);
+    assert_eq!(s.step_state(G, "battery"), StepState::Done);
+    assert_eq!(s.param("BATT_CAPACITY"), 10000.0);
+    assert_eq!(s.param("BATT_LOW_MAH"), 2000.0);
+    assert_eq!(s.param("BATT_CRT_MAH"), 1000.0);
+}
+
 #[test]
 fn ados_profile_sets_land_on_a_copter_without_gnss() {
     // GNSS: low = SmartRTL or Land, critical = Land.

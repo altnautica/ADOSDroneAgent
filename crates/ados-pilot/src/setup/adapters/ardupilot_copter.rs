@@ -155,7 +155,10 @@ fn round_to(value: f64, precision: i32) -> f64 {
 /// - Low at 20 %: the floor of the return reserve. The pilot reads its own
 ///   low-battery trigger from `BATT_LOW_MAH` / `BATT_CAPACITY`, so the FC's
 ///   level and the pilot's reserve act at the same charge, never below the
-///   floor.
+///   floor. The FC's capacity failsafe has no timer, and the pilot starts
+///   its countdown at the whole percentage 20 (up to 1 % earlier), so at the
+///   floor itself the FC's action can come within the countdown; it is the
+///   same return or landing.
 /// - Critical at 10 %: half the floor, kept for the landing. On a 5000 mAh
 ///   pack hovering at 26 A it is 69 s, against about 30 s to land from 15 m
 ///   at ArduCopter's 0.5 m/s landing speed.
@@ -166,6 +169,19 @@ fn round_to(value: f64, precision: i32) -> f64 {
 /// voltage trips early under a hover's sag. The voltage levels the initial
 /// tune writes stay as a backstop for a wrong capacity or current sensor.
 pub const CAPACITY_RESERVE: [(&str, f32); 2] = [("BATT_LOW_MAH", 0.20), ("BATT_CRT_MAH", 0.10)];
+
+/// The [`CAPACITY_RESERVE`] levels for a pack of `capacity_mah`, whole mAh;
+/// none for a capacity ArduPilot treats as unset, against which any mAh
+/// level trips at once. The `battery` step (which sets the capacity) and the
+/// `initial_params` step both write them, so they always follow the
+/// capacity.
+pub fn capacity_levels(capacity_mah: f32) -> impl Iterator<Item = (&'static str, f32)> {
+    let set = capacity_mah > crate::batt_failsafe::CAPACITY_MIN_MAH;
+    CAPACITY_RESERVE
+        .into_iter()
+        .filter(move |_| set)
+        .map(move |(name, frac)| (name, (capacity_mah * frac).round()))
+}
 
 /// The initial tune parameters, ported from Mission Planner's
 /// `ConfigInitialParams.cs` (`calc_values` and the 4.x parameter names).

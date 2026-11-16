@@ -132,7 +132,7 @@ fn profile_item(fc: &FcState, fw: Firmware, mode: ControlMode, place: PlaceClass
     let mut missing = Vec::new();
     let mut unread = false;
     // The battery actions are the `battery_failsafe` item's: their right
-    // value depends on whether the vehicle navigates by GNSS.
+    // value depends on the GNSS sources and the place class.
     let rows = fc_profile(fw, class)
         .iter()
         .filter(|r| !crate::batt_failsafe::ACTIONS.contains(&r.name));
