@@ -20,7 +20,7 @@ use nix::sys::termios::{
     SetArg, Termios,
 };
 
-use super::keys::{parse_key, Input, KeyEvent};
+use super::keys::{parse_keys, Input, KeyEvent};
 use super::INTERRUPTED;
 
 /// Enter the alternate screen, clear it, and hide the cursor.
@@ -35,6 +35,9 @@ pub(super) struct DevTty {
     file: File,
     /// The terminal settings captured before raw mode.
     original: Termios,
+    /// Keys decoded from an earlier burst and not yet handed out. A paste or a
+    /// fast typist delivers several keys in one `read()`.
+    pending: std::collections::VecDeque<KeyEvent>,
 }
 
 impl DevTty {
@@ -56,7 +59,11 @@ impl DevTty {
         install_int_handler();
         let _ = file.write_all(ENTER_ALT.as_bytes());
         let _ = file.flush();
-        Some(DevTty { file, original })
+        Some(DevTty {
+            file,
+            original,
+            pending: Default::default(),
+        })
     }
 
     /// Whether `/dev/tty` opens and is a real terminal.
@@ -75,6 +82,7 @@ impl DevTty {
     /// Discard queued input. A write-only phase never reads `/dev/tty`, so
     /// keystrokes pile up in the kernel input queue until flushed.
     pub(super) fn flush_input(&mut self) {
+        self.pending.clear();
         let _ = tcflush(self.file.as_fd(), FlushArg::TCIFLUSH);
     }
 
@@ -88,6 +96,9 @@ impl DevTty {
     }
 
     pub(super) fn read_key(&mut self) -> std::io::Result<KeyEvent> {
+        if let Some(k) = self.pending.pop_front() {
+            return Ok(k);
+        }
         loop {
             let mut fds = [PollFd::new(self.file.as_fd(), PollFlags::POLLIN)];
             match poll(&mut fds, PollTimeout::NONE) {
@@ -112,6 +123,9 @@ impl DevTty {
     }
 
     pub(super) fn read_input(&mut self, ms: u64) -> Input {
+        if let Some(k) = self.pending.pop_front() {
+            return Input::Key(k);
+        }
         let timeout = PollTimeout::try_from(std::time::Duration::from_millis(ms))
             .unwrap_or(PollTimeout::ZERO);
         let mut fds = [PollFd::new(self.file.as_fd(), PollFlags::POLLIN)];
@@ -142,13 +156,16 @@ impl DevTty {
 
     /// Read one already-ready burst off the terminal and decode it.
     fn read_decoded(&mut self) -> std::io::Result<KeyEvent> {
-        let mut buf = [0u8; 8];
+        let mut buf = [0u8; 256];
         let n = self.file.read(&mut buf)?;
         if n == 0 {
             // EOF on the terminal (the operator closed it): treat as an abort.
             return Ok(KeyEvent::CtrlC);
         }
-        Ok(parse_key(&buf[..n]))
+        let mut keys = parse_keys(&buf[..n]).into_iter();
+        let first = keys.next().unwrap_or(KeyEvent::Unknown);
+        self.pending.extend(keys);
+        Ok(first)
     }
 }
 

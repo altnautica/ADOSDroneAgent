@@ -109,6 +109,44 @@ pub(super) fn map_ct_key(k: CtKeyEvent) -> Option<KeyEvent> {
     })
 }
 
+/// Split a raw burst into every key it carries, in order (pure). A paste, or
+/// keys typed faster than the read loop, arrive in one `read()`; decoding only
+/// the first silently dropped the rest, so a pasted Wi-Fi password kept one
+/// character.
+pub fn parse_keys(bytes: &[u8]) -> Vec<KeyEvent> {
+    let mut out = Vec::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let len = key_len(rest);
+        out.push(parse_key(&rest[..len]));
+        rest = &rest[len..];
+    }
+    out
+}
+
+/// The byte length of the first key in a non-empty burst: a CSI escape runs to
+/// its final byte, `ESC` plus one byte is one key (an Alt chord or an SS3
+/// prefix), a UTF-8 lead byte takes its continuation bytes, anything else is one
+/// byte.
+fn key_len(bytes: &[u8]) -> usize {
+    let len = match bytes[0] {
+        0x1B => match bytes.get(1) {
+            Some(b'[') => bytes[2..]
+                .iter()
+                .position(|b| (0x40..=0x7E).contains(b))
+                .map_or(bytes.len(), |p| p + 3),
+            Some(b'O') => 3,
+            Some(_) => 2,
+            None => 1,
+        },
+        0xF0..=0xF7 => 4,
+        0xE0..=0xEF => 3,
+        0xC0..=0xDF => 2,
+        _ => 1,
+    };
+    len.min(bytes.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +205,32 @@ mod tests {
         let mut rel = CtKeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         rel.kind = KeyEventKind::Release;
         assert_eq!(map_ct_key(rel), None);
+    }
+
+    #[test]
+    fn a_pasted_burst_keeps_every_key() {
+        // A pasted password plus Enter arrives as one read.
+        let keys = parse_keys(b"12345678\r");
+        let typed: String = keys
+            .iter()
+            .filter_map(|k| match k {
+                KeyEvent::Char(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typed, "12345678");
+        assert_eq!(keys.last(), Some(&KeyEvent::Enter));
+        // Escapes and multi-byte characters stay whole inside a burst.
+        assert_eq!(
+            parse_keys("a\x1b[Bé\x1b[1;5C ".as_bytes()),
+            vec![
+                KeyEvent::Char('a'),
+                KeyEvent::Down,
+                KeyEvent::Char('é'),
+                KeyEvent::Unknown,
+                KeyEvent::Space
+            ]
+        );
+        assert_eq!(parse_keys(&[0x1B]), vec![KeyEvent::Esc]);
     }
 }
