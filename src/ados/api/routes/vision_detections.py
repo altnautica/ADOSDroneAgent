@@ -60,6 +60,7 @@ from __future__ import annotations
 import asyncio
 import struct
 import time
+from typing import Any
 
 import msgpack
 import structlog
@@ -107,7 +108,7 @@ _latest_by_camera: dict[str, dict] = {}
 # batch covers just its window, so a poller that sees one also needs the last
 # whole-frame batch to hold the other boxes; the latest reply carries it as
 # ``full_frame``.
-_full_by_camera: dict[str, dict] = {}
+_full_by_camera: dict[str, dict[str, Any]] = {}
 
 # The WS close reason when the engine socket cannot be reached: the same
 # ``available: false`` the latest poll reports, so a client tells "vision off"
