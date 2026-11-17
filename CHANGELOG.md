@@ -25,6 +25,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 - The NetworkManager rule that keeps the long-range radios unmanaged moved to `/etc/NetworkManager/conf.d/95-ados-wfb-unmanaged.conf`, so it sorts after netplan's generated `10-globally-managed-devices.conf`; the old `10-ados-wfb-unmanaged.conf` is removed on install, and uninstall removes both.
 - The management-link guardian repairs a link with the stack that runs it: NetworkManager only for a device it manages, so a wired link it leaves unmanaged is repaired through systemd-networkd again.
 
+### Fixed
+
+- The installer wizard kept only the first character of anything pasted (or typed faster than it read): every key in one terminal read after the first was dropped, so a pasted Wi-Fi password failed to connect. Every key of a burst is now delivered in order. `ados-term` 0.1.1 adds `parse_keys`.
+- Switching a netplan host to NetworkManager no longer leaves the wired link exposed until the reboot: the netplan generator runs on every systemd reload and removes networkd's wired configuration at once, so a networkd reload before the reboot would have dropped the wired address. The installer keeps a copy of that configuration in `/run/systemd/network` (named so the generator leaves it), which the reboot clears.
+
 ## [0.118.0] - 2026-11-17
 
 ### Added

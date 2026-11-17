@@ -135,6 +135,10 @@ fn execute(p: &AdoptionPlan, sink: &ProgressSink) -> Result<bool, String> {
 
     // 6. netplan: switch the renderer for the next boot only.
     if switch {
+        // Any systemd reload from here on re-runs the netplan generator, which
+        // removes networkd's wired config at once; keep a copy it leaves alone,
+        // so a networkd reload before the reboot keeps the wired address.
+        keep_networkd_config()?;
         write_file(Path::new(NETPLAN_NM_PATH), NETPLAN_NM_BODY, 0o600)?;
         if p.disable_networkd_wait_online
             && exec::run("systemctl", &["is-enabled", "systemd-networkd-wait-online"])
@@ -152,6 +156,25 @@ fn execute(p: &AdoptionPlan, sink: &ProgressSink) -> Result<bool, String> {
         reboot::signal_required(REBOOT_REASON);
     }
     Ok(switch)
+}
+
+/// Copy netplan's generated networkd units in `/run/systemd/network` to
+/// `09-ados-keep-*`, a name the generator never cleans. `/run` is cleared at the
+/// reboot that completes the switch.
+fn keep_networkd_config() -> Result<(), String> {
+    let dir = Path::new("/run/systemd/network");
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(rest) = name.strip_prefix("10-netplan-") {
+            let body = std::fs::read_to_string(e.path())
+                .map_err(|err| format!("could not read {name}: {err}"))?;
+            write_file(&dir.join(format!("09-ados-keep-{rest}")), &body, 0o644)?;
+        }
+    }
+    Ok(())
 }
 
 /// The renderer switch drop-in.
