@@ -6,6 +6,10 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The vision detections route's whole-frame batch cache carries its types, so the route passes the strict type check. No behaviour change.
+
 ## [0.118.0] - 2026-11-17
 
 ### Added
