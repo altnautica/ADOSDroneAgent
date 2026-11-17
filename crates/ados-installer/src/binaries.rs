@@ -56,13 +56,16 @@ impl PrebuiltBinary {
     /// aarch64: a musl build cannot link ONNX Runtime, and no x86_64 board
     /// profile declares CPU-ONNX inference.
     pub fn asset_name(&self, arch: &str) -> String {
-        // The ONNX Runtime library is a shared object, and only aarch64 has a
-        // prebuilt: a musl build cannot link it and no x86_64 board profile
-        // declares CPU-ONNX inference.
+        // The ONNX pair (runtime library and vision build) has only aarch64
+        // prebuilts: a musl build cannot link it, no x86_64 profile wants it.
+        let stem = self.asset_stem.unwrap_or(self.service);
         if self.service == "libonnxruntime" {
             return "libonnxruntime-aarch64.so".to_string();
         }
-        let stem = self.asset_stem.unwrap_or(self.service);
+        let arch = match stem {
+            "ados-vision-onnx" => "aarch64",
+            _ => arch,
+        };
         format!("{stem}-{arch}")
     }
 }
@@ -479,6 +482,8 @@ const ONNX_VISION_BOARD_SUBSTRINGS: &[&str] = &[
     "cubie a7s",
     "cubie-a7s",
     "a733",
+    "dragon q6a",
+    "dragon-q6a",
 ];
 
 /// Whether the board model declares CPU-ONNX local inference and should fetch the

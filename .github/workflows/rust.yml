@@ -127,7 +127,6 @@ env:
     ados-gnss-x86_64
     ados-lora-x86_64
     mediamtx-x86_64
-    ados-vision-onnx-x86_64
     libonnxruntime-aarch64.so
 
 defaults:
@@ -394,7 +393,8 @@ jobs:
           mkdir -p rel installer work
           for asset in ${REV_ASSETS}; do
             case "$asset" in
-              mediamtx-aarch64|ados-vision-onnx-aarch64|libonnxruntime-aarch64.so) continue ;;
+              # x86_64 assets are staged by prebuilt-x86_64; the ONNX pair by vision-onnx.
+              mediamtx-aarch64|ados-vision-onnx-*|libonnxruntime-*.so|*-x86_64) continue ;;
             esac
             install -m 0755 "$out/${asset%-aarch64}" "rel/$asset"
           done
