@@ -12,6 +12,7 @@
 //! thr + is climb, yaw + is clockwise, roll + is right.
 
 mod command;
+mod obstacles;
 mod rc;
 mod route;
 mod sensors;
@@ -20,6 +21,7 @@ mod stick;
 mod wire;
 
 pub use command::*;
+pub use obstacles::*;
 pub use rc::*;
 pub use route::*;
 pub use sensors::*;

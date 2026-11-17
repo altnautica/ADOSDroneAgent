@@ -326,7 +326,6 @@ impl Pilot {
             _ => {}
         }
     }
-
 }
 
 /// How fast `v` still goes the way `ask` asked, m/s (the speed of `v` when

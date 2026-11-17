@@ -25,6 +25,9 @@ pub const COMPID: u8 = 196;
 /// State publish period (10 Hz).
 const STATE_PERIOD_MS: u64 = 100;
 
+mod setup_view;
+pub use setup_view::SetupView;
+
 /// FC traffic for the setup engine: a copy of every FC frame, and a way to send.
 #[derive(Clone)]
 pub struct FcLink {
@@ -34,28 +37,6 @@ pub struct FcLink {
     /// the workspace builds the dialect without MAVLink 2 message extensions,
     /// so `uid2` is dropped in decoding. Sent before the decoded message.
     pub version_frames: broadcast::Sender<Vec<u8>>,
-}
-
-/// What the setup engine watches: readiness, the surface link and what its
-/// take-off needs for a supervised lift-off.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SetupView {
-    pub readiness: Vec<ados_protocol::pilot::Readiness>,
-    /// No operator surface heard from for `pilot.link_loss_s`.
-    pub link_lost: bool,
-    /// `pilot.place_class`: the `ados_profile` step writes its values.
-    pub place_class: ados_protocol::pilot::PlaceClass,
-    /// `pilot.rc_receiver`: the `ados_profile` step writes its values.
-    pub rc_receiver: ados_protocol::pilot::RcReceiver,
-    /// `pilot.supervised_liftoff`.
-    pub supervised_liftoff: bool,
-    /// The airframe's learned trim for the connected FC.
-    pub liftoff_trim: Option<crate::airframe::Trim>,
-    /// The hover thrust a lift-off ramps against.
-    pub liftoff_hover: f32,
-    /// The airframe record to file under the FC identity (`None` until the
-    /// identity is known); filed again whenever its `rev` moves.
-    pub airframe: Option<crate::airframe::Save>,
 }
 
 /// Commands from the setup engine to the core.

@@ -254,7 +254,8 @@ impl Step for AdosIntro {
         let mut applied = Vec::new();
         if let Some(fw) = firmware(cx.adapter.fw) {
             let current = |n: &str| cx.params.get(n);
-            let rows = crate::no_rc::declaration_rows(fw, vehicle_class(cx.adapter.class), rc, current);
+            let rows =
+                crate::no_rc::declaration_rows(fw, vehicle_class(cx.adapter.class), rc, current);
             for row in rows {
                 let name = std::iter::once(row.name)
                     .chain(row.alt_names.iter().copied())

@@ -72,7 +72,6 @@ impl MotionRef {
         self.ask = v;
     }
 
-
     /// Slew the heading's rate toward `rate` (rad/s) at no more than `acc`
     /// (rad/s²) and turn on it; a rate of zero brakes the turn, and the
     /// heading holds where it stops.
@@ -91,7 +90,6 @@ impl MotionRef {
             && self.yaw_rate == 0.0
     }
 }
-
 
 /// `p` held within `r` of `pos`.
 pub fn leash_within(p: V2, pos: V2, r: f32) -> V2 {

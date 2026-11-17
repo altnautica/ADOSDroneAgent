@@ -180,10 +180,7 @@ fn a_take_off_here_is_held_to_the_no_rc_ceiling() {
 #[test]
 fn a_launch_climbs_no_higher_than_the_no_rc_ceiling() {
     let mut w = no_rc();
-    assert_eq!(
-        err(&w.action_args("launch", json!({"alt_m": 60.0}))),
-        None
-    );
+    assert_eq!(err(&w.action_args("launch", json!({"alt_m": 60.0}))), None);
     w.run(3_000);
     assert_eq!(w.agl, Some(NO_RC_MAX_ALT_M));
 }
