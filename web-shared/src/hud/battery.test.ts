@@ -49,7 +49,7 @@ describe("battery bands", () => {
   it("takes the low fallback from the spec and the engine's reserve above it", () => {
     expect(BATTERY_LOW_PCT).toBe(layout.battery.low_fallback_pct);
     expect(batteryLowPct(null)).toBe(BATTERY_LOW_PCT);
-    expect(batteryLowPct({ thresholds: { reserve_percent: 30 } })).toBe(30);
+    expect(batteryLowPct({ thresholds: { reserve_percent: 40 } })).toBe(40);
     expect(batteryLowPct({ thresholds: { reserve_percent: 5 } })).toBe(BATTERY_LOW_PCT);
   });
 });

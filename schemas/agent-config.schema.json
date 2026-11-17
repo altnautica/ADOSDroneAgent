@@ -137,7 +137,7 @@
           "type": "integer"
         },
         "reserve_percent": {
-          "default": 25,
+          "default": 30,
           "maximum": 50,
           "minimum": 5,
           "title": "Reserve Percent",
@@ -4463,7 +4463,7 @@
         "gauge": null,
         "low_cell_mv": 3500,
         "predictive_window_s": 30,
-        "reserve_percent": 25,
+        "reserve_percent": 30,
         "temp_spike_dc_per_s": 50,
         "voltage_drop_mv_per_s": 500
       }

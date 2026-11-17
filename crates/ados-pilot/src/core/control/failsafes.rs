@@ -56,9 +56,10 @@ impl Pilot {
             return;
         };
         let p = &self.fc.params;
+        // No charge level on the FC: the wizard's floor (`CAPACITY_RESERVE`).
         let low_pct = match (p.get("BATT_LOW_MAH"), p.get("BATT_CAPACITY")) {
             (Some(&l), Some(&c)) if l > 0.0 && c > 0.0 => l / c * 100.0,
-            _ => 20.0,
+            _ => crate::setup::adapters::ardupilot_copter::CAPACITY_RESERVE[0].1 * 100.0,
         };
         let airborne = self.fc.armed && !self.fc.landed();
         if !airborne || pct > low_pct + 5.0 {

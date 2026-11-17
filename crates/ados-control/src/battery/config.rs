@@ -42,7 +42,8 @@ pub struct BatteryConfig {
     /// How far back the time-to-reserve projection looks.
     #[serde(default = "default_predictive_window_s")]
     pub predictive_window_s: u32,
-    /// The remaining percentage the projection counts down to.
+    /// The remaining percentage the projection counts down to: the setup
+    /// wizard's low level and the pilot's return floor.
     #[serde(default = "default_reserve_percent")]
     pub reserve_percent: u32,
 }
@@ -69,7 +70,7 @@ fn default_predictive_window_s() -> u32 {
     30
 }
 fn default_reserve_percent() -> u32 {
-    25
+    30
 }
 
 impl Default for BatteryConfig {

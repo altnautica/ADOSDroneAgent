@@ -59,7 +59,7 @@ describe("layout values", () => {
   it("carries the shared thresholds and holds", () => {
     expect(layout.status_pill.storage_warn_pct).toBe(90);
     expect(layout.status_pill.storage_crit_pct).toBe(97);
-    expect(layout.battery.low_fallback_pct).toBe(20);
+    expect(layout.battery.low_fallback_pct).toBe(30);
     expect(layout.holds_ms.stop).toBe(3000);
     expect(layout.holds_ms.take_control).toBe(1500);
     expect(layout.launch.alt_min_m).toBe(1);

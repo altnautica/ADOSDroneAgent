@@ -280,6 +280,20 @@ fn low_battery_returns_a_gnss_copter_by_smart_rtl_and_says_so() {
         .any(|t| t.text == "Low battery: returning home" && t.severity == 2));
 }
 
+/// With no charge level on the FC (`BATT_LOW_MAH` 0) the pilot's reserve
+/// acts at the wizard's 30 % floor, not at 20 %.
+#[test]
+fn low_battery_without_a_charge_level_acts_at_the_wizard_floor() {
+    let mut w = low_battery_flight(GPS, 29.0);
+    w.run(1_000);
+    let s = w.p.state(w.now);
+    assert_eq!(s.low_battery_action.as_deref(), Some("rth"));
+    assert!(s.rth_countdown_s.is_some());
+    let mut w = low_battery_flight(GPS, 31.0);
+    w.run(1_000);
+    assert_eq!(w.p.state(w.now).low_battery_action, None);
+}
+
 #[test]
 fn low_battery_returns_a_confined_external_nav_copter_by_smart_rtl() {
     let mut w = low_battery_flight(EXTERNAL_NAV, 19.0);

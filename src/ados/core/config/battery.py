@@ -45,7 +45,7 @@ class BatteryConfig(BaseModel):
     voltage_drop_mv_per_s: int = Field(default=500, ge=100, le=5000)
     temp_spike_dc_per_s: int = Field(default=50, ge=5, le=200)
     predictive_window_s: int = Field(default=30, ge=5, le=300)
-    reserve_percent: int = Field(default=25, ge=5, le=50)
+    reserve_percent: int = Field(default=30, ge=5, le=50)
     gauge: BatteryGaugeConfig | None = None
 
     @model_validator(mode="after")

@@ -390,18 +390,18 @@ fn initial_params_with_capacity(capacity: f32) -> Sim {
     s
 }
 
-/// The reserve on charge used: low at 20 % and critical at 10 % of the
+/// The reserve on charge used: low at 30 % and critical at 15 % of the
 /// pack's capacity, the raw-voltage levels kept as the backstop.
 #[test]
 fn initial_params_sets_the_capacity_reserve() {
     let s = initial_params_with_capacity(5000.0);
-    assert_eq!(s.param("BATT_LOW_MAH"), 1000.0);
-    assert_eq!(s.param("BATT_CRT_MAH"), 500.0);
+    assert_eq!(s.param("BATT_LOW_MAH"), 1500.0);
+    assert_eq!(s.param("BATT_CRT_MAH"), 750.0);
     assert!((s.param("BATT_LOW_VOLT") - 14.4).abs() < 1e-4);
     assert!((s.param("BATT_CRT_VOLT") - 14.0).abs() < 1e-4);
     assert_eq!(
         s.result(G, "initial_params")["params"]["BATT_LOW_MAH"],
-        json!(1000.0)
+        json!(1500.0)
     );
     // No capacity: a level in mAh would trip at once (ArduPilot counts the
     // capacity left as BATT_CAPACITY less the charge used), so none is
@@ -433,14 +433,14 @@ fn the_battery_step_moves_the_capacity_reserve_with_the_capacity() {
     s.until(|s| s.e.current_view().is_none(), 30_000);
     assert_eq!(s.step_state(G, "battery"), StepState::Done);
     assert_eq!(s.param("BATT_CAPACITY"), 10000.0);
-    assert_eq!(s.param("BATT_LOW_MAH"), 2000.0);
-    assert_eq!(s.param("BATT_CRT_MAH"), 1000.0);
+    assert_eq!(s.param("BATT_LOW_MAH"), 3000.0);
+    assert_eq!(s.param("BATT_CRT_MAH"), 1500.0);
 }
 
-/// The battery step keeps an operator's reserve above the floor: a 30 % low
-/// and 15 % critical on an unchanged capacity (a voltage-only
+/// The battery step keeps an operator's reserve above the floor: a 40 % low
+/// and 20 % critical on an unchanged capacity (a voltage-only
 /// recalibration) stay, and move with the capacity as shares of it; a level
-/// under its floor rises to it.
+/// under its floor (30 % / 15 %) rises to it.
 #[test]
 fn the_battery_step_keeps_a_reserve_above_the_floor() {
     let run = |low: f32, crt: f32, capacity: f32| {
@@ -461,11 +461,11 @@ fn the_battery_step_keeps_a_reserve_above_the_floor() {
         assert_eq!(s.step_state(G, "battery"), StepState::Done);
         (s.param("BATT_LOW_MAH"), s.param("BATT_CRT_MAH"))
     };
-    assert_eq!(run(1500.0, 750.0, 5000.0), (1500.0, 750.0));
-    assert_eq!(run(1500.0, 750.0, 10000.0), (3000.0, 1500.0));
-    assert_eq!(run(500.0, 250.0, 5000.0), (1000.0, 500.0));
+    assert_eq!(run(2000.0, 1000.0, 5000.0), (2000.0, 1000.0));
+    assert_eq!(run(2000.0, 1000.0, 10000.0), (4000.0, 2000.0));
+    assert_eq!(run(1000.0, 500.0, 5000.0), (1500.0, 750.0));
     // A critical level at or above low falls back to its floor.
-    assert_eq!(run(0.0, 1500.0, 5000.0), (1000.0, 500.0));
+    assert_eq!(run(0.0, 2000.0, 5000.0), (1500.0, 750.0));
 }
 
 #[test]

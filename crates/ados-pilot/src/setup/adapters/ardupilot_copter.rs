@@ -150,31 +150,36 @@ fn round_to(value: f64, precision: i32) -> f64 {
 }
 
 /// The battery levels on charge used, as fractions of `BATT_CAPACITY`:
-/// low (`BATT_LOW_MAH`) at 20 %, critical (`BATT_CRT_MAH`) at 10 %.
+/// low (`BATT_LOW_MAH`) at 30 %, critical (`BATT_CRT_MAH`) at 15 %.
 ///
-/// - Low at 20 %: the floor of the return reserve. The pilot reads its own
+/// - Low at 30 %: the floor of the return reserve. The pilot reads its own
 ///   low-battery trigger from `BATT_LOW_MAH` / `BATT_CAPACITY`, so the FC's
 ///   level and the pilot's reserve act at the same charge, never below the
 ///   floor. The FC's capacity failsafe has no timer, and the pilot starts
-///   its countdown at the whole percentage 20 (up to 1 % earlier), so at the
+///   its countdown at the whole percentage 30 (up to 1 % earlier), so at the
 ///   floor itself the FC's action can come within the countdown; it is the
 ///   same return or landing.
-/// - Critical at 10 %: half the floor, kept for the landing. On a 5000 mAh
-///   pack hovering at 26 A it is 69 s, against about 30 s to land from 15 m
-///   at ArduCopter's 0.5 m/s landing speed.
+/// - Critical at 15 %: half the floor, kept for the landing.
 ///
-/// A LiPo's resting voltage is too flat to place either level: from 20 % to
+/// 20 % / 10 % was too little: a 5000 mAh 4S pack warmed by its own
+/// load holds its voltage until about 4500 mAh used, then falls off. On the
+/// simulator's 5 Ah survey (about 23 A) a 20 % low at 702 s left the return
+/// from the far orbit reaching critical 20 m over the pad at 778 s, and the
+/// pack lost thrust in the descent. A fixed share has to cover the longest
+/// return plus the descent on that cliff.
+///
+/// A LiPo's resting voltage is too flat to place either level (from 20 % to
 /// 10 % left a graphene LiPo cell's open-circuit voltage falls only from
-/// about 3.72 V to 3.685 V, and a voltage level judged on the loaded
+/// about 3.72 V to 3.685 V), and a voltage level judged on the loaded
 /// voltage trips early under a hover's sag. The voltage levels the initial
 /// tune writes stay as a backstop for a wrong capacity or current sensor.
-pub const CAPACITY_RESERVE: [(&str, f32); 2] = [("BATT_LOW_MAH", 0.20), ("BATT_CRT_MAH", 0.10)];
+pub const CAPACITY_RESERVE: [(&str, f32); 2] = [("BATT_LOW_MAH", 0.30), ("BATT_CRT_MAH", 0.15)];
 
 /// The levels on charge used for a pack of `capacity_mah`, whole mAh; none
 /// for a capacity ArduPilot treats as unset, against which any mAh level
 /// trips at once. `before` reads the FC's values before the write. Each
 /// level keeps the share of the old capacity the FC held (an operator's
-/// 30 % reserve stays 30 % of a recalibrated or new pack) unless that is
+/// 40 % reserve stays 40 % of a recalibrated or new pack) unless that is
 /// below its [`CAPACITY_RESERVE`] floor or not a share at all; critical
 /// falls back to its floor when it would not stay below low (ArduPilot
 /// refuses an inverted pair). The `battery` step (which sets the capacity)

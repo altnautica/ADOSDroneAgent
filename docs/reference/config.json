@@ -198,7 +198,7 @@
       "type": "integer"
     },
     {
-      "default": 25,
+      "default": 30,
       "description": "Reserve Percent",
       "enum": null,
       "key": "battery.reserve_percent",

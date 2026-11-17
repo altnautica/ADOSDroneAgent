@@ -151,7 +151,8 @@ fn a_config_change_reprojects_without_waiting_for_a_sample() {
         e.ingest(s * 1000, &snap(json!([p])));
     }
     let before = wire(&e, 9000)["packs"][0]["prediction"]["eta_s"].clone();
-    assert_eq!(before, json!(61));
+    // 86 % now, 30 % default reserve
+    assert_eq!(before, json!(56));
     e.set_config(BatteryConfig {
         reserve_percent: 50,
         ..BatteryConfig::default()

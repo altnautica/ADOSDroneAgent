@@ -403,7 +403,7 @@ fn the_low_battery_countdown_is_announced_and_logged() {
     let b = s.banner.expect("the countdown banner");
     assert_eq!(b.text_key, "pilot.banner.low_battery_rth");
     assert_eq!(b.args["pct"], json!(15));
-    assert_eq!(b.args["need_pct"], json!(20));
+    assert_eq!(b.args["need_pct"], json!(30));
     assert_eq!(b.args["in_s"], json!(10));
     assert!(s.rth_countdown_s.is_some());
     assert!(
