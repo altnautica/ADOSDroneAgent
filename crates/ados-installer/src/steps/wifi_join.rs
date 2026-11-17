@@ -16,7 +16,7 @@
 
 use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
-use crate::wizard::wifi;
+use crate::wizard::wifi::{self, WifiRole};
 
 /// Headless Wi-Fi join (driven by `--wifi-ssid` / `--wifi-pass-file`).
 pub struct WifiJoin;
@@ -70,10 +70,12 @@ impl Step for WifiJoin {
 
         let password = match ctx.args.wifi_pass_file.as_deref() {
             None => None,
-            Some(path) => match read_password_file(std::path::Path::new(path)) {
-                Ok(pw) => pw,
-                Err(e) => return StepOutcome::Failed(e),
-            },
+            Some(path) => {
+                match read_password_file(std::path::Path::new(path), "--wifi-pass-file") {
+                    Ok(pw) => pw,
+                    Err(e) => return StepOutcome::Failed(e),
+                }
+            }
         };
         let password = password.as_deref();
 
@@ -92,19 +94,61 @@ impl Step for WifiJoin {
             );
         }
 
-        // Persist: autoconnect on, a route metric higher than wired (so a
-        // plugged cable stays primary), power-save off.
-        wifi::persist(&ssid);
+        // Persist: autoconnect on at the main network's priority, a route
+        // metric higher than wired (so a plugged cable stays primary),
+        // power-save off.
+        wifi::persist(&ssid, WifiRole::Primary);
         tracing::info!(iface = %iface, ssid = %ssid, "headless Wi-Fi join complete");
+
+        let backup = match ctx.args.wifi_backup_ssid.clone() {
+            Some(b) if !b.trim().is_empty() => b,
+            _ => return StepOutcome::Ok,
+        };
+        let saved = join_backup(&iface, &backup, ctx.args.wifi_backup_pass_file.as_deref());
+        if let Err(e) = &saved {
+            tracing::warn!(ssid = %backup, error = %e, "backup Wi-Fi join failed");
+            wifi::forget(&backup);
+        }
+        // End on the main network whatever happened to the backup.
+        let back = wifi::activate(&ssid)
+            .map(|()| wifi::verify_lan_reachable(&iface).reachable)
+            .unwrap_or(false);
+        if saved.is_err() {
+            return StepOutcome::Failed(format!(
+                "backup Wi-Fi {backup} did not connect; not saved"
+            ));
+        }
+        if !back {
+            return StepOutcome::Failed(format!(
+                "backup Wi-Fi {backup} saved, but switching back to {ssid} did not reach the LAN"
+            ));
+        }
+        tracing::info!(ssid = %backup, "backup Wi-Fi saved");
         StepOutcome::Ok
     }
 }
 
-/// Read the Wi-Fi password from `path`: the first line, without its line
-/// ending. An empty password means an open network (`None`).
-fn read_password_file(path: &std::path::Path) -> Result<Option<String>, String> {
+/// Join the backup network, check it reaches the LAN and save it at the
+/// backup priority.
+fn join_backup(iface: &str, ssid: &str, pass_file: Option<&str>) -> Result<(), String> {
+    let password = match pass_file {
+        None => None,
+        Some(path) => read_password_file(std::path::Path::new(path), "--wifi-backup-pass-file")?,
+    };
+    wifi::connect(iface, ssid, password.as_deref(), false)?;
+    if !wifi::verify_lan_reachable(iface).reachable {
+        return Err("the LAN gateway did not answer".into());
+    }
+    wifi::persist(ssid, WifiRole::Backup);
+    Ok(())
+}
+
+/// Read a Wi-Fi password from `path` (named by `flag` in errors): the first
+/// line, without its line ending. An empty password means an open network
+/// (`None`).
+fn read_password_file(path: &std::path::Path, flag: &str) -> Result<Option<String>, String> {
     let body = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read --wifi-pass-file {}: {e}", path.display()))?;
+        .map_err(|e| format!("could not read {flag} {}: {e}", path.display()))?;
     let pw = body.lines().next().unwrap_or("").to_string();
     Ok((!pw.is_empty()).then_some(pw))
 }

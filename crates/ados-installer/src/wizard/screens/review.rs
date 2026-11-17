@@ -104,6 +104,9 @@ pub(super) fn review_summary(
         "Wi-Fi",
         collected.wifi_ssid.as_deref().unwrap_or("skipped"),
     ));
+    if let Some(backup) = collected.wifi_backup_ssid.as_deref() {
+        rows.push(kv(theme, "Backup", backup));
+    }
     rows.push(kv(
         theme,
         "Reach",

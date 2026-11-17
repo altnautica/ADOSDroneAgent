@@ -8,6 +8,13 @@
       "value_name": "<drone|ground_station|workstation|compute|visor>"
     },
     {
+      "help": "Host kind: appliance (dedicated box) or personal (your laptop or desktop); detected when omitted",
+      "name": "--host",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<appliance|personal>"
+    },
+    {
       "help": "mDNS hostname to set",
       "name": "--name",
       "short": null,
@@ -129,6 +136,20 @@
     {
       "help": "File holding the --wifi-ssid password (omit if open; keeps it off the command line)",
       "name": "--wifi-pass-file",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<path>"
+    },
+    {
+      "help": "Also save this Wi-Fi network as a lower-priority backup during a headless install (requires --wifi-ssid)",
+      "name": "--wifi-backup-ssid",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<ssid>"
+    },
+    {
+      "help": "File holding the --wifi-backup-ssid password (omit if open)",
+      "name": "--wifi-backup-pass-file",
       "short": null,
       "takes_value": true,
       "value_name": "<path>"

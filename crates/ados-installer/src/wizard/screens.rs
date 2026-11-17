@@ -25,10 +25,12 @@ use role::{components_stage, hardware_stage, profile_stage};
 use wifi_flow::wifi_stage;
 
 /// Cross-stage collected state that is not an `Args` field (the joined Wi-Fi
-/// SSID, for the review summary).
+/// networks, for the review summary).
 #[derive(Debug, Default)]
 pub struct Collected {
     pub wifi_ssid: Option<String>,
+    /// The lower-priority backup network, when one was saved.
+    pub wifi_backup_ssid: Option<String>,
 }
 
 /// The terminal result of the whole spine.
@@ -171,9 +173,15 @@ pub fn run_stages(
 
 // ── stage: profile ────────────────────────────────────────────────────────
 
+/// What a successful join learned about the network.
+struct JoinInfo {
+    /// The LAN gateway that answered the reachability check.
+    gateway: Option<String>,
+}
+
 /// The result of one join attempt.
 enum JoinOutcome {
-    Connected,
+    Connected(JoinInfo),
     Retry,
     Skip,
     Abort,

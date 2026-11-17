@@ -90,6 +90,13 @@ pub struct Args {
     /// itself, so the secret never sits in this process's argv where any local
     /// user can read it.
     pub wifi_pass_file: Option<String>,
+    /// `--wifi-backup-ssid <v>` — also save this Wi-Fi network, at a lower
+    /// autoconnect priority, as the backup NetworkManager joins when the
+    /// `--wifi-ssid` network is out of range. Requires `--wifi-ssid`.
+    pub wifi_backup_ssid: Option<String>,
+    /// `--wifi-backup-pass-file <path>` — a file holding the password for
+    /// `--wifi-backup-ssid` (omit for an open network).
+    pub wifi_backup_pass_file: Option<String>,
     /// `--tile-pack <url|path>` — a PMTiles field tile pack to place in the
     /// ground station's tiles directory (`/var/ados/tiles`), downloaded from a
     /// URL or copied from a local path. The ground station serves it to the
@@ -185,6 +192,23 @@ impl Args {
             args.profile = Some(normalize_profile(&p));
         }
 
+        if let Some(backup) = args.wifi_backup_ssid.as_deref() {
+            match args.wifi_ssid.as_deref() {
+                None => {
+                    return Err(ParseError::Conflict(
+                        "--wifi-backup-ssid requires --wifi-ssid".to_string(),
+                    ))
+                }
+                Some(main) if main == backup => {
+                    return Err(ParseError::Conflict(
+                        "--wifi-backup-ssid must name a different network than --wifi-ssid"
+                            .to_string(),
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+
         Ok(args)
     }
 }
@@ -219,6 +243,9 @@ pub enum ParseError {
     /// A second bare positional after the pair code was already set.
     #[error("unexpected positional argument {0}")]
     UnexpectedPositional(String),
+    /// Flags that cannot be used together as given.
+    #[error("{0}")]
+    Conflict(String),
 }
 
 /// Why this `--display` value cannot be honoured, given the display ids the
@@ -363,6 +390,46 @@ mod tests {
         assert!(open.wifi_pass_file.is_none());
         // The password itself is no longer accepted on the command line.
         assert!(Args::parse(["--wifi-ssid", "cafe", "--wifi-pass", "s3cr3t"]).is_err());
+    }
+
+    #[test]
+    fn parses_the_backup_wifi_flags() {
+        let a = Args::parse([
+            "--wifi-ssid",
+            "example-net",
+            "--wifi-backup-ssid",
+            "example-net-backup",
+            "--wifi-backup-pass-file",
+            "/root/backup.pass",
+        ])
+        .unwrap();
+        assert_eq!(a.wifi_backup_ssid.as_deref(), Some("example-net-backup"));
+        assert_eq!(
+            a.wifi_backup_pass_file.as_deref(),
+            Some("/root/backup.pass")
+        );
+        assert!(Args::default().wifi_backup_ssid.is_none());
+        // An open backup network needs no password file.
+        let open =
+            Args::parse(["--wifi-ssid", "example-net", "--wifi-backup-ssid", "cafe"]).unwrap();
+        assert!(open.wifi_backup_pass_file.is_none());
+    }
+
+    #[test]
+    fn a_backup_wifi_needs_a_different_main_network() {
+        assert!(matches!(
+            Args::parse(["--wifi-backup-ssid", "example-net-backup"]),
+            Err(ParseError::Conflict(_))
+        ));
+        assert!(matches!(
+            Args::parse([
+                "--wifi-ssid",
+                "example-net",
+                "--wifi-backup-ssid",
+                "example-net"
+            ]),
+            Err(ParseError::Conflict(_))
+        ));
     }
 
     #[test]

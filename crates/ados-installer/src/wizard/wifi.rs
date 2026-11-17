@@ -254,41 +254,74 @@ fn default_gateway(iface: &str) -> Option<String> {
     }
 }
 
-/// Persist the joined profile for the next boot: auto-connect on, a route metric
-/// higher than wired so a plugged cable stays primary, and Wi-Fi power-save off
-/// so the radio never parks the uplink. NetworkManager names the profile after
-/// the SSID. Best-effort — a failure here only affects the next boot.
-pub fn persist(ssid: &str) {
-    let _ = exec::run(
-        "nmcli",
-        &[
-            "connection",
-            "modify",
-            ssid,
-            "connection.autoconnect",
-            "yes",
-        ],
-    );
-    // A higher metric = lower priority: wired (default ~100) wins when present.
-    let _ = exec::run(
-        "nmcli",
-        &["connection", "modify", ssid, "ipv4.route-metric", "700"],
-    );
-    let _ = exec::run(
-        "nmcli",
-        &["connection", "modify", ssid, "ipv6.route-metric", "700"],
-    );
-    // 2 = power-save disabled.
-    let _ = exec::run(
-        "nmcli",
-        &[
-            "connection",
-            "modify",
-            ssid,
-            "802-11-wireless.powersave",
-            "2",
-        ],
-    );
+/// Which of the saved networks a profile is. NetworkManager joins the highest
+/// autoconnect priority in range, so the backup is used only when the main
+/// network is out of reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiRole {
+    Primary,
+    Backup,
+}
+
+impl WifiRole {
+    /// The NetworkManager `connection.autoconnect-priority` for this role.
+    pub fn priority(self) -> &'static str {
+        match self {
+            WifiRole::Primary => "10",
+            WifiRole::Backup => "5",
+        }
+    }
+}
+
+/// Persist the joined profile for the next boot: auto-connect on with the
+/// role's priority, a route metric higher than wired so a plugged cable stays
+/// primary, and Wi-Fi power-save off so the radio never parks the uplink.
+///
+/// The profile is not pinned to an interface name or an access point: kernel
+/// names race at boot (a long-range radio can come up as `wlan0`), and a
+/// network with several access points must stay joinable through any of them.
+/// NetworkManager names the profile after the SSID. Best-effort — a failure
+/// here only affects the next boot.
+pub fn persist(ssid: &str, role: WifiRole) {
+    let settings: [(&str, &str); 7] = [
+        ("connection.autoconnect", "yes"),
+        ("connection.autoconnect-priority", role.priority()),
+        ("connection.interface-name", ""),
+        ("802-11-wireless.bssid", ""),
+        // A higher metric = lower priority: wired (default ~100) wins when present.
+        ("ipv4.route-metric", "700"),
+        ("ipv6.route-metric", "700"),
+        // 2 = power-save disabled.
+        ("802-11-wireless.powersave", "2"),
+    ];
+    for (key, value) in settings {
+        let _ = exec::run("nmcli", &["connection", "modify", ssid, key, value]);
+    }
+}
+
+/// Bring the saved profile for `ssid` up (switch back to it).
+pub fn activate(ssid: &str) -> Result<(), String> {
+    let res = exec::run("nmcli", &["connection", "up", "id", ssid]);
+    if res.success() {
+        Ok(())
+    } else {
+        let msg = res.stderr.trim();
+        Err(if msg.is_empty() {
+            "could not connect".to_string()
+        } else {
+            msg.to_string()
+        })
+    }
+}
+
+/// The IPv4 address on `iface`, without its prefix length, or `None`.
+pub fn iface_ipv4(iface: &str) -> Option<String> {
+    let res = exec::run("ip", &["-4", "-o", "addr", "show", "dev", iface]);
+    if res.success() {
+        parse_ipv4_addr(&res.stdout)
+    } else {
+        None
+    }
 }
 
 // ── pure parsers (unit-tested) ────────────────────────────────────────────
@@ -380,6 +413,22 @@ pub fn parse_default_gw(output: &str) -> Option<String> {
     None
 }
 
+/// Parse the first address from `ip -4 -o addr show dev <if>` output: the
+/// token after `inet`, without its `/prefix` (pure).
+pub fn parse_ipv4_addr(output: &str) -> Option<String> {
+    let mut tokens = output.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok == "inet" {
+            return tokens
+                .next()
+                .and_then(|a| a.split('/').next())
+                .filter(|a| !a.is_empty())
+                .map(str::to_string);
+        }
+    }
+    None
+}
+
 /// Parse `nmcli -t -f DEVICE,TYPE,STATE device status` into the Wi-Fi devices
 /// as `(device, state)` pairs (pure).
 pub fn parse_wifi_devices(output: &str) -> Vec<(String, String)> {
@@ -400,102 +449,4 @@ pub fn parse_wifi_devices(output: &str) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wifi_iface_names_are_recognized() {
-        assert!(is_wifi_iface("wlan0"));
-        assert!(is_wifi_iface("wlp3s0"));
-        assert!(is_wifi_iface("wlx00c0ca"));
-        assert!(!is_wifi_iface("eth0"));
-        assert!(!is_wifi_iface("end0"));
-        assert!(!is_wifi_iface("lo"));
-    }
-
-    #[test]
-    fn radio_drivers_are_flagged_case_insensitively() {
-        assert!(is_radio_driver("8812eu"));
-        assert!(is_radio_driver("RTL8812AU"));
-        assert!(is_radio_driver("rtl88x2eu"));
-        // The onboard management-WiFi drivers are not long-range radios.
-        assert!(!is_radio_driver("aic8800_fdrv"));
-        assert!(!is_radio_driver("brcmfmac"));
-        assert!(!is_radio_driver("iwlwifi"));
-    }
-
-    #[test]
-    fn terse_split_honors_backslash_escape() {
-        // A colon inside an SSID is backslash-escaped in nmcli terse output.
-        let cols = split_terse(r"home\:5G:82:WPA2:*");
-        assert_eq!(cols, vec!["home:5G", "82", "WPA2", "*"]);
-        // Trailing empty field is preserved.
-        assert_eq!(split_terse("open:70::"), vec!["open", "70", "", ""]);
-    }
-
-    #[test]
-    fn wifi_list_parses_dedups_and_sorts_by_signal() {
-        let out = "\
-home-5G:82:WPA2:*
-home-2G:60:WPA2:
-neighbor:45::
-home-5G:70:WPA2:
-:33:WPA2:
-";
-        let nets = parse_wifi_list(out);
-        // Strongest first; the blank SSID row is dropped; home-5G de-duped to 82.
-        assert_eq!(nets.len(), 3);
-        assert_eq!(nets[0].ssid, "home-5G");
-        assert_eq!(nets[0].signal, 82);
-        assert!(nets[0].secured);
-        assert!(nets[0].in_use);
-        assert_eq!(nets[1].ssid, "home-2G");
-        assert_eq!(nets[2].ssid, "neighbor");
-        // "neighbor" has empty SECURITY → open.
-        assert!(!nets[2].secured);
-    }
-
-    #[test]
-    fn egress_iface_parsed_from_both_route_forms() {
-        // Direct (on-link) form.
-        assert_eq!(
-            parse_egress_iface("1.1.1.1 dev eth0 src 192.168.1.42 uid 0"),
-            Some("eth0".to_string())
-        );
-        // Via-gateway form.
-        assert_eq!(
-            parse_egress_iface("1.1.1.1 via 192.168.1.1 dev wlan0 src 192.168.1.50"),
-            Some("wlan0".to_string())
-        );
-        // No `dev` token → no interface.
-        assert_eq!(parse_egress_iface("1.1.1.1 unreachable"), None);
-    }
-
-    #[test]
-    fn default_gateway_parsed() {
-        assert_eq!(
-            parse_default_gw("default via 192.168.1.1 proto dhcp metric 600"),
-            Some("192.168.1.1".to_string())
-        );
-        // An on-link default route with no gateway → none.
-        assert_eq!(parse_default_gw("default dev eth0 proto dhcp"), None);
-    }
-
-    #[test]
-    fn wifi_devices_filtered_from_device_status() {
-        let out = "\
-eth0:ethernet:connected:Wired
-wlan0:wifi:disconnected:
-wlan1:wifi:connected:home-5G
-lo:loopback:unmanaged:
-";
-        let devs = parse_wifi_devices(out);
-        assert_eq!(
-            devs,
-            vec![
-                ("wlan0".to_string(), "disconnected".to_string()),
-                ("wlan1".to_string(), "connected".to_string()),
-            ]
-        );
-    }
-}
+mod tests;

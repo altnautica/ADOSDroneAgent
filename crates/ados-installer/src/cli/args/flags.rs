@@ -127,6 +127,17 @@ pub const FLAGS: &[FlagSpec] = &[
         "File holding the --wifi-ssid password (omit if open; keeps it off\n\
          the command line)",
     ),
+    valued(
+        "--wifi-backup-ssid",
+        "<ssid>",
+        "Also save this Wi-Fi network as a lower-priority backup during a\n\
+         headless install (requires --wifi-ssid)",
+    ),
+    valued(
+        "--wifi-backup-pass-file",
+        "<path>",
+        "File holding the --wifi-backup-ssid password (omit if open)",
+    ),
     with_short(
         valued(
             "--plugin-key",
@@ -247,6 +258,8 @@ impl Args {
             "--camera" => self.camera = value,
             "--wifi-ssid" => self.wifi_ssid = value,
             "--wifi-pass-file" => self.wifi_pass_file = value,
+            "--wifi-backup-ssid" => self.wifi_backup_ssid = value,
+            "--wifi-backup-pass-file" => self.wifi_backup_pass_file = value,
             "--plugin-key" => self.plugin_key.extend(value),
             "--tile-pack" => self.tile_pack = value,
             other => unreachable!("flag {other} is in FLAGS but has no apply arm"),
@@ -264,6 +277,10 @@ mod tests {
             let mut argv = vec![f.name.to_string()];
             if f.takes_value {
                 argv.push("value".into());
+            }
+            // A backup network is only accepted alongside a main one.
+            if f.name == "--wifi-backup-ssid" {
+                argv.extend(["--wifi-ssid".to_string(), "primary".to_string()]);
             }
             let parsed = Args::parse(argv.clone())
                 .unwrap_or_else(|e| panic!("{} did not parse: {e}", f.name));
