@@ -29,6 +29,7 @@
 
   "builds_on_device": [
     "beagley-ai",
+    "dragon-q6a",
     "generic-arm64",
     "generic-x86_64",
     "jetson-nano",
