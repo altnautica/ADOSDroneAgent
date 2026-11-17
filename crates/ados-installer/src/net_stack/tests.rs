@@ -188,14 +188,14 @@ fn dhcpcd_deny_is_appended_once() {
 }
 
 #[test]
-fn handoff_conf_appends_to_the_unmanaged_list() {
+fn handoff_conf_is_its_own_device_section() {
     let body = render_handoff_conf(&strs(&["enp1s0", "eth1"]));
     assert!(body.starts_with('#'));
-    assert!(
-        body.contains("[keyfile]\nunmanaged-devices+=interface-name:enp1s0;interface-name:eth1\n")
-    );
-    // A plain `=` would replace the WFB driver list instead of extending it.
-    assert!(!body.contains("unmanaged-devices="));
+    assert!(body.contains(
+        "[device-ados-wired-handoff]\nmatch-device=interface-name:enp1s0;interface-name:eth1\nmanaged=0\n"
+    ));
+    // An `unmanaged-devices` list would be replaced by the WFB rule's list.
+    assert!(!body.contains("unmanaged-devices"));
 }
 
 #[test]

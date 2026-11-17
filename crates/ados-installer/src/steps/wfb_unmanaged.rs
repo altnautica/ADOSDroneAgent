@@ -34,11 +34,11 @@ use std::path::Path;
 use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
 
-/// The conf.d drop-in the rule is written to. NetworkManager reads conf.d
-/// snippets in file-name order across `/usr/lib`, `/run` and `/etc`, and a
-/// plain `unmanaged-devices=` replaces any earlier value: the `95-` prefix sorts
-/// after netplan's generated `10-globally-managed-devices.conf`, which would
-/// otherwise reset the list.
+/// The conf.d drop-in the rule is written to. NetworkManager reads `/usr/lib`,
+/// then `/run`, then `/etc`, each in file-name order, and a plain
+/// `unmanaged-devices=` replaces any earlier value: in `/etc` this rule wins over
+/// the lists netplan generates in `/run`, and the `95-` prefix puts it after any
+/// other `/etc` drop-in that sets the same key.
 pub const NM_CONF_PATH: &str = "/etc/NetworkManager/conf.d/95-ados-wfb-unmanaged.conf";
 
 /// The path earlier installs wrote the rule to; removed when the rule is written.

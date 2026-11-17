@@ -22,7 +22,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - The vision detections route's whole-frame batch cache carries its types, so the route passes the strict type check. No behaviour change.
 - Dependencies: `ort` 2.0.0-rc.15 (with serde_json, sha2, getrandom, flate2, memmap2, hyper, libc, prost and prost-build minor updates). The ONNX backend builds one ONNX Runtime environment per process on the first model load and hands it to every session, as rc.15 requires; the device runtime stays 1.24.2.
-- The NetworkManager rule that keeps the long-range radios unmanaged moved to `/etc/NetworkManager/conf.d/95-ados-wfb-unmanaged.conf`, so it sorts after netplan's generated `10-globally-managed-devices.conf`; the old `10-ados-wfb-unmanaged.conf` is removed on install, and uninstall removes both.
+- The NetworkManager rule that keeps the long-range radios unmanaged moved to `/etc/NetworkManager/conf.d/95-ados-wfb-unmanaged.conf`, so it comes after any other `/etc` drop-in that sets the same list; the old `10-ados-wfb-unmanaged.conf` is removed on install, and uninstall removes both. The installer's wired handoff is its own `[device-ados-wired-handoff]` section (`managed=0`), which no `unmanaged-devices` list overrides.
 - The management-link guardian repairs a link with the stack that runs it: NetworkManager only for a device it manages, so a wired link it leaves unmanaged is repaired through systemd-networkd again.
 
 ### Fixed

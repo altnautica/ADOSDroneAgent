@@ -11,8 +11,10 @@ use super::{plan, probe, AdoptionPlan, NETPLAN_NM_PATH};
 use crate::steps::deps::{apt_update, apt_waiting_for_lock};
 use crate::steps::reboot;
 
-/// The handoff drop-in's file name. Sorts after the WFB rule (`95-`), so its
-/// `+=` appends to that list rather than being replaced by it.
+/// The handoff drop-in's file name. Its own `[device-…]` section, so it holds
+/// whatever order NetworkManager merges `/run` and `/etc` in (it reads each
+/// directory in turn, so a `/run` `unmanaged-devices` list is replaced by the
+/// WFB rule's in `/etc`).
 const HANDOFF_CONF: &str = "96-ados-wired-handoff.conf";
 
 /// systemd-networkd drop-in that releases the Wi-Fi interface.
@@ -303,8 +305,9 @@ pub fn render_handoff_conf(ifaces: &[String]) -> String {
     format!(
         "# ADOS: these wired links stay with the network stack that runs them.\n\
          # NetworkManager manages the Wi-Fi only. Written by the installer.\n\
-         [keyfile]\n\
-         unmanaged-devices+={list}\n"
+         [device-ados-wired-handoff]\n\
+         match-device={list}\n\
+         managed=0\n"
     )
 }
 
