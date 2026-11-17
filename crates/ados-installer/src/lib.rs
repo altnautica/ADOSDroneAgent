@@ -21,6 +21,7 @@ pub mod host;
 pub mod journal;
 pub mod macos;
 pub mod net;
+pub mod net_stack;
 pub mod pair_only;
 pub mod report;
 pub mod result;

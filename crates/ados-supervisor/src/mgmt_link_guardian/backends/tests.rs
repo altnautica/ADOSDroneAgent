@@ -160,3 +160,14 @@ fn backend_strings_are_bland() {
     assert_eq!(Backend::Networkd.as_str(), "networkd");
     assert_eq!(Backend::Fallback.as_str(), "fallback");
 }
+
+#[test]
+fn a_wired_link_networkmanager_leaves_unmanaged_is_not_its_to_repair() {
+    // NetworkManager runs the Wi-Fi while another stack keeps the wired link.
+    let status = "eth0:unmanaged\nwlan0:connected\nwlan1:unmanaged\nlo:unmanaged\n";
+    assert!(!nm_manages(status, "eth0"));
+    assert!(nm_manages(status, "wlan0"));
+    // A device NetworkManager does not list at all is not its either.
+    assert!(!nm_manages(status, "eth1"));
+    assert!(nm_manages("eth0:disconnected\n", "eth0"));
+}

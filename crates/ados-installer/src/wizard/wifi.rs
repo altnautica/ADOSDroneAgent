@@ -122,7 +122,7 @@ fn is_radio_driver_iface(iface: &str) -> bool {
 
 /// Read an interface's kernel driver name from sysfs (the basename of the
 /// `device/driver` symlink), or `None`.
-fn iface_driver(iface: &str) -> Option<String> {
+pub(crate) fn iface_driver(iface: &str) -> Option<String> {
     let link = format!("/sys/class/net/{iface}/device/driver");
     let target = std::fs::read_link(&link).ok()?;
     target

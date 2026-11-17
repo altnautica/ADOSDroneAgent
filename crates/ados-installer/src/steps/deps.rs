@@ -15,7 +15,8 @@ use ados_protocol::host_kind::HostKind;
 use ados_term::exec;
 use ados_term::progress::ProgressSink;
 
-use apt_lock::{apt_argv, apt_waiting_for_lock};
+use apt_lock::apt_argv;
+pub(crate) use apt_lock::apt_waiting_for_lock;
 
 /// The cross-profile core apt package set (REQUIRED). Ported verbatim from
 /// `install_system_deps` in 02-deps.sh: Python venv + native-extension build
@@ -168,7 +169,7 @@ fn apt(args: &[&str], sink: &ProgressSink) -> exec::CmdResult {
 
 /// `apt-get update`, surfacing failure. Errors propagate so the caller fails
 /// the step (a stale index breaks every install below).
-fn apt_update(sink: &ProgressSink) -> anyhow::Result<()> {
+pub(crate) fn apt_update(sink: &ProgressSink) -> anyhow::Result<()> {
     let res = apt_waiting_for_lock(&["update"], sink);
     if res.success() {
         Ok(())

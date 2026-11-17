@@ -27,8 +27,9 @@ impl Step for WifiJoin {
     }
     fn requires(&self) -> &[&str] {
         // After config_identity so the hostname is set before the box appears
-        // on the new network.
-        &["config_identity"]
+        // on the new network, and after network_stack so NetworkManager owns
+        // the Wi-Fi interface nmcli drives.
+        &["config_identity", "network_stack"]
     }
     fn checkpoint(&self) -> Option<&str> {
         // No checkpoint: re-running an upgrade re-affirms the join + persist
@@ -130,7 +131,7 @@ mod tests {
     #[test]
     fn step_metadata_is_optional_after_config() {
         assert_eq!(WifiJoin.id(), "wifi_join");
-        assert_eq!(WifiJoin.requires(), &["config_identity"]);
+        assert_eq!(WifiJoin.requires(), &["config_identity", "network_stack"]);
         assert!(matches!(WifiJoin.kind(), StepKind::Optional));
         assert!(WifiJoin.checkpoint().is_none());
     }

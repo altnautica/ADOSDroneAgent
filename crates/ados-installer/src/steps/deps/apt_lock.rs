@@ -84,7 +84,7 @@ fn is_lock_contention(stderr: &str) -> bool {
 /// Only those two are retried. A broken index, an unknown package or a failing
 /// post-install script returns immediately, because those do not get better by
 /// trying again and a silent retry loop would only delay the report.
-pub(super) fn apt_waiting_for_lock(argv: &[&str], sink: &ProgressSink) -> exec::CmdResult {
+pub(crate) fn apt_waiting_for_lock(argv: &[&str], sink: &ProgressSink) -> exec::CmdResult {
     let deadline = Instant::now() + APT_LOCK_WAIT;
     let mut announced = false;
     let mut repaired = false;

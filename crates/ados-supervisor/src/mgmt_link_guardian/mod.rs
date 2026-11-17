@@ -235,7 +235,7 @@ impl MgmtLinkGuardian {
 
         // Detect the backend only when unhealthy (keeps healthy ticks cheap).
         let backend = if verdict != HealthVerdict::Healthy {
-            Some(backends::detect_backend().await)
+            Some(backends::detect_backend(&managed.iface).await)
         } else {
             None
         };

@@ -44,6 +44,7 @@ pub mod health;
 pub mod i2c_enable;
 pub mod legacy_nat;
 pub mod network_mac_pin;
+pub mod network_stack;
 pub mod npu_provision;
 pub mod portable_python;
 pub mod pps_overlay;
@@ -73,6 +74,10 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         // any network service (and NM itself) can autoconnect a client profile
         // to the flight radio.
         Box::new(wfb_unmanaged::WfbUnmanaged),
+        // Hand the management Wi-Fi to NetworkManager on a host that runs
+        // another stack, before anything (the wizard-less join, the agent)
+        // drives it with nmcli. The wired link is never touched live.
+        Box::new(network_stack::NetworkStack),
         // Right after the packages land, before the venv / fetched binaries /
         // DKMS build ask for space: the downloaded .debs have no further use.
         Box::new(apt_reclaim::AptReclaim),
@@ -131,7 +136,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 29);
+        assert_eq!(order.len(), 30);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -146,6 +151,11 @@ mod tests {
         // The headless Wi-Fi join runs after config (hostname is set before the
         // box appears on the joined network).
         assert!(pos("config_identity") < pos("wifi_join"));
+        // NetworkManager owns the Wi-Fi before the headless join drives it,
+        // and the WFB radios are unmanaged before it ever starts.
+        assert!(pos("network_stack") < pos("wifi_join"));
+        assert!(pos("wfb_unmanaged") < pos("network_stack"));
+        assert!(pos("deps") < pos("network_stack"));
         // The NPU runtime provisioning installs its wheel into the agent venv,
         // so it must run after the venv exists.
         assert!(pos("venv_agent") < pos("npu_provision"));

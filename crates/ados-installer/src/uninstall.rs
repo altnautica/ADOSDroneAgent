@@ -75,6 +75,8 @@ pub fn dropin_files() -> Vec<&'static str> {
         "/etc/udev/rules.d/99-ados-eth-no-eee.rules",
         "/etc/udev/rules.d/99-ados-sensorhub.rules",
         "/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf",
+        crate::steps::wfb_unmanaged::NM_CONF_PATH,
+        crate::steps::wfb_unmanaged::LEGACY_NM_CONF_PATH,
         "/etc/modprobe.d/ados-aic8800.conf",
         "/etc/systemd/logind.conf.d/90-ados-no-idle.conf",
         "/etc/avahi/services/ados-gs-ap.service",

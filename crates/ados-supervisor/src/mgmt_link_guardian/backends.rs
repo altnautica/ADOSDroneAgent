@@ -94,13 +94,31 @@ pub fn rung_command(
     }
 }
 
-/// Detect the active management backend by querying systemd. A box with neither
-/// managed stack active (e.g. a CI host with no running systemd) reports
-/// `Fallback`, which the guardian treats as "do not run the disruptive ladder".
+/// Whether NetworkManager manages `iface`, from `nmcli -t -f DEVICE,STATE
+/// device status` output (pure). A device it lists as `unmanaged` (a wired
+/// link another stack runs, kept out of NetworkManager by a conf.d rule) or
+/// does not list at all is not its to repair.
+pub fn nm_manages(device_status: &str, iface: &str) -> bool {
+    device_status.lines().any(|line| {
+        let mut cols = line.splitn(2, ':');
+        cols.next() == Some(iface) && cols.next().is_some_and(|s| s.trim() != "unmanaged")
+    })
+}
+
+/// Detect the backend that runs `iface` by querying systemd and
+/// NetworkManager. NetworkManager wins only for a device it manages; a host can
+/// run it for the Wi-Fi while systemd-networkd keeps the wired link. A box
+/// with neither managed stack active (e.g. a CI host with no running systemd)
+/// reports `Fallback`, which the guardian treats as "do not run the disruptive
+/// ladder".
 #[cfg(target_os = "linux")]
-pub async fn detect_backend() -> Backend {
+pub async fn detect_backend(iface: &str) -> Backend {
     if super::run_status("systemctl", &["is-active", "--quiet", "NetworkManager"]).await {
-        return Backend::NetworkManager;
+        // nmcli not answering keeps the old verdict: NetworkManager runs it.
+        match super::run_output("nmcli", &["-t", "-f", "DEVICE,STATE", "device", "status"]).await {
+            Some(status) if !nm_manages(&status, iface) => {}
+            _ => return Backend::NetworkManager,
+        }
     }
     if super::run_status("systemctl", &["is-active", "--quiet", "systemd-networkd"]).await {
         return Backend::Networkd;

@@ -1,6 +1,6 @@
 //! Persistent NetworkManager "unmanaged" rule for the WFB monitor radios.
 //!
-//! Writes `/etc/NetworkManager/conf.d/10-ados-wfb-unmanaged.conf` so NetworkManager
+//! Writes `/etc/NetworkManager/conf.d/95-ados-wfb-unmanaged.conf` so NetworkManager
 //! structurally CANNOT claim a WFB monitor radio from the FIRST boot, before the
 //! agent's runtime `nmcli dev set <iface> managed no` (`adapter.py`) has a chance to
 //! run.
@@ -34,8 +34,15 @@ use std::path::Path;
 use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
 
-/// The conf.d drop-in the rule is written to.
-pub const NM_CONF_PATH: &str = "/etc/NetworkManager/conf.d/10-ados-wfb-unmanaged.conf";
+/// The conf.d drop-in the rule is written to. NetworkManager reads conf.d
+/// snippets in file-name order across `/usr/lib`, `/run` and `/etc`, and a
+/// plain `unmanaged-devices=` replaces any earlier value: the `95-` prefix sorts
+/// after netplan's generated `10-globally-managed-devices.conf`, which would
+/// otherwise reset the list.
+pub const NM_CONF_PATH: &str = "/etc/NetworkManager/conf.d/95-ados-wfb-unmanaged.conf";
+
+/// The path earlier installs wrote the rule to; removed when the rule is written.
+pub const LEGACY_NM_CONF_PATH: &str = "/etc/NetworkManager/conf.d/10-ados-wfb-unmanaged.conf";
 
 /// The WFB-compatible kernel driver names, exactly the set in
 /// `crates/ados-protocol/wfb-adapters.toml`. Kept in sync by
@@ -99,26 +106,45 @@ impl Step for WfbUnmanaged {
         StepKind::Optional
     }
     fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
-        let body = render_file(WFB_UNMANAGED_DRIVERS);
-        let path = Path::new(NM_CONF_PATH);
-        // Idempotent: skip the write when the file is already current.
-        if std::fs::read_to_string(path)
-            .map(|c| c == body)
-            .unwrap_or(false)
-        {
-            tracing::info!("WFB unmanaged-devices rule already current");
-            return StepOutcome::Ok;
+        match write_rule() {
+            Ok(true) => {
+                tracing::info!(
+                    drivers = WFB_UNMANAGED_DRIVERS.len(),
+                    "wrote WFB unmanaged-devices rule"
+                );
+                StepOutcome::Ok
+            }
+            Ok(false) => {
+                tracing::info!("WFB unmanaged-devices rule already current");
+                StepOutcome::Ok
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to write WFB unmanaged-devices rule");
+                StepOutcome::Failed(e)
+            }
         }
-        if let Err(e) = write_file(path, &body) {
-            tracing::warn!(error = %e, "failed to write WFB unmanaged-devices rule");
-            return StepOutcome::Failed(format!("could not write {NM_CONF_PATH}: {e}"));
-        }
-        tracing::info!(
-            drivers = WFB_UNMANAGED_DRIVERS.len(),
-            "wrote WFB unmanaged-devices rule"
-        );
-        StepOutcome::Ok
     }
+}
+
+/// Write the rule to [`NM_CONF_PATH`] and drop the legacy copy. Returns `true`
+/// when the file was written, `false` when it was already current.
+pub fn write_rule() -> Result<bool, String> {
+    match std::fs::remove_file(LEGACY_NM_CONF_PATH) {
+        Ok(()) => tracing::info!(path = LEGACY_NM_CONF_PATH, "removed the legacy WFB rule"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("could not remove {LEGACY_NM_CONF_PATH}: {e}")),
+    }
+    let body = render_file(WFB_UNMANAGED_DRIVERS);
+    let path = Path::new(NM_CONF_PATH);
+    // Idempotent: skip the write when the file is already current.
+    if std::fs::read_to_string(path)
+        .map(|c| c == body)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    write_file(path, &body).map_err(|e| format!("could not write {NM_CONF_PATH}: {e}"))?;
+    Ok(true)
 }
 
 /// Write `body` to `path` atomically (tmp + rename), creating the parent dir.
@@ -172,7 +198,7 @@ mod tests {
     #[test]
     fn write_then_rewrite_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("10-ados-wfb-unmanaged.conf");
+        let path = dir.path().join("95-ados-wfb-unmanaged.conf");
         let body = render_file(WFB_UNMANAGED_DRIVERS);
         write_file(&path, &body).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
