@@ -12,6 +12,14 @@ struct Run {
     peak_deg: f32,
     ground_peak_deg: f32,
     lifted_ms: Option<u64>,
+    /// The airframe's height when the lift-off first said it had lifted.
+    h_at_lift: Option<f32>,
+    /// The FC's height estimate creeps up this fast while the airframe sits
+    /// on its skids (m/s), and how far it has crept.
+    ekf_creep_mps: f32,
+    ekf_up: f32,
+    /// The rangefinder's noise, ± m.
+    agl_noise_m: f32,
 }
 
 impl Run {
@@ -25,6 +33,10 @@ impl Run {
             peak_deg: 0.0,
             ground_peak_deg: 0.0,
             lifted_ms: None,
+            h_at_lift: None,
+            ekf_creep_mps: 0.0,
+            ekf_up: 0.0,
+            agl_noise_m: 0.0,
         }
     }
 
@@ -42,8 +54,13 @@ impl Run {
                 yaw_rate: 0.0,
             }),
             local: Some(LocalPos {
-                d: -self.af.h,
-                vd: -self.af.vz,
+                d: -(self.af.h + self.ekf_up),
+                vd: -self.af.vz
+                    - if self.af.airborne() {
+                        0.0
+                    } else {
+                        self.ekf_creep_mps
+                    },
                 ..Default::default()
             }),
             i: Some(self.af.i),
@@ -52,7 +69,7 @@ impl Run {
                 min: frac(min),
                 spread_us: max - min,
             }),
-            agl: Some(0.1 + self.af.h),
+            agl: Some(0.1 + self.af.h + self.agl_noise_m * noise(self.now)),
         }
     }
 
@@ -90,8 +107,12 @@ impl Run {
         for _ in 0..4 {
             self.af.step(0.005);
         }
+        if !self.af.airborne() {
+            self.ekf_up += 0.02 * self.ekf_creep_mps;
+        }
         if self.lifted_ms.is_none() && self.lo.lifted_ever() {
             self.lifted_ms = Some(self.now);
+            self.h_at_lift = Some(self.af.h);
         }
         let tilt = self.af.att[0].abs().max(self.af.att[1].abs()).to_degrees();
         if self.lifted_ms.is_none() {
@@ -101,6 +122,12 @@ impl Run {
             self.peak_deg = self.peak_deg.max(tilt);
         }
     }
+}
+
+/// A repeatable rangefinder noise in −1..1, a new value every tick.
+fn noise(now_ms: u64) -> f32 {
+    let x = (now_ms / 20).wrapping_mul(2_654_435_761) % 1000;
+    x as f32 / 500.0 - 1.0
 }
 
 fn learned(i: [f32; 2], hover: f32) -> Option<Trim> {
@@ -152,6 +179,27 @@ fn first_flight_finds_the_trim_on_the_skids_without_pivoting() {
             assert!((i[ax] - trim[ax]).abs() < 0.08, "{trim:?}: {i:?}");
         }
         assert!(!o.saturated, "{trim:?}: {o:?}");
+    }
+}
+
+#[test]
+fn a_height_estimate_creeping_up_on_the_skids_is_not_a_lift_off() {
+    // On the bench (right40, tail40, nose35) the FC's height crept up while
+    // the airframe rocked on its skids finding its trim, so the lift-off
+    // took it as lifted, levelled the attitude target and handed a
+    // grounded, unbalanced airframe to the position controller, which
+    // pivoted it 6-15°. The rangefinder (noisy) read the skids still down.
+    for trim in [[0.0, 0.0], [0.0, 0.25], [-0.29, 0.0], [0.0, -0.28]] {
+        let mut r = Run::new(Airframe::new(0.6, trim), None);
+        r.ekf_creep_mps = 0.05;
+        r.agl_noise_m = 0.07;
+        r.run(40_000);
+        assert!(r.lo.handed_over(), "{trim:?}: {:?}", r.lo.view());
+        let h = r.h_at_lift.expect("a lift-off");
+        assert!(h > 0.0, "{trim:?}: took the ground for a lift-off");
+        // …and seen while still close to it, not a median's lag later.
+        assert!(h < 0.15, "{trim:?}: lift-off seen at {h:.3} m");
+        assert!(r.peak_deg < 5.0, "{trim:?}: peak {}", r.peak_deg);
     }
 }
 

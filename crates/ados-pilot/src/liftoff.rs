@@ -36,6 +36,8 @@ pub mod sim;
 #[cfg(test)]
 mod tests;
 
+use std::collections::VecDeque;
+
 use crate::airframe::{LiftoffOutcome, Trim};
 use crate::fc::{Attitude, LocalPos};
 
@@ -121,9 +123,18 @@ const SATURATION_MS: u64 = 150;
 /// Once handed over, the climb stops speeding up while the busiest motor
 /// is above this share of its range, and slows instead.
 const CLIMB_SATURATION: f32 = 0.9;
-/// Off the ground: risen this far, or climbing this fast (m, m/s).
+/// Off the ground: risen this far, or climbing this fast (m, m/s). With a
+/// downward rangefinder the rise is the rangefinder's alone: the FC's
+/// height estimate creeps while the airframe rocks on its skids finding its
+/// trim (0.08 m in 2 s on the bench), and taking that for a lift-off hands
+/// a grounded airframe to the position controller.
 const LIFT_RISE_M: f32 = 0.08;
 const LIFT_VZ_MPS: f32 = 0.25;
+/// The rangefinder height is the median of its readings over this long, so
+/// its noise (±0.07 m on the bench) is not a rise.
+const AGL_WINDOW_MS: u64 = 500;
+/// …of at most this many readings, the newest kept.
+const AGL_WINDOW_MAX: usize = 64;
 /// Clear of the ground: hand over to the position controller at this rise,
 /// after this long, or once tilted this far.
 const HANDOVER_RISE_M: f32 = 0.12;
@@ -341,6 +352,8 @@ pub struct Liftoff {
     /// The rangefinder height at rest, and whether it has left the ground.
     rest_agl: Option<f32>,
     lifted: bool,
+    /// The rangefinder's readings over the last [`AGL_WINDOW_MS`].
+    agl_window: VecDeque<(u64, f32)>,
     /// What it found at lift-off, taken once by the pilot.
     outcome: Option<LiftoffOutcome>,
 }
@@ -379,6 +392,7 @@ impl Liftoff {
             saturated_since: None,
             rest_agl: None,
             lifted: false,
+            agl_window: VecDeque::new(),
             outcome: None,
         }
     }
@@ -386,6 +400,22 @@ impl Liftoff {
     /// The take-off point, local NED.
     pub fn start(&self) -> Option<LocalPos> {
         self.start
+    }
+
+    /// The rangefinder height now: the median of its readings over the last
+    /// [`AGL_WINDOW_MS`] (at most [`AGL_WINDOW_MAX`]), `None` without any.
+    fn agl_now(&self) -> Option<f32> {
+        let mut buf = [0.0f32; AGL_WINDOW_MAX];
+        let n = self.agl_window.len().min(AGL_WINDOW_MAX);
+        if n == 0 {
+            return None;
+        }
+        for (slot, &(_, a)) in buf.iter_mut().zip(self.agl_window.iter().rev()) {
+            *slot = a;
+        }
+        let v = &mut buf[..n];
+        v.sort_unstable_by(f32::total_cmp);
+        Some(v[n / 2])
     }
 
     /// The rangefinder height at rest, once spooled.
@@ -451,11 +481,41 @@ impl Liftoff {
         let (r0, p0) = self.rest.unwrap_or((att.roll, att.pitch));
         let tilt = [(att.roll - r0).to_degrees(), (att.pitch - p0).to_degrees()];
         self.tilt_deg = tilt[0].abs().max(tilt[1].abs());
-        let rise = match (self.start, inp.local) {
+        if let Some(a) = inp.agl {
+            if self.agl_window.len() == AGL_WINDOW_MAX {
+                self.agl_window.pop_front();
+            }
+            self.agl_window.push_back((now, a));
+        }
+        while self
+            .agl_window
+            .front()
+            .is_some_and(|&(t, _)| now.saturating_sub(t) > AGL_WINDOW_MS)
+        {
+            self.agl_window.pop_front();
+        }
+        let ekf_rise = match (self.start, inp.local) {
             (Some(s), Some(l)) => s.d - l.d,
             _ => 0.0,
         };
-        let lifted = rise > LIFT_RISE_M || inp.local.is_some_and(|l| l.vd < -LIFT_VZ_MPS);
+        // The rangefinder decides once it has a rest height to rise from: its
+        // median, or, for a fast lift the median would see late, its newest
+        // reading risen together with the FC's climb rate (neither the
+        // estimate's creep nor the rangefinder's noise alone is enough).
+        let agl_rise = self.rest_agl.zip(self.agl_now()).map(|(r0, a)| a - r0);
+        let rise = agl_rise.unwrap_or(ekf_rise);
+        let climbing = inp.local.is_some_and(|l| l.vd < -LIFT_VZ_MPS);
+        let lifted = match agl_rise {
+            Some(r) => {
+                r > LIFT_RISE_M
+                    || (climbing
+                        && inp
+                            .agl
+                            .zip(self.rest_agl)
+                            .is_some_and(|(a, r0)| a - r0 > LIFT_RISE_M))
+            }
+            None => ekf_rise > LIFT_RISE_M || climbing,
+        };
         if self.on_ground() {
             if let Some(m) = inp.motors {
                 self.max_motor = self.max_motor.max(m.max);
@@ -503,7 +563,7 @@ impl Liftoff {
                 };
                 if done {
                     self.rest = Some((att.roll, att.pitch));
-                    self.rest_agl = inp.agl;
+                    self.rest_agl = self.agl_now();
                     self.phase = if self.loading.iter().any(|&l| l) {
                         Phase::Level { since: now }
                     } else {
