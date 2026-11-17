@@ -428,7 +428,7 @@ On a device the agent installs as a set of systemd services plus a Python virtua
 
 ## Supported hardware
 
-The agent auto-detects the board on boot and scales features to the resources it finds. 22 board profiles ship in [`src/ados/hal/boards/`](src/ados/hal/boards/); any ARM64 or x86_64 Linux board with a serial port and systemd should work through a generic profile.
+The agent auto-detects the board on boot and scales features to the resources it finds. 23 board profiles ship in [`src/ados/hal/boards/`](src/ados/hal/boards/); any ARM64 or x86_64 Linux board with a serial port and systemd should work through a generic profile.
 
 <p align="center">
   <picture>
@@ -446,6 +446,7 @@ The agent auto-detects the board on boot and scales features to the resources it
 | Raspberry Pi CM5 | BCM2712 | `cm5.yaml` |
 | Radxa Cubie A7S | Allwinner A733 | `cubie-a7s.yaml` |
 | Radxa Cubie A7Z | Allwinner A733 | `cubie-a7z.yaml` |
+| Radxa Dragon Q6A | Qualcomm QCS6490 | `dragon-q6a.yaml` |
 | generic-arm64 | Any | `generic-arm64.yaml` |
 | generic-x86_64 | Any | `generic-x86_64.yaml` |
 | NVIDIA Jetson Nano | Tegra X1 | `jetson-nano.yaml` |

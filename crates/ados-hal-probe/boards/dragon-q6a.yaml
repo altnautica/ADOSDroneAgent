@@ -1,0 +1,192 @@
+# Radxa Dragon Q6A — Qualcomm QCS6490 (Kryo 670: 4x Cortex-A78 + 4x
+# Cortex-A55), Raspberry-Pi-style 40-pin header, M.2 NVMe, eMMC/UFS module
+# socket and microSD. Boots UEFI + GRUB on the mainline-based images; GRUB
+# loads the device tree from /boot, so header overlays are merged into that
+# DTB at install time (scripts/drivers/lib/display-activate.sh).
+#
+# The onboard Wi-Fi is an AIC8800D80 (Wi-Fi 6 + BT 5), not an RTL, so it is
+# never an injection interface — WFB rides an EXTERNAL USB RTL8812EU dongle.
+#
+# The Hexagon DSP/NPU needs the vendor QNN/SNPE runtime, which ADOS's
+# ONNX/RKNN vision backends cannot target, so npu_tops stays 0.0; the A78
+# cores are strong enough for the CPU ONNX path (local_inference: onnx).
+#
+# 40-pin header SPI, Pi-standard positions (QUP SE12 / spi12):
+#   pin 19 GPIO_49 MOSI, pin 21 GPIO_48 MISO, pin 23 GPIO_50 SCLK,
+#   pin 24 GPIO_51 CS0,  pin 26 GPIO_55 CS1 (driven as a GPIO chip select),
+#   pin 22 GPIO_57 (touch PENIRQ).
+
+name: "Radxa Dragon Q6A"
+vendor: "Radxa"
+soc: "Qualcomm QCS6490"
+arch: "aarch64"
+model_patterns:
+  - "radxa,dragon-q6a"     # /proc/device-tree/compatible (board node)
+  - "Radxa Dragon Q6A"     # /proc/device-tree/model
+  - "Dragon Q6A"
+default_tier: 4
+
+gpio_pins:
+  - 3    # I2C SDA
+  - 5    # I2C SCL
+  - 7
+  - 8    # UART TXD
+  - 10   # UART RXD
+  - 11
+  - 12
+  - 13
+  - 15
+  - 16
+  - 18
+  - 19   # SPI MOSI
+  - 21   # SPI MISO
+  - 22   # touch PENIRQ
+  - 23   # SPI CLK
+  - 24   # SPI CS0
+  - 26   # SPI CS1
+  - 27
+  - 28
+  - 29
+  - 31
+  - 32
+  - 33
+  - 35
+  - 36
+  - 37
+  - 38
+  - 40
+uart_paths:
+  - /dev/ttyACM0
+  - /dev/ttyUSB0
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+
+board:
+  id: dragon-q6a
+  manufacturer: Radxa
+  status: experimental
+
+compute:
+  cores: 8
+  core_type: "Cortex-A78 x4 + Cortex-A55 x4"
+  max_freq_mhz: 2700
+  # npu_tops: 0.0 is INTENTIONAL: the Hexagon NPU is not usable by ADOS's
+  # vision engine, so declaring it would make the perception tier attempt
+  # local detection on hardware it cannot drive. Inference runs CPU ONNX.
+  npu_tops: 0.0
+  local_inference: onnx
+  gpu: "Adreno 643"
+  ram_type: LPDDR5
+
+storage:
+  emmc: true          # eMMC/UFS module socket
+  emmc_gb: 0          # module-dependent; runtime detects actual
+  sd_card: true
+  nand: false
+
+buses:
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb3
+  spi:
+    - id: spi12
+      path: ""
+      notes: "40-pin header SPI (pins 19/21/23/24/26); enabled only by the HDMI-touch overlay"
+
+network:
+  wifi: true          # onboard AIC8800D80 — management only, never injection
+  ethernet: true
+  bluetooth: true
+
+video:
+  csi_ports: 3
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 30
+  encoder_api: v4l2
+  nav_cameras:
+    csi_count: 3
+    usb_uvc_count: 1
+    recommended_role: nav-usb
+
+cameras:
+  supported:
+    - id: usb-nav
+      type: usb
+      bus: usb
+      orientation: downward
+      overlay_required: false
+      vendor_isp: false
+
+# Only the EXTERNAL USB RTL8812EU is an injection interface; the module is
+# built on-device via DKMS.
+radios:
+  supported:
+    - id: wfb-rtl8812eu
+      role: wfb-injection
+      chipset: RTL8812EU
+      driver: rtl8812eu
+      install: dkms
+      modules_required: [8812eu]
+      mesh_capable: true
+
+flight_controller:
+  interfaces:
+    - id: fc-usb
+      type: usb-acm
+      baud_candidates: [921600, 115200, 57600]
+      priority: 1
+
+provisioning:
+  packages:
+    - {id: camera-userspace, when: camera, apt: [gstreamer1.0-tools, v4l-utils]}
+  drivers:
+    - {radio: wfb-rtl8812eu}
+
+power:
+  typical_watts: 5.0
+  max_watts: 15.0
+  voltage: 12.0
+  input: "USB-C PD 12V"
+
+navigation:
+  vio_capable: false
+
+displays:
+  supported:
+    # 800x480 HDMI panel with an XPT2046 resistive touch controller on the
+    # 40-pin header SPI (CS1, PENIRQ on pin 22). The overlay is compiled from
+    # data/overlays/dragon-q6a-hdmi_touch_xpt2046.dts and merged into the
+    # GRUB-loaded DTB. The ADC bounds and orientation are a baseline for a
+    # common panel; the on-screen calibration wizard refits them.
+    - id: hdmi_touch_xpt2046
+      type: hdmi-touch
+      controller: HDMI
+      touch_chip: ADS7846
+      bus: spi12
+      resolution: 800x480
+      overlay_source: repo
+      overlay_ref: dragon-q6a-hdmi_touch_xpt2046
+      modules_required:
+        - ads7846
+      touch:
+        controller: XPT2046
+        bus: spi12
+        cs: 1
+        irq:
+          pin: GPIO_57
+          pinctrl: default
+          header_pin: 22
+          direction: in
+        x_min: 200
+        x_max: 3900
+        y_min: 200
+        y_max: 3900
+        swap_xy: false
+        invert_x: false
+        invert_y: false
+        modules_required:
+          - ads7846

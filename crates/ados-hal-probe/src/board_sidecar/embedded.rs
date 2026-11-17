@@ -15,6 +15,7 @@ pub const BOARD_PROFILE_YAML: &[(&str, &str)] = &[
     ("cm5", include_str!("../../boards/cm5.yaml")),
     ("cubie-a7s", include_str!("../../boards/cubie-a7s.yaml")),
     ("cubie-a7z", include_str!("../../boards/cubie-a7z.yaml")),
+    ("dragon-q6a", include_str!("../../boards/dragon-q6a.yaml")),
     (
         "generic-arm64",
         include_str!("../../boards/generic-arm64.yaml"),

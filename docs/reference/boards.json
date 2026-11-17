@@ -116,6 +116,26 @@
     },
     {
       "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec"
+      ],
+      "id": "dragon-q6a",
+      "max_encode_resolution": "3840x2160",
+      "name": "Radxa Dragon Q6A",
+      "plugin_tokens": [
+        "dragon-q6a",
+        "qualcomm qcs6490"
+      ],
+      "soc": "Qualcomm QCS6490",
+      "vendor": "Radxa",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
       "default_tier": 2,
       "hw_video_codecs": [],
       "id": "generic-arm64",
