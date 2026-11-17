@@ -64,11 +64,16 @@ pub const SUBJECT_CLIMB_HYST_M: f32 = 1.0;
 /// While climbing clear, the vehicle's outermost extent flies at least this
 /// high over the subject's body, metres.
 pub const SUBJECT_CLEAR_M: f32 = 1.0;
+/// While climbing clear, the ground is taken again only when the height
+/// above ground reads more than this from the reading it was taken at,
+/// metres: a stuck reading never moves it, rising ground does.
+const SUBJECT_GROUND_READ_M: f32 = 0.05;
 
 /// What the pilot keeps of the subject across ticks: the lease whose goals
 /// named it, the latest subject and its goal's arrival, its smoothed
 /// velocity, when it was named, and, while the vehicle climbs clear, the
-/// ground's down position taken when the climb began.
+/// ground's down position and the height-above-ground reading it was taken
+/// at.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SubjectTrack {
     lease_id: Option<u64>,
@@ -76,7 +81,7 @@ pub struct SubjectTrack {
     vel: V2,
     named_ms: u64,
     climbing: bool,
-    ground_d: Option<f32>,
+    ground_d: Option<(f32, f32)>,
 }
 
 /// One tick's subject: where it is, the horizontal distance kept from it
@@ -119,35 +124,57 @@ impl Pilot {
                 ..SubjectTrack::default()
             };
         }
-        match t.last {
-            Some((_, prev_ms)) if at_ms == prev_ms => {}
-            None => {
-                t.vel = [0.0, 0.0];
-                t.named_ms = at_ms;
-            }
-            Some((prev, prev_ms)) => {
-                let dt_ms = at_ms.saturating_sub(prev_ms);
-                let dt = dt_ms as f32 / 1000.0;
-                let step = geo::dist(ne, prev);
-                if step > SUBJECT_JUMP_MPS * dt.max(SUBJECT_JUMP_MIN_S) {
+        // A subject that is not a number is no position: the last one named
+        // stands, with its velocity and its goal's arrival, so the next
+        // finite subject is judged against it; with none there is no
+        // subject.
+        let fresh = ne.iter().all(|x| x.is_finite());
+        if fresh {
+            match t.last {
+                Some((_, prev_ms)) if at_ms == prev_ms => {}
+                None => {
                     t.vel = [0.0, 0.0];
                     t.named_ms = at_ms;
-                } else if dt_ms == 0 || dt_ms > SUBJECT_VEL_GAP_MS {
-                    t.vel = [0.0, 0.0];
-                } else {
-                    let raw = geo::scale(geo::sub(ne, prev), 1.0 / dt);
-                    let k = (dt / SUBJECT_VEL_SMOOTH_S).min(1.0);
-                    t.vel = geo::add(t.vel, geo::scale(geo::sub(raw, t.vel), k));
+                }
+                Some((prev, prev_ms)) => {
+                    let dt_ms = at_ms.saturating_sub(prev_ms);
+                    let dt = dt_ms as f32 / 1000.0;
+                    let step = geo::dist(ne, prev);
+                    // Written so that a step that is not a number reads as a
+                    // jump, never as motion.
+                    let moved = step <= SUBJECT_JUMP_MPS * dt.max(SUBJECT_JUMP_MIN_S);
+                    if !moved {
+                        t.vel = [0.0, 0.0];
+                        t.named_ms = at_ms;
+                    } else if dt_ms == 0 || dt_ms > SUBJECT_VEL_GAP_MS {
+                        t.vel = [0.0, 0.0];
+                    } else {
+                        let raw = geo::scale(geo::sub(ne, prev), 1.0 / dt);
+                        let k = (dt / SUBJECT_VEL_SMOOTH_S).min(1.0);
+                        t.vel = geo::add(t.vel, geo::scale(geo::sub(raw, t.vel), k));
+                    }
                 }
             }
+            t.last = Some((ne, at_ms));
         }
-        t.last = Some((ne, at_ms));
+        let Some((ne, _)) = t.last else {
+            self.subject_track = SubjectTrack::default();
+            return None;
+        };
         let armed = now_ms >= t.named_ms + SUBJECT_ARM_MS;
         let body = self.settings.pilot.body_radius_m();
+        // A sigma that is not a number widens the kept distance the most.
+        let sigma = sigma.map_or(0.0, |s| {
+            if s.is_nan() {
+                f32::INFINITY
+            } else {
+                s.max(0.0)
+            }
+        });
         let keep = SUBJECT_BODY_RADIUS_M
             + body
             + SUBJECT_MARGIN_M
-            + (SUBJECT_SIGMAS * sigma.unwrap_or(0.0).max(0.0)).min(SUBJECT_SIGMA_MAX_M);
+            + (SUBJECT_SIGMAS * sigma).min(SUBJECT_SIGMA_MAX_M);
         let d = geo::dist([pos[0], pos[1]], ne);
         let agl = self.agl(now_ms);
         let t = &mut self.subject_track;
@@ -157,16 +184,23 @@ impl Pilot {
             t.climbing = false;
             t.ground_d = None;
         }
-        // The ground is taken once, when the climb begins (or when a height
-        // above ground first reads during it): a rangefinder stuck low then
-        // raises the setpoint once, never a climb that follows the vehicle up.
-        if t.climbing && t.ground_d.is_none() {
-            t.ground_d = agl.map(|a| pos[2] + a);
+        // The ground is taken when the climb begins, and again only when the
+        // height above ground reads a new value: a rangefinder stuck low then
+        // raises the setpoint once, never a climb that follows the vehicle
+        // up, while rising ground still lifts the floor.
+        if t.climbing {
+            if let Some(a) = agl {
+                if t.ground_d
+                    .is_none_or(|(_, read)| (a - read).abs() > SUBJECT_GROUND_READ_M)
+                {
+                    t.ground_d = Some((pos[2] + a, a));
+                }
+            }
         }
         let vel = t.vel;
         let floor_d = t
             .ground_d
-            .map(|g| g - (SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M));
+            .map(|(g, _)| g - (SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M));
         let subject = Subject {
             ne,
             keep,

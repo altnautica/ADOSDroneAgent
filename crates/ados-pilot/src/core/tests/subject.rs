@@ -292,11 +292,12 @@ fn a_subject_coming_on_is_kept_clear_of() {
 
 /// The goal's `subject_sigma_m` widens the kept distance by two sigmas, at
 /// most 1.5 m: at 1 m sigma (kept 2.8 m) a subject 2.5 m off is inside it
-/// (the vehicle backs away), at none (kept 1.3 m) it is not (the vehicle
+/// (the vehicle backs away), as it is at a sigma that is not a number
+/// (widened the most), and at none (kept 1.3 m) it is not (the vehicle
 /// holds).
 #[test]
 fn the_subject_sigma_widens_the_kept_distance() {
-    for (sigma, inside) in [(1.0, true), (0.0, false)] {
+    for (sigma, inside) in [(1.0, true), (f32::NAN, true), (0.0, false)] {
         let (mut w, id) = flying();
         let subject = [w.pos[0] + 2.5, w.pos[1]];
         let goal = move || {
@@ -492,4 +493,88 @@ fn the_back_away_keeps_the_nav_cap() {
     }
     assert!(braked, "never braked");
     assert!(fastest <= CAP + 1e-3, "flew {fastest:.2} m/s under the cap");
+}
+
+/// A goal whose `subject_ne` is not a number keeps the last subject: the
+/// brake stays armed and its velocity unpoisoned, so the 2 m/s approach
+/// that follows is still held to the stick stop and stops outside the kept
+/// distance. A sigma that is not a number widens it the most (above).
+#[test]
+fn a_subject_that_is_not_a_number_keeps_the_brake() {
+    let (mut w, id, subject) = armed_at(8.0);
+    w.run(40);
+    send(&mut w, id, follow(0.0, Some([f32::NAN, f32::NAN]), -5.0));
+    w.run(100);
+    let a_h = w.p.limits_now(w.now).a_h;
+    let mut nearest = f32::INFINITY;
+    let mut braked = false;
+    let t0 = w.now;
+    while w.now < t0 + 10_000 {
+        if (w.now - t0).is_multiple_of(100) {
+            send(&mut w, id, follow(2.0, Some(subject), -5.0));
+        }
+        let (d, closing) = (subject[0] - w.pos[0], w.vel[0]);
+        w.run(20);
+        let (v, z) = setpoint(&w);
+        assert!(v[0].is_finite() && z.is_finite(), "setpoint {v:?} {z}");
+        let cap = stop_cap(d, closing, a_h, KEEP);
+        assert!(
+            d >= KEEP + 1.0 || v[0] <= cap + 1e-3,
+            "{d:.2} m off: {:.2} m/s toward, the stick stop allows {cap:.2}",
+            v[0]
+        );
+        braked |= subject_cut(&w);
+        nearest = nearest.min(subject[0] - w.pos[0]);
+    }
+    assert!(braked, "never braked for the subject");
+    assert!(nearest >= KEEP, "came within {nearest:.2} m of the subject");
+}
+
+/// Following a subject 3 m ahead, settled on flat ground, then up a 10 %
+/// slope for 50 m, inside the climb zone the whole way: the ground is
+/// taken again as the reading changes, so the climb floor stays 3.4 m over
+/// the local ground rather than over the ground where the climb began (5 m
+/// lower by the end).
+#[test]
+fn the_climb_floor_follows_rising_ground() {
+    const WALK: f32 = 1.4;
+    const GRADE: f32 = 0.1;
+    const SETTLE_MS: u64 = 12_000;
+    let (mut w, id) = flying();
+    w.pos[2] = -1.5;
+    w.agl = Some(1.5);
+    let start = w.pos[0] + 3.0;
+    // Where the slope starts, once the follow has settled.
+    let mut foot: Option<f32> = None;
+    // The ground's down position under north `n`.
+    let ground = |foot: Option<f32>, n: f32| foot.map_or(0.0, |f| -GRADE * (n - f).max(0.0));
+    let t0 = w.now;
+    while w.now < t0 + SETTLE_MS + 37_000 {
+        if (w.now - t0).is_multiple_of(100) {
+            let s = start + WALK * (w.now - t0) as f32 / 1000.0;
+            let mut g = Goal::new(GoalKind::Follow, [s - 3.0, 0.0, -1.5], 6.0);
+            g.vn = WALK;
+            g.subject_ne = Some([s, 0.0]);
+            send(&mut w, id, g);
+        }
+        w.run(20);
+        // The vehicle holds the setpoint's height; the rangefinder reads
+        // the ground under it.
+        w.pos[2] = setpoint(&w).1;
+        if w.now - t0 >= SETTLE_MS && foot.is_none() {
+            foot = Some(w.pos[0]);
+        }
+        w.agl = Some(ground(foot, w.pos[0]) - w.pos[2]);
+        if let Some(f) = foot {
+            let floor = ground(foot, w.pos[0]) - FLOOR_AGL;
+            let d = w.pos[2];
+            assert!(
+                (d - floor).abs() < 0.08,
+                "{:.1} m up the slope: d {d:.2}, the floor {floor:.2}",
+                w.pos[0] - f
+            );
+        }
+    }
+    let up = w.pos[0] - foot.unwrap();
+    assert!(up > 50.0, "followed {up:.1} m up the slope");
 }
