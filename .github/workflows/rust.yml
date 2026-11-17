@@ -97,6 +97,37 @@ env:
     ados-lora-aarch64
     mediamtx-aarch64
     ados-vision-onnx-aarch64
+    ados-tui-x86_64
+    ados-supervisor-x86_64
+    ados-mavlink-router-x86_64
+    ados-radio-x86_64
+    ados-video-x86_64
+    ados-camera-probe-x86_64
+    ados-plugin-host-x86_64
+    ados-cloud-x86_64
+    ados-groundlink-x86_64
+    ados-net-x86_64
+    ados-captive-x86_64
+    ados-pic-x86_64
+    ados-input-x86_64
+    ados-display-x86_64
+    ados-display-probe-x86_64
+    ados-oled-i2c-x86_64
+    ados-kiosk-x86_64
+    ados-vision-x86_64
+    ados-swarmbus-x86_64
+    ados-logd-x86_64
+    ados-control-x86_64
+    ados-gpio-x86_64
+    ados-crsf-x86_64
+    ados-pilot-x86_64
+    ados-tunnel-config-x86_64
+    ados-clock-x86_64
+    ados-sensorhub-x86_64
+    ados-gnss-x86_64
+    ados-lora-x86_64
+    mediamtx-x86_64
+    ados-vision-onnx-x86_64
     libonnxruntime-aarch64.so
 
 defaults:
@@ -460,6 +491,88 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The x86_64 half of the release: the same service set, built for a laptop or
+  # desktop install (`install.sh` on any Linux machine). Its own job because the
+  # target triple and the mediamtx download differ; a native runner rather than a
+  # second cross target, so the binaries are what CI's own tests would run.
+  prebuilt-x86_64:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    env:
+      MEDIAMTX_VERSION: v1.17.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: musl-release-x86_64
+
+      # Bundled C (SQLite, zstd, ring via rustls) needs an x86_64-musl C
+      # compiler; cargo-zigbuild drives zig as that compiler for every crate.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build every service binary (static musl)
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl --workspace --bins --exclude ados-vision --exclude ados-capabilities-codegen
+
+      - name: Build the default vision binary (static musl)
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p ados-vision-engine --bin ados-vision
+
+      # The installer itself, so `install.sh` has a prebuilt bootstrap on x86_64
+      # exactly as it does on aarch64.
+      - name: Build the installer (static musl)
+        run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p ados-installer --bin ados-installer
+
+      - name: Stage binaries, the mirrored mediamtx, and checksums
+        run: |
+          set -euo pipefail
+          out=target/x86_64-unknown-linux-musl/release
+          mkdir -p rel installer work
+          for asset in ${REV_ASSETS}; do
+            case "$asset" in
+              mediamtx-x86_64|ados-vision-onnx-*|libonnxruntime-*.so|*-aarch64) continue ;;
+            esac
+            install -m 0755 "$out/${asset%-x86_64}" "rel/$asset"
+          done
+          url="https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 "$url" -o work/mediamtx.tar.gz
+          tar -xzf work/mediamtx.tar.gz -C work mediamtx
+          install -m 0755 work/mediamtx rel/mediamtx-x86_64
+          install -m 0755 "$out/ados-installer" installer/ados-installer-x86_64
+          for dir in rel installer; do
+            ( cd "$dir" && for f in *; do sha256sum "$f" > "$f.sha256"; done )
+          done
+          ls -l rel installer
+
+      - name: Hand the binaries to the publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: rel-prebuilt-x86_64
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Hand the installer to the publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-x86_64
+          path: crates/installer/
+          if-no-files-found: error
+          retention-days: 1
+
   # Sign everything, publish `rev-<sha>` in one step, then move the pointer.
   #
   # Releases rather than run artifacts because the whole download stack on a
@@ -473,6 +586,7 @@ jobs:
   publish:
     needs:
       - prebuilt
+      - prebuilt-x86_64
       - vision-onnx
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
@@ -491,11 +605,14 @@ jobs:
           path: crates/rev
           merge-multiple: true
 
-      - name: Collect this run's installer
+      # Both bootstrap installers: `install.sh` picks the one for this arch, and
+      # x86_64 exists so an install on a laptop needs no toolchain.
+      - name: Collect this run's installers
         uses: actions/download-artifact@v4
         with:
-          name: installer
+          pattern: installer*
           path: crates/installer
+          merge-multiple: true
 
       - name: The staged set is exactly REV_ASSETS
         run: |

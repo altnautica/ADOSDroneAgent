@@ -32,6 +32,7 @@ fn unit_row(unit: &UnitSpec, body: &str) -> Value {
         "profiles": profiles,
         "roles": unit.roles,
         "install": unit.install.as_str(),
+        "appliance_only": unit.appliance_only,
         "start_on_install": unit.start_on_install,
         "api_restartable": unit.api_restartable,
         "drops_link": unit.drops_link,

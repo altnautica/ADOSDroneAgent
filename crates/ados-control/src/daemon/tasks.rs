@@ -28,6 +28,16 @@ where
             .security
             .err();
     ados_config::write_config_status("control", startup_error.as_deref());
+    // Where this front may be reached. An appliance serves the LAN, as every
+    // shipped board does. A ground station on somebody's own computer answers
+    // this machine only until its owner shares it from Mission Control: a
+    // control API that appeared on the office Wi-Fi at install time is a
+    // surprise, not a feature.
+    let bind_scope = crate::serve::BindScope::for_host(
+        ados_protocol::host_kind::read_host_kind(),
+        share_on_lan(&paths.config_path),
+    );
+    tracing::info!(?bind_scope, "control front bind scope");
     let pairing = Arc::new(
         PairingState::with_path(paths.pairing_path.clone()).with_security(Arc::clone(&security)),
     );
@@ -154,7 +164,10 @@ where
     // socket; every other node has no uplink daemon, so this process serves the
     // socket itself with the same Wi-Fi-client manager (the owner of the
     // station's advisory radio lock). The unit table decides which is which.
-    if !ados_protocol::units::net_daemon_owns_wifi(&profile) {
+    if !ados_protocol::units::net_daemon_owns_wifi(
+        &profile,
+        ados_protocol::host_kind::read_host_kind(),
+    ) {
         let sock = crate::routes::network_write::wifi_cmd_sock();
         let runner: Arc<dyn ados_net::cmd::CmdRunner> = Arc::new(ados_net::cmd::TokioCmdRunner);
         let wifi = Arc::new(tokio::sync::Mutex::new(
@@ -285,11 +298,12 @@ where
     // the front whichever family it tries first.
     let unix_listener = bind_unix(&paths.control_socket)
         .with_context(|| format!("bind control socket {}", paths.control_socket.display()))?;
-    let tcp_listeners = bind_tcp(paths.control_tcp_port).await?;
+    let tcp_listeners = bind_tcp(paths.control_tcp_port, bind_scope).await?;
     tracing::info!(
         socket = %paths.control_socket.display(),
         tcp_port = paths.control_tcp_port,
         tcp_listeners = tcp_listeners.len(),
+        ?bind_scope,
         "control API listening"
     );
 
@@ -353,6 +367,13 @@ where
     let _ = std::fs::remove_file(&paths.control_socket);
     tracing::info!("control API stopped");
     Ok(())
+}
+
+/// Whether the operator has shared this host on the local network. Read through
+/// the shared config snapshot, so a flip is honoured within
+/// [`crate::config::CONFIG_CACHE_TTL`] on every reader that projects it.
+fn share_on_lan(config_path: &std::path::Path) -> bool {
+    crate::config::host_section(config_path).share_on_lan
 }
 
 /// Whether `profile` (wire or underscore form) runs the front-panel daemons

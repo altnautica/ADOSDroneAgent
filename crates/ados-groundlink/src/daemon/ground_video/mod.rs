@@ -81,7 +81,10 @@ async fn supervise(manager: &mut MediamtxManager, stats_path: &Path, shutdown: &
 async fn write_config(path: &Path) -> std::io::Result<()> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let yaml = config::render(&ados_video::mediamtx::detect_lan_ips());
+        // A ground station on somebody's own computer with sharing off opens no
+        // port on their network: the media server binds loopback too.
+        let loopback_only = !ados_config::reachable_on_lan_now();
+        let yaml = config::render(&ados_video::mediamtx::detect_lan_ips(), loopback_only);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

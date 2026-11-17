@@ -313,21 +313,22 @@ pub fn arch() -> &'static str {
 }
 
 /// True when the running architecture is one the installer supports: `aarch64`
-/// (published release binaries) or `x86_64` (locally built binaries passed with
-/// `--channel edge --artifacts <dir>`).
+/// or `x86_64`, each with published release binaries (or locally built ones
+/// passed with `--channel edge --artifacts <dir>`).
 pub fn is_supported_arch() -> bool {
     matches!(arch(), "aarch64" | "x86_64")
 }
 
 /// True when the release host publishes prebuilt binaries for the running
-/// architecture. Only `*-aarch64` assets are published.
+/// architecture. CI builds a job per arch in [`crate::binaries::RELEASE_ARCHES`]:
+/// aarch64 for the boards, x86_64 so `install.sh` works on any Linux laptop.
 pub fn has_release_assets() -> bool {
     arch_has_release_assets(arch())
 }
 
 /// [`has_release_assets`] for a given normalized arch (pure).
 pub fn arch_has_release_assets(arch: &str) -> bool {
-    arch == "aarch64"
+    matches!(arch, "aarch64" | "x86_64")
 }
 
 /// Write `contents` to `path` atomically AND durably: a temp sibling, written,
@@ -640,14 +641,13 @@ mod tests {
     }
 
     #[test]
-    fn x86_64_is_supported_without_release_assets() {
+    fn both_supported_arches_have_release_assets() {
         assert!(arch_has_release_assets("aarch64"));
-        assert!(!arch_has_release_assets("x86_64"));
+        assert!(arch_has_release_assets("x86_64"));
         assert!(!arch_has_release_assets("riscv64"));
         assert_eq!(has_release_assets(), arch_has_release_assets(arch()));
-        if std::env::consts::ARCH == "x86_64" {
-            assert!(is_supported_arch());
-            assert!(!has_release_assets());
+        if is_supported_arch() {
+            assert!(has_release_assets());
         }
     }
 

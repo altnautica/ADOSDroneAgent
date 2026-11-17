@@ -65,8 +65,11 @@ use ados_term::exec;
 /// needs the supervisor plus the receive + AP + setup units that the systemd
 /// step enable-links. Every one is enabled by that step, so completeness never
 /// demands a unit the installer does not create.
-pub fn expected_profile_units(profile: &str) -> Vec<&'static str> {
-    crate::steps::systemd::health_units(profile)
+pub fn expected_profile_units(
+    profile: &str,
+    host: ados_protocol::host_kind::HostKind,
+) -> Vec<&'static str> {
+    crate::steps::systemd::health_units(profile, host)
 }
 
 /// True when `systemctl is-enabled <unit>` reports a state that means "will be
@@ -383,7 +386,7 @@ impl Step for Health {
         }
 
         // 3. profile units enabled.
-        for unit in expected_profile_units(&ctx.profile) {
+        for unit in expected_profile_units(&ctx.profile, ctx.host) {
             if !unit_enabled(unit) {
                 misses.push(format!("unit-enabled:{unit}"));
             }

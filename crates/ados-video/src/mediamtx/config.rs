@@ -215,6 +215,14 @@ pub struct ConfigParams<'a> {
     pub streams: &'a [(String, String)],
     /// Recording knobs, from `video.recording`.
     pub recording: RecordingParams,
+    /// Render a server this machine only can reach.
+    ///
+    /// Set for a ground station running on somebody's own computer with sharing
+    /// off: the RTSP publish listener, the WebRTC ICE socket and the advertised
+    /// host candidates all stay on loopback, so the media server does not open
+    /// ports on a network its owner did not ask it to join. An appliance always
+    /// renders the LAN-reachable form.
+    pub loopback_only: bool,
 }
 
 impl<'a> ConfigParams<'a> {
@@ -236,6 +244,7 @@ impl<'a> ConfigParams<'a> {
             lan_ips,
             streams,
             recording: RecordingParams::default(),
+            loopback_only: false,
         }
     }
 }
@@ -253,7 +262,33 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
     // failover, DHCP change, multi-homing). ICE host candidates are gathered
     // from the real physical interfaces, re-read by Pion per session, so
     // whatever interface is up at connect time is advertised.
-    let phys_ifaces = physical_lan_interfaces();
+    //
+    // `loopback_only` inverts that: a ground station on somebody's own computer
+    // with sharing off binds the ICE socket to loopback and advertises no host
+    // candidates, so the media server opens nothing on a network its owner did
+    // not invite it onto. The publish leg follows the same rule.
+    let phys_ifaces = if params.loopback_only {
+        Vec::new()
+    } else {
+        physical_lan_interfaces()
+    };
+    let rtsp_address = if params.loopback_only {
+        format!("{LOOPBACK_BIND}:{}", params.rtsp_port)
+    } else {
+        format!(":{}", params.rtsp_port)
+    };
+    let local_udp_address = if params.loopback_only {
+        format!("{LOOPBACK_BIND}:{WEBRTC_LOCAL_ICE_PORT}")
+    } else {
+        format!(":{WEBRTC_LOCAL_ICE_PORT}")
+    };
+    let additional_hosts = if params.loopback_only {
+        Some(vec![LOOPBACK_BIND.to_string()])
+    } else if params.lan_ips.is_empty() {
+        None
+    } else {
+        Some(params.lan_ips.to_vec())
+    };
 
     let mut paths = std::collections::BTreeMap::new();
     for (name, source) in params.streams {
@@ -290,18 +325,18 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         // compute node on the LAN pulls the live feed from this listener. Who may
         // publish is restricted by `authInternalUsers` instead.
         rtsp: true,
-        rtsp_address: format!(":{}", params.rtsp_port),
+        rtsp_address,
         rtsp_transports: vec!["tcp".into()],
         rtmp: false,
         srt: false,
         webrtc: true,
         webrtc_address: format!("{LOOPBACK_BIND}:{}", params.webrtc_port),
         webrtc_allow_origin: "*".into(),
-        webrtc_ips_from_interfaces: true,
+        webrtc_ips_from_interfaces: !params.loopback_only,
         webrtc_ips_from_interfaces_list: phys_ifaces,
         webrtc_handshake_timeout: WEBRTC_HANDSHAKE_TIMEOUT.into(),
         webrtc_stun_gather_timeout: STUN_GATHER_TIMEOUT.into(),
-        webrtc_local_udp_address: format!(":{WEBRTC_LOCAL_ICE_PORT}"),
+        webrtc_local_udp_address: local_udp_address,
         webrtc_local_tcp_address: params.profile.webrtc_local_tcp_address(),
         webrtc_ice_servers2: params.profile.ice_servers(),
         hls: true,
@@ -324,11 +359,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         hls_segment_duration: "1s".into(),
         hls_part_duration: HLS_PART_DURATION.into(),
         hls_allow_origin: "*".into(),
-        webrtc_additional_hosts: if params.lan_ips.is_empty() {
-            None
-        } else {
-            Some(params.lan_ips.to_vec())
-        },
+        webrtc_additional_hosts: additional_hosts,
         path_defaults: PathDefaults {
             use_absolute_timestamp: false,
             record: rec.enabled,

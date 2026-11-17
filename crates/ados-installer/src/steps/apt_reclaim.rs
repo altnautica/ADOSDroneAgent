@@ -159,6 +159,9 @@ impl Step for AptReclaim {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "apt_reclaim") {
+            return skip;
+        }
         let archives = Path::new(APT_ARCHIVE_DIR);
         let cache_before = dir_bytes(archives);
         // `apt-get clean` rather than deleting the files ourselves: it knows the

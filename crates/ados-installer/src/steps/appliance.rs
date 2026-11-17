@@ -30,6 +30,7 @@ use std::path::Path;
 
 use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::host::{is_desktop, is_graphical_session_type, own_session_type, probe_desktop};
 use ados_term::exec;
 
 /// The logind drop-in this step writes (keeps the appliance awake).
@@ -112,57 +113,6 @@ fn logind_no_idle_body() -> String {
         .to_string()
 }
 
-/// The facts that decide whether a desktop is present. Kept as a plain struct so
-/// the gate is a pure, unit-tested function separate from the system probe.
-#[derive(Debug, Clone, Copy, Default)]
-struct DesktopProbe {
-    /// A display manager (gdm/sddm/lightdm, aliased to `display-manager.service`)
-    /// is active.
-    dm_active: bool,
-    /// The GNOME shell binary is installed.
-    gnome_shell: bool,
-    /// The KDE Plasma shell binary is installed.
-    plasmashell: bool,
-}
-
-/// True when the box has a desktop stack (a running display manager OR an
-/// installed GNOME/KDE shell). "Installed" — not "showing" — is the right gate:
-/// PackageKit + GNOME Software churn the moment a desktop stack is on disk, even
-/// with no one logged in. Pure.
-fn is_desktop(p: DesktopProbe) -> bool {
-    p.dm_active || p.gnome_shell || p.plasmashell
-}
-
-/// Probe the live box for a desktop. Best-effort: any read failure reads as
-/// "absent" so a headless node cleanly skips the desktop block.
-fn probe_desktop() -> DesktopProbe {
-    let dm_active = [
-        "display-manager.service",
-        "gdm.service",
-        "gdm3.service",
-        "sddm.service",
-        "lightdm.service",
-    ]
-    .iter()
-    .any(|u| exec::run_ok("systemctl", &["is-active", "--quiet", u]));
-    DesktopProbe {
-        dm_active,
-        gnome_shell: binary_present("gnome-shell"),
-        plasmashell: binary_present("plasmashell"),
-    }
-}
-
-/// True when `name` resolves to an executable on PATH (a desktop shell binary
-/// being installed is the broad desktop-present signal). Best-effort: probes the
-/// shell's `command -v` (PATH-aware), falling back to the canonical bin dirs.
-/// `name` is a fixed shell name here, so the `sh -c` interpolation is not a
-/// user-input injection surface.
-fn binary_present(name: &str) -> bool {
-    exec::run_ok("sh", &["-c", &format!("command -v {name}")])
-        || Path::new(&format!("/usr/bin/{name}")).exists()
-        || Path::new(&format!("/bin/{name}")).exists()
-}
-
 /// True when `unit` has a unit file on this box (so we only mask what is really
 /// there and report honestly). Best-effort: a spawn failure reads as absent.
 fn unit_present(unit: &str) -> bool {
@@ -212,10 +162,54 @@ impl Step for Appliance {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if ctx.host.is_personal() {
+            // Nothing to apply: the owner's sleep policy, update daemons and
+            // login manager stay theirs. But a host that ran the appliance set
+            // first carries the marks this step made, so undo them rather than
+            // pretending the step was never there.
+            restore_personal_defaults();
+            tracing::info!(step = "appliance", "skipped on a personal computer");
+            return StepOutcome::Skipped;
+        }
         keep_awake();
         quiet_desktop_package_daemons();
         stand_down_display_manager(&ctx.profile);
         StepOutcome::Ok
+    }
+}
+
+/// Undo what [`keep_awake`] did: the logind drop-ins it writes and the sleep
+/// targets it masks, plus the background updater it masks on a desktop and the
+/// login manager it stands down.
+///
+/// Only the exact units and files this step owns are reversed, taken from the
+/// same lists it applies, so a machine-side `unmask` of something unrelated is
+/// not swept up. Fail-soft: a mask that was never applied, a unit that does not
+/// exist or an unremovable file degrades and never aborts the install.
+fn restore_personal_defaults() {
+    let mut removed = false;
+    for path in [LOGIND_NO_IDLE_CONF, STALE_NOSLEEP_CONF] {
+        if Path::new(path).exists() {
+            match std::fs::remove_file(path) {
+                Ok(()) => removed = true,
+                Err(e) => tracing::warn!(path, error = %e, "could not remove a no-sleep drop-in"),
+            }
+        }
+    }
+    for unit in sleep_targets() {
+        let _ = exec::run("systemctl", &["unmask", unit]);
+    }
+    for unit in desktop_churn_units() {
+        let _ = exec::run("systemctl", &["unmask", unit]);
+    }
+    for unit in display_manager_units() {
+        let _ = exec::run("systemctl", &["unmask", unit]);
+    }
+    // Only reload when a drop-in actually went away: logind re-reads on its own
+    // otherwise, and a needless SIGHUP on a live session is churn.
+    if removed {
+        let _ = exec::run("systemctl", &["reload", "systemd-logind"]);
+        tracing::info!("removed the appliance no-sleep drop-ins; sleep is the owner's again");
     }
 }
 
@@ -287,11 +281,6 @@ fn should_stand_down(profile: &str, marker_present: bool) -> bool {
     profile == "ground_station" && !marker_present
 }
 
-/// A logind session type that means a compositor is up in that session. Pure.
-fn is_graphical_session_type(session_type: &str) -> bool {
-    matches!(session_type.trim(), "x11" | "wayland" | "mir")
-}
-
 /// Whether the installer may STOP the login manager in place, as opposed to only
 /// masking it for the next boot. Stopping tears down every graphical session on
 /// the box — including the one the installer may itself be running inside, which
@@ -302,30 +291,6 @@ fn is_graphical_session_type(session_type: &str) -> bool {
 /// on the next boot, which is the recoverable side of the trade. Pure.
 fn safe_to_stop_display_manager(own_session_type: Option<&str>) -> bool {
     matches!(own_session_type, Some(t) if !is_graphical_session_type(t))
-}
-
-/// The logind session type of THIS process, or `None` when it cannot be
-/// determined. `XDG_SESSION_TYPE` is deliberately not used: sudo's `env_reset`
-/// strips it, so under the install one-liner it is always absent and would make
-/// the stop unreachable. `/proc/self/sessionid` carries the audit/logind session
-/// id across fork, sudo and setsid, so it survives the way the installer is
-/// actually launched. Best-effort; any failure reads as unknown.
-fn own_session_type() -> Option<String> {
-    let raw = std::fs::read_to_string("/proc/self/sessionid").ok()?;
-    let id = raw.trim();
-    // 4294967295 is the kernel's "no audit session" sentinel.
-    if id.is_empty() || id == "4294967295" {
-        return None;
-    }
-    let shown = exec::run("loginctl", &["show-session", id, "-p", "Type", "--value"]);
-    if !shown.success() {
-        return None;
-    }
-    let t = shown.stdout.trim().to_string();
-    if t.is_empty() {
-        return None;
-    }
-    Some(t)
 }
 
 /// Ground-station appliance only: stand the login manager down so the kiosk's
@@ -431,23 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn desktop_gate_is_true_for_any_desktop_signal() {
-        assert!(!is_desktop(DesktopProbe::default()));
-        assert!(is_desktop(DesktopProbe {
-            dm_active: true,
-            ..Default::default()
-        }));
-        assert!(is_desktop(DesktopProbe {
-            gnome_shell: true,
-            ..Default::default()
-        }));
-        assert!(is_desktop(DesktopProbe {
-            plasmashell: true,
-            ..Default::default()
-        }));
-    }
-
-    #[test]
     fn desktop_churn_units_are_the_background_updaters() {
         let u = desktop_churn_units();
         assert!(u.contains(&"packagekit.service"));
@@ -502,16 +450,6 @@ mod tests {
         // line this step logs and in the changelog); a rename that did not update
         // both would silently orphan every operator's rollback.
         assert_eq!(KEEP_DESKTOP_MARKER, "/etc/ados/keep-desktop");
-    }
-
-    #[test]
-    fn graphical_session_types_are_the_compositor_ones() {
-        for t in ["x11", "wayland", "mir"] {
-            assert!(is_graphical_session_type(t), "{t} is a graphical session");
-        }
-        for t in ["tty", "unspecified", ""] {
-            assert!(!is_graphical_session_type(t), "{t} is not graphical");
-        }
     }
 
     #[test]

@@ -9,6 +9,37 @@ pub fn bind_unix(path: &Path) -> std::io::Result<OperatorListener> {
     ados_protocol::ipc::bind_command_socket(path, 0o660)
 }
 
+/// Where the TCP front binds.
+///
+/// [`BindScope::All`] is the appliance behaviour every shipped board has: the
+/// wildcard address on both families, so any phone or tablet on the network can
+/// reach the node by its LAN address or `.local` name.
+///
+/// [`BindScope::Loopback`] is a ground station running on somebody's own
+/// computer with sharing off: it answers this machine only. A laptop that
+/// started serving a control API on the office Wi-Fi the moment it was installed
+/// is a surprise, and the operator can widen it from Mission Control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindScope {
+    /// `0.0.0.0` and `::` — the whole network.
+    All,
+    /// `127.0.0.1` and `::1` — this computer only.
+    Loopback,
+}
+
+impl BindScope {
+    /// The scope for a ground station on `host` with `share_on_lan` set to
+    /// `share`: loopback unless the operator shared it. An appliance always
+    /// serves the LAN, whatever the flag says, because that is what it is for.
+    pub fn for_host(host: ados_protocol::host_kind::HostKind, share: bool) -> BindScope {
+        if host.is_personal() && !share {
+            BindScope::Loopback
+        } else {
+            BindScope::All
+        }
+    }
+}
+
 /// Bind the LAN TCP front on the given port across BOTH address families: one
 /// AF_INET listener on `0.0.0.0` and one AF_INET6 listener on `::` with
 /// `IPV6_V6ONLY` set, so the two sockets do not contend for IPv4-mapped traffic.
@@ -24,13 +55,13 @@ pub fn bind_unix(path: &Path) -> std::io::Result<OperatorListener> {
 /// best-effort: on a kernel built without IPv6, or one that rejects the `::`
 /// bind, the v6 socket is dropped and the function returns the v4 listener alone,
 /// so the front still serves IPv4 clients.
-pub async fn bind_tcp(port: u16) -> Result<Vec<TcpListener>> {
-    let v4 = bind_one(Domain::IPV4, port, false)
+pub async fn bind_tcp(port: u16, scope: BindScope) -> Result<Vec<TcpListener>> {
+    let v4 = bind_one(Domain::IPV4, port, false, scope)
         .with_context(|| format!("bind control TCP port {port} (IPv4)"))?;
     let mut listeners = vec![v4];
     // The IPv6 leg is best-effort: a kernel without IPv6 or a restricted bind
     // leaves the v4 listener serving alone rather than failing bring-up.
-    match bind_one(Domain::IPV6, port, true) {
+    match bind_one(Domain::IPV6, port, true, scope) {
         Ok(v6) => listeners.push(v6),
         Err(e) => {
             tracing::debug!(error = %e, port, "IPv6 control listener unavailable; serving IPv4 only");
@@ -44,16 +75,26 @@ pub async fn bind_tcp(port: u16) -> Result<Vec<TcpListener>> {
 /// claims IPv4-mapped traffic the v4 leg owns. `SO_REUSEADDR` is set so a quick
 /// restart does not trip `EADDRINUSE` on the TIME_WAIT window.
 /// The socket is set non-blocking and handed to tokio as a [`TcpListener`].
-pub(super) fn bind_one(domain: Domain, port: u16, v6only: bool) -> std::io::Result<TcpListener> {
+pub(super) fn bind_one(
+    domain: Domain,
+    port: u16,
+    v6only: bool,
+    scope: BindScope,
+) -> std::io::Result<TcpListener> {
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     if v6only {
         socket.set_only_v6(true)?;
     }
-    let addr: SocketAddr = if domain == Domain::IPV6 {
-        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0))
-    } else {
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+    let addr: SocketAddr = match (domain, scope) {
+        (Domain::IPV6, BindScope::All) => {
+            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0))
+        }
+        (Domain::IPV6, BindScope::Loopback) => {
+            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0))
+        }
+        (_, BindScope::All) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
+        (_, BindScope::Loopback) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
     };
     socket.bind(&addr.into())?;
     // A backlog depth comfortably above the burst

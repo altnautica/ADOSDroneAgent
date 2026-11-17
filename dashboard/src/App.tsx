@@ -23,9 +23,13 @@ function routeElement(entry: RouteEntry) {
   // Home is the index route; its table path only redirects there.
   if (entry.key === "home") return <Navigate to="/" replace />;
   const Page = ROUTE_COMPONENTS[entry.key as RouteKey];
-  if (!entry.profiles) return <Page />;
+  if (!entry.profiles && !entry.hosts) return <Page />;
   return (
-    <ProfileGate allow={entry.profiles} roles={entry.roles ?? undefined}>
+    <ProfileGate
+      allow={entry.profiles ?? []}
+      roles={entry.roles ?? undefined}
+      hosts={entry.hosts ?? undefined}
+    >
       <Page />
     </ProfileGate>
   );

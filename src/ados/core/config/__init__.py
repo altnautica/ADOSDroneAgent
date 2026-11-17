@@ -74,6 +74,7 @@ from .ground_station import (
     WfbReceiverConfig,
     WfbRelayConfig,
 )
+from .host import HostConfig
 from .mavlink import EndpointConfig, MavlinkConfig
 from .network import (
     CellularConfig,
@@ -185,6 +186,8 @@ __all__ = [
     "MeshConfig",
     "WfbReceiverConfig",
     "WfbRelayConfig",
+    # host
+    "HostConfig",
 ]
 
 

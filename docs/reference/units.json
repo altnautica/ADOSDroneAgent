@@ -3,6 +3,7 @@
   "units": [
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "core",
       "condition_paths": [],
       "description": "ADOS REST API",
@@ -22,6 +23,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/mesh/role"
@@ -42,6 +44,7 @@
     },
     {
       "api_restartable": false,
+      "appliance_only": false,
       "category": null,
       "condition_paths": [
         "/etc/ados/camera.probation"
@@ -63,6 +66,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS Clock and Sensor Bus",
@@ -80,6 +84,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "core",
       "condition_paths": [
         "/opt/ados/bin/ados-cloud"
@@ -101,6 +106,7 @@
     },
     {
       "api_restartable": false,
+      "appliance_only": false,
       "category": "on_demand",
       "condition_paths": [
         "/opt/ados/bin/ados-control"
@@ -122,6 +128,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/crsf-enabled"
@@ -140,6 +147,7 @@
     },
     {
       "api_restartable": false,
+      "appliance_only": true,
       "category": null,
       "condition_paths": [
         "/etc/ados/display.probation"
@@ -161,6 +169,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/dnsmasq-gs.conf",
@@ -180,6 +189,7 @@
     },
     {
       "api_restartable": false,
+      "appliance_only": true,
       "category": null,
       "condition_paths": [
         "/etc/ados/display.conf"
@@ -201,6 +211,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS GNSS Receivers (rover, survey-in base, PPS)",
@@ -217,6 +228,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS GPIO Output Service (status buzzer / LED)",
@@ -236,6 +248,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/hostapd-gs.conf",
@@ -255,6 +268,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/opt/ados/bin/ados-input"
@@ -273,6 +287,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS HDMI Kiosk (ground-station profile)",
@@ -288,6 +303,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "core",
       "condition_paths": [],
       "description": "ADOS Logging and Telemetry Store",
@@ -307,6 +323,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/lora-enabled"
@@ -325,6 +342,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "core",
       "condition_paths": [],
       "description": "ADOS MAVLink Proxy",
@@ -342,6 +360,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS ground-station media server (mediamtx)",
@@ -357,6 +376,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": null,
       "condition_paths": [
         "/etc/ados/profile.conf"
@@ -374,6 +394,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/dev/i2c-1",
@@ -393,6 +414,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/display.enabled"
@@ -411,6 +433,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/opt/ados/bin/ados-pic"
@@ -429,6 +452,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "core",
       "condition_paths": [
         "/opt/ados/bin/ados-pilot"
@@ -446,6 +470,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": null,
       "condition_paths": [
         "/opt/ados/bin/ados-plugin-host"
@@ -467,6 +492,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": null,
       "condition_paths": [],
       "description": "ADOS Power Hardening Re-assert",
@@ -486,6 +512,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [
         "|/run/ados/sensor-hub-present",
@@ -505,6 +532,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "on_demand",
       "condition_paths": [
         "!/var/lib/ados/setup-complete"
@@ -522,6 +550,7 @@
     },
     {
       "api_restartable": false,
+      "appliance_only": false,
       "category": null,
       "condition_paths": [],
       "description": "ADOS Drone Agent Supervisor",
@@ -541,6 +570,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "core",
       "condition_paths": [
         "/opt/ados/bin/ados-swarmbus"
@@ -559,6 +589,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/tunnel-enabled"
@@ -577,6 +608,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS Uplink Router (ground-station profile)",
@@ -593,6 +625,7 @@
     },
     {
       "api_restartable": false,
+      "appliance_only": true,
       "category": null,
       "condition_paths": [],
       "description": "ADOS force USB OTG controllers into host mode",
@@ -612,6 +645,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS Video Pipeline",
@@ -628,6 +662,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [
         "/dev/hailo0"
@@ -645,6 +680,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [
         "/usr/lib/librknnrt.so"
@@ -662,6 +698,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [
         "/opt/ados/bin/ados-vision"
@@ -680,6 +717,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/mesh/role"
@@ -699,6 +737,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
         "/etc/ados/mesh/role"
@@ -718,6 +757,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS WFB-ng RX (ground-station direct role)",
@@ -735,6 +775,7 @@
     },
     {
       "api_restartable": true,
+      "appliance_only": false,
       "category": "hardware",
       "condition_paths": [],
       "description": "ADOS WFB-ng Link Manager",

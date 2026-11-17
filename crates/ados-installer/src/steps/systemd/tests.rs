@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// These cases pin the appliance lists, which are what every shipped board
+/// runs; the personal lists have their own cases in `lists.rs`.
+const HOST: ados_protocol::host_kind::HostKind = ados_protocol::host_kind::HostKind::Appliance;
+
 #[test]
 fn hardware_groups_include_gpio() {
     // gpio is the group generic Armbian lacks; ados-gpio.service is
@@ -22,12 +26,12 @@ fn installer_prunes_retired_units() {
     ] {
         assert!(RETIRED_UNITS.contains(&unit), "{unit} must be retired");
         assert!(
-            !universal_units().contains(&unit),
+            !universal_units(HOST).contains(&unit),
             "{unit} must not be enabled"
         );
         for profile in ados_protocol::contracts::PROFILES {
             assert!(
-                !profile_enable_units(profile).contains(&unit),
+                !profile_enable_units(profile, HOST).contains(&unit),
                 "{unit} must not be enable-linked on {profile}"
             );
         }
@@ -66,12 +70,12 @@ fn installer_prunes_retired_units() {
 
 #[test]
 fn hailo_unit_enabled_on_drone() {
-    assert!(profile_enable_units("drone").contains(&"ados-vision-hailo.service"));
-    assert!(!profile_enable_units("ground_station").contains(&"ados-vision-hailo.service"));
-    assert!(profile_enable_units("workstation").is_empty());
+    assert!(profile_enable_units("drone", HOST).contains(&"ados-vision-hailo.service"));
+    assert!(!profile_enable_units("ground_station", HOST).contains(&"ados-vision-hailo.service"));
+    assert!(profile_enable_units("workstation", HOST).is_empty());
     // A ground station that was ever a drone tears the sidecar down.
-    assert!(other_profile_units("ground_station").contains(&"ados-vision-hailo.service"));
-    assert!(!other_profile_units("drone").contains(&"ados-vision-hailo.service"));
+    assert!(other_profile_units("ground_station", HOST).contains(&"ados-vision-hailo.service"));
+    assert!(!other_profile_units("drone", HOST).contains(&"ados-vision-hailo.service"));
 
     // The shipped unit mirrors the RKNN sidecar: gated on the device node
     // and serving the socket the vision engine's hailo backend dials.

@@ -16,8 +16,12 @@
 #                                                clone would produce.
 #   ados-installer-aarch64                       the installer the bootstrap
 #                                                execs for `--channel stable`
+#                                                on a board
+#   ados-installer-x86_64                        the same installer for a
+#                                                laptop or desktop install
 #   <service>-aarch64 (the prebuilt catalog)     the service binaries built
 #                                                from this tag's Rust tree
+#   <service>-x86_64 (the same catalog)          the laptop/desktop half
 #
 # Every artifact is signed with Ed25519 via minisign using the release key
 # (the `ADOS_DRIVER_SIGNING_KEY` secret), whose public half is embedded in the
@@ -48,8 +52,20 @@ jobs:
   # `prebuilt-installer` is whatever main last built, which a pinned release
   # must not depend on.
   installer:
-    name: build installer
-    runs-on: ubuntu-24.04-arm
+    name: build installer (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # One installer per published arch: the bootstrap on a board and the one
+        # on a laptop are the same program built for different machines.
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - arch: x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     steps:
@@ -65,7 +81,7 @@ jobs:
       - name: Install Rust toolchain (musl target)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-musl
+          targets: ${{ matrix.target }}
 
       # ados-installer links ados-plugin-host (the World Engine extension step),
       # which bundles C (SQLite, zstd) and ring, so it cross-compiles through the
@@ -80,18 +96,18 @@ jobs:
 
       - name: Build static ados-installer (bundled C via zig)
         working-directory: crates
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-installer
+        run: cargo zigbuild --release --target ${{ matrix.target }} -p ados-installer
 
       - name: Stage installer
         run: |
           set -euo pipefail
           mkdir -p installer
-          cp crates/target/aarch64-unknown-linux-musl/release/ados-installer installer/ados-installer-aarch64
+          cp "crates/target/${{ matrix.target }}/release/ados-installer" "installer/ados-installer-${{ matrix.arch }}"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: installer
-          path: installer/ados-installer-aarch64
+          name: installer-${{ matrix.arch }}
+          path: installer/ados-installer-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 14
 
@@ -241,8 +257,9 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: installer
+          pattern: installer-*
           path: installer
+          merge-multiple: true
 
       - name: Collect artifacts + checksums
         id: collect
@@ -252,7 +269,7 @@ jobs:
           mkdir -p "${OUT}"
           cp dist/*.whl "${OUT}/"
           cp "${{ steps.bundle.outputs.bundle }}" "${OUT}/"
-          cp installer/ados-installer-aarch64 "${OUT}/"
+          cp installer/ados-installer-aarch64 installer/ados-installer-x86_64 "${OUT}/"
           # The service binaries keep the .sha256 and .minisig the Rust workflow
           # signed them with (the same release key); they are verified again
           # below with everything else.
@@ -261,7 +278,7 @@ jobs:
           # Per-artifact .sha256 sidecars for the artifacts built here (the
           # install verifier checks each artifact against its own
           # ARTIFACT.sha256 via `sha256sum -c`).
-          ( cd "${OUT}" && for f in *.whl *.tar.gz ados-installer-aarch64; do
+          ( cd "${OUT}" && for f in *.whl *.tar.gz ados-installer-aarch64 ados-installer-x86_64; do
               sha256sum "$f" > "$f.sha256"
             done )
           ls -l "${OUT}"
@@ -289,7 +306,7 @@ jobs:
           OUT="release-assets"
           KEY_FILE="$(mktemp)"
           printf '%s' "${MINISIGN_KEY}" > "${KEY_FILE}"
-          for f in "${OUT}"/*.whl "${OUT}"/*.tar.gz "${OUT}/ados-installer-aarch64" "${OUT}/SHA256SUMS"; do
+          for f in "${OUT}"/*.whl "${OUT}"/*.tar.gz "${OUT}"/ados-installer-* "${OUT}/SHA256SUMS"; do
             minisign -S -s "${KEY_FILE}" -m "$f" -x "$f.minisig"
           done
           shred -u "${KEY_FILE}"

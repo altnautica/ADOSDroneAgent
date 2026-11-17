@@ -24,6 +24,7 @@ pub mod fleet_identity;
 pub mod flight_modes;
 pub mod frame;
 pub mod framebus;
+pub mod host_kind;
 pub mod hwcaps;
 pub mod identity;
 pub mod ipc;

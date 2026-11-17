@@ -139,5 +139,8 @@ fn summary(status: &str, required: &[&str]) -> SummaryData {
             .map(|s| format!("{s}: example reason"))
             .collect(),
         pending_reboot: Vec::new(),
+        host_kind: "appliance".to_string(),
+        host_basis: String::new(),
+        deferred_reboot: Vec::new(),
     }
 }

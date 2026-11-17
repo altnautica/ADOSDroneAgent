@@ -336,6 +336,9 @@ impl Step for GpuProvision {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "gpu_provision") {
+            return skip;
+        }
         // The HDMI kiosk (the sole consumer of the render marker) is a
         // ground-station surface, so GPU provisioning is scoped to it.
         if ctx.profile != "ground_station" {

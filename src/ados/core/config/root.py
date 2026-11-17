@@ -14,6 +14,7 @@ from .clock import ClockConfig
 from .cloud import RemoteAccessConfig, ServerConfig
 from .gnss import GnssConfig
 from .ground_station import GroundStationConfig
+from .host import HostConfig
 from .lora import LoraConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
@@ -73,6 +74,7 @@ class ADOSConfig(BaseModel):
     swarm: SwarmConfig = SwarmConfig()
     battery: BatteryConfig = BatteryConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
+    host: HostConfig = Field(default_factory=HostConfig)
     ui: UiConfig = Field(default_factory=UiConfig)
     mcp: McpConfig = McpConfig()
     storage: StorageConfig = StorageConfig()

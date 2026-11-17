@@ -137,7 +137,7 @@ impl Step for Systemd {
         // 4. Cross-profile units, the supervisor and the control front among
         //    them (enabled, NOT started: that is the `start` step's job, gated
         //    on fetch_binaries so the binary is guaranteed present).
-        for unit in universal_units() {
+        for unit in universal_units(ctx.host) {
             enable_if_present(unit);
         }
         let _ = std::fs::create_dir_all("/etc/ados/peripherals");
@@ -192,7 +192,7 @@ impl Step for Systemd {
 
         // 6. Profile-specific enable, and the other profile's units unlinked
         //    (the start step stops them once the supervisor is down).
-        for unit in profile_enable_units(&ctx.profile) {
+        for unit in profile_enable_units(&ctx.profile, ctx.host) {
             enable_if_present(unit);
         }
         if matches!(ctx.profile.as_str(), "ground_station" | "visor") {
@@ -205,7 +205,7 @@ impl Step for Systemd {
         // The retired static avahi record, on every profile: an upgraded
         // ground station would otherwise keep advertising itself twice.
         remove_avahi_gs_ap();
-        disable_other_profile_units(&ctx.profile);
+        disable_other_profile_units(&ctx.profile, ctx.host);
 
         StepOutcome::Ok
     }

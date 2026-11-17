@@ -267,6 +267,12 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         // `/api/v1/setup/profile` keeps `ground_station`: that is a different
         // enum — an operator's install-time choice, not the runtime profile.)
         "profile": "ground-station",
+        // Whether this is a dedicated box or somebody's own computer, and whether
+        // it may be reached from the network. Mission Control hides the
+        // access-point, kiosk and uplink settings on `personal` and shows its
+        // share toggle instead, so both halves travel together.
+        "host_kind": ados_protocol::host_kind::read_host_kind().as_str(),
+        "share_on_lan": crate::config::host_section(&state.pairing_paths.config).share_on_lan,
         "paired_drone": {
             "device_id": paired_drone_id,
             "key_fingerprint": key_fingerprint,

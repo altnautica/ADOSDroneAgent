@@ -11,6 +11,10 @@ DEFAULT_CORS_ORIGINS: list[str] = [
     "http://127.0.0.1:4000",
     "http://localhost:4001",
     "http://127.0.0.1:4001",
+    # The hosted Mission Control (where most operators run it). A ground station
+    # on a personal computer answers that page at 127.0.0.1, so its origin has to
+    # be allowed or the browser drops every reply. Two lists, one contract.
+    "https://command.altnautica.com",
 ]
 
 

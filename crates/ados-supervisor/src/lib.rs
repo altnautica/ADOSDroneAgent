@@ -31,6 +31,7 @@ pub mod role_persist;
 pub mod rtl_modprobe;
 pub mod sdnotify;
 pub mod service_memory;
+pub mod sleep_guard;
 pub mod usb_rehome;
 pub mod video_cmd;
 pub mod wifi_powersave;

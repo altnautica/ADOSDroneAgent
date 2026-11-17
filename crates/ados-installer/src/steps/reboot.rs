@@ -127,6 +127,17 @@ impl Step for Reboot {
         if reasons.is_empty() {
             return StepOutcome::Ok;
         }
+        if ctx.host.is_personal() {
+            // The machine is somebody's own: the install never takes it down, and
+            // `pending_reboot` is what the binary acts on, so it stays empty. The
+            // reasons go to the summary as "reboot when convenient".
+            ctx.deferred_reboot = reasons.clone();
+            tracing::info!(
+                reasons = %reasons.join(", "),
+                "provisioning staged that needs a reboot; left to the owner on a personal computer"
+            );
+            return StepOutcome::Ok;
+        }
         ctx.pending_reboot = reasons.clone();
         let outcome = classify(&reasons, ctx.args.no_reboot);
         if ctx.args.no_reboot {

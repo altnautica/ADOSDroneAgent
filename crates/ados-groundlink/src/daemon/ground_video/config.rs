@@ -30,16 +30,18 @@ pub fn rtp_sdp() -> String {
 
 /// Render the full ground `mediamtx.yml`, advertising `lan_ips` as WebRTC
 /// host-candidate hints. Blocking (the shared renderer walks `/sys/class/net`).
-pub fn render(lan_ips: &[String]) -> String {
+///
+/// `loopback_only` renders the form a ground station on somebody's own computer
+/// serves when it is not shared: everything binds loopback and no interface
+/// candidate is advertised.
+pub fn render(lan_ips: &[String], loopback_only: bool) -> String {
     // The shared renderer emits `main` with the given source plus
     // `sourceOnDemand: true` for any non-publisher source. A UDP listener is
     // not an on-demand pull, so the path entry is replaced wholesale below.
     let streams = [(MAIN_PATH.to_string(), main_source())];
-    let yaml = mediamtx_config_yaml(&ConfigParams::new(
-        MediamtxProfile::Ground,
-        lan_ips,
-        &streams,
-    ));
+    let mut params = ConfigParams::new(MediamtxProfile::Ground, lan_ips, &streams);
+    params.loopback_only = loopback_only;
+    let yaml = mediamtx_config_yaml(&params);
     let mut doc: Value =
         serde_norway::from_str(&yaml).expect("shared mediamtx renderer emits valid YAML");
     let paths = doc

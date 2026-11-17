@@ -80,8 +80,10 @@ fn profile_and_install_rules_hold() {
 
 #[test]
 fn visor_unit_set() {
-    use ados_protocol::units::units_for_profile;
-    let names: Vec<&str> = units_for_profile("visor").map(|u| u.name).collect();
+    use ados_protocol::units::{units_for_profile, HostKind};
+    let names: Vec<&str> = units_for_profile("visor", HostKind::Appliance)
+        .map(|u| u.name)
+        .collect();
     for want in [
         "ados-vision.service",
         "ados-video.service",
@@ -160,11 +162,16 @@ fn a_unit_that_exits_zero_when_done_is_not_restarted_for_it() {
 
 #[test]
 fn the_net_daemon_owns_wifi_on_ground_station_and_visor_only() {
-    use ados_protocol::units::net_daemon_owns_wifi;
+    use ados_protocol::units::{net_daemon_owns_wifi, HostKind};
     for p in ["ground_station", "ground-station", "visor"] {
-        assert!(net_daemon_owns_wifi(p), "{p}");
+        assert!(net_daemon_owns_wifi(p, HostKind::Appliance), "{p}");
     }
     for p in ["drone", "workstation", "compute", "unknown"] {
-        assert!(!net_daemon_owns_wifi(p), "{p}");
+        assert!(!net_daemon_owns_wifi(p, HostKind::Appliance), "{p}");
+    }
+    // A personal computer's Wi-Fi is the owner's: the control surface serves the
+    // Wi-Fi command socket itself rather than handing it to the uplink daemon.
+    for p in ["ground_station", "visor"] {
+        assert!(!net_daemon_owns_wifi(p, HostKind::Personal), "{p}");
     }
 }

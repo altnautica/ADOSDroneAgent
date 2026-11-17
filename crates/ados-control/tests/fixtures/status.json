@@ -45,5 +45,7 @@
   "uptime_seconds": 42.0,
   "profile": "drone",
   "role": null,
+  "host_kind": "appliance",
+  "share_on_lan": false,
   "version": "0.62.0"
 }

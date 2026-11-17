@@ -263,6 +263,8 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "uptime_seconds": uptime,
         "profile": profile,
         "role": role,
+        "host_kind": ados_protocol::host_kind::read_host_kind().as_str(),
+        "share_on_lan": crate::config::host_section(&paths.config).share_on_lan,
         "board": board,
         "health": health,
         "fc_connected": fc_connected,

@@ -290,13 +290,13 @@ mod tests {
     fn edge_resolves_single_commit_manifest() {
         let root = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        let fetched: Vec<&str> = PREBUILT
+        let fetched: Vec<String> = PREBUILT
             .iter()
             .chain([
                 &binaries::PREBUILT_VISION_ONNX,
                 &binaries::PREBUILT_VISION_ONNX_RUNTIME,
             ])
-            .map(|b| b.asset)
+            .map(|b| b.asset_name("aarch64"))
             .collect();
         let assets: BTreeMap<String, (String, u64)> = fetched
             .iter()
@@ -315,10 +315,10 @@ mod tests {
         // manifest names, with the manifest's digest of record.
         for asset in fetched {
             assert_eq!(
-                release.asset_url(asset),
+                release.asset_url(&asset),
                 format!("{base}/rev-{COMMIT}/{asset}")
             );
-            let d = release.manifest().unwrap().digest(asset).unwrap();
+            let d = release.manifest().unwrap().digest(&asset).unwrap();
             assert_eq!(d.sha256, digest_hex(asset.as_bytes()));
         }
         assert!(release
@@ -350,15 +350,15 @@ mod tests {
         let bytes = fake_elf(0xB7, b"the published binary");
         let rev = root.path().join(format!("rev-{COMMIT}"));
         std::fs::create_dir_all(&rev).unwrap();
-        std::fs::write(rev.join(video.asset), &bytes).unwrap();
+        std::fs::write(rev.join(video.asset_name("aarch64")), &bytes).unwrap();
         std::fs::write(
-            rev.join(format!("{}.sha256", video.asset)),
-            sha256_sidecar_body(&bytes, video.asset),
+            rev.join(format!("{}.sha256", video.asset_name("aarch64"))),
+            sha256_sidecar_body(&bytes, &video.asset_name("aarch64")),
         )
         .unwrap();
         let mut assets = BTreeMap::new();
         assets.insert(
-            video.asset.to_string(),
+            video.asset_name("aarch64"),
             ("0".repeat(64), bytes.len() as u64),
         );
         let base = format!("file://{}", root.path().display());

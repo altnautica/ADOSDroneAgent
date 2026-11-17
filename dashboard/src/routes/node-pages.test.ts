@@ -102,14 +102,34 @@ describe("route table: node pages", () => {
 });
 
 describe("ProfileGateView", () => {
-  const gate = (profile: Parameters<typeof ProfileGateView>[0]["profile"]) =>
+  const gate = (
+    profile: Parameters<typeof ProfileGateView>[0]["profile"],
+    extra: { hosts?: ("appliance" | "personal" | "unknown")[]; host?: "appliance" | "personal" | "unknown" } = {},
+  ) =>
     html(
       createElement(
         MemoryRouter,
         null,
-        createElement(ProfileGateView, { profile, role: "direct", allow: ["visor"], children: "PAGE" }),
+        createElement(ProfileGateView, {
+          profile,
+          role: "direct",
+          host: extra.host ?? "appliance",
+          allow: ["visor"],
+          hosts: extra.hosts,
+          children: "PAGE",
+        }),
       ),
     );
+
+  it("hides a page whose host kind the node is not", () => {
+    // A personal computer has no access point, kiosk or status panel, so a page
+    // that configures them must not render there — and must still render on an
+    // appliance and while the host is unknown.
+    const hosts = ["appliance"] as const;
+    expect(gate("visor", { hosts: [...hosts] })).toContain("PAGE");
+    expect(gate("visor", { hosts: [...hosts], host: "personal" })).not.toContain("PAGE");
+    expect(gate("visor", { hosts: [...hosts], host: "unknown" })).toContain("PAGE");
+  });
 
   it("renders the page only for an allowed profile", () => {
     expect(gate("visor")).toContain("PAGE");

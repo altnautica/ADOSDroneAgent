@@ -5,7 +5,8 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { profileLabel, roleLabel } from "@/lib/enum-labels";
-import { gateDecision, type AllowedProfile } from "@/lib/node-identity";
+import { gateDecision, type AllowedProfile, type HostKind } from "@/lib/node-identity";
+import { useNodeHostKind } from "@/hooks/use-node-host-kind";
 import type { GroundRole, Profile } from "@/shared/api/types";
 
 export type { AllowedProfile };
@@ -13,6 +14,7 @@ export type { AllowedProfile };
 interface ProfileGateProps {
   allow: AllowedProfile[];
   roles?: GroundRole[];
+  hosts?: HostKind[];
   children: React.ReactNode;
 }
 
@@ -85,12 +87,21 @@ function NotAvailablePanel() {
 interface ProfileGateViewProps extends ProfileGateProps {
   profile: Profile;
   role: GroundRole;
+  host: HostKind;
 }
 
 /** The gate for a known identity: the page, the mismatch panel, or the
  *  neutral not-available state for a profile this dashboard does not know. */
-export function ProfileGateView({ profile, role, allow, roles, children }: ProfileGateViewProps) {
-  const decision = gateDecision(profile, role, allow, roles);
+export function ProfileGateView({
+  profile,
+  role,
+  host,
+  allow,
+  roles,
+  hosts,
+  children,
+}: ProfileGateViewProps) {
+  const decision = gateDecision(profile, role, allow, roles, hosts, host);
   if (decision === "unavailable") return <NotAvailablePanel />;
   if (decision === "mismatch") {
     return (
@@ -105,10 +116,11 @@ export function ProfileGateView({ profile, role, allow, roles, children }: Profi
   return <>{children}</>;
 }
 
-export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
+export function ProfileGate({ allow, roles, hosts, children }: ProfileGateProps) {
   const { profile, role } = useNodeIdentity();
+  const host = useNodeHostKind();
   return (
-    <ProfileGateView profile={profile} role={role} allow={allow} roles={roles}>
+    <ProfileGateView profile={profile} role={role} host={host} allow={allow} roles={roles} hosts={hosts}>
       {children}
     </ProfileGateView>
   );

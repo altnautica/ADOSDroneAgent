@@ -24,7 +24,7 @@ mod render;
 
 use provision::{
     ensure_device_id, provision_overlays, set_hostname, write_cutover_note, write_default_config,
-    write_pairing, write_profile_conf,
+    write_host_conf, write_pairing, write_profile_conf,
 };
 pub(crate) use render::default_display_arg;
 pub use render::{
@@ -63,6 +63,7 @@ impl Step for ConfigIdentity {
         //    and operating region come from the operator's onboarding choices
         //    (local-first + unrestricted by default).
         write_profile_conf(&ctx.profile, &ctx.channel, ctx.args.version.as_deref());
+        write_host_conf(ctx.host);
         let server_mode = if ctx.cloud_from_anywhere {
             "cloud"
         } else {

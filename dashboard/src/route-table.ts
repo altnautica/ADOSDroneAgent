@@ -1,19 +1,25 @@
 import { lazy, type ComponentType } from "react";
 
 import type { AllowedProfile } from "@/components/profile-gate";
+import type { HostKind } from "@/lib/node-identity";
 import type { GroundRole } from "@/shared/api/types";
 
 import { HomeRoute } from "@/routes/home";
 
 import table from "./route-table.json";
 
-/** One dashboard page. `profiles`/`roles` null means every profile/role. */
+/** One dashboard page. `profiles`/`roles`/`hosts` null means every
+ * profile/role/host kind. */
 export interface RouteEntry {
   key: string;
   path: string;
   label: string;
   profiles: AllowedProfile[] | null;
   roles: GroundRole[] | null;
+  /** Host kinds the page applies to. Absent = every kind. A page that configures
+   * something only an appliance runs (the access point, the HDMI kiosk) is
+   * restricted to `appliance`, because a personal computer has none of it. */
+  hosts?: HostKind[] | null;
 }
 
 export const ROUTES = table as readonly RouteEntry[];

@@ -214,7 +214,13 @@ impl Supervisor {
         // silently falls off the LAN. Re-assert `power_save off` on every station
         // interface and record the verified per-interface state for the heartbeat.
         // Cheap (one `iw get` per iface; a `set` only on a real drift).
-        self.wifi_powersave.tick().await;
+        //
+        // None of the reconcilers from here to the USB rehome run on a personal
+        // computer: they manage the machine's own link, and its owner's
+        // NetworkManager owns that.
+        if self.manages_host_devices() {
+            self.wifi_powersave.tick().await;
+        }
         self.progress.mark();
 
         // Reactive network self-heal: detect + rebuild an onboard managed-WiFi
@@ -222,7 +228,9 @@ impl Supervisor {
         // working failover. Independent of service state; a no-op when there is
         // no onboard managed WiFi or the WiFi is healthy. Kept as the backstop
         // for a link that still needs an explicit rebuild after a domain drift.
-        self.wifi_selfheal.tick().await;
+        if self.manages_host_devices() {
+            self.wifi_selfheal.tick().await;
+        }
         self.progress.mark();
 
         // Management-link guardian (REACTIVE backstop for the WHOLE link): detect
@@ -231,7 +239,9 @@ impl Supervisor {
         // without a reboot, across NetworkManager and systemd-networkd. Runs
         // after the per-connection WiFi self-heal so the cheaper fix gets first
         // crack; cheap when the link is healthy, one repair rung per tick.
-        self.mgmt_guardian.tick().await;
+        if self.manages_host_devices() {
+            self.mgmt_guardian.tick().await;
+        }
         self.progress.mark();
 
         // Onboard-WiFi heartbeat reach-back (LAST resort): when the wired
@@ -239,7 +249,9 @@ impl Supervisor {
         // heartbeat-only fallback so the box stays visible to the GCS. Runs
         // after the guardian (which repairs the link while it physically
         // exists); cheap when the wired primary is up.
-        self.mgmt_failover.tick().await;
+        if self.manages_host_devices() {
+            self.mgmt_failover.tick().await;
+        }
         self.progress.mark();
 
         // USB-rehome self-heal (LAST resort for a slow-port, not-radiating
@@ -256,7 +268,7 @@ impl Supervisor {
         // sequence here also keeps the post-rebind start out of the bind window.
         // `session_active` (not `is_active`) so the rehome is also held off during
         // the bind's `Idle` setup window, before the data-plane state advances.
-        if !self.bind.session_active() {
+        if self.manages_host_devices() && !self.bind.session_active() {
             if let Some(plan) = self.usb_rehome.decide().await {
                 let unit = plan.unit;
                 self.stop_service(unit).await;

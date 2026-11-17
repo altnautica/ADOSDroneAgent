@@ -58,6 +58,25 @@ pub struct SummaryData {
     /// `/run/ados/reboot-required`, and until the closing card said so an
     /// operator was never told their camera would not work until a reboot.
     pub pending_reboot: Vec<String>,
+    /// What kind of machine this install landed on
+    /// ([`ados_protocol::host_kind::HostKind`]'s wire string).
+    ///
+    /// On a personal computer the closing card says so, in place of the access
+    /// point block it does not have: the operator needs to know the install
+    /// deliberately left their Wi-Fi, display, sleep and updates alone, and how
+    /// to reach the console without a LAN advert.
+    pub host_kind: String,
+    /// How the host kind was decided ("laptop chassis, battery, desktop
+    /// session", or `--host`). Empty when there is nothing to explain.
+    pub host_basis: String,
+    /// Provisioning that needs a reboot which the install deliberately did NOT
+    /// perform, because the machine is the owner's own computer.
+    ///
+    /// Rendered as "Reboot when convenient:" rather than the "Reboot needed to
+    /// finish:" block, which is a promise the installer will do it. Same
+    /// placement — ahead of the next-step commands — because the hardware it
+    /// provisions does not work until the reboot.
+    pub deferred_reboot: Vec<String>,
 }
 
 impl SummaryView for SummaryData {
@@ -137,6 +156,13 @@ fn ap_lines(s: &SummaryData) -> Vec<(String, String)> {
 /// while the pairing probe advertises a different one. `None` means this box has
 /// no resolvable mDNS name, and the card then lists only addresses.
 fn console_urls(s: &SummaryData) -> Vec<String> {
+    // On a personal computer the control surface binds loopback only until the
+    // operator shares it, so the LAN and mDNS names are not reach yet. Listing
+    // them would be a status surface reporting a false value; the card hands out
+    // the address that answers.
+    if s.is_personal_host() {
+        return vec![PERSONAL_CONSOLE_URL.to_string()];
+    }
     let mut urls = Vec::new();
     if let Some(host) = ados_protocol::reach::mdns_name_for(&s.hostname) {
         urls.push(format!("http://{host}:8080"));
@@ -200,12 +226,33 @@ pub fn plain_lines(s: &SummaryData) -> Vec<String> {
         out.push("  This passphrase is unique to this unit. Write it down.".to_string());
     }
 
+    // A ground station on somebody's own computer: say so, and say what was
+    // left alone. In place of the access-point block it does not have.
+    if s.is_personal_host() {
+        out.push(String::new());
+        out.push(format!("{PERSONAL_HEADING}:"));
+        out.push(format!("  {PERSONAL_REASSURANCE}"));
+        out.push("  Only this computer can reach it until you share it.".to_string());
+        if !s.host_basis.is_empty() {
+            out.push(format!("  detected: {}", s.host_basis));
+        }
+    }
+
     // Before "Next steps": a staged overlay means the hardware it provisions is
     // NOT working yet, so it outranks anything the operator might type.
     if !s.pending_reboot.is_empty() {
         out.push(String::new());
         out.push("Reboot needed to finish:".to_string());
         for reason in &s.pending_reboot {
+            out.push(format!("  {reason}"));
+        }
+    }
+    // The same fact on a machine the install will not take down: the owner
+    // reboots when it suits them.
+    if !s.deferred_reboot.is_empty() {
+        out.push(String::new());
+        out.push("Reboot when convenient:".to_string());
+        for reason in &s.deferred_reboot {
             out.push(format!("  {reason}"));
         }
     }
@@ -224,6 +271,29 @@ pub fn plain_lines(s: &SummaryData) -> Vec<String> {
     out.push(NOTE_DOCS.to_string());
     out
 }
+
+/// Whether this install landed on somebody's own computer.
+impl SummaryData {
+    /// True on a personal computer, from the persisted wire string.
+    pub fn is_personal_host(&self) -> bool {
+        self.host_kind == "personal"
+    }
+}
+
+/// The heading for the personal-computer block, in both card styles. Its
+/// wording is the install's promise: the machine is still theirs.
+const PERSONAL_HEADING: &str = "Installed as a ground station on this computer";
+
+/// The personal-computer block's second line: exactly what was left alone.
+const PERSONAL_REASSURANCE: &str = "Your Wi-Fi, display, sleep and updates are untouched.";
+
+/// Where the console is on a personal computer: loopback only, until the
+/// operator shares it from Mission Control.
+const PERSONAL_CONSOLE_URL: &str = "http://127.0.0.1:8080";
+
+/// The button and the address, as the operator will see them in Mission
+/// Control's connect screen.
+const PERSONAL_REACH: &str = "Open Mission Control and choose \"Use this computer as ground station\", or browse to http://127.0.0.1:8080";
 
 /// The command-column width used to align the next-step descriptions (the
 /// longest command name).
@@ -330,6 +400,46 @@ fn success_card(s: &SummaryData, theme: &Theme, width: usize) -> Vec<String> {
             body.push(format!("  {}  {}", theme.dim(&padded), theme.accent(value)));
         }
         body.push(theme.dim("This passphrase is unique to this unit. Write it down."));
+    }
+
+    // A ground station on somebody's own computer: the same reassurance the
+    // plain card carries, in place of the access-point block it does not have.
+    if s.is_personal_host() {
+        body.push(String::new());
+        body.push(section(theme, PERSONAL_HEADING));
+        body.push(format!(
+            "  {}  {}",
+            theme.accent(arrow(theme)),
+            theme.bold(PERSONAL_REASSURANCE)
+        ));
+        body.push(theme.dim(PERSONAL_REACH));
+        if !s.host_basis.is_empty() {
+            let padded = "detected".to_string();
+            body.push(format!(
+                "  {}  {}",
+                theme.dim(&format!("{padded:<11}")),
+                theme.dim(&s.host_basis)
+            ));
+        }
+    }
+
+    // A staged overlay means the hardware it provisions does not work yet, so it
+    // outranks the next-step commands. Warned, not merely noted: on an appliance
+    // the installer finishes it, on a personal computer the owner has to.
+    if !s.pending_reboot.is_empty() {
+        body.push(String::new());
+        body.push(section(theme, "Reboot needed to finish"));
+        for reason in &s.pending_reboot {
+            body.push(theme.warn(&format!("  {reason}")));
+        }
+    }
+    if !s.deferred_reboot.is_empty() {
+        body.push(String::new());
+        body.push(section(theme, "Reboot when convenient"));
+        for reason in &s.deferred_reboot {
+            body.push(theme.warn(&format!("  {reason}")));
+        }
+        body.push(theme.dim("This install left your computer up; reboot it whenever suits you."));
     }
 
     // Curated primitive commands: command in accent, description dimmed.
@@ -465,6 +575,9 @@ mod tests {
             required_failures: vec![],
             failure_reasons: vec![],
             pending_reboot: vec![],
+            host_kind: "appliance".to_string(),
+            host_basis: String::new(),
+            deferred_reboot: vec![],
         }
     }
 
@@ -509,6 +622,77 @@ mod tests {
     fn no_pending_reboot_renders_no_reboot_block() {
         let body = plain_lines(&sample("ok")).join("\n");
         assert!(!body.contains("Reboot needed"));
+    }
+
+    /// A ground station installed on somebody's own computer must say so, say
+    /// what it left alone, and point at the loopback console it actually
+    /// serves — with no access-point block, because there is no access point.
+    #[test]
+    fn a_personal_install_says_what_it_left_alone() {
+        let mut s = sample("ok");
+        s.profile = "ground_station".to_string();
+        s.host_kind = "personal".to_string();
+        s.host_basis = "desktop session, laptop chassis, battery, x86_64".to_string();
+        let body = plain_lines(&s).join("\n");
+        assert!(body.contains(PERSONAL_HEADING), "{body}");
+        assert!(
+            body.contains("Wi-Fi, display, sleep and updates are untouched"),
+            "{body}"
+        );
+        assert!(body.contains("detected: desktop session"), "{body}");
+        assert!(!body.contains("Wi-Fi access point"), "{body}");
+        assert!(body.contains("http://127.0.0.1:8080"), "{body}");
+
+        // The same block on the rich card, in its own section style.
+        let theme = Theme {
+            ascii: false,
+            tier: ColorTier::None,
+        };
+        let card = rich_lines(&s, &theme, &VecDeque::new()).join("\n");
+        assert!(card.contains(PERSONAL_HEADING), "{card}");
+        assert!(
+            card.contains("Wi-Fi, display, sleep and updates are untouched"),
+            "{card}"
+        );
+    }
+
+    /// An appliance card is unchanged by the personal block existing.
+    #[test]
+    fn an_appliance_install_renders_no_personal_block() {
+        let mut s = sample("ok");
+        s.profile = "ground_station".to_string();
+        let body = plain_lines(&s).join("\n");
+        assert!(!body.contains(PERSONAL_HEADING), "{body}");
+    }
+
+    /// A reboot the install deliberately did not perform reads as the owner's
+    /// choice, never as "needed to finish" — which promises the installer will
+    /// do it.
+    #[test]
+    fn a_deferred_reboot_is_the_owners_choice() {
+        let mut s = sample("degraded");
+        s.profile = "ground_station".to_string();
+        s.host_kind = "personal".to_string();
+        s.deferred_reboot = vec!["camera overlay staged".to_string()];
+        let lines = plain_lines(&s);
+        let body = lines.join("\n");
+        assert!(body.contains("Reboot when convenient:"), "{body}");
+        assert!(!body.contains("Reboot needed to finish:"), "{body}");
+        assert!(body.contains("camera overlay staged"), "{body}");
+        // Still ahead of the next-step commands: the hardware does not work yet.
+        let reboot_at = lines
+            .iter()
+            .position(|l| l.contains("Reboot when convenient:"))
+            .unwrap();
+        let next_at = lines.iter().position(|l| l == "Next steps:").unwrap();
+        assert!(reboot_at < next_at);
+
+        let theme = Theme {
+            ascii: false,
+            tier: ColorTier::None,
+        };
+        let card = rich_lines(&s, &theme, &VecDeque::new()).join("\n");
+        assert!(card.contains("Reboot when convenient"), "{card}");
     }
 
     #[test]

@@ -36,6 +36,10 @@ impl ConfigWriteJob {
             lan_ips: &lan_ips,
             streams: &self.streams,
             recording: self.recording,
+            // The air-side manager serves a drone's own video pipeline, whose
+            // consumers are on this box or on the LAN by design; only the
+            // ground media server has a loopback-only form.
+            loopback_only: false,
         });
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;

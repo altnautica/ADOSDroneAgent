@@ -1,5 +1,8 @@
 use super::*;
 
+/// These cases pin the appliance gate, the one every shipped board runs.
+const HOST: ados_protocol::host_kind::HostKind = ados_protocol::host_kind::HostKind::Appliance;
+
 #[test]
 fn the_control_wait_is_bounded_and_names_the_last_state() {
     // A unit that comes up on the third poll returns then, without sleeping
@@ -27,17 +30,36 @@ fn the_control_wait_is_bounded_and_names_the_last_state() {
 
 #[test]
 fn drone_expects_only_the_supervisor() {
-    let units = expected_profile_units("drone");
+    let units = expected_profile_units("drone", HOST);
     assert_eq!(units, &["ados-supervisor.service"]);
 }
 
 #[test]
 fn ground_station_expects_the_receive_and_ap_set() {
-    let units = expected_profile_units("ground_station");
+    let units = expected_profile_units("ground_station", HOST);
     assert!(units.contains(&"ados-supervisor.service"));
     assert!(units.contains(&"ados-wfb-rx.service"));
     assert!(units.contains(&"ados-hostapd.service"));
     assert!(units.contains(&"ados-setup-captive.service"));
+}
+
+#[test]
+fn a_personal_ground_station_expects_no_access_point() {
+    use ados_protocol::host_kind::HostKind;
+    let units = expected_profile_units("ground_station", HostKind::Personal);
+    assert!(units.contains(&"ados-supervisor.service"));
+    assert!(units.contains(&"ados-wfb-rx.service"));
+    // The gate must never demand a unit a personal install does not create, or
+    // every laptop install reports degraded.
+    for absent in [
+        "ados-hostapd.service",
+        "ados-dnsmasq-gs.service",
+        "ados-setup-captive.service",
+        "ados-kiosk.service",
+        "ados-oled.service",
+    ] {
+        assert!(!units.contains(&absent), "{absent}");
+    }
 }
 
 #[test]
@@ -46,7 +68,7 @@ fn no_profile_expects_a_retired_or_hardware_gated_unit() {
     // is inactive on a board without the accelerator, so expecting either
     // would fail a healthy install.
     for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {
-        let units = expected_profile_units(profile);
+        let units = expected_profile_units(profile, HOST);
         for unit in crate::steps::systemd::RETIRED_UNITS {
             assert!(!units.contains(unit), "{profile} expects retired {unit}");
         }

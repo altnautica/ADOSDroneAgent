@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A ground station installed on a personal computer (a laptop or a desktop somebody also uses) runs only the radio, pairing, video and control services. The install detects the host kind (a desktop session plus an x86_64 machine, a laptop chassis or a battery), persists it in `/etc/ados/host.conf`, and skips every step that would take the machine over: the sleep masks and the logind drop-in, the Wi-Fi join and MAC pin, the access point and uplink daemons, the console and HDMI kiosk, the I2C and PPS overlays, the GPU and NPU provisioning, the hardware watchdog, the package-daemon masking and the automatic reboot. `--host appliance|personal` overrides the detection. An appliance behaves exactly as before.
+- The control front and the ground media server answer only `127.0.0.1` on a personal computer until the operator turns on `host.share_on_lan` in Mission Control or the agent dashboard, which restarts both. `_ados._tcp` is not advertised while the front is loopback-only.
+- Mission Control: a "Use this computer as ground station" action that probes `127.0.0.1:8080`, pairs, and says how to install an agent when nothing answers; a "This computer" settings page carrying the share toggle in place of the access-point, uplink and display pages; and a loopback transport that reaches a local agent from the hosted secure page (no mixed-content block, no server-side proxy, and the browser's private-network grant declared per request).
+- The agent dashboard hides the network and display settings pages on a personal computer, the TUI shows a PERSONAL chip beside the profile, and `/api/status` reports `host_kind` and `share_on_lan`.
+- CI publishes the whole service-binary catalog for x86_64 as well as aarch64, plus an `ados-installer-x86_64`, so `scripts/install.sh` works on any Linux laptop.
+
 ### Changed
 
 - The vision detections route's whole-frame batch cache carries its types, so the route passes the strict type check. No behaviour change.

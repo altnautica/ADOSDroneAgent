@@ -84,7 +84,10 @@ impl Step for NpuProvision {
     fn kind(&self) -> StepKind {
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "npu_provision") {
+            return skip;
+        }
         let model = read_board_model();
         if !is_npu_board(&model) {
             tracing::info!(

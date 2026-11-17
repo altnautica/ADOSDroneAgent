@@ -45,21 +45,22 @@ const REPLY_GRACE: Duration = Duration::from_secs(1);
 /// supervisor started.
 pub fn switch_units(
     profile: &str,
+    host: units::HostKind,
     deployed: &dyn Fn(&str) -> bool,
     systemctl: &mut dyn FnMut(&[&str]) -> bool,
 ) -> bool {
     systemctl(&["stop", SUPERVISOR]);
-    for unit in units::other_profile_units(profile) {
+    for unit in units::other_profile_units(profile, host) {
         systemctl(&["stop", unit]);
         systemctl(&["disable", unit]);
     }
-    for unit in units::profile_enable_units(profile) {
+    for unit in units::profile_enable_units(profile, host) {
         if deployed(unit) {
             systemctl(&["enable", unit]);
         }
     }
     let started = systemctl(&["start", SUPERVISOR]);
-    for unit in units::start_units(profile) {
+    for unit in units::start_units(profile, host) {
         systemctl(&["start", "--no-block", unit]);
     }
     started
@@ -143,7 +144,7 @@ pub fn run() -> ExitCode {
         }
         ok
     };
-    if switch_units(&profile, &deployed, &mut systemctl) {
+    if switch_units(&profile, units::read_host_kind(), &deployed, &mut systemctl) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -156,9 +157,14 @@ mod tests {
 
     const PROFILES: [&str; 5] = ["drone", "ground_station", "workstation", "compute", "visor"];
 
+    /// These tests pin the appliance lists, which are what every shipped board
+    /// runs; the personal lists have their own cases in the installer's unit
+    /// list tests.
+    const HOST: units::HostKind = units::HostKind::Appliance;
+
     fn calls_for(profile: &str) -> Vec<String> {
         let mut calls = Vec::new();
-        assert!(switch_units(profile, &|_| true, &mut |args| {
+        assert!(switch_units(profile, HOST, &|_| true, &mut |args| {
             calls.push(args.join(" "));
             true
         }));
@@ -178,7 +184,7 @@ mod tests {
             let start_sup = pos("start ados-supervisor.service").unwrap();
             assert_eq!(stop_sup, 0, "{profile}");
             assert!(calls.iter().all(|c| !c.starts_with("restart")), "{profile}");
-            for unit in units::other_profile_units(profile) {
+            for unit in units::other_profile_units(profile, HOST) {
                 let stop = pos(&format!("stop {unit}")).unwrap();
                 let disable = pos(&format!("disable {unit}")).unwrap();
                 assert!(
@@ -186,13 +192,13 @@ mod tests {
                     "{unit}"
                 );
             }
-            for unit in units::profile_enable_units(profile) {
+            for unit in units::profile_enable_units(profile, HOST) {
                 assert!(
                     pos(&format!("enable {unit}")).unwrap() < start_sup,
                     "{unit}"
                 );
             }
-            for unit in units::start_units(profile) {
+            for unit in units::start_units(profile, HOST) {
                 assert!(
                     pos(&format!("start --no-block {unit}")).unwrap() > start_sup,
                     "{unit}"
@@ -211,6 +217,7 @@ mod tests {
         let mut calls = Vec::new();
         let started = switch_units(
             "ground_station",
+            HOST,
             &|u| u != "ados-kiosk.service",
             &mut |args| {
                 calls.push(args.join(" "));

@@ -49,7 +49,7 @@ fn both_fc_profiles_fetch_the_swarm_bus() {
     // The path the unit's ConditionPathExists + ExecStart name, or the unit
     // silently never starts.
     assert_eq!(bus.dest, "/opt/ados/bin/ados-swarmbus");
-    assert_eq!(bus.asset, "ados-swarmbus-aarch64");
+    assert_eq!(bus.asset_name("aarch64"), "ados-swarmbus-aarch64");
 }
 
 #[test]

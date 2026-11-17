@@ -105,6 +105,9 @@ impl Step for ChronyAdos {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "chrony_ados") {
+            return skip;
+        }
         if !profile_runs_clock(&ctx.profile) {
             return StepOutcome::Skipped;
         }

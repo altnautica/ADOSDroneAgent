@@ -623,21 +623,22 @@ fn a_local_artifact_failure_is_reported_once_rather_than_retried() {
     );
 }
 
-/// A test context posing as an x86_64 Linux host, whatever the build host.
-fn x86_64_ctx() -> Ctx {
+/// A test context posing as a supported arch the release does not carry, so the
+/// per-arch release guard is exercised whatever the build host.
+fn unreleased_arch_ctx() -> Ctx {
     let mut ctx = Ctx::for_test(Checkpoint::new());
-    ctx.env.arch = "x86_64".to_string();
+    ctx.env.arch = "riscv64".to_string();
     ctx.env.supported_arch = true;
     ctx
 }
 
 #[test]
-fn an_x86_64_host_without_artifacts_fails_before_fetching() {
-    let mut ctx = x86_64_ctx();
+fn an_unreleased_arch_without_artifacts_fails_before_fetching() {
+    let mut ctx = unreleased_arch_ctx();
     ctx.artifacts = None;
     match FetchBinaries.run(&mut ctx) {
         StepOutcome::Failed(msg) => {
-            assert_eq!(msg, no_release_assets("x86_64"));
+            assert_eq!(msg, no_release_assets("riscv64"));
             assert!(msg.contains("--channel edge --artifacts <dir>"), "{msg}");
         }
         other => panic!("expected a failure naming --artifacts: {other:?}"),
@@ -645,14 +646,14 @@ fn an_x86_64_host_without_artifacts_fails_before_fetching() {
 }
 
 #[test]
-fn an_x86_64_host_never_falls_back_to_the_release_for_a_missing_hard_entry() {
+fn an_unreleased_arch_never_falls_back_to_the_release_for_a_missing_hard_entry() {
     // The directory carries only the BestEffort relay (last in the catalog),
     // so every Hard entry resolves to the release. On a host without release
     // assets that is a failed entry, never a download: the first Hard one
     // aborts the step before anything is placed.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("mediamtx"), b"local").unwrap();
-    let mut ctx = x86_64_ctx();
+    let mut ctx = unreleased_arch_ctx();
     ctx.artifacts = Some(dir.path().to_path_buf());
     let first_hard = binaries::for_profile(&ctx.profile)
         .into_iter()

@@ -81,7 +81,10 @@ impl Step for NetworkMacPin {
         // Optional: a pin problem must degrade, never abort the install.
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "network_mac_pin") {
+            return skip;
+        }
         let config = read_config();
         if !config.enabled {
             tracing::info!("stable-MAC pinning disabled by config; skipping");

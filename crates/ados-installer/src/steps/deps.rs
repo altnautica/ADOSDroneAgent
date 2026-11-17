@@ -11,6 +11,7 @@ mod apt_lock;
 use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::ui::activity;
+use ados_protocol::host_kind::HostKind;
 use ados_term::exec;
 use ados_term::progress::ProgressSink;
 
@@ -123,8 +124,17 @@ pub fn browser_packages() -> &'static [&'static str] {
 /// the cross-profile core; a ground station and a visor add the access-point
 /// set, and a ground station the kiosk/mesh core too. Deduped +
 /// insertion-stable.
-pub fn required_packages(profile: &str) -> Vec<&'static str> {
+///
+/// On a personal computer only the cross-profile core is required. Everything
+/// the extras bring — `hostapd`, `dnsmasq`, `cage`, `wlr-randr`, `batctl` —
+/// serves a unit this host does not run (the access point, the kiosk, the
+/// mesh), and a laptop that installed them would still be running somebody
+/// else's packages on a machine they did not ask us to provision.
+pub fn required_packages(profile: &str, host: HostKind) -> Vec<&'static str> {
     let mut pkgs: Vec<&'static str> = core_packages().to_vec();
+    if host.is_personal() {
+        return pkgs;
+    }
     let ap = matches!(profile, "ground_station" | "visor");
     let gs = profile == "ground_station";
     let extras = access_point_packages()
@@ -315,7 +325,7 @@ impl Step for Deps {
             return StepOutcome::Failed(e.to_string());
         }
 
-        let required = required_packages(&ctx.profile);
+        let required = required_packages(&ctx.profile, ctx.host);
         if let Err(e) = apt_install(&required, true, &sink) {
             return StepOutcome::Failed(e.to_string());
         }
@@ -340,7 +350,12 @@ impl Step for Deps {
         // candidate that succeeds; best-effort so a headless ground station (no HDMI
         // sink) or an image lacking both names degrades cleanly (the kiosk service
         // resolves the browser binary at runtime and fails loudly if none is present).
-        if ctx.profile == "ground_station" && !install_browser(&sink) {
+        //
+        // Never on a personal computer: there is no kiosk there, the owner already
+        // has their own browser, and on Ubuntu `chromium-browser` installs the
+        // snap — a package manager, a daemon and a second browser on their machine
+        // for a surface that does not exist.
+        if ctx.profile == "ground_station" && !ctx.host.is_personal() && !install_browser(&sink) {
             tracing::warn!(
                 "no chromium browser package installed; the HDMI kiosk is unavailable until one is present"
             );
@@ -429,19 +444,22 @@ mod tests {
     fn every_profile_installs_the_signature_verifier_as_required() {
         // Release downloads refuse to install unverified, so the verifier must be
         // in the REQUIRED set (a failed install stops the step) on every profile,
-        // not left to the bootstrap script that a direct run skips.
-        for profile in ["drone", "ground_station", "compute", "workstation", "visor"] {
-            assert!(
-                required_packages(profile).contains(&"minisign"),
-                "{profile} must install minisign"
-            );
+        // not left to the bootstrap script that a direct run skips. It is core,
+        // so it survives the personal-computer narrowing too.
+        for host in [HostKind::Appliance, HostKind::Personal] {
+            for profile in ["drone", "ground_station", "compute", "workstation", "visor"] {
+                assert!(
+                    required_packages(profile, host).contains(&"minisign"),
+                    "{profile} on {host} must install minisign"
+                );
+            }
         }
         assert!(!optional_packages().contains(&"minisign"));
     }
 
     #[test]
     fn drone_profile_excludes_ground_station_extras() {
-        let drone = required_packages("drone");
+        let drone = required_packages("drone", HostKind::Appliance);
         assert!(!drone.contains(&"hostapd"));
         assert!(!drone.contains(&"dnsmasq"));
         assert!(!drone.contains(&"cage"));
@@ -449,9 +467,38 @@ mod tests {
         assert!(drone.contains(&"ffmpeg"));
     }
 
+    /// A ground station on somebody's own computer needs the radio, not an
+    /// access point, a kiosk compositor or the mesh tooling: those serve units
+    /// this host does not run, and installing them puts the agent's packages on
+    /// a machine it was told not to provision.
+    #[test]
+    fn a_personal_ground_station_installs_only_the_core() {
+        let gs = required_packages("ground_station", HostKind::Personal);
+        for absent in [
+            "hostapd",
+            "dnsmasq",
+            "cage",
+            "wlr-randr",
+            "batctl",
+            "bluetooth",
+            "bluez",
+            "wpasupplicant",
+        ] {
+            assert!(
+                !gs.contains(&absent),
+                "personal ground station must not install {absent}"
+            );
+        }
+        // The radio and the media stack are the point of the install.
+        for p in ["ffmpeg", "wireless-regdb", MINISIGN] {
+            assert!(gs.contains(&p), "personal ground station must install {p}");
+        }
+        assert_eq!(gs, core_packages());
+    }
+
     #[test]
     fn visor_adds_only_the_access_point_set() {
-        let visor = required_packages("visor");
+        let visor = required_packages("visor", HostKind::Appliance);
         assert!(visor.contains(&"hostapd"));
         assert!(visor.contains(&"dnsmasq"));
         for p in ground_station_core_packages() {
@@ -461,7 +508,7 @@ mod tests {
 
     #[test]
     fn ground_station_adds_ap_kiosk_core() {
-        let gs = required_packages("ground_station");
+        let gs = required_packages("ground_station", HostKind::Appliance);
         for p in [
             "hostapd",
             "dnsmasq",

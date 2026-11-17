@@ -111,6 +111,9 @@ impl Step for I2cEnable {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "i2c_enable") {
+            return skip;
+        }
         if !profile_uses_i2c(&ctx.profile) {
             return StepOutcome::Skipped;
         }

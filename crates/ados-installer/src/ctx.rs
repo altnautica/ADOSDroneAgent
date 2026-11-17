@@ -28,6 +28,18 @@ pub struct Ctx {
     /// Resolved agent profile (`drone` | `ground_station` | `workstation` |
     /// `compute` | `visor`).
     pub profile: String,
+    /// What kind of machine this is ([`ados_protocol::host_kind::HostKind`]):
+    /// a dedicated appliance, or a personal computer whose Wi-Fi, display,
+    /// sleep and updates the install leaves alone.
+    ///
+    /// Resolved once, here: `--host`, else the persisted `/etc/ados/host.conf`,
+    /// else a live probe ([`crate::host::resolve`]). Every step reads this
+    /// field, never the machine, so one install cannot disagree with itself.
+    pub host: ados_protocol::host_kind::HostKind,
+    /// How the host kind was decided ("--host", or the probe's signals), for
+    /// the closing summary. `None` means the operator or a prior install said
+    /// so and there is nothing to explain.
+    pub host_basis: Option<String>,
     /// Whether to build + install the RTL8812EU WFB radio driver. Default on;
     /// `--no-rtl-driver` opts out (a workstation/compute node or a rig with no
     /// long-range radio does not need it). The `dkms` step honours this.
@@ -89,6 +101,12 @@ pub struct Ctx {
     /// outgoing copy is retained at `<dest>.prev`; when a required step fails,
     /// the binary hands this list to `rollback::roll_back`.
     pub replaced_binaries: Vec<std::path::PathBuf>,
+    /// Provisioning that needs a reboot which the installer deliberately did not
+    /// perform, because the machine is somebody's own computer and taking it
+    /// down is their call. The reasons only render in the closing summary
+    /// ("reboot when convenient: …"); they never trigger the automatic reboot,
+    /// which reads [`Ctx::pending_reboot`] alone.
+    pub deferred_reboot: Vec<String>,
 }
 
 /// Resolve the release channel for this run: the `--channel` flag, else the
@@ -139,6 +157,13 @@ impl Ctx {
             .map(|p| normalize_profile(&p))
             .unwrap_or_else(|| "drone".to_string());
         let channel = resolve_channel(args.channel.as_deref());
+        // The host kind is resolved once, before any step runs: the machine is
+        // either somebody's computer or an appliance for the whole install.
+        let (host, host_probe) = crate::host::resolve(args.host.as_deref());
+        let host_basis = host_probe
+            .as_ref()
+            .map(crate::host::detection_basis)
+            .or_else(|| args.host.is_some().then(|| "--host".to_string()));
         let install_rtl8812eu = !args.no_rtl_driver;
         let install_world_engine = args
             .world_engine
@@ -158,6 +183,8 @@ impl Ctx {
             failures: FailureAccumulator::new(),
             force,
             profile,
+            host,
+            host_basis,
             install_rtl8812eu,
             install_world_engine,
             channel,
@@ -169,6 +196,7 @@ impl Ctx {
             progress: ProgressSink::default(),
             pending_reboot: Vec::new(),
             replaced_binaries: Vec::new(),
+            deferred_reboot: Vec::new(),
         }
     }
 

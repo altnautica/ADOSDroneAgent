@@ -28,6 +28,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import type { AllowedProfile } from "@/components/profile-gate";
 import { RouteFallback } from "@/components/route-fallback";
 import { useNodeProfile } from "@/hooks/use-node-profile";
+import { useNodeHostKind } from "@/hooks/use-node-host-kind";
+import type { HostKind } from "@/lib/node-identity";
 import { useStatus } from "@/hooks/use-status";
 import type { Profile } from "@/shared/api/types";
 import { cn } from "@/lib/utils";
@@ -71,18 +73,27 @@ interface SectionLink {
    * offers a page whose writes are inert on this profile. During the
    * pre-detect ("auto"/"unknown") phase every page stays visible. */
   allow?: AllowedProfile[];
+  /** Host kinds this page applies to. Absent = every kind. A page that
+   * configures something only an appliance runs (the access point, the HDMI
+   * kiosk) is restricted to `appliance`: a personal computer has none of it.
+   * Mirrors the route table's `hosts`, so the nav never offers a page whose
+   * writes are inert on this machine. */
+  hosts?: HostKind[];
 }
 
-/** Whether a section shows on `profile`, matching the ProfileGate convention:
- * ungated pages always show; during pre-detect every page shows; otherwise the
- * concrete profile must be in the allow list. */
+/** Whether a section shows on `profile` / `host`, matching the ProfileGate
+ * convention: ungated pages always show; during pre-detect every page shows;
+ * otherwise the concrete profile (and host kind) must be in the allow list. */
 function sectionVisible(
   allow: AllowedProfile[] | undefined,
   profile: Profile,
+  hosts: HostKind[] | undefined,
+  host: HostKind,
 ): boolean {
-  if (!allow) return true;
   if (profile === "auto" || profile === "unknown") return true;
-  return allow.includes(profile as AllowedProfile);
+  if (allow && !allow.includes(profile as AllowedProfile)) return false;
+  if (hosts && host !== "unknown" && !hosts.includes(host)) return false;
+  return true;
 }
 
 const SECTIONS: SectionLink[] = [
@@ -101,6 +112,9 @@ const SECTIONS: SectionLink[] = [
     icon: Wifi,
     blurbKey: "layout.settings.networkBlurb",
     group: "Link & network",
+    // Uplinks, failover and the access point belong to the uplink router, which
+    // a personal computer does not run: its Wi-Fi and routes are its owner's.
+    hosts: ["appliance"],
   },
   {
     to: "/settings/cellular",
@@ -236,6 +250,9 @@ const SECTIONS: SectionLink[] = [
     blurbKey: "layout.settings.displayBlurb",
     group: "System & safety",
     allow: ["ground_station"],
+    // The local renderer and the HDMI kiosk are the box's console; a personal
+    // computer keeps its own.
+    hosts: ["appliance"],
   },
   {
     to: "/settings/advanced",
@@ -254,9 +271,12 @@ export function SettingsLayout() {
   // Settings sections read the setup status; the layout keeps it fresh while
   // any settings page is open.
   useStatus({ poll: true });
+  const host = useNodeHostKind();
   const groups = GROUP_ORDER.map((group) => ({
     group,
-    links: SECTIONS.filter((s) => s.group === group && sectionVisible(s.allow, profile)),
+    links: SECTIONS.filter(
+      (s) => s.group === group && sectionVisible(s.allow, profile, s.hosts, host),
+    ),
   })).filter((g) => g.links.length > 0);
   const current = SECTIONS.find((s) => pathname === s.to || pathname.startsWith(`${s.to}/`))?.to ?? "";
 

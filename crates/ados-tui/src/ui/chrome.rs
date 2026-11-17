@@ -38,6 +38,15 @@ pub fn header(f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
                 left.push(Span::styled(d.profile.to_uppercase(), t.accent_bold()));
                 left.push(Span::raw("  "));
             }
+            // A ground station on somebody's own computer is a different node
+            // from one on a dedicated box: it runs no access point, kiosk or
+            // panel, and answers this machine only until it is shared. The chip
+            // sits beside the profile for exactly that reason — the profile alone
+            // no longer says what the node is.
+            if d.host_kind == "personal" {
+                left.push(Span::styled("PERSONAL", t.dim()));
+                left.push(Span::raw("  "));
+            }
             let alive = matches!(d.fc_link(), FcLink::Connected | FcLink::Msp);
             let family = d.fc_family_label().or_else(|| d.fc_variant_label());
             if d.profile != "ground_station" {

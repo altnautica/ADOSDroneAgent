@@ -54,8 +54,8 @@ pub(super) fn prune_retired_udev_rules() {
 /// is down: the supervisor still running here is the previous profile's, and
 /// it restarts any unit it supervises the moment that unit dies, so a stop
 /// issued now is undone within one monitor pass.
-pub(super) fn disable_other_profile_units(profile: &str) {
-    for unit in other_profile_units(profile) {
+pub(super) fn disable_other_profile_units(profile: &str, host: ados_protocol::host_kind::HostKind) {
+    for unit in other_profile_units(profile, host) {
         let _ = exec::run("systemctl", &["disable", unit]);
     }
 }

@@ -17,6 +17,7 @@ pub mod cli;
 pub mod ctx;
 pub mod env;
 pub mod graph;
+pub mod host;
 pub mod journal;
 pub mod macos;
 pub mod net;

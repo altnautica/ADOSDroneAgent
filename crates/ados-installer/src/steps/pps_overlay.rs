@@ -424,6 +424,9 @@ impl Step for PpsOverlay {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "pps_overlay") {
+            return skip;
+        }
         let profiles = load_profiles();
         let facts = probe_host_facts();
         let Some(matched) = resolve_profile(&profiles, &facts) else {

@@ -127,10 +127,10 @@ impl Step for FetchBinaries {
             return StepOutcome::Skipped;
         }
 
-        // The release publishes aarch64 binaries only. Any other supported arch
-        // (x86_64) installs entirely from a locally built `--artifacts` dir, and
-        // an entry missing from it is never fetched from the release (it would
-        // land an aarch64 binary that cannot run here).
+        // The release publishes both arches. An entry missing from a local
+        // `--artifacts` dir still falls back to the release, but only for an
+        // arch the release carries: the assets are per-arch, so a fallback can
+        // never land a binary built for a different machine.
         let release_assets = env::arch_has_release_assets(&ctx.env.arch);
         if !release_assets && ctx.artifacts.is_none() {
             return StepOutcome::Failed(no_release_assets(&ctx.env.arch));
@@ -192,7 +192,7 @@ impl Step for FetchBinaries {
         let needs_release = bins.iter().any(|b| {
             artifacts
                 .as_deref()
-                .is_none_or(|d| local_artifact(d, b).is_none())
+                .is_none_or(|d| local_artifact(d, b, crate::env::arch()).is_none())
         });
         let release: Option<ReleaseRef> = if release_assets && needs_release {
             sink.activity(

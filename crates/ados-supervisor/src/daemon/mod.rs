@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, mac_pin, role, sdnotify,
-    service_memory, video_cmd,
+    service_memory, sleep_guard, video_cmd,
 };
 
 mod signals;
@@ -60,6 +60,10 @@ async fn serve() -> Result<()> {
     // (auto-pair).
     let auto_pair_role = bind::BindRole::parse(&config.profile_wire);
     let cloud_relay_enabled = config.cloud_relay_enabled;
+    // A ground station on somebody's own computer is the one combination that
+    // takes a conditional sleep lock: the machine may sleep, but not mid-flight.
+    let personal_ground_station = config.profile_wire == "ground_station"
+        && ados_protocol::host_kind::read_host_kind().is_personal();
     let control_sock = config.run_dir.join(bind::control::SUPERVISOR_SOCK_NAME);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -138,7 +142,20 @@ async fn serve() -> Result<()> {
     // that randomizes its address each boot (no efuse MAC), so the box stops
     // churning its IP. Runs on every profile; inert when no such adapter exists.
     // Writes a next-boot .link only — never touches the live interface.
-    tokio::spawn(mac_pin::run(shutdown_rx.clone()));
+    //
+    // Skipped on a personal computer: this machine's adapters are the owner's,
+    // and a pinned MAC on a laptop that is also used elsewhere is a surprise
+    // (captive portals and per-network DHCP leases both follow the MAC).
+    if supervisor.manages_host_devices() {
+        tokio::spawn(mac_pin::run(shutdown_rx.clone()));
+    } else {
+        tracing::info!("personal computer: leaving the host's own adapters alone");
+        // Its one job in return: keep the machine awake only while a drone link
+        // is actually live, so the display can sleep the rest of the time.
+        if personal_ground_station {
+            tokio::spawn(sleep_guard::run(shutdown_rx.clone()));
+        }
+    }
 
     // Per-service memory sampler: scan /proc on a steady cadence, group PSS by
     // each ados unit's cgroup, and ship one metric per unit to the logging

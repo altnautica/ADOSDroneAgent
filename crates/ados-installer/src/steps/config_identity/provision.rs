@@ -158,6 +158,25 @@ pub(super) fn write_profile_conf(profile: &str, channel: &str, version: Option<&
     }
 }
 
+/// Persist the resolved host kind to `/etc/ados/host.conf`, beside
+/// `profile.conf` and with the same fsync'd write. Every later read of the host
+/// — the supervisor's catalog, the control surface's bind scope, an `--upgrade`
+/// with no flags — comes from this file, so it is written before any unit is
+/// deployed. Best-effort: a write failure leaves the box on the appliance
+/// default, which is the behaviour it had before this existed.
+pub(super) fn write_host_conf(host: ados_protocol::host_kind::HostKind) {
+    let path = Path::new(ados_protocol::host_kind::HOST_CONF);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = ados_protocol::host_kind::conf_body(host);
+    if let Err(e) = crate::env::write_atomic_durable(path, body.as_bytes(), Some(0o644)) {
+        tracing::warn!(error = %e, "writing host.conf failed; this host stays an appliance");
+    } else {
+        tracing::info!(host = %host, "host kind recorded");
+    }
+}
+
 /// Set the system hostname from `--name` (slugified), rewrite the `/etc/hosts`
 /// `127.0.1.1` line, and restart avahi so `<slug>.local` resolves. Best-effort
 /// — a hostname failure must not abort the install.

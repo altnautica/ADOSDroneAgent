@@ -172,7 +172,10 @@ impl Step for Watchdog {
         // Optional: a write/re-exec problem must degrade, never abort the install.
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "watchdog") {
+            return skip;
+        }
         // A previously-armed box must be DISARMED even if the device check would
         // skip, so an upgrade actively reverts a rig that already carries the
         // drop-in. A default that only affected fresh installs would leave every

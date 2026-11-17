@@ -36,10 +36,11 @@ use ados_term::exec::{self, CmdResult};
 /// in only what is enabled, and the systemd step has already disabled them.
 pub(crate) fn cycle_supervisor(
     profile: &str,
+    host: ados_protocol::host_kind::HostKind,
     systemctl: &mut dyn FnMut(&[&str]) -> CmdResult,
 ) -> CmdResult {
     let _ = systemctl(&["stop", SERVICE_NAME]);
-    for unit in crate::steps::systemd::other_profile_units(profile) {
+    for unit in crate::steps::systemd::other_profile_units(profile, host) {
         let _ = systemctl(&["stop", unit]);
     }
     systemctl(&["start", SERVICE_NAME])
@@ -68,7 +69,9 @@ impl Step for Start {
 
         // The ONLY supervisor start in the whole install. The binary is
         // guaranteed present because this step requires fetch_binaries.
-        let res = cycle_supervisor(&ctx.profile, &mut |args| exec::run("systemctl", args));
+        let res = cycle_supervisor(&ctx.profile, ctx.host, &mut |args| {
+            exec::run("systemctl", args)
+        });
         if !res.success() {
             if !res.spawned {
                 return StepOutcome::Failed(
@@ -108,7 +111,7 @@ impl Step for Start {
         // Best-effort: a unit that is not deployed / not enabled is a no-op,
         // and a ConditionPathExists keeps a box whose binary has not landed
         // inactive rather than restart-looping.
-        for unit in crate::steps::systemd::start_units(&ctx.profile) {
+        for unit in crate::steps::systemd::start_units(&ctx.profile, ctx.host) {
             let _ = exec::run("systemctl", &["start", "--no-block", unit]);
             tracing::info!(unit, "unit started (--no-block)");
         }
@@ -123,6 +126,11 @@ mod tests {
 
     const PROFILES: [&str; 5] = ["drone", "ground_station", "workstation", "compute", "visor"];
 
+    /// These cases pin the appliance lists, the set every shipped board acts
+    /// on; the personal lists have their own cases in the installer's unit-list
+    /// tests.
+    const HOST: ados_protocol::host_kind::HostKind = ados_protocol::host_kind::HostKind::Appliance;
+
     fn ok() -> CmdResult {
         CmdResult {
             code: Some(0),
@@ -135,7 +143,7 @@ mod tests {
     /// The `systemctl` calls the cycle issues for `profile`, in order.
     fn cycle_calls(profile: &str) -> Vec<Vec<String>> {
         let mut calls = Vec::new();
-        let res = cycle_supervisor(profile, &mut |args| {
+        let res = cycle_supervisor(profile, HOST, &mut |args| {
             calls.push(args.iter().map(|a| a.to_string()).collect());
             ok()
         });
@@ -145,7 +153,7 @@ mod tests {
 
     #[test]
     fn gs_start_set_has_the_receive_ap_and_pairing_units() {
-        let gs = crate::steps::systemd::start_units("ground_station");
+        let gs = crate::steps::systemd::start_units("ground_station", HOST);
         // The supervisor is cycled above, never kicked again here.
         assert!(!gs.contains(&"ados-supervisor.service"));
         assert!(gs.contains(&"ados-wfb-rx.service"));
@@ -156,7 +164,7 @@ mod tests {
         assert!(gs.contains(&"ados-mesh-pairing.service"));
         // The front and plugin host come back on every profile.
         for profile in PROFILES {
-            let set = crate::steps::systemd::start_units(profile);
+            let set = crate::steps::systemd::start_units(profile, HOST);
             assert!(set.contains(&"ados-control.service"), "{profile}");
             assert!(set.contains(&"ados-plugin-host.service"), "{profile}");
         }
@@ -172,7 +180,7 @@ mod tests {
     fn the_other_profile_is_stopped_while_the_supervisor_is_down() {
         for profile in PROFILES {
             let calls = cycle_calls(profile);
-            let other = crate::steps::systemd::other_profile_units(profile);
+            let other = crate::steps::systemd::other_profile_units(profile, HOST);
             assert_eq!(calls.first().unwrap(), &["stop", SERVICE_NAME], "{profile}");
             assert_eq!(calls.last().unwrap(), &["start", SERVICE_NAME], "{profile}");
             let middle: Vec<&Vec<String>> = calls[1..calls.len() - 1].iter().collect();
@@ -185,7 +193,7 @@ mod tests {
                 "{profile}: a restart carries revived units over"
             );
             // Nothing stopped here is started again by the start set.
-            let started = crate::steps::systemd::start_units(profile);
+            let started = crate::steps::systemd::start_units(profile, HOST);
             assert!(other.iter().all(|u| !started.contains(u)), "{profile}");
         }
         // Both directions of the switch that showed it.
@@ -199,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_cycle_reports_the_supervisor_start() {
-        let res = cycle_supervisor("drone", &mut |args| {
+        let res = cycle_supervisor("drone", HOST, &mut |args| {
             if args == ["start", SERVICE_NAME] {
                 CmdResult {
                     code: Some(1),

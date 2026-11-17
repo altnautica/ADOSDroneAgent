@@ -262,7 +262,10 @@ impl Step for LegacyNat {
     fn kind(&self) -> StepKind {
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "legacy_nat") {
+            return skip;
+        }
         let errors: Vec<String> = [
             remove_live_rules(),
             rewrite_if_changed(Path::new(RULES_V4_PATH), strip_legacy_masquerade).map(drop),

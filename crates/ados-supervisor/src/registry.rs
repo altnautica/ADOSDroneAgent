@@ -124,9 +124,17 @@ impl ServiceDef {
 }
 
 /// Every service the supervisor knows about, in canonical order.
+///
+/// On a personal computer the appliance-only rows are absent: each of them
+/// would take the console, the display, the Wi-Fi station, the routing table or
+/// the USB port's mode away from the machine's owner. The gate lives here
+/// rather than at each start site so a service the table says is not for this
+/// host has no runtime state at all.
 pub static SERVICE_REGISTRY: LazyLock<Vec<ServiceDef>> = LazyLock::new(|| {
+    let host = ados_protocol::host_kind::read_host_kind();
     units::UNITS
         .iter()
+        .filter(|u| !(host.is_personal() && u.appliance_only))
         .filter_map(|u| u.category.map(|c| ServiceDef::from_unit(u, c)))
         .collect()
 });

@@ -153,6 +153,9 @@ impl Step for PurgeResidue {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "purge_residue") {
+            return skip;
+        }
         purge_orphan_route();
         // Only the REVERT direction lives here. Provisioning a panel overlay
         // needs presence detection and a probation marker to be brick-safe,

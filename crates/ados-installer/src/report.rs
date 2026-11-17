@@ -36,6 +36,9 @@ pub fn build_summary(status: &str, ctx: &Ctx) -> SummaryData {
         required_failures: ctx.failures.required.clone(),
         failure_reasons: ctx.failures.required_reasons.clone(),
         pending_reboot: ctx.pending_reboot.clone(),
+        host_kind: ctx.host.as_str().to_string(),
+        host_basis: ctx.host_basis.clone().unwrap_or_default(),
+        deferred_reboot: ctx.deferred_reboot.clone(),
     }
 }
 

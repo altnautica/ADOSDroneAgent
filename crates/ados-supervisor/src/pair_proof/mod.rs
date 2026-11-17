@@ -55,8 +55,13 @@ use ados_protocol::pair_proof::{
 use crate::bind::BindRole;
 use machine::{
     decide_rearm, drone_signals, gs_signals, HoldTrigger, RearmInput, RearmSignals, RearmStep,
-    DEFAULT_REARM_COOLDOWN_S, PAIR_REARM_KIND, REARM_CONFIRM_HOLD, STATS_FRESH_CEILING,
+    DEFAULT_REARM_COOLDOWN_S, PAIR_REARM_KIND, REARM_CONFIRM_HOLD,
 };
+
+/// How old the radio's stats sidecar may be and still count as this moment's
+/// verdict, re-exported so a reader that only needs the freshness rule (the
+/// sleep lock) shares the one definition rather than carrying a second.
+pub use machine::STATS_FRESH_CEILING;
 
 /// The radio's own stats sidecar — the source of both signals.
 const WFB_STATS_PATH: &str = "/run/ados/wfb-stats.json";

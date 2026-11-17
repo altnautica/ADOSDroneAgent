@@ -95,7 +95,10 @@ impl Step for Aic8800Tune {
         // Optional: a write problem must degrade, never abort the install.
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "aic8800_tune") {
+            return skip;
+        }
         if !aic8800_present() {
             tracing::info!("no AIC8800 onboard WiFi present; skipping stability tune");
             return StepOutcome::Ok;

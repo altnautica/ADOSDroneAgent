@@ -50,6 +50,12 @@ pub const FLAGS: &[FlagSpec] = &[
         "<drone|ground_station|workstation|compute|visor>",
         "Agent profile to install",
     ),
+    valued(
+        "--host",
+        "<appliance|personal>",
+        "Host kind: appliance (dedicated box) or personal (your laptop or\n\
+         desktop); detected when omitted",
+    ),
     valued("--name", "<hostname>", "mDNS hostname to set"),
     flag(
         "--no-rtl-driver",
@@ -229,6 +235,7 @@ impl Args {
             "--non-interactive" => self.non_interactive = true,
             "--help" => self.help = true,
             "--profile" => self.profile = value,
+            "--host" => self.host = value,
             "--name" => self.name = value,
             "--pair" => self.pair = value,
             "--branch" => self.branch = value,

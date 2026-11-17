@@ -152,19 +152,32 @@ pub async fn run_daemon() -> Result<()> {
     // station never appears in the discovered list and the operator has to
     // know and type a hostname. The SRV target is the same resolvable name
     // `/api/pairing/info` reports as `mdns_host`.
-    let advert = crate::mdns::advertise(
-        &crate::state::PairingPaths {
-            config: paths.config_path.clone(),
-            pairing_json: paths.pairing_path.clone(),
-            wfb_key_dir: paths.wfb_key_dir.clone(),
-            bind_state: paths.bind_state_path.clone(),
-            profile_conf: paths.profile_conf_path.clone(),
-            mesh_role: paths.mesh_role_path.clone(),
-            relay_secret: paths.relay_secret_path.clone(),
-        },
-        paths.board_path.clone(),
-        paths.control_tcp_port,
-    );
+    //
+    // Not on a ground station running on somebody's own computer with sharing
+    // off: that front answers loopback only, so advertising it would put a node
+    // in the fleet's discovered list whose pairing front nothing else can reach.
+    let advertise = crate::serve::BindScope::for_host(
+        ados_protocol::host_kind::read_host_kind(),
+        crate::config::host_section(&paths.config_path).share_on_lan,
+    ) == crate::serve::BindScope::All;
+    let advert = if advertise {
+        crate::mdns::advertise(
+            &crate::state::PairingPaths {
+                config: paths.config_path.clone(),
+                pairing_json: paths.pairing_path.clone(),
+                wfb_key_dir: paths.wfb_key_dir.clone(),
+                bind_state: paths.bind_state_path.clone(),
+                profile_conf: paths.profile_conf_path.clone(),
+                mesh_role: paths.mesh_role_path.clone(),
+                relay_secret: paths.relay_secret_path.clone(),
+            },
+            paths.board_path.clone(),
+            paths.control_tcp_port,
+        )
+    } else {
+        tracing::info!("loopback-only front: not advertising on the network");
+        None
+    };
     let result = run_with_paths(paths, shutdown_signal()).await;
     // Withdraw before exiting, so a GCS browsing mid-shutdown does not list a
     // node whose pairing front has already stopped answering.

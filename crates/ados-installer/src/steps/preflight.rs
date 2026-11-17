@@ -6,18 +6,24 @@
 //!      `/etc/systemd/system`, so a non-root run cannot proceed. On a non-Linux
 //!      dev host the check is inert (returns "root") so `cargo test` + a dry
 //!      run on a Mac still exercise the chain.
-//!   2. **arch** — the prebuilt service binaries target aarch64 only.
+//!   2. **arch** — the release publishes service binaries for aarch64 and
+//!      x86_64, so an install on either fetches a prebuilt and needs no
+//!      compiler. Any other arch is refused unless `--channel edge` builds from
+//!      source with `--artifacts`.
 //!   3. **profile** — `--profile` wins, else the persisted
 //!      `/etc/ados/profile.conf` (YAML `profile: X` or legacy `profile=X`),
 //!      else the `drone` default. The resolved value lands in `ctx.profile`.
-//!   4. **channel** — `--channel` wins, else `ctx.channel`'s existing default
+//!   4. **host** — what kind of machine this is (an appliance, or a personal
+//!      computer whose Wi-Fi, display, sleep and updates the install leaves
+//!      alone). `--host` wins, else `/etc/ados/host.conf`, else a probe.
+//!   5. **channel** — `--channel` wins, else `ctx.channel`'s existing default
 //!      (`edge`). The resolved value lands back in `ctx.channel`.
-//!   5. **armed** — an upgrade (or a reinstall over a present install) of a
+//!   6. **armed** — an upgrade (or a reinstall over a present install) of a
 //!      drone or ground-station node restarts the MAVLink, radio and video
 //!      services, so it is refused while the vehicle is, or may be, armed,
 //!      unless `--force-armed`. The verdict is the shared
 //!      `ados_protocol::armed` rule: no fresh `armed: false` state fails closed.
-//!   6. a best-effort connectivity note (logged, never fatal — `fetch_binaries`
+//!   7. a best-effort connectivity note (logged, never fatal — `fetch_binaries`
 //!      is the real network gate).
 
 use std::path::{Path, PathBuf};
@@ -115,14 +121,12 @@ impl Step for Preflight {
             );
         }
 
-        // 2. arch — aarch64 installs from the published release binaries;
-        // x86_64 installs from locally built binaries (`--artifacts`, enforced
-        // in fetch_binaries). macOS hosts take the separate build-from-source
-        // install path instead.
+        // 2. arch — the release publishes both arches, so either installs from
+        // prebuilt binaries. Anything else has no binaries at all.
+        // macOS hosts take the separate build-from-source install path instead.
         if !env::is_supported_arch() {
             return StepOutcome::Failed(format!(
-                "unsupported architecture {}: Linux supports aarch64 (release \
-                 binaries) and x86_64 (locally built, --channel edge --artifacts <dir>)",
+                "unsupported architecture {}: Linux supports aarch64 and x86_64",
                 ctx.env.arch
             ));
         }

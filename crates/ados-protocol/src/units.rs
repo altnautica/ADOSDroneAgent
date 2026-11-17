@@ -92,6 +92,12 @@ pub struct UnitSpec {
     pub self_terminating: bool,
     /// An install of a profile outside `profiles` stops and disables it.
     pub teardown: bool,
+    /// Takes over something a personal computer's owner already owns: the
+    /// console, the display, the Wi-Fi station or routing table, the USB port's
+    /// mode, or the mesh. Every list a `HostKind::Personal` install acts on
+    /// drops these rows, and the installer tears them down when a host that ran
+    /// the appliance set becomes personal.
+    pub appliance_only: bool,
 }
 
 impl UnitSpec {
@@ -137,6 +143,7 @@ const BASE: UnitSpec = UnitSpec {
     idle_ok: false,
     self_terminating: false,
     teardown: false,
+    appliance_only: false,
 };
 
 /// A boot oneshot the installer enables everywhere. Nothing to restart.
@@ -175,6 +182,8 @@ const fn sensor_unit(name: &'static str, profiles: &'static [&'static str]) -> U
         ..BASE
     }
 }
+
+pub use crate::host_kind::{read_host_kind, HostKind};
 
 use Category::{Core, Hardware, OnDemand};
 
@@ -302,12 +311,26 @@ pub const UNITS: &[UnitSpec] = &[
         headless_keep: true,
         ..BASE
     },
-    boot_oneshot("ados-fbcon-detach.service"),
-    boot_oneshot("ados-display-probe.service"),
+    // The console and its mode: taking the virtual terminal away from the
+    // local session, and probing what the display can do. A personal computer
+    // keeps its own console.
+    UnitSpec {
+        appliance_only: true,
+        ..boot_oneshot("ados-fbcon-detach.service")
+    },
+    UnitSpec {
+        appliance_only: true,
+        ..boot_oneshot("ados-display-probe.service")
+    },
     // Confirms a staged CSI overlay or restores the pre-overlay boot config;
     // the probation marker, not the profile, decides whether it does anything.
     boot_oneshot("ados-camera-probe.service"),
-    boot_oneshot("ados-usb-otg-host.service"),
+    // Forces the USB-C port into host mode. That is the box's port, not a
+    // laptop's: on a personal computer it stays where the user put it.
+    UnitSpec {
+        appliance_only: true,
+        ..boot_oneshot("ados-usb-otg-host.service")
+    },
     // The native plugin host, pulled up by `WantedBy=` the supervisor.
     UnitSpec {
         name: "ados-plugin-host.service",
@@ -378,6 +401,7 @@ pub const UNITS: &[UnitSpec] = &[
     },
     UnitSpec {
         profiles: GS_VISOR,
+        appliance_only: true,
         ..gs_unit("ados-oled.service", Some(Hardware))
     },
     // The optional I2C status panel self-skips when no panel answers, so the
@@ -385,33 +409,39 @@ pub const UNITS: &[UnitSpec] = &[
     UnitSpec {
         profiles: GS_VISOR,
         start_on_install: false,
+        appliance_only: true,
         ..gs_unit("ados-oled-i2c.service", Some(Hardware))
     },
     UnitSpec {
         profiles: GS_VISOR,
         health_check: true,
         drops_link: true,
+        appliance_only: true,
         ..gs_unit("ados-hostapd.service", Some(Hardware))
     },
     UnitSpec {
         profiles: GS_VISOR,
         health_check: true,
         drops_link: true,
+        appliance_only: true,
         ..gs_unit("ados-dnsmasq-gs.service", Some(Hardware))
     },
     UnitSpec {
         health_check: true,
         idle_ok: true,
+        appliance_only: true,
         ..gs_unit("ados-setup-captive.service", Some(OnDemand))
     },
     // Exits 0 when the configured display is an LCD or none.
     UnitSpec {
         idle_ok: true,
+        appliance_only: true,
         ..gs_unit("ados-kiosk.service", Some(Hardware))
     },
     UnitSpec {
         profiles: GS_VISOR,
         drops_link: true,
+        appliance_only: true,
         ..gs_unit("ados-input.service", Some(Hardware))
     },
     // The front-panel button reader lives in-process here, so a visor runs it
@@ -419,6 +449,7 @@ pub const UNITS: &[UnitSpec] = &[
     UnitSpec {
         profiles: GS_VISOR,
         drops_link: true,
+        appliance_only: true,
         ..gs_unit("ados-pic.service", Some(Hardware))
     },
     // The ados-net uplink daemon: uplinks, the Wi-Fi station (it serves the
@@ -427,6 +458,7 @@ pub const UNITS: &[UnitSpec] = &[
     UnitSpec {
         profiles: GS_VISOR,
         drops_link: true,
+        appliance_only: true,
         ..gs_unit("ados-uplink-router.service", Some(Hardware))
     },
     // Distributed-receive units, owned by the relay and receiver roles. The
@@ -439,6 +471,7 @@ pub const UNITS: &[UnitSpec] = &[
         drops_link: true,
         idle_ok: true,
         teardown: true,
+        appliance_only: true,
         ..BASE
     },
     UnitSpec {
@@ -448,6 +481,7 @@ pub const UNITS: &[UnitSpec] = &[
         roles: &["relay"],
         drops_link: true,
         idle_ok: true,
+        appliance_only: true,
         ..BASE
     },
     UnitSpec {
@@ -457,6 +491,7 @@ pub const UNITS: &[UnitSpec] = &[
         roles: &["receiver"],
         drops_link: true,
         idle_ok: true,
+        appliance_only: true,
         ..BASE
     },
 ];
@@ -489,7 +524,7 @@ pub const RETIRED: &[&str] = &[
 mod lookup;
 mod roles;
 pub use lookup::{
-    find, health_units, net_daemon_owns_wifi, other_profile_units, profile_enable_units,
-    start_units, supervised, units_for_profile, universal_units,
+    appliance_teardown_units, find, health_units, net_daemon_owns_wifi, other_profile_units,
+    profile_enable_units, start_units, supervised, units_for_profile, universal_units,
 };
 pub use roles::{role_unit_count, role_unit_names};

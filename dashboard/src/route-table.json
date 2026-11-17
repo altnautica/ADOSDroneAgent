@@ -191,7 +191,10 @@
     "path": "/settings/network",
     "label": "Network",
     "profiles": null,
-    "roles": null
+    "roles": null,
+    "hosts": [
+      "appliance"
+    ]
   },
   {
     "key": "settings-cellular",
@@ -300,7 +303,10 @@
     "profiles": [
       "ground_station"
     ],
-    "roles": null
+    "roles": null,
+    "hosts": [
+      "appliance"
+    ]
   },
   {
     "key": "settings-advanced",

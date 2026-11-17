@@ -25,8 +25,11 @@ pub enum Gate {
 pub struct PrebuiltBinary {
     /// Service name (also the installed binary basename).
     pub service: &'static str,
-    /// GitHub release asset name (`<service>-aarch64`).
-    pub asset: &'static str,
+    /// Release asset stem, when the asset is not `<service>`. `None` is the
+    /// normal case and derives the name from `service`; the one entry that sets
+    /// it is the ONNX-enabled vision build, which replaces the default at the
+    /// same destination and so must publish under a name of its own.
+    pub asset_stem: Option<&'static str>,
     /// Install destination.
     pub dest: &'static str,
     /// Hard vs best-effort gate.
@@ -34,6 +37,34 @@ pub struct PrebuiltBinary {
     /// Profiles that need this binary (`drone`, `ground_station`,
     /// `workstation`, `compute`, `visor`).
     pub profiles: &'static [&'static str],
+}
+
+/// The architectures the release publishes service binaries for. CI builds a
+/// job per entry and names each asset `<service>-<arch>`.
+pub const RELEASE_ARCHES: &[&str] = &["aarch64", "x86_64"];
+
+impl PrebuiltBinary {
+    /// The GitHub release asset for `arch`.
+    ///
+    /// Every service publishes `<service>-<arch>`, in both arches CI builds, so
+    /// the name is derived rather than restated per entry — a table that spelled
+    /// it out was 30 identical strings and one place for a rename to miss. The
+    /// two exceptions carry their own names: the ONNX-enabled vision build is a
+    /// distinct glibc binary (`<service>-onnx-<arch>`) that replaces the default
+    /// at the same destination, and its runtime is a shared object
+    /// (`libonnxruntime-<arch>.so`) that lands in `lib/`. Both exist only for
+    /// aarch64: a musl build cannot link ONNX Runtime, and no x86_64 board
+    /// profile declares CPU-ONNX inference.
+    pub fn asset_name(&self, arch: &str) -> String {
+        // The ONNX Runtime library is a shared object, and only aarch64 has a
+        // prebuilt: a musl build cannot link it and no x86_64 board profile
+        // declares CPU-ONNX inference.
+        if self.service == "libonnxruntime" {
+            return "libonnxruntime-aarch64.so".to_string();
+        }
+        let stem = self.asset_stem.unwrap_or(self.service);
+        format!("{stem}-{arch}")
+    }
 }
 
 // Profile constants — kept as slices so the const table can reference them.
@@ -70,55 +101,54 @@ const ANY: &[&str] = ados_protocol::contracts::PROFILES;
 pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-tui",
-        asset: "ados-tui-aarch64",
         dest: "/opt/ados/bin/ados-tui",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-supervisor",
-        asset: "ados-supervisor-aarch64",
         dest: "/opt/ados/bin/ados-supervisor",
         gate: Gate::Hard,
+        asset_stem: None,
         profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-mavlink-router",
-        asset: "ados-mavlink-router-aarch64",
         dest: "/opt/ados/bin/ados-mavlink-router",
         // The sole command-and-control path: the Core MAVLink unit execs this
         // binary unconditionally and has no Python fallback. Hard on every
         // MAVLink profile so a fetch miss aborts the install instead of shipping
         // a unit that crash-loops with no FC or sensor-hub link.
         gate: Gate::Hard,
+        asset_stem: None,
         profiles: FC_VISOR,
     },
     // The on-board command authority. Best-effort: without it the router keeps
     // its own heartbeat and passes client stick frames through, as before.
     PrebuiltBinary {
         service: "ados-pilot",
-        asset: "ados-pilot-aarch64",
         dest: "/opt/ados/bin/ados-pilot",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: DRONE,
     },
     PrebuiltBinary {
         service: "ados-radio",
-        asset: "ados-radio-aarch64",
         dest: "/opt/ados/bin/ados-radio",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: DRONE,
     },
     PrebuiltBinary {
         service: "ados-video",
-        asset: "ados-video-aarch64",
         dest: "/opt/ados/bin/ados-video",
         gate: Gate::Hard,
+        asset_stem: None,
         profiles: DRONE_VISOR,
     },
     PrebuiltBinary {
         service: "ados-camera-probe",
-        asset: "ados-camera-probe-aarch64",
         // Built in the same job as ados-video, so the probe can never be a
         // version behind the pipeline whose overlay it validates.
         dest: "/opt/ados/bin/ados-camera-probe",
@@ -127,6 +157,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         // probation marker, so a node that never staged a camera overlay never
         // execs it, and any node that DID stage one must be able to revert it.
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: ANY,
     },
     // The native plugin host: the per-plugin sockets, token minting and unit
@@ -134,23 +165,23 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // nodes as well as the SBC profiles — so it is fetched on all of them.
     PrebuiltBinary {
         service: "ados-plugin-host",
-        asset: "ados-plugin-host-aarch64",
         dest: "/opt/ados/bin/ados-plugin-host",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-cloud",
-        asset: "ados-cloud-aarch64",
         dest: "/opt/ados/bin/ados-cloud",
         gate: Gate::Hard,
+        asset_stem: None,
         profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-groundlink",
-        asset: "ados-groundlink-aarch64",
         dest: "/opt/ados/bin/ados-groundlink",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GROUND,
     },
     // The network daemon, exec'd by `ados-uplink-router.service` on the
@@ -160,9 +191,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // uplink-router unit runs.
     PrebuiltBinary {
         service: "ados-net",
-        asset: "ados-net-aarch64",
         dest: "/opt/ados/bin/ados-net",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GS_VISOR,
     },
     // The first-boot captive portal, exec'd by `ados-setup-captive.service`:
@@ -172,44 +203,44 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // phone's sign-in sheet.
     PrebuiltBinary {
         service: "ados-captive",
-        asset: "ados-captive-aarch64",
         dest: "/opt/ados/bin/ados-captive",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GROUND,
     },
     PrebuiltBinary {
         service: "ados-pic",
-        asset: "ados-pic-aarch64",
         dest: "/opt/ados/bin/ados-pic",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GS_VISOR,
     },
     PrebuiltBinary {
         service: "ados-input",
-        asset: "ados-input-aarch64",
         dest: "/opt/ados/bin/ados-input",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GS_VISOR,
     },
     PrebuiltBinary {
         service: "ados-display",
-        asset: "ados-display-aarch64",
         dest: "/opt/ados/bin/ados-display",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GS_VISOR,
     },
     PrebuiltBinary {
         service: "ados-display-probe",
-        asset: "ados-display-probe-aarch64",
         dest: "/opt/ados/bin/ados-display-probe",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GS_VISOR,
     },
     PrebuiltBinary {
         service: "ados-oled-i2c",
-        asset: "ados-oled-i2c-aarch64",
         dest: "/opt/ados/bin/ados-oled-i2c",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GS_VISOR,
     },
     // The HDMI kiosk, exec'd by `ados-kiosk.service`: a full-screen browser on
@@ -217,16 +248,16 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // station only, matching the unit's profile list.
     PrebuiltBinary {
         service: "ados-kiosk",
-        asset: "ados-kiosk-aarch64",
         dest: "/opt/ados/bin/ados-kiosk",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GROUND,
     },
     PrebuiltBinary {
         service: "ados-vision",
-        asset: "ados-vision-aarch64",
         dest: "/opt/ados/bin/ados-vision",
         gate: Gate::Hard,
+        asset_stem: None,
         profiles: DRONE_VISOR,
     },
     // The decentralized swarm state bus. Fetched on both FC-bearing profiles,
@@ -248,9 +279,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // surface somewhere an operator will see it.
     PrebuiltBinary {
         service: "ados-swarmbus",
-        asset: "ados-swarmbus-aarch64",
         dest: "/opt/ados/bin/ados-swarmbus",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: FC,
     },
     // The local logging and telemetry store. Best-effort: a missing store
@@ -260,9 +291,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // tooling — a controlled rollout rather than an unconditional default.
     PrebuiltBinary {
         service: "ados-logd",
-        asset: "ados-logd-aarch64",
         dest: "/opt/ados/bin/ados-logd",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: ANY,
     },
     // The native HTTP control surface: the LAN front on `:8080` (pairing, status,
@@ -274,9 +305,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // unreachable REST port.
     PrebuiltBinary {
         service: "ados-control",
-        asset: "ados-control-aarch64",
         dest: "/opt/ados/bin/ados-control",
         gate: Gate::Hard,
+        asset_stem: None,
         profiles: ANY,
     },
     // The GPIO-output service (status buzzer / LED). Best-effort and opt-in: it
@@ -286,9 +317,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // header GPIO can drive an indicator on an air, a ground or a handheld node.
     PrebuiltBinary {
         service: "ados-gpio",
-        asset: "ados-gpio-aarch64",
         dest: "/opt/ados/bin/ados-gpio",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: FC_VISOR,
     },
     // The CRSF / ExpressLRS RC control lane. Best-effort and opt-in: the unit
@@ -299,9 +330,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // last-mile posture.
     PrebuiltBinary {
         service: "ados-crsf",
-        asset: "ados-crsf-aarch64",
         dest: "/opt/ados/bin/ados-crsf",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: FC,
     },
     // The config-over-radio channel service. ExecStart guard execs /bin/true
@@ -310,9 +341,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // injector.
     PrebuiltBinary {
         service: "ados-tunnel-config",
-        asset: "ados-tunnel-config-aarch64",
         dest: "/opt/ados/bin/ados-tunnel-config",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: FC,
     },
     // The sensor plane. Best-effort: each unit's ExecStart guard execs
@@ -323,23 +354,23 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // ground node and the visor.
     PrebuiltBinary {
         service: "ados-clock",
-        asset: "ados-clock-aarch64",
         dest: "/opt/ados/bin/ados-clock",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: FC_VISOR,
     },
     PrebuiltBinary {
         service: "ados-sensorhub",
-        asset: "ados-sensorhub-aarch64",
         dest: "/opt/ados/bin/ados-sensorhub",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: DRONE_VISOR,
     },
     PrebuiltBinary {
         service: "ados-gnss",
-        asset: "ados-gnss-aarch64",
         dest: "/opt/ados/bin/ados-gnss",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: GS_VISOR,
     },
     // The LoRa beacon lane. Best-effort and opt-in: the unit gates on the
@@ -348,9 +379,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // runs: the drone and the ground station.
     PrebuiltBinary {
         service: "ados-lora",
-        asset: "ados-lora-aarch64",
         dest: "/opt/ados/bin/ados-lora",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: FC,
     },
     // The video relay the pipeline streams through. It is a mirrored
@@ -362,9 +393,9 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // through it.
     PrebuiltBinary {
         service: "mediamtx",
-        asset: "mediamtx-aarch64",
         dest: "/usr/local/bin/mediamtx",
         gate: Gate::BestEffort,
+        asset_stem: None,
         profiles: FC_VISOR,
     },
 ];
@@ -400,7 +431,9 @@ pub fn profile_ships(profile: &str, service: &str) -> bool {
 /// install.
 pub const PREBUILT_VISION_ONNX: PrebuiltBinary = PrebuiltBinary {
     service: "ados-vision",
-    asset: "ados-vision-onnx-aarch64",
+    // Its own asset name: it lands at the same destination as the default vision
+    // binary, so publishing it as `ados-vision-<arch>` would collide with it.
+    asset_stem: Some("ados-vision-onnx"),
     dest: "/opt/ados/bin/ados-vision",
     gate: Gate::Hard,
     profiles: DRONE_VISOR,
@@ -416,7 +449,7 @@ pub const PREBUILT_VISION_ONNX: PrebuiltBinary = PrebuiltBinary {
 /// is unavailable. Placed alongside `ados-vision`'s config, not on `bin/`.
 pub const PREBUILT_VISION_ONNX_RUNTIME: PrebuiltBinary = PrebuiltBinary {
     service: "libonnxruntime",
-    asset: "libonnxruntime-aarch64.so",
+    asset_stem: None,
     dest: "/opt/ados/lib/libonnxruntime.so",
     gate: Gate::BestEffort,
     profiles: DRONE_VISOR,

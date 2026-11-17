@@ -100,7 +100,9 @@ pub fn ignored_artifact_names(entries: &[String]) -> Vec<String> {
 
 /// Whether `name` is a spelling of some catalog artifact — any profile's, plus
 /// the onnx vision variant and the ONNX Runtime library, since a directory
-/// assembled for one profile may legitimately carry another's binary.
+/// assembled for one profile may legitimately carry another's binary. Both
+/// arches count: a directory staged on one machine may be installed on the
+/// other.
 pub(super) fn is_catalog_artifact_name(name: &str) -> bool {
     binaries::PREBUILT
         .iter()
@@ -108,7 +110,12 @@ pub(super) fn is_catalog_artifact_name(name: &str) -> bool {
             &binaries::PREBUILT_VISION_ONNX,
             &binaries::PREBUILT_VISION_ONNX_RUNTIME,
         ])
-        .any(|b| b.asset == name || b.service == name)
+        .any(|b| {
+            b.service == name
+                || binaries::RELEASE_ARCHES
+                    .iter()
+                    .any(|a| b.asset_name(a) == name)
+        })
 }
 
 /// The file names directly inside `dir` (no recursion), sorted.

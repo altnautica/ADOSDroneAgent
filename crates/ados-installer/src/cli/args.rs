@@ -20,6 +20,12 @@ pub struct Args {
     /// `--profile <v>` — `drone` | `ground_station` | `workstation` | `compute`
     /// | `visor` (the ground-station spelling is normalized; others pass through).
     pub profile: Option<String>,
+    /// `--host <v>` — `appliance` (a dedicated box: the agent owns the console,
+    /// display, radios and routes) or `personal` (a laptop or desktop somebody
+    /// also uses: the agent keeps only the radio, pairing, video and control
+    /// services). `None` means detect it, or reuse the persisted
+    /// `/etc/ados/host.conf`; see [`crate::host`].
+    pub host: Option<String>,
     /// `--name <v>` — mDNS hostname to set.
     pub name: Option<String>,
     /// `--pair <v>` or a bare positional — pairing code / key.

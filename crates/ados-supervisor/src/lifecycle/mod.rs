@@ -224,6 +224,16 @@ pub struct Supervisor {
     /// The agent config file's modification time as last seen. A change wakes
     /// every idle row (see [`Self::idle_rows_due_on_config_change`]).
     config_stamp: Option<std::time::SystemTime>,
+    /// What kind of machine this is, read once from `/etc/ados/host.conf` at
+    /// construction.
+    ///
+    /// On a personal computer the pass does not run the reconcilers that manage
+    /// the machine's own network or USB devices (the management-link guardian
+    /// and failover, the onboard-WiFi self-heal and power-save reconcilers, the
+    /// USB rehome and the stable-MAC pin). Each of those exists to keep an
+    /// unattended appliance reachable; on a laptop they fight the owner's own
+    /// NetworkManager profile and can yank a device that is not ours.
+    host: ados_protocol::host_kind::HostKind,
 }
 
 impl Supervisor {
@@ -278,7 +288,15 @@ impl Supervisor {
             progress: MonitorProgress::new(),
             work_proof: crate::work_proof::WorkProof::new(),
             last_adoption_sweep: None,
+            host: ados_protocol::host_kind::read_host_kind(),
         }
+    }
+
+    /// Whether this process is the steward of the machine's own network and USB
+    /// devices: true on an appliance, false on somebody's personal computer,
+    /// where the reconcilers behind it would fight the owner's own setup.
+    pub fn manages_host_devices(&self) -> bool {
+        !self.host.is_personal()
     }
 
     pub fn config(&self) -> &AgentConfig {

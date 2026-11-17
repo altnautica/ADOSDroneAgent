@@ -40,6 +40,9 @@ impl Step for WifiJoin {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        if let Some(skip) = crate::host::personal_skip(ctx, "wifi_join") {
+            return skip;
+        }
         let ssid = match ctx.args.wifi_ssid.clone() {
             Some(s) if !s.trim().is_empty() => s,
             // No --wifi-ssid: nothing to do (the wizard owns the interactive path).

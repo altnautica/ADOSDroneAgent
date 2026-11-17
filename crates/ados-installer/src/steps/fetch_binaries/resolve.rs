@@ -177,7 +177,10 @@ pub(super) fn pinned_release_published(
     sample: &PrebuiltBinary,
     tmp_dir: &Path,
 ) -> bool {
-    let url = format!("{}.sha256", release.asset_url(sample.asset));
+    let url = format!(
+        "{}.sha256",
+        release.asset_url(&sample.asset_name("aarch64"))
+    );
     let probe = tmp_dir.join("pinned-release-probe.sha256");
     let ok = net::fetch(&url, &probe).is_ok();
     let _ = std::fs::remove_file(&probe);

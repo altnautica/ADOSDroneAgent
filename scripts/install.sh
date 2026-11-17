@@ -290,18 +290,10 @@ fi
 arch="$(uname -m)"
 case "$arch" in
     aarch64|arm64) asset="ados-installer-aarch64" ;;
+    x86_64|amd64)  asset="ados-installer-x86_64" ;;
     *)
-        case "$arch" in
-            x86_64|amd64)
-                echo "ERROR: x86_64 Linux has no published installer: build ados-installer from" >&2
-                echo "       source (cargo build --release --workspace) and run it with" >&2
-                echo "       --channel edge --artifacts <dir>" >&2
-                ;;
-            *)
-                echo "ERROR: ${arch} Linux is not supported. Linux supports aarch64 (release" >&2
-                echo "       binaries) and x86_64 (locally built installer), or run on macOS." >&2
-                ;;
-        esac
+        echo "ERROR: ${arch} Linux is not supported. Linux supports aarch64 and x86_64," >&2
+        echo "       or run on macOS." >&2
         exit 1
         ;;
 esac

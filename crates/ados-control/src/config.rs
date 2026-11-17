@@ -176,14 +176,22 @@ impl Default for ApiSecuritySection {
     }
 }
 
-/// The Mission Control dev origins, matching `DEFAULT_CORS_ORIGINS` in
-/// `src/ados/core/config/security.py`. Two lists, one contract.
+/// The Mission Control origins the agent accepts by default, matching
+/// `DEFAULT_CORS_ORIGINS` in `src/ados/core/config/security.py`. Two lists, one
+/// contract.
+///
+/// The hosted site is here because it is where most operators run Mission
+/// Control: a ground station on a personal computer answers that page at
+/// `127.0.0.1`, so the page's origin has to be allowed or the browser drops
+/// every reply. The private-network preflight that request triggers is answered
+/// by `allow_private_network` on the CORS layer, not by an origin.
 pub fn default_cors_origins() -> Vec<String> {
     [
         "http://localhost:4000",
         "http://127.0.0.1:4000",
         "http://localhost:4001",
         "http://127.0.0.1:4001",
+        "https://command.altnautica.com",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -290,6 +298,16 @@ impl ControlSecurityConfig {
 /// honoured within a couple of requests without a stat per request.
 pub const CONFIG_CACHE_TTL: Duration = Duration::from_secs(2);
 
+/// The `host:` section, from the shared config snapshot: one parse per change of
+/// the file, like every other slice this daemon reads.
+///
+/// The type is [`ados_config::HostConfig`] — the same one the ground media server
+/// reads — so the control front's bind scope, its mDNS advert and the media
+/// server's WebRTC reach can never disagree about whether this node is shared.
+pub fn host_section(path: &Path) -> Arc<ados_config::HostConfig> {
+    config_snapshot(path, CONFIG_CACHE_TTL).host
+}
+
 /// The config document as the control plane types it: the pairing slice and the
 /// security slice, parsed together in one pass.
 #[derive(Debug, Default, Deserialize)]
@@ -302,6 +320,8 @@ struct ConfigDoc {
     security: SecuritySection,
     #[serde(default)]
     mcp: McpSection,
+    #[serde(default)]
+    host: ados_config::HostConfig,
 }
 
 /// One parse of the config, shared by every reader until the file changes.
@@ -312,6 +332,8 @@ pub struct ConfigSnapshot {
     /// The security slice, or why it could not be read. An absent file is the
     /// all-defaults config of a fresh node, not an error.
     pub security: Result<Arc<ControlSecurityConfig>, Arc<str>>,
+    /// The host slice; all-defaults (loopback, not shared) on absence.
+    pub host: Arc<ados_config::HostConfig>,
 }
 
 /// Size and modification time of a file, `None` when it cannot be stat-ed.
@@ -388,6 +410,7 @@ fn parse_snapshot(path: &Path) -> ConfigSnapshot {
         video,
         security,
         mcp,
+        host,
     } = doc;
     let mut pairing = PairingConfig { agent, video };
     pairing.agent.device_id = ados_protocol::identity::device_id_at(
@@ -401,6 +424,7 @@ fn parse_snapshot(path: &Path) -> ConfigSnapshot {
     ConfigSnapshot {
         pairing: Arc::new(pairing),
         security,
+        host: Arc::new(host),
     }
 }
 

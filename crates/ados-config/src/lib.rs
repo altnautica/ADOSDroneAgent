@@ -25,6 +25,7 @@
 
 pub mod cameras;
 pub mod capture_storage;
+pub mod host;
 pub mod log_store;
 pub mod mac_pin;
 mod profile;
@@ -32,6 +33,7 @@ pub mod schema;
 pub mod side_effects;
 pub mod simulation;
 
+pub use host::{reachable_on_lan, reachable_on_lan_now, HostConfig};
 pub use profile::{
     ground_station_role, mesh_role_path, node_profile, node_profile_at, normalize_profile,
     profile_conf_path, read_mesh_role, read_profile_conf_value, resolve_profile, MESH_ROLE_PATH,

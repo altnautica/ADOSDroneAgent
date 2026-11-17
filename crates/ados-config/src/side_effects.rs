@@ -71,6 +71,7 @@ pub fn apply(
     fx.tunnel(old, new);
     fx.lora(old, new);
     fx.hotspot(old, new);
+    fx.host_share(old, new);
     fx.remote_access(old, new);
     fx.sensorhub(old, new);
     fx.report
@@ -110,6 +111,13 @@ fn truthy(value: Option<&Value>) -> bool {
 
 fn enabled(slice: &Value) -> bool {
     truthy(slice.get("enabled"))
+}
+
+/// Whether the host is shared on the local network. Absent reads as `false`:
+/// a personal computer's ground station is reachable only from itself until the
+/// operator says otherwise.
+fn share_on_lan(host: &Value) -> bool {
+    truthy(host.get("share_on_lan"))
 }
 
 /// The projection of `radio.crsf` the MAVLink router consumes: the pinned
@@ -281,6 +289,28 @@ impl Effects<'_> {
             // turned off would otherwise still show a failed unit.
             self.systemctl(&["--no-block", "reset-failed", "ados-dnsmasq-gs.service"]);
             self.systemctl(&["--no-block", "stop", "ados-dnsmasq-gs.service"]);
+        }
+    }
+
+    /// `host.share_on_lan`: whether phones and tablets on this network may reach
+    /// a ground station running on somebody's own computer.
+    ///
+    /// The flag decides a bind scope, not a marker file, so a flip has to
+    /// restart the two listeners that read it once at startup: the control front
+    /// (which binds the wildcard or loopback) and the media server (which
+    /// advertises a reachable WebRTC host or a loopback one). Both are
+    /// `--no-block` restarts: the operator is watching the surface that issues
+    /// the write, and a blocking restart there would hang their own request.
+    fn host_share(&mut self, old: &Value, new: &Value) {
+        let (before, after) = (
+            share_on_lan(slice(old, &["host"])),
+            share_on_lan(slice(new, &["host"])),
+        );
+        if before == after {
+            return;
+        }
+        for unit in ["ados-control.service", "ados-mediamtx-gs.service"] {
+            self.systemctl(&["--no-block", "try-restart", unit]);
         }
     }
 

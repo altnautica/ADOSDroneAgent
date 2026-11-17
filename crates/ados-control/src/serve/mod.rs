@@ -69,7 +69,7 @@ mod ws_ticket;
 #[cfg(test)]
 use edge::McpDecision;
 use edge::{tcp_edge, EdgeAuth};
-pub use listener::{bind_tcp, bind_unix, serve_tcp, serve_unix};
+pub use listener::{bind_tcp, bind_unix, serve_tcp, serve_unix, BindScope};
 pub(crate) use ws_ticket::MEDIA_SESSION_QUERY_KEY;
 use ws_ticket::*;
 
@@ -428,10 +428,19 @@ pub fn tcp_app(
     //
     // `expose_headers(Any)` is also gone: nothing on this edge needs a
     // non-simple response header readable cross-origin.
+    //
+    // A page served from a public origin (the hosted Mission Control) that calls
+    // this agent on `127.0.0.1` is a request from a public site to a more-private
+    // address space, which Chrome gates behind a CORS preflight carrying
+    // `Access-Control-Request-Private-Network`. Without the matching
+    // `Access-Control-Allow-Private-Network: true` on the reply the browser
+    // refuses the request before the agent ever sees it, and the hosted GCS
+    // cannot reach a local ground station at all.
     let cors = CorsLayer::new()
         .allow_origin(live_cors_origins(security))
         .allow_methods(AllowMethods::mirror_request())
-        .allow_headers(AllowHeaders::mirror_request());
+        .allow_headers(AllowHeaders::mirror_request())
+        .allow_private_network(true);
     edge_router(router, edge).layer(cors)
 }
 

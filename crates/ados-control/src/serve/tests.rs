@@ -6,7 +6,7 @@ async fn bind_tcp_returns_real_bound_listeners() {
     // v6 leg follows on the SAME port. On a dual-stack host both bind (2); on a
     // host without IPv6 only the v4 leg returns (1). Either way every returned
     // listener is a real bound socket with a resolvable local address.
-    let listeners = bind_tcp(0).await.expect("v4 leg must bind");
+    let listeners = bind_tcp(0, BindScope::All).await.expect("v4 leg must bind");
     assert!(
         listeners.len() == 1 || listeners.len() == 2,
         "expected 1 (IPv4-only host) or 2 (dual-stack) listeners, got {}",
@@ -17,6 +17,47 @@ async fn bind_tcp_returns_real_bound_listeners() {
         let addr = l.local_addr().expect("a bound listener resolves its addr");
         assert_ne!(addr.port(), 0, "an ephemeral bind resolves to a real port");
     }
+}
+
+#[tokio::test]
+async fn a_loopback_scope_binds_only_the_loopback_addresses() {
+    // A ground station on somebody's own computer must not be reachable from
+    // the network: every bound leg is a loopback address, never a wildcard.
+    let listeners = bind_tcp(0, BindScope::Loopback)
+        .await
+        .expect("v4 leg must bind");
+    assert!(!listeners.is_empty());
+    for l in &listeners {
+        let addr = l.local_addr().expect("a bound listener resolves its addr");
+        assert!(
+            addr.ip().is_loopback(),
+            "loopback scope bound {}",
+            addr.ip()
+        );
+    }
+}
+
+#[test]
+fn the_bind_scope_follows_the_host_and_the_share_flag() {
+    use ados_protocol::host_kind::HostKind;
+    // An appliance serves the LAN whatever the flag says: that is what it is for.
+    assert_eq!(
+        BindScope::for_host(HostKind::Appliance, false),
+        BindScope::All
+    );
+    assert_eq!(
+        BindScope::for_host(HostKind::Appliance, true),
+        BindScope::All
+    );
+    // A personal computer answers itself until its owner shares it.
+    assert_eq!(
+        BindScope::for_host(HostKind::Personal, false),
+        BindScope::Loopback
+    );
+    assert_eq!(
+        BindScope::for_host(HostKind::Personal, true),
+        BindScope::All
+    );
 }
 
 fn ws_headers(subprotocol: Option<&str>) -> http::HeaderMap {

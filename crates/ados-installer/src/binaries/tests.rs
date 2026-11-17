@@ -61,12 +61,23 @@ fn rev_assets() -> BTreeSet<String> {
 /// Every asset an install fetches: the catalog, plus the two out-of-catalog
 /// entries the fetch step selects explicitly (the onnx vision build and the
 /// ONNX Runtime library that ships with it).
+///
+/// Both arches, because CI publishes both and an install on either must find
+/// what it asks for. The two out-of-catalog entries are aarch64-only by design
+/// (a musl x86_64 build cannot link ONNX, and no x86_64 profile declares CPU
+/// inference), and `asset_name` returns their aarch64 name whatever arch is
+/// asked, so they appear once here.
 fn fetched_assets() -> BTreeSet<String> {
-    PREBUILT
-        .iter()
-        .chain([&PREBUILT_VISION_ONNX, &PREBUILT_VISION_ONNX_RUNTIME])
-        .map(|b| b.asset.to_string())
-        .collect()
+    let mut out = BTreeSet::new();
+    for arch in crate::binaries::RELEASE_ARCHES {
+        out.extend(
+            PREBUILT
+                .iter()
+                .chain([&PREBUILT_VISION_ONNX, &PREBUILT_VISION_ONNX_RUNTIME])
+                .map(|b| b.asset_name(arch)),
+        );
+    }
+    out
 }
 
 /// The catalog and the release must name the same assets, in both directions.
@@ -210,7 +221,8 @@ fn control_is_hard_on_every_profile() {
 #[test]
 fn asset_matches_service_aarch64() {
     for b in PREBUILT {
-        assert_eq!(b.asset, format!("{}-aarch64", b.service).as_str());
+        assert_eq!(b.asset_name("aarch64"), format!("{}-aarch64", b.service));
+        assert_eq!(b.asset_name("x86_64"), format!("{}-x86_64", b.service));
     }
 }
 
@@ -230,12 +242,18 @@ fn onnx_vision_variant_targets_the_same_service_and_destination() {
     assert_eq!(PREBUILT_VISION_ONNX.dest, default.dest);
     assert_eq!(PREBUILT_VISION_ONNX.dest, "/opt/ados/bin/ados-vision");
     // A distinct asset so the default (musl) build is untouched.
-    assert_ne!(PREBUILT_VISION_ONNX.asset, default.asset);
-    assert_eq!(PREBUILT_VISION_ONNX.asset, "ados-vision-onnx-aarch64");
+    assert_ne!(
+        PREBUILT_VISION_ONNX.asset_name("aarch64"),
+        default.asset_name("aarch64")
+    );
+    assert_eq!(
+        PREBUILT_VISION_ONNX.asset_name("aarch64"),
+        "ados-vision-onnx-aarch64"
+    );
     // Not part of the catalog (it is selected in place of the default entry).
     assert!(!PREBUILT
         .iter()
-        .any(|b| b.asset == PREBUILT_VISION_ONNX.asset));
+        .any(|b| b.asset_name("aarch64") == PREBUILT_VISION_ONNX.asset_name("aarch64")));
 }
 
 #[test]
@@ -244,7 +262,7 @@ fn onnx_runtime_library_ships_beside_the_onnx_binary() {
     // best-effort so a miss falls back to the default vision build rather
     // than aborting the install.
     assert_eq!(
-        PREBUILT_VISION_ONNX_RUNTIME.asset,
+        PREBUILT_VISION_ONNX_RUNTIME.asset_name("aarch64"),
         "libonnxruntime-aarch64.so"
     );
     assert_eq!(
@@ -258,7 +276,7 @@ fn onnx_runtime_library_ships_beside_the_onnx_binary() {
     // Not part of the catalog (fetched alongside the onnx binary explicitly).
     assert!(!PREBUILT
         .iter()
-        .any(|b| b.asset == PREBUILT_VISION_ONNX_RUNTIME.asset));
+        .any(|b| b.asset_name("aarch64") == PREBUILT_VISION_ONNX_RUNTIME.asset_name("aarch64")));
 }
 
 #[test]
@@ -289,7 +307,10 @@ fn a_board_override_stem_selects_the_same_vision_build_as_the_model_string() {
             board_prefers_onnx_vision(stem),
             "override stem {stem} must select the onnx vision build"
         );
-        assert_eq!(vision_binary(stem).asset, "ados-vision-onnx-aarch64");
+        assert_eq!(
+            vision_binary(stem).asset_name("aarch64"),
+            "ados-vision-onnx-aarch64"
+        );
     }
     // An NPU-sidecar board's stem still resolves to the default build.
     assert!(!board_prefers_onnx_vision("rock-5c-lite"));
@@ -300,14 +321,17 @@ fn vision_binary_resolves_the_variant_by_board() {
     // A CPU-strong board resolves to the onnx build; everything else to the
     // default catalog entry.
     assert_eq!(
-        vision_binary("Raspberry Pi 5 Model B").asset,
+        vision_binary("Raspberry Pi 5 Model B").asset_name("aarch64"),
         "ados-vision-onnx-aarch64"
     );
     assert_eq!(
-        vision_binary("Radxa ROCK 5C Lite").asset,
-        default_vision_binary().asset
+        vision_binary("Radxa ROCK 5C Lite").asset_name("aarch64"),
+        default_vision_binary().asset_name("aarch64")
     );
-    assert_eq!(vision_binary("").asset, default_vision_binary().asset);
+    assert_eq!(
+        vision_binary("").asset_name("aarch64"),
+        default_vision_binary().asset_name("aarch64")
+    );
 }
 
 #[test]

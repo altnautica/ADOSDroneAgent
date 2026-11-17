@@ -94,6 +94,10 @@ pub struct Dashboard {
     pub version: String,
     pub device_name: String,
     pub profile: String,
+    /// What kind of machine this is (`appliance` / `personal`), from
+    /// `/api/status`. Empty until the first status poll lands, which renders as
+    /// nothing rather than a guess.
+    pub host_kind: String,
     pub paired: bool,
     pub pairing_code: Option<String>,
     pub access_urls: Vec<AccessUrl>,
@@ -241,6 +245,7 @@ impl Dashboard {
     /// but-silent distinction lives here. Best-effort: called only when the
     /// route was reachable this poll.
     pub fn merge_fc_status(&mut self, status: &Value) {
+        self.host_kind = opt_str(status, "host_kind").unwrap_or_default();
         self.transport_open = status.get("transportOpen").and_then(Value::as_bool);
         self.mavlink_alive = status.get("mavlinkAlive").and_then(Value::as_bool);
         self.fc_link_hint = status

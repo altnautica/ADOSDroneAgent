@@ -69,8 +69,8 @@ impl AssetSource<'_> {
 /// leaves in `target/<triple>/release`). Nothing else is guessed — a name close
 /// to but not equal to one of those is reported by
 /// [`unrecognised_artifact_names`] rather than silently ignored.
-pub fn local_artifact(dir: &Path, b: &PrebuiltBinary) -> Option<PathBuf> {
-    for name in [b.asset, b.service] {
+pub fn local_artifact(dir: &Path, b: &PrebuiltBinary, arch: &str) -> Option<PathBuf> {
+    for name in [b.asset_name(arch), b.service.to_string()] {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
@@ -93,7 +93,9 @@ pub(super) fn source_for<'a>(
     release: Option<&'a ReleaseRef>,
 ) -> AssetSource<'a> {
     match artifacts {
-        Some(dir) if local_artifact(dir, b).is_some() => AssetSource::Local { dir, host_arch },
+        Some(dir) if local_artifact(dir, b, host_arch).is_some() => {
+            AssetSource::Local { dir, host_arch }
+        }
         _ => AssetSource::Release { release, host_arch },
     }
 }
@@ -136,10 +138,11 @@ pub(super) fn stage_asset(
                 anyhow::anyhow!(
                     "{}: no release resolved to fetch {} from",
                     b.service,
-                    b.asset
+                    b.asset_name(host_arch)
                 )
             })?;
-            let asset_url = release.asset_url(b.asset);
+            let asset = b.asset_name(host_arch);
+            let asset_url = release.asset_url(&asset);
             // Stream byte progress so the live pane shows "<service> 4.2/8.1 MB".
             net::fetch_with_progress(&asset_url, dl_bin, |done, total| {
                 sink.byte_progress("fetch_binaries", done, total, b.service);
@@ -147,15 +150,15 @@ pub(super) fn stage_asset(
             // Refuse a release asset this host cannot run (the release only
             // publishes aarch64) before it replaces a working binary.
             if let Some(why) = artifact_arch_error(&read_header(dl_bin), host_arch) {
-                anyhow::bail!("{}: release asset {} {why}", b.service, b.asset);
+                anyhow::bail!("{}: release asset {} {why}", b.service, asset);
             }
             match release.manifest() {
                 // The signed manifest is the digest of record for an edge
                 // build: the verifier checks the bytes against it, not against
                 // a sidecar served beside the asset.
                 Some(m) => {
-                    let digest = m.check_size(b.asset, dl_bin)?;
-                    manifest::write_digest_sidecar(digest, b.asset, dl_sha)?;
+                    let digest = m.check_size(&asset, dl_bin)?;
+                    manifest::write_digest_sidecar(digest, &asset, dl_sha)?;
                 }
                 None => net::fetch(&format!("{asset_url}.sha256"), dl_sha)?,
             }
@@ -167,7 +170,7 @@ pub(super) fn stage_asset(
             Ok(())
         }
         AssetSource::Local { dir, host_arch } => {
-            let src = local_artifact(dir, b).ok_or_else(|| {
+            let src = local_artifact(dir, b, host_arch).ok_or_else(|| {
                 anyhow::anyhow!("{}: no artifact in {}", b.service, dir.display())
             })?;
             let src_sha = sidecar_path(&src, "sha256");
