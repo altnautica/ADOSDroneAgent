@@ -15,28 +15,29 @@ use ratatui::text::Span;
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::api_path::seg;
-use crate::app::{Core, FrameOut, Tab, TabId};
+use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx, PageKeys};
 use crate::model::autonomy::detection::{
     Detection, Seen, DETECTIONS_LATEST_PATH, VISION_STATUS_PATH,
 };
 use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
 use crate::model::mission_stall::{pilot_refusal_text, stall_view, StallAction};
-use crate::model::route_check::{other_place_class, place_command, place_label};
+use crate::model::route_check::other_place_class;
 use crate::model::skill_detail::{skill_detail_from_state, skill_state_topic};
 use crate::model::spec_text::spec_text;
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
 use crate::toast::ToastKind;
-use crate::worker::{Purpose, Reply, Request, Route};
+use crate::worker::{Purpose, Reply};
 
 mod attitude;
 mod autonomy;
 pub(in crate::ui) mod chart;
 mod chip_line;
+mod command;
 mod layout;
 mod packs;
 mod pilot;
@@ -56,51 +57,8 @@ const HIDDEN_STALE: &str = "no fresh data from the agent · flight readings hidd
 /// Where the gimbal says whether it takes rate commands.
 const GIMBAL_RATE_PATH: &str = "/api/v1/gimbal/rate";
 
-/// The command route a stall or place action goes out on.
-const COMMAND_PATH: &str = "/api/command";
-/// The reply tag of a stall action.
-const STALL_TAG: &str = "stall";
-/// The reply tag of a place-class change.
-const PLACE_TAG: &str = "place";
-/// The reply tag of "I rebalanced it".
-const AIRFRAME_TAG: &str = "airframe";
-/// The `/api/command` name of the pilot's `airframe_reset`.
-pub(crate) const AIRFRAME_RESET_COMMAND: &str = "airframereset";
-
-/// `POST /api/command` with `cmd`, its words carried for the reply's toast.
-fn command_request(tag: &'static str, cmd: &str, label: String) -> Request {
-    Request::new(
-        "POST",
-        COMMAND_PATH,
-        Route::tab(TabId::Vehicle),
-        Purpose::Page {
-            tag,
-            data: json!(label),
-        },
-    )
-    .body(json!({ "cmd": cmd }))
-}
-
-/// The request a stall action sends: the command that reaches the pilot
-/// action.
-pub(crate) fn stall_request(action: StallAction) -> Request {
-    command_request(STALL_TAG, action.command(), action.label())
-}
-
-/// The request that sets the place class (`placeclass_<class>`, the pilot's
-/// `place_class:<class>`).
-pub(crate) fn place_request(class: &str) -> Request {
-    command_request(PLACE_TAG, &place_command(class), place_label(class))
-}
-
-/// The request "I rebalanced it" sends: the pilot's `airframe_reset`.
-pub(crate) fn airframe_reset_request() -> Request {
-    command_request(
-        AIRFRAME_TAG,
-        AIRFRAME_RESET_COMMAND,
-        spec_text("readiness.airframe_balance.reset", &[]),
-    )
-}
+pub(crate) use command::stall_request;
+use command::{airframe_reset_request, place_request, AIRFRAME_TAG, PLACE_TAG, STALL_TAG};
 
 #[derive(Default)]
 pub struct VehicleTab {

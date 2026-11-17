@@ -49,7 +49,7 @@ fn launched_into_mission(when_done: Option<&str>) -> World {
     }
     assert!(ok(&w.action_args("launch", args)));
     w.mission("loaded", 0, 4);
-    w.fly_takeoff(30_000);
+    w.run(3000);
     assert!(w.armed);
     assert_eq!(w.mode, copter::AUTO);
     assert_eq!(w.p.owner(), Owner::MissionFc);
@@ -127,7 +127,7 @@ fn no_when_done_without_a_launch_that_armed_one() {
     let mut w = World::new();
     let args = json!({"after": "hold", "alt_m": 3.0, "when_done": "rth"});
     assert!(ok(&w.action_args("launch", args)));
-    w.fly_takeoff(30_000);
+    w.run(3000);
     assert_eq!(w.p.owner(), Owner::Pilot);
     w.mode = copter::AUTO;
     w.run(100);

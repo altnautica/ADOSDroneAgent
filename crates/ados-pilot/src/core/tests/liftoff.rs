@@ -50,6 +50,7 @@ fn force_disarms(w: &World) -> usize {
 fn world() -> World {
     let mut w = World::new();
     w.p.settings.pilot.link_loss_s = 300;
+    w.p.settings.pilot.supervised_liftoff = true;
     w
 }
 
@@ -204,6 +205,7 @@ fn pause_in_the_climb_holds_in_the_air() {
 fn a_lost_operator_link_mid_spool_stops_and_disarms() {
     let mut w = World::new();
     w.p.settings.pilot.link_loss_s = 2;
+    w.p.settings.pilot.supervised_liftoff = true;
     launch(&mut w);
     run_to_phase(&mut w, "spool", 3000);
     // Nothing more from any surface.
@@ -226,7 +228,7 @@ fn a_motor_out_of_headroom_stops_on_the_ground_and_says_so() {
     assert_eq!(s.error.as_deref(), Some("liftoff_saturated"));
     let l = s.liftoff.unwrap();
     assert_eq!(l.text, "Take-off stopped");
-    assert!(l.detail.contains("ran out of power"), "{}", l.detail);
+    assert!(l.detail.contains("No climb margin"), "{}", l.detail);
 }
 
 #[test]

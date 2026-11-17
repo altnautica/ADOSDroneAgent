@@ -116,6 +116,21 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
     if (claimed) claimCommandedModes(claimed, modeAtCommand, null, sentAt);
     throw e;
   }
+  // While the pilot is live the agent hands the command to it and answers as
+  // the pilot (`via: "pilot"`), with no flight-controller ack: `status: "ok"`,
+  // or a refusal whose `message` is `pilot refused <action>: <code>`.
+  const p = res as typeof res & { via?: string; message?: string };
+  if (p.via === "pilot") {
+    if (p.status === "ok") {
+      if (claimed) claimCommandedModes(claimed, modeAtCommand, null, sentAt);
+      report({ text: `${skill.label}: ${resultWord("ACCEPTED")}`, kind: "ok" });
+    } else {
+      if (claimed) dropProvisionalClaim(sentAt);
+      const code = p.message?.match(/^pilot refused [^:]*: (.+)$/)?.[1];
+      report({ text: `${skill.label}: ${refusalText(code ?? p.message)}`, kind: "err" });
+    }
+    return;
+  }
   const a = res.ack;
   if (claimed) claimCommandedModes(claimed, modeAtCommand, a, sentAt);
   if (!a?.observed) {

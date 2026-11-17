@@ -302,9 +302,25 @@ fn a_take_off_waits_for_the_fc_to_finish_its_land() {
     assert!(w.p.touchdown.floor_d.is_none());
     w.run(1500);
     assert_eq!(w.mode, copter::GUIDED);
-    // The take-off began: the supervised lift-off is spooling.
+    assert!(w.commands(MavCmd::MAV_CMD_NAV_TAKEOFF, None) > 0);
+}
+
+/// With the steady take-off switched on, the take-off after the FC's land
+/// is the supervised lift-off, not the FC's own NAV_TAKEOFF.
+#[test]
+fn with_the_steady_take_off_on_a_take_off_after_a_land_spools_the_lift_off() {
+    let (mut w, mut s) = hovering(4.0, true);
+    w.p.settings.pilot.supervised_liftoff = true;
+    w.action("land");
+    fly_to_touchdown(&mut w, &mut s);
+    fly(&mut w, &mut s, 1500);
+    assert!(w.landed, "the FC's land detector finished");
+    assert_eq!(err(w.action("takeoff")), None);
+    w.run(1500);
+    assert_eq!(w.mode, copter::GUIDED);
     let lo = w.p.state(w.now).sequence.and_then(|s| s.liftoff);
     assert!(lo.is_some(), "{lo:?}");
+    assert_eq!(w.commands(MavCmd::MAV_CMD_NAV_TAKEOFF, None), 0);
 }
 
 #[test]

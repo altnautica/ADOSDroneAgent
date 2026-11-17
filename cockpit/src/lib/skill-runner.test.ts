@@ -9,6 +9,7 @@ import { onToast } from "@/shared/api/toast";
 import { useConfirmStore } from "@/stores/confirm-store";
 import { usePreflightStore } from "@/stores/preflight-store";
 import { LAUNCH } from "@/lib/cockpit-flow";
+import { refusalText } from "@/shared/hud/refusal";
 
 const ctxNow = vi.hoisted(() => ({ ctx: { fcConnected: true, live: true, armed: true } as SkillContext }));
 vi.mock("@/hooks/use-skill-context", () => ({ skillContextNow: () => ctxNow.ctx }));
@@ -162,6 +163,42 @@ function silentFetch(): void {
       }),
   );
 }
+
+describe("take off on the command route answered by the pilot", () => {
+  const answer = (body: Record<string, unknown>) =>
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } }));
+  // Take off passes the pre-flight gate first, so its answer lands after `executeSkill` returns.
+  const ackLine = () => vi.waitFor(() => useConfirmStore.getState().ack ?? Promise.reject(new Error("no answer yet")));
+
+  beforeEach(() => {
+    usePreflightStore.setState({ passed: true });
+    ctxNow.ctx = { fcConnected: true, live: true, armed: false, pilot: null };
+  });
+
+  it("a launch the pilot took reads accepted", async () => {
+    answer({ status: "ok", cmd: "takeoff", via: "pilot", action: "launch" });
+    await executeSkill(B.takeoff!, { altitudeM: 7 });
+    const ack = await ackLine();
+    expect(ack.kind).toBe("ok");
+    expect(ack.text).toMatch(new RegExp(`^${B.takeoff!.label}: `));
+  });
+
+  it("a launch the pilot refused reads the refusal, not its code", async () => {
+    answer({ status: "error", cmd: "takeoff", via: "pilot", action: "launch", message: "pilot refused launch: not_ready:airframe_balance" });
+    await executeSkill(B.takeoff!, { altitudeM: 7 });
+    const ack = await ackLine();
+    expect(ack).toEqual({ text: `${B.takeoff!.label}: ${refusalText("not_ready:airframe_balance")}`, kind: "err" });
+    expect(ack.text).not.toContain("airframe_balance");
+  });
+
+  it("a flight controller ack still reads as before", async () => {
+    answer({ status: "ok", ack: { observed: true, accepted: false, result_name: "DENIED", statustext: "No GPS" } });
+    await executeSkill(B.takeoff!, { altitudeM: 7 });
+    const ack = await ackLine();
+    expect(ack.kind).toBe("err");
+    expect(ack.text).toMatch(new RegExp(`^${B.takeoff!.label}: .* — No GPS$`));
+  });
+});
 
 describe("command path timeout", () => {
   it("gives up after the timeout with the no-answer code", async () => {

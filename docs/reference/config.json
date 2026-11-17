@@ -2311,7 +2311,7 @@
       "type": "integer"
     },
     {
-      "default": true,
+      "default": false,
       "description": "Supervised Liftoff",
       "enum": null,
       "key": "pilot.supervised_liftoff",

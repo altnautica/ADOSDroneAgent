@@ -115,6 +115,6 @@ class PilotConfig(BaseModel):
     fc_sensors: FcSensorsConfig = Field(default_factory=FcSensorsConfig)
     # A multirotor launch on ArduPilot lifts off under the pilot: the
     # airframe's trim loaded into the FC's rate loop on the ground, then a
-    # level lift-off. False sends the FC's own take-off instead (a
-    # field-validation switch, shown on every surface while off).
-    supervised_liftoff: bool = True
+    # level lift-off. Off by default: the FC's own take-off flies, and
+    # every surface says the steady take-off is off.
+    supervised_liftoff: bool = False

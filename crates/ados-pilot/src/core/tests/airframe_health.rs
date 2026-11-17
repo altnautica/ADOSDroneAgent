@@ -16,6 +16,7 @@ use crate::liftoff::sim::Airframe;
 fn world() -> World {
     let mut w = World::new();
     w.p.settings.pilot.link_loss_s = 300;
+    w.p.settings.pilot.supervised_liftoff = true;
     w.p.settings.pilot.prop_tip_radius_m = Some(0.373);
     w.p.fc.params.insert("FRAME_TYPE".into(), 1.0);
     w.p.load_airframe("fc-a", None, Some(10.0));
@@ -69,6 +70,7 @@ fn a_blocked_airframe_refuses_the_supervised_launch_in_every_control_mode() {
     for mode in ["fc_manual", "elrs"] {
         let mut w = World::new();
         w.p.settings.pilot.link_loss_s = 300;
+        w.p.settings.pilot.supervised_liftoff = true;
         w.p.load_airframe("fc-a", Some(blocked()), Some(10.0));
         let r = w.action(&format!("control_mode:{mode}"));
         assert!(matches!(&r, Reply::Action(a) if a.ok), "{r:?}");

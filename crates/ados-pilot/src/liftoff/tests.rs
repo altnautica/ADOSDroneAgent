@@ -184,6 +184,39 @@ fn a_motor_at_the_top_of_its_range_stops_on_the_ground() {
     assert_eq!(r.lo.view().phase, "stopped");
 }
 
+/// The Balance check is what refuses nose50's next launch: filed with the
+/// saturated stop it blocks, and a check stubbed healthy (the mutation)
+/// would let the same airframe launch again. A gate that still refused under
+/// the stub would be refusing for some other reason.
+#[test]
+fn a_forced_healthy_balance_check_lets_nose50_launch() {
+    let af = Airframe::new(0.62, [0.0, 0.42]);
+    let mut r = Run::new(af, learned([0.0, 0.42], 0.62));
+    r.run(30_000);
+    let o = r.lo.take_outcome().expect("saturation outcome");
+    let mut health = crate::airframe::Airframe::default();
+    health.note_liftoff(&o, r.now);
+    let mut fc = crate::fc::FcState {
+        firmware: Some(crate::fc_profile::Firmware::Ardupilot),
+        mav_type: 2,
+        ..Default::default()
+    };
+    fc.params.insert("FRAME_CLASS".into(), 1.0);
+    fc.params.insert("FRAME_TYPE".into(), 1.0);
+    let row = health.readiness(&fc).expect("the airframe_balance row");
+    assert_eq!(
+        (row.ok, row.severity),
+        (false, ados_protocol::pilot::Severity::Block),
+        "the gate refuses nose50: {row:?}"
+    );
+    health.force_healthy = true;
+    let forced = health.readiness(&fc).expect("the airframe_balance row");
+    assert!(
+        forced.ok && forced.severity != ados_protocol::pilot::Severity::Block,
+        "stubbed healthy, nose50 would launch: {forced:?}"
+    );
+}
+
 /// Inputs for a hand-built tick: level, at `local`, motors at `motor_max`.
 fn tick(now_ms: u64, local: LocalPos, motor_max: f32) -> Inputs {
     Inputs {
@@ -297,6 +330,76 @@ fn a_tilt_past_the_back_off_steps_the_thrust_back_once_and_a_bigger_one_cuts_it(
     lo.step(&tipped(1060, HARD_DEG + 0.2));
     assert!((lo.thrust - HARD_FRAC * 0.6).abs() < 1e-4, "{}", lo.thrust);
     assert_eq!(lo.stopped(), None);
+}
+
+#[test]
+fn the_bounce_after_a_cut_does_not_turn_the_lean_round() {
+    // A nose-heavy airframe pivots, the cut drops it back onto its skids and
+    // it overshoots nose-up. Turning the lean round there unwound the trim
+    // the integrator had wound, and the ramp cycled on the skids.
+    let pitch_of = |c: Option<Cmd>| match c {
+        Some(Cmd::Attitude { pitch, .. }) => pitch,
+        other => panic!("an attitude target: {other:?}"),
+    };
+    let mut lo = ramping(1000);
+    assert!(pitch_of(lo.step(&tipped(1020, 0.7))) > 0.0);
+    lo.step(&tipped(1040, HARD_DEG + 0.5));
+    assert!((lo.thrust - HARD_FRAC * 0.6).abs() < 1e-4, "{}", lo.thrust);
+    // The bounce: nose-up past the edge, just after the cut.
+    assert!(
+        pitch_of(lo.step(&tipped(1060, -0.8))) > 0.0,
+        "the lean held through the bounce"
+    );
+    assert_eq!(lo.edges, 1);
+    // Settled, the ramp climbs back; once past the quiet window and at
+    // ramp thrust, the other side unloading turns the lean round.
+    let mut now = 1060;
+    while now < 1060 + FLIP_QUIET_MS + 200 {
+        now += 20;
+        lo.step(&tipped(now, 0.0));
+    }
+    assert!(lo.thrust > K_FAST * 0.6, "{}", lo.thrust);
+    now += 20;
+    assert!(pitch_of(lo.step(&tipped(now, -0.7))) < 0.0, "turned round");
+    assert_eq!(lo.edges, 2);
+    assert_eq!(lo.stopped(), None);
+}
+
+#[test]
+fn a_stop_reads_the_same_on_the_launch_and_in_the_spec() {
+    // A stopped launch shows "Take-off stopped" and the stop's text; a
+    // refusal or a setup step shows the spec string for its code. They are
+    // the same words.
+    let spec: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../web-shared/src/cockpit-spec/setup-strings.json"
+    ))
+    .unwrap();
+    for stop in [
+        Stop::Tipping,
+        Stop::Saturated,
+        Stop::NoTrim,
+        Stop::NoRateData,
+        Stop::Spool,
+        Stop::FcLink,
+        Stop::Link,
+        Stop::Operator,
+        Stop::Timeout,
+    ] {
+        let shown = format!("{STOPPED_TEXT}. {}", stop.text());
+        for key in ["refusal", "setup.blocker"] {
+            let key = format!("{key}.{}", stop.code());
+            assert_eq!(
+                spec["strings"][&key].as_str(),
+                Some(shown.as_str()),
+                "{key}"
+            );
+        }
+    }
+    let params = "liftoff_fc_params";
+    assert_eq!(
+        spec["strings"][format!("refusal.{params}")].as_str(),
+        error_text(params)
+    );
 }
 
 #[test]

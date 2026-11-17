@@ -160,6 +160,10 @@ pub struct Airframe {
     accel: f32,
     /// The PID_TUNING pitch sample last learned from.
     last_pid_ms: u64,
+    /// A mutation stub: the Balance check reads healthy whatever the
+    /// record holds, to prove a test's refusal is the check's own.
+    #[cfg(test)]
+    pub(crate) force_healthy: bool,
 }
 
 impl Airframe {
@@ -383,6 +387,10 @@ impl Airframe {
             severity,
             msg,
         };
+        #[cfg(test)]
+        if self.force_healthy {
+            return Some(row(true, Severity::Warn, BALANCE_OK.into()));
+        }
         if self.rec.saturated {
             return Some(row(
                 false,

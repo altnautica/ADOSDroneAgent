@@ -2528,7 +2528,7 @@
           "type": "integer"
         },
         "supervised_liftoff": {
-          "default": true,
+          "default": false,
           "title": "Supervised Liftoff",
           "type": "boolean"
         }

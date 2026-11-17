@@ -18,10 +18,11 @@
 //!    starts to unload (the trim not known yet, or wrong) holds the thrust
 //!    and leans the attitude target toward the low side, so the rate-loop
 //!    integrator winds up against skid contact; the lean turns round when
-//!    the other side unloads. The airframe never pivots: a tilt past
-//!    [`BACK_DEG`] steps the thrust back, past [`HARD_DEG`] cuts it to
-//!    [`HARD_FRAC`] of hover. A tilt past [`ABORT_DEG`], or a motor held at
-//!    the top of its range, stops the launch on the ground.
+//!    the other side unloads while the thrust climbs (never in the bounce
+//!    after a cut, see [`FLIP_QUIET_MS`]). The airframe never pivots: a
+//!    tilt past [`BACK_DEG`] steps the thrust back, past [`HARD_DEG`] cuts
+//!    it to [`HARD_FRAC`] of hover. A tilt past [`ABORT_DEG`], or a motor
+//!    held at the top of its range, stops the launch on the ground.
 //! 4. **Climb**: level, clear of the ground, then a position target that
 //!    starts where the airframe is and moving as it moves, climbing to the
 //!    launch height.
@@ -94,6 +95,12 @@ const BACK_STEP: f32 = 0.1;
 /// …and past this cuts it to [`HARD_FRAC`] of hover.
 pub const HARD_DEG: f32 = 2.5;
 const HARD_FRAC: f32 = 0.3;
+/// After a step back or a cut the airframe settles back onto its skids and
+/// overshoots the other way: that bounce is not the other side unloading.
+/// For this long after one, and while the thrust is under [`K_FAST`] of
+/// hover, a lean never turns round, so the integrator keeps the trim it has
+/// wound (turning round there unwound it and the ramp cycled on the skids).
+const FLIP_QUIET_MS: u64 = 1000;
 /// An integrator wound past this while a side still unloads: the trim is
 /// beyond what the rate loop can hold.
 const TRIM_MAX: f32 = 0.45;
@@ -238,22 +245,23 @@ impl Stop {
         }
     }
 
-    /// Why, in the operator's words: the detail under "Take-off stopped".
+    /// Why, in the operator's words: the detail under "Take-off stopped",
+    /// the spec's `refusal.liftoff_<code>` after its "Take-off stopped. ".
     pub fn text(self) -> &'static str {
         match self {
             Self::Tipping => "The drone started to tip. Motors off.",
-            Self::Saturated => "A motor ran out of power before lift-off. Motors off.",
+            Self::Saturated => "No climb margin. Lighten the drone or rebalance it.",
             Self::NoTrim => {
-                "Could not balance the drone on the ground. Check the battery and payload are secure. Motors off."
+                "Could not find the drone's balance. Check the battery and payload are secure."
             }
             Self::NoRateData => {
                 "The flight controller sends no rate data to balance the drone with. Motors off."
             }
-            Self::Spool => "The motors did not spin up steadily. Motors off.",
+            Self::Spool => "The motors did not spin up.",
             Self::FcLink => "The flight controller stopped reporting.",
             Self::Link => "The controller link was lost. Motors off.",
             Self::Operator => "Stopped by the operator. Motors off.",
-            Self::Timeout => "Take-off took too long. Motors off.",
+            Self::Timeout => "Lift-off took too long. Motors off.",
         }
     }
 }
@@ -316,8 +324,10 @@ pub struct Liftoff {
     edge: [f32; 2],
     edges: u32,
     blind_since: Option<u64>,
-    /// The thrust already stepped back for this excursion.
+    /// The thrust already stepped back for this excursion, and until when
+    /// a lean may not turn round.
     backed: bool,
+    flip_quiet_until: u64,
     rest: Option<(f32, f32)>,
     yaw: f32,
     thrust: f32,
@@ -358,6 +368,7 @@ impl Liftoff {
             edges: 0,
             blind_since: None,
             backed: false,
+            flip_quiet_until: 0,
             rest: None,
             yaw: 0.0,
             thrust: SPOOL_THRUST,
@@ -547,7 +558,7 @@ impl Liftoff {
                     self.phase = Phase::Stopped(stop);
                     return None;
                 }
-                self.ramp_thrust(dt);
+                self.ramp_thrust(dt, now);
                 let lean = EDGE_LEAN_DEG.to_radians();
                 Some(att_cmd(
                     r0 + self.edge[0] * lean,
@@ -578,12 +589,17 @@ impl Liftoff {
     }
 
     /// A side unloading on the ramp: lean toward it so the integrator winds
-    /// up against skid contact, turning round when the other side unloads.
-    /// Near lift-off thrust the lean only acts while a side unloads.
+    /// up against skid contact, turning round when the other side unloads
+    /// (outside the bounce after a cut, [`FLIP_QUIET_MS`]). Near lift-off
+    /// thrust the lean only acts while a side unloads.
     fn edge_track(&mut self, inp: &Inputs, tilt: [f32; 2], now: u64) -> Option<Stop> {
+        let quiet = now < self.flip_quiet_until || self.thrust < K_FAST * self.hover;
         for (ax, &t) in tilt.iter().enumerate() {
             if t.abs() > EDGE_DEG {
                 let want = -t.signum();
+                if quiet && self.edge[ax] == -want {
+                    continue;
+                }
                 if self.edge[ax] != want {
                     self.edges += 1;
                 }
@@ -614,10 +630,14 @@ impl Liftoff {
 
     /// The ramp's thrust: rising only while the airframe sits level, held
     /// while a side unloads, stepped back past [`BACK_DEG`], cut past
-    /// [`HARD_DEG`].
-    fn ramp_thrust(&mut self, dt: f32) {
+    /// [`HARD_DEG`]. A tilt past [`BACK_DEG`] keeps the [`FLIP_QUIET_MS`]
+    /// window open until that long after it settles.
+    fn ramp_thrust(&mut self, dt: f32, now: u64) {
         let hover = self.hover;
         let fast = K_FAST * hover;
+        if self.tilt_deg > BACK_DEG {
+            self.flip_quiet_until = now + FLIP_QUIET_MS;
+        }
         if self.tilt_deg > HARD_DEG {
             self.thrust = self.thrust.min(HARD_FRAC * hover);
         } else if self.tilt_deg > BACK_DEG {
