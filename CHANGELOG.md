@@ -17,6 +17,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - The vision detections route's whole-frame batch cache carries its types, so the route passes the strict type check. No behaviour change.
+- Dependencies: `ort` 2.0.0-rc.15 (with serde_json, sha2, getrandom, flate2, memmap2, hyper, libc, prost and prost-build minor updates). The ONNX backend builds one ONNX Runtime environment per process on the first model load and hands it to every session, as rc.15 requires; the device runtime stays 1.24.2.
 
 ## [0.118.0] - 2026-11-17
 

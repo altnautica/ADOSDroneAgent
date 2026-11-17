@@ -60,13 +60,37 @@ impl OnnxBackend {
     }
 }
 
+/// The process's ONNX Runtime environment, built on the first model load.
+///
+/// ONNX Runtime allows one environment per process and `ort` refuses a second
+/// `build()` even after the first is dropped, so the environment is shared by
+/// every backend and lives for the rest of the process. The runtime library
+/// is loaded dynamically, so it is built here, not at start: a process that
+/// never loads an ONNX model never needs the library.
+fn onnx_environment() -> Result<ort::environment::Environment> {
+    static ENV: Mutex<Option<ort::environment::Environment>> = Mutex::new(None);
+    let mut env = ENV
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(e) = env.as_ref() {
+        return Ok(e.clone());
+    }
+    let e = ort::init()
+        .with_name("ados-vision")
+        .build()
+        .map_err(|e| anyhow!("init onnx runtime environment: {e}"))?;
+    *env = Some(e.clone());
+    Ok(e)
+}
+
 impl VisionBackend for OnnxBackend {
     fn load(&self, meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
         let path = meta
             .model_path
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("onnx model has no model_path"))?;
-        let builder = ort::session::Session::builder()?;
+        let env = onnx_environment()?;
+        let builder = ort::session::Session::builder(&env)?;
         let intra = self.intra_threads_for(meta.kind);
         // `BuilderResult` errors carry the builder back (large, and not `Send`
         // under every feature set), so each is flattened to a message at once.
