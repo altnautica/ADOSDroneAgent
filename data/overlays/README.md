@@ -13,7 +13,8 @@ data/overlays/
 │   ├── waveshare35-lcd.dtsi                        ← shared chip-level dtsi
 │   ├── rk3588-spi4-m2-cs0-waveshare35.dts          ← Rock 5C/5A/5D SPI LCD + touch
 │   └── rk3588-spi4-m2-cs1-xpt2046-touch.dts        ← Rock 5C/5A/5D touch-only (HDMI video)
-└── cubie-a7z-waveshare35a.dts                      ← Radxa Cubie A7Z (Allwinner A733)
+├── cubie-a7z-waveshare35a.dts                      ← Radxa Cubie A7Z (Allwinner A733)
+└── dragon-q6a-hdmi_touch_xpt2046.dts               ← Radxa Dragon Q6A touch-only (HDMI video)
 ```
 
 The `rk3588-spi4-m2-cs1-xpt2046-touch.dts` overlay is the panel-stripped
@@ -28,6 +29,13 @@ PENIRQ polarity + `EDGE_FALLING` trigger. See
 path) for how it is compiled + activated and how the
 `LIBINPUT_CALIBRATION_MATRIX` udev rule is derived from the board's declared
 touch bounds.
+
+`dragon-q6a-hdmi_touch_xpt2046.dts` is standalone in the same way as the
+RK3588 touch-only overlay, on the Q6A's header SPI (`spi12`, touch on CS1).
+That board loads its device tree from GRUB, so the installer merges the
+overlay into `/boot/armbian-dtb-<kernel>` and a kernel postinst hook
+(`data/kernel/postinst.d/yy-ados-dtb-overlays`) merges it again after every
+kernel upgrade.
 
 ## The chip-vs-SoC contract
 

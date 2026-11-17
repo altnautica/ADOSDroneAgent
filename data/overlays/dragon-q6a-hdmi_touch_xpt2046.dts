@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * Touch-ONLY XPT2046 / ADS7846 resistive touch controller on the Radxa
+ * Dragon Q6A 40-pin header SPI (QUP SE12, `spi12`) — no framebuffer panel.
+ * Video comes over HDMI; this overlay only brings up the SPI resistive-touch
+ * chip so an 800x480 HDMI panel that carries an XPT2046 touch layer reports a
+ * standard libinput touchscreen for the kiosk.
+ *
+ * Header wiring (Pi-standard positions):
+ *   pin 19  GPIO_49  SPI MOSI
+ *   pin 21  GPIO_48  SPI MISO
+ *   pin 23  GPIO_50  SPI SCLK
+ *   pin 24  GPIO_51  SPI CS0 (unused, kept as a GPIO chip select)
+ *   pin 26  GPIO_55  SPI CS1 -> touch controller
+ *   pin 22  GPIO_57  PENIRQ
+ *
+ * The GENI SPI controller drives a second chip select only as a GPIO, so
+ * both selects are listed in cs-gpios and GPIO_55 gets its own pinctrl state.
+ *
+ * Compiled with plain `dtc -@` (no cpp pass), so the cells are raw numbers:
+ * flag 1 = GPIO_ACTIVE_LOW, trigger 2 = IRQ_TYPE_EDGE_FALLING. PENIRQ is
+ * open-drain active-low with a chip-side pull-up, hence ACTIVE_LOW plus a
+ * falling-edge trigger and a pull-up on the SoC side (see README.md).
+ *
+ * There is no ti,swap-xy: it is a boolean whose presence alone swaps the
+ * axes. Orientation and the ADC bounds are applied by the
+ * LIBINPUT_CALIBRATION_MATRIX udev rule the installer writes from the board
+ * profile, and the on-screen calibration wizard refits it.
+ *
+ * GRUB loads the device tree on this board, so the installer merges this
+ * overlay into /boot/armbian-dtb-<kernel> with fdtoverlay (and again from a
+ * kernel postinst hook on every kernel upgrade).
+ */
+
+/dts-v1/;
+/plugin/;
+
+&spi12 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&qup_spi12_data_clk>, <&qup_spi12_cs_gpio>, <&ados_touch_cs1>;
+	cs-gpios = <&tlmm 51 1>, <&tlmm 55 1>;
+
+	touchscreen@1 {
+		compatible = "ti,ads7846";
+		reg = <1>;
+		spi-max-frequency = <2000000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ados_touch_irq>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <57 2>;
+		pendown-gpio = <&tlmm 57 1>;
+		ti,x-plate-ohms = /bits/ 16 <60>;
+		ti,pressure-max = /bits/ 16 <255>;
+		ti,keep-vref-on;
+		touchscreen-max-pressure = <255>;
+	};
+};
+
+&tlmm {
+	ados_touch_cs1: ados-touch-cs1-state {
+		pins = "gpio55";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-high;
+	};
+
+	ados_touch_irq: ados-touch-irq-state {
+		pins = "gpio57";
+		function = "gpio";
+		bias-pull-up;
+	};
+};

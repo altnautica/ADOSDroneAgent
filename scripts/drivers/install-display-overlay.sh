@@ -113,6 +113,19 @@ DISPLAY_ENABLED_FILE="${ADOS_DISPLAY_ENABLED_FILE:-${ETC_ADOS_DIR}/display.enabl
 # Probation marker for the apply-verify-auto-revert path. Records the
 # boot-config snapshot so the boot-time probe can self-heal.
 DISPLAY_PROBATION_FILE="${ADOS_DISPLAY_PROBATION_FILE:-${ETC_ADOS_DIR}/display.probation}"
+# GRUB-loaded device tree (Armbian's armbian-grub-with-dtb) and the kernel
+# command line. Overridable so the bats suite can point them at a temp tree.
+ARMBIAN_GRUB_DTB_CONF="${ADOS_ARMBIAN_GRUB_DTB_CONF:-/etc/armbian-grub-with-dtb}"
+KERNEL_POSTINST_DIR="${ADOS_KERNEL_POSTINST_DIR:-/etc/kernel/postinst.d}"
+KERNEL_RELEASE="${ADOS_KERNEL_RELEASE:-$(uname -r)}"
+GRUB_DEFAULT_D="${ADOS_GRUB_DEFAULT_D:-/etc/default/grub.d}"
+UPDATE_GRUB_BIN="${ADOS_UPDATE_GRUB_BIN:-update-grub}"
+PROC_CMDLINE="${ADOS_PROC_CMDLINE:-/proc/cmdline}"
+# The running kernel's device tree, to tell a staged overlay from a live one.
+LIVE_DT_DIR="${ADOS_LIVE_DT_DIR:-/sys/firmware/devicetree/base}"
+# The installer's pending-reboot signal (read by its `reboot` step).
+RUN_ADOS_DIR="${ADOS_RUN_DIR:-/run/ados}"
+REBOOT_REQUIRED_FILE="${ADOS_REBOOT_REQUIRED_FILE:-${RUN_ADOS_DIR}/reboot-required}"
 
 # Presence-detection roots. Overridable via env so the bats suite can mock
 # the kernel sysfs + /dev surfaces under a temp tree and assert the

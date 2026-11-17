@@ -24,6 +24,7 @@ detect_board() {
             *"raspberry pi 4"*) echo "rpi4b"; return ;;
             *"raspberry pi 5"*) echo "rpi5"; return ;;
             *"raspberry pi zero 2"*) echo "pi-zero-2w"; return ;;
+            *"dragon q6a"*) echo "dragon-q6a"; return ;;
         esac
     fi
     if [ -f /proc/cpuinfo ]; then

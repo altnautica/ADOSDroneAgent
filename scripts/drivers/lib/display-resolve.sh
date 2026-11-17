@@ -14,6 +14,11 @@ resolve_auto_display() {
             cubie-a7z|rock-5c-lite|rock-5c|rpi4b|rpi5|pi-zero-2w)
                 DISPLAY_ID="waveshare35a"
                 ;;
+            dragon-q6a)
+                # HDMI panel with an SPI touch layer; provisioned only when
+                # HDMI is connected, `none` otherwise (ladder below).
+                DISPLAY_ID="hdmi_touch_xpt2046"
+                ;;
             *)
                 warn "Board ${BOARD_ID} has no auto-detect default display."
                 warn "Pass --display <id> explicitly or --display none."

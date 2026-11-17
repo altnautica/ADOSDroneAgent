@@ -74,6 +74,32 @@ apply_board_overlay() {
                         ;;
                 esac
                 ;;
+            dragon-q6a)
+                # GRUB loads the device tree: merge the overlay into the DTB
+                # it boots (and on every kernel upgrade), and give the panel
+                # its native mode when its EDID does not list it.
+                info "Provisioning HDMI touch overlay '${ovl_ref}' for ${DISPLAY_ID} (source=repo)."
+                compile_and_install_repo_dtbo "${BOARD_ID}" "${DISPLAY_ID}" || exit 2
+                if ! activate_overlay_armbian_grub_dtb "${BOARD_ID}-${DISPLAY_ID}"; then
+                    error "Could not activate HDMI touch overlay ${ovl_ref}."
+                    exit 3
+                fi
+                apply_hdmi_mode_cmdline || exit 3
+                ACTIVATED_VIA="armbian-grub-dtb"
+                # A reboot is owed while the running kernel lacks the touch
+                # node or the mode drop-in, so a re-run on a provisioned box
+                # (an upgrade) does not reboot it again.
+                local mode_cfg="${GRUB_DEFAULT_D}/99-ados-display.cfg" mode_tok=""
+                if [ -f "${mode_cfg}" ]; then
+                    mode_tok="$(grep -o 'video=[^" ]*' "${mode_cfg}" | head -n1 || true)"
+                fi
+                if ! grep -rqs --include=compatible 'ti,ads7846' "${LIVE_DT_DIR}" \
+                    || { [ -n "${mode_tok}" ] && ! grep -qF "${mode_tok}" "${PROC_CMDLINE}" 2>/dev/null; }; then
+                    install -d -m 0755 "${RUN_ADOS_DIR}"
+                    echo "display-overlay ${BOARD_ID}-${DISPLAY_ID}" >> "${REBOOT_REQUIRED_FILE}"
+                    info "HDMI touch overlay staged; reboot required (signalled in ${REBOOT_REQUIRED_FILE})."
+                fi
+                ;;
             *)
                 error "Board ${BOARD_ID} has no HDMI touch overlay activation handler."
                 exit 4

@@ -512,3 +512,133 @@ EOF
     grep -q '^display_id=waveshare35a' "${ETC}/display.conf"
     [ -f "${ETC}/display.enabled" ]
 }
+
+# -----------------------------------------------------------------------------
+# Dragon Q6A: GRUB loads the device tree from /boot/armbian-dtb-<kernel>, a
+# copy of the kernel package's DTB. The HDMI-touch overlay is compiled with the
+# real dtc, merged into that copy with the real fdtoverlay through the kernel
+# postinst hook, and the panel's missing 800x480 mode goes on the GRUB command
+# line. The base DTB is a tiny tree carrying the labels the overlay targets.
+# -----------------------------------------------------------------------------
+
+KREL="6.18.0-test"
+
+# Build the fake kernel package DTB, the Armbian GRUB-DTB config and the stock
+# /boot copy; stub update-grub. Mocks HDMI as connected with a 1080p-only EDID.
+setup_q6a() {
+    mock_hdmi_connected
+    echo "1920x1080" > "${SYS_DRM}/card0-HDMI-A-1/modes"
+    local lib="${TMP}/lib/linux-image-${KREL}/qcom"
+    mkdir -p "${lib}" "${TMP}/postinst.d" "${TMP}/grub.d" "${TMP}/livedt"
+    cat > "${TMP}/base.dts" <<'EOF'
+/dts-v1/;
+/ {
+    #address-cells = <1>;
+    #size-cells = <1>;
+    compatible = "radxa,dragon-q6a";
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        tlmm: pinctrl@f100000 {
+            reg = <0xf100000 0x300000>;
+            gpio-controller;
+            #gpio-cells = <2>;
+            interrupt-controller;
+            #interrupt-cells = <2>;
+            qup_spi12_data_clk: qup-spi12-data-clk-state { pins = "gpio48", "gpio49", "gpio50"; };
+            qup_spi12_cs_gpio: qup-spi12-cs-gpio-state { pins = "gpio51"; };
+        };
+        spi12: spi@a90000 {
+            reg = <0xa90000 0x4000>;
+            status = "disabled";
+        };
+    };
+};
+EOF
+    dtc -@ -I dts -O dtb -o "${lib}/q6a.dtb" "${TMP}/base.dts"
+    cp "${lib}/q6a.dtb" "${BOOT}/armbian-dtb-${KREL}"
+    echo 'BOOT_FDT_FILE="qcom/q6a.dtb"' > "${TMP}/armbian-grub-with-dtb"
+    printf '#!/usr/bin/env bash\necho update-grub >> "%s/update-grub.calls"\n' "${TMP}" > "${TMP}/bin/update-grub"
+    chmod +x "${TMP}/bin/update-grub"
+    echo "BOOT_IMAGE=/boot/vmlinuz-${KREL} ro quiet" > "${TMP}/cmdline"
+}
+
+run_q6a() {
+    run env \
+        ADOS_OVERLAY_ALLOW_NONROOT=1 \
+        ADOS_BOARD_ID="dragon-q6a" \
+        ADOS_DISPLAY="auto" \
+        ADOS_ETC_DIR="${ETC}" \
+        ADOS_MODULES_LOAD_DIR="${MODLOAD}" \
+        ADOS_BOOT_DIR="${BOOT}" \
+        ADOS_UDEV_RULES_DIR="${UDEV}" \
+        ADOS_SYS_GRAPHICS_DIR="${SYS_GRAPHICS}" \
+        ADOS_SYS_INPUT_DIR="${SYS_INPUT}" \
+        ADOS_SYS_DRM_DIR="${SYS_DRM}" \
+        ADOS_DEV_DRI_DIR="${DEV_DRI}" \
+        ADOS_I2CDETECT_BIN="${I2CBIN}" \
+        ADOS_ARMBIAN_GRUB_DTB_CONF="${TMP}/armbian-grub-with-dtb" \
+        ADOS_LINUX_IMAGE_LIB="${TMP}/lib" \
+        ADOS_KERNEL_POSTINST_DIR="${TMP}/postinst.d" \
+        ADOS_KERNEL_RELEASE="${KREL}" \
+        ADOS_GRUB_DEFAULT_D="${TMP}/grub.d" \
+        ADOS_UPDATE_GRUB_BIN="${TMP}/bin/update-grub" \
+        ADOS_PROC_CMDLINE="${TMP}/cmdline" \
+        ADOS_LIVE_DT_DIR="${TMP}/livedt" \
+        ADOS_RUN_DIR="${TMP}/run/ados" \
+        bash "${SCRIPT}"
+}
+
+@test "Dragon Q6A + HDMI: touch overlay merged into the GRUB DTB, 800x480 mode, reboot signalled" {
+    setup_q6a
+    run_q6a
+    [ "$status" -eq 0 ]
+    # The overlay is listed for the kernel hook, and the hook is installed.
+    grep -qx 'dragon-q6a-hdmi_touch_xpt2046' "${BOOT}/overlay-user/ados-overlays.list"
+    [ -x "${TMP}/postinst.d/yy-ados-dtb-overlays" ]
+    # The DTB GRUB loads now carries the enabled SPI bus and the touch node;
+    # the pristine copy is kept beside it.
+    run cmp -s "${BOOT}/armbian-dtb-${KREL}" "${TMP}/lib/linux-image-${KREL}/qcom/q6a.dtb"
+    [ "$status" -ne 0 ]
+    cmp -s "${BOOT}/armbian-dtb-${KREL}.ados-bak" "${TMP}/lib/linux-image-${KREL}/qcom/q6a.dtb"
+    dtc -I dtb -O dts "${BOOT}/armbian-dtb-${KREL}" 2>/dev/null | grep -q 'compatible = "ti,ads7846"'
+    [ "$(fdtget -t s "${BOOT}/armbian-dtb-${KREL}" /soc/spi@a90000 status)" = "okay" ]
+    # The EDID lacks 800x480, so the mode goes on the kernel command line.
+    grep -q 'video=HDMI-A-1:800x480@60' "${TMP}/grub.d/99-ados-display.cfg"
+    grep -qF 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} ' "${TMP}/grub.d/99-ados-display.cfg"
+    [ -f "${TMP}/update-grub.calls" ]
+    # The installer's reboot step is told why.
+    grep -qx 'display-overlay dragon-q6a-hdmi_touch_xpt2046' "${TMP}/run/ados/reboot-required"
+    grep -q '^board=dragon-q6a' "${ETC}/display.conf"
+    grep -q '^display_id=hdmi_touch_xpt2046' "${ETC}/display.conf"
+    grep -q '^has_touch=true' "${ETC}/display.conf"
+    grep -q '^activated_via=armbian-grub-dtb' "${ETC}/display.conf"
+    [ -f "${UDEV}/99-ados-hdmi-touch.rules" ]
+}
+
+@test "Dragon Q6A re-run on a booted, provisioned box: no reboot, mode kept, kernel hook re-merges" {
+    setup_q6a
+    run_q6a
+    [ "$status" -eq 0 ]
+    # Simulate the reboot: the live tree has the touch node, the kernel was
+    # booted with the mode, and the connector now lists it.
+    mkdir -p "${TMP}/livedt/soc/spi@a90000/touchscreen@1"
+    printf 'ti,ads7846\0' > "${TMP}/livedt/soc/spi@a90000/touchscreen@1/compatible"
+    echo "BOOT_IMAGE=/boot/vmlinuz-${KREL} ro quiet video=HDMI-A-1:800x480@60" > "${TMP}/cmdline"
+    printf '800x480\n1920x1080\n' > "${SYS_DRM}/card0-HDMI-A-1/modes"
+    rm -rf "${TMP}/run"
+    run_q6a
+    [ "$status" -eq 0 ]
+    [ ! -f "${TMP}/run/ados/reboot-required" ]
+    [ -f "${TMP}/grub.d/99-ados-display.cfg" ]
+    # A kernel upgrade re-copies the stock DTB; the hook merges the overlay
+    # back and leaves an identical file.
+    merged="${TMP}/merged.dtb"
+    cp "${BOOT}/armbian-dtb-${KREL}" "${merged}"
+    cp "${TMP}/lib/linux-image-${KREL}/qcom/q6a.dtb" "${BOOT}/armbian-dtb-${KREL}"
+    run env ADOS_BOOT_DIR="${BOOT}" ADOS_ARMBIAN_GRUB_DTB_CONF="${TMP}/armbian-grub-with-dtb" \
+        ADOS_LINUX_IMAGE_LIB="${TMP}/lib" "${TMP}/postinst.d/yy-ados-dtb-overlays" "${KREL}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"merged 1 overlay(s) into armbian-dtb-${KREL}"* ]]
+    cmp -s "${BOOT}/armbian-dtb-${KREL}" "${merged}"
+}

@@ -1,4 +1,5 @@
-# Bootloader overlay activation for Allwinner and Rockchip boards.
+# Bootloader overlay activation for Allwinner, Rockchip and GRUB-DTB boards,
+# plus the HDMI mode drop-in for panels whose EDID lacks their native mode.
 #
 # Sourced by scripts/drivers/install-display-overlay.sh; defines functions only.
 # Globals (paths, board/display ids, log colours) come from the main script.
@@ -213,4 +214,73 @@ activate_overlay_rk3588() {
 
     warn "Could not locate a supported Rockchip overlay activation file."
     return 1
+}
+
+# ----------------------------------------------------------------------------
+# GRUB-loaded device tree (Armbian's /etc/armbian-grub-with-dtb): GRUB loads
+# /boot/armbian-dtb-<kver>, a copy of the kernel package's DTB refreshed on
+# every kernel install. Install the kernel hook that merges the listed
+# overlays into that copy, list this overlay, and run the hook now.
+# ----------------------------------------------------------------------------
+activate_overlay_armbian_grub_dtb() {
+    local overlay_basename="$1"   # "dragon-q6a-hdmi_touch_xpt2046"
+    local list="${BOOT_DIR}/overlay-user/ados-overlays.list"
+    local hook="${KERNEL_POSTINST_DIR}/yy-ados-dtb-overlays"
+
+    if [ ! -f "${ARMBIAN_GRUB_DTB_CONF}" ]; then
+        error "${ARMBIAN_GRUB_DTB_CONF} not found; this image does not load its device tree from GRUB."
+        return 1
+    fi
+    install -d -m 0755 "${KERNEL_POSTINST_DIR}"
+    install -m 0755 "${REPO_ROOT}/data/kernel/postinst.d/yy-ados-dtb-overlays" "${hook}"
+    install -d -m 0755 "${BOOT_DIR}/overlay-user"
+    if ! grep -qx "${overlay_basename}" "${list}" 2>/dev/null; then
+        echo "${overlay_basename}" >> "${list}"
+        info "Listed ${overlay_basename} in ${list}."
+    fi
+    # Snapshot the stock DTB before the first merge so it stays restorable.
+    snapshot_boot_config "${BOOT_DIR}/armbian-dtb-${KERNEL_RELEASE}" || return 1
+    "${hook}" "${KERNEL_RELEASE}" --strict
+}
+
+# ----------------------------------------------------------------------------
+# HDMI mode: a panel whose EDID does not list its native resolution gets a
+# kernel `video=` mode on the GRUB command line. A no-op when the connected
+# HDMI connector already offers the declared resolution (and a stale drop-in
+# from an earlier run is removed).
+# ----------------------------------------------------------------------------
+apply_hdmi_mode_cmdline() {
+    local res conn_dir conn="" cfg="${GRUB_DEFAULT_D}/99-ados-display.cfg"
+    res="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" resolution)"
+    [ -n "${res}" ] || return 0
+    for conn_dir in "${SYS_DRM_DIR}"/card*-HDMI-A-*; do
+        [ -r "${conn_dir}/status" ] || continue
+        if [ "$(cat "${conn_dir}/status" 2>/dev/null)" = "connected" ]; then
+            conn="$(basename "${conn_dir}")"
+            conn="${conn#card*-}"
+            break
+        fi
+    done
+    [ -n "${conn}" ] || return 0
+    # The mode a previous run's `video=` added shows up in `modes` too: keep
+    # the drop-in while the running kernel was booted with it.
+    if grep -q "video=${conn}:${res}@" "${PROC_CMDLINE}" 2>/dev/null && [ -f "${cfg}" ]; then
+        return 0
+    fi
+    if grep -qx "${res}" "${conn_dir}/modes" 2>/dev/null; then
+        if [ -f "${cfg}" ]; then
+            rm -f "${cfg}"
+            "${UPDATE_GRUB_BIN}" >/dev/null 2>&1 || warn "${UPDATE_GRUB_BIN} returned non-zero."
+        fi
+        return 0
+    fi
+    install -d -m 0755 "${GRUB_DEFAULT_D}"
+    {
+        echo "# Written by ADOS install-display-overlay.sh: the panel's EDID does not"
+        echo "# list its ${res} mode, so the kernel is told to use it on ${conn}."
+        # shellcheck disable=SC2016
+        printf 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} video=%s:%s@60"\n' "${conn}" "${res}"
+    } > "${cfg}"
+    info "Wrote ${cfg} (video=${conn}:${res}@60)."
+    "${UPDATE_GRUB_BIN}" || { error "${UPDATE_GRUB_BIN} failed."; return 1; }
 }

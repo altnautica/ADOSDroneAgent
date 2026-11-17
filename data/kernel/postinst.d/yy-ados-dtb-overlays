@@ -1,0 +1,63 @@
+#!/bin/bash
+# ADOS: merge the agent's device-tree overlays into the DTB that GRUB loads.
+#
+# On boards that boot through GRUB with a device tree (Armbian's
+# /etc/armbian-grub-with-dtb mechanism), GRUB loads /boot/armbian-dtb-<kver>,
+# which armbian-grub-with-dtb copies from the kernel package on every kernel
+# install. That copy would drop any overlay merged before, so this hook runs
+# after it (and before zz-update-grub) and merges the overlays listed in
+# /boot/overlay-user/ados-overlays.list again.
+#
+# Usage: yy-ados-dtb-overlays <kernel-version> [--strict]
+#
+# A failed merge keeps the stock DTB and exits 0, so a kernel upgrade never
+# breaks; --strict (the installer's own call) exits 1 instead.
+set -u
+
+kver="${1:-}"
+strict=0
+[ "${2:-}" = "--strict" ] && strict=1
+
+BOOT="${ADOS_BOOT_DIR:-/boot}"
+CONF="${ADOS_ARMBIAN_GRUB_DTB_CONF:-/etc/armbian-grub-with-dtb}"
+LIB="${ADOS_LINUX_IMAGE_LIB:-/usr/lib}"
+LIST="${BOOT}/overlay-user/ados-overlays.list"
+
+fail() {
+    rm -f "${BOOT}/armbian-dtb-${kver}.ados-tmp"
+    echo "ados: device-tree overlay merge failed; keeping the stock DTB${1:+ ($1)}" >&2
+    [ "${strict}" -eq 1 ] && exit 1
+    exit 0
+}
+
+[ -n "${kver}" ] || fail "no kernel version given"
+[ -f "${CONF}" ] || exit 0
+[ -s "${LIST}" ] || exit 0
+
+BOOT_FDT_FILE=""
+# shellcheck source=/dev/null
+. "${CONF}"
+[ -n "${BOOT_FDT_FILE}" ] || fail "BOOT_FDT_FILE unset in ${CONF}"
+base="${LIB}/linux-image-${kver}/${BOOT_FDT_FILE}"
+[ -f "${base}" ] || fail "base DTB ${base} missing"
+
+dtbos=()
+while IFS= read -r name || [ -n "${name}" ]; do
+    name="${name%%#*}"
+    name="$(printf '%s' "${name}" | tr -d '[:space:]')"
+    [ -n "${name}" ] || continue
+    dtbo="${BOOT}/overlay-user/${name}.dtbo"
+    if [ -f "${dtbo}" ]; then
+        dtbos+=("${dtbo}")
+    else
+        echo "ados: overlay ${dtbo} listed but missing; skipping it" >&2
+    fi
+done < "${LIST}"
+[ "${#dtbos[@]}" -gt 0 ] || fail "no listed overlay is present"
+
+tmp="${BOOT}/armbian-dtb-${kver}.ados-tmp"
+command -v fdtoverlay >/dev/null 2>&1 || fail "fdtoverlay not installed"
+fdtoverlay -i "${base}" -o "${tmp}" "${dtbos[@]}" || fail "fdtoverlay rejected an overlay"
+mv -f "${tmp}" "${BOOT}/armbian-dtb-${kver}" || fail "could not replace armbian-dtb-${kver}"
+echo "ados: merged ${#dtbos[@]} overlay(s) into armbian-dtb-${kver}"
+exit 0
