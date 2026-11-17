@@ -28,8 +28,8 @@ mod vantage_goal;
 pub use brake::*;
 pub(super) use goal_ref::GoalRef;
 #[cfg(test)]
-pub use route::{check_legs, legs_of, Origin, RouteItem};
-pub use route::{route_of, Route, CONFINED_CAP_MPS};
+pub use route::{check_legs, legs_of, Origin};
+pub use route::{route_of, Route, RouteItem, CONFINED_CAP_MPS};
 pub(super) use subject_guard::SubjectTrack;
 pub use supervisor::{Resume, Supervisor};
 pub use vantage_goal::HOLD_NO_VANTAGE;

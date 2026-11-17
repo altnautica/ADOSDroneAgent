@@ -59,9 +59,7 @@ use super::super::Pilot;
 use super::supervisor::Resume;
 
 pub use cap::{Slowed, CONFINED_CAP_MPS};
-#[cfg(test)]
-pub use legs::RouteItem;
-pub use legs::{check_legs, legs_of, route_of, LegCheck, Origin, RouteFeed};
+pub use legs::{check_legs, legs_of, route_of, LegCheck, Origin, RouteFeed, RouteItem};
 
 /// `hold_reason` while the vehicle holds before an infeasible leg.
 pub const HOLD_ROUTE_INFEASIBLE: &str = "route-infeasible";

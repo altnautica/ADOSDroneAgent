@@ -111,7 +111,11 @@ fn surfaces_quiet_before_arming_are_not_watched() {
     w.run(1_000);
     w.airborne(copter::GUIDED);
     w.run(10_500);
-    assert!(returned(&w), "the phone was live at arming: mode {}", w.mode);
+    assert!(
+        returned(&w),
+        "the phone was live at arming: mode {}",
+        w.mode
+    );
 }
 
 fn returned(w: &World) -> bool {
