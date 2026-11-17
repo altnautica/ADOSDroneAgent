@@ -15,6 +15,7 @@ mod brake;
 mod failsafes;
 mod goal_brake;
 mod goal_ref;
+mod hold_flight;
 mod motion_ref;
 mod obstacle_data;
 mod plan;
@@ -299,7 +300,12 @@ impl Pilot {
                     self.mav(m);
                 }
             }
-            Owner::Pilot => self.fly_sticks(axes, pos, yaw, dt, now_ms),
+            // The operator's sticks fly the stick limits; the pilot's own
+            // holds and landing, with no stick session, the profile's.
+            Owner::Pilot if self.sessions.owner.is_some() => {
+                self.fly_sticks(axes, pos, yaw, dt, now_ms)
+            }
+            Owner::Pilot => self.fly_hold(axes, pos, yaw, dt, now_ms),
             Owner::Skill | Owner::Goto => self.fly_plan(pos, yaw, dt, stale_hold, now_ms),
             // Unknown obstacles: the swarm goal is not flown; the pilot holds.
             Owner::Swarm if self.obstacle_data_stale(now_ms) => {

@@ -591,3 +591,54 @@ fn a_stick_to_skill_handover_at_speed_does_not_dip() {
     assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Skill);
     assert!(low >= 0.9 * v0, "dipped to {low} from {v0}");
 }
+
+/// The pilot's own hold (a pause on a goto, with no operator stick session)
+/// brakes on the profile limits, as in 0.117, not on the operator's stick
+/// limits: on Sport the brake reaches past the sticks' 2.5 m/s² towards the
+/// profile's 6 m/s², and never past it.
+#[test]
+fn a_paused_goto_brakes_on_the_profile_limits_not_the_stick_limits() {
+    let mut w = World::new();
+    w.p.settings.pilot.avoid = AvoidMode::Off;
+    w.p.settings.pilot.profile = Profile::Sport;
+    w.airborne(copter::GUIDED);
+    w.fly = true;
+    w.req(Request::Goto {
+        n: 300.0,
+        e: 0.0,
+        d: -5.0,
+        yaw: None,
+    });
+    w.run(12_000);
+    let cruise = w.last_setpoint().unwrap().vx;
+    assert!(cruise > 8.0, "the goto cruises at {cruise:.1} m/s");
+    let _ = w.action("pause");
+    assert!(w.p.sessions.owner.is_none(), "no operator stick session");
+    let lim = crate::model::limits(Profile::Sport);
+    // The brake while the hold model still flies a velocity; the step onto
+    // the hold point once it has slowed under the capture speed is the
+    // hold, not the brake.
+    let mut prev = cruise;
+    let mut hardest = 0.0f32;
+    let mut held = false;
+    for _ in 0..300 {
+        w.run(20);
+        let sp = w.last_setpoint().unwrap();
+        if sp.type_mask.bits() != crate::fc::MASK_VELOCITY {
+            held = true;
+            break;
+        }
+        hardest = hardest.max((prev - sp.vx) / DT);
+        prev = sp.vx;
+    }
+    assert!(
+        hardest > 2.5 + 0.5,
+        "braked at most {hardest:.2} m/s²: the stick limit"
+    );
+    assert!(
+        hardest <= lim.a_h + 0.05,
+        "braked at {hardest:.2} m/s², past the profile's {}",
+        lim.a_h
+    );
+    assert!(held, "the hold model captured its hold point");
+}

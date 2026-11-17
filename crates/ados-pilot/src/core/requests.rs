@@ -235,9 +235,11 @@ impl Pilot {
         self.swarm = Some(g);
     }
 
-    /// Brake to a hold as `pilot`: the reference flown so far brakes on the
-    /// stick limits from its own velocity and acceleration, and holds where
-    /// it stops.
+    /// Brake to a hold as `pilot`. While an operator stick session owns the
+    /// vehicle, the reference flown so far brakes on the stick limits from
+    /// its own velocity and acceleration; otherwise the hold model starts
+    /// from the vehicle's velocity and brakes on the profile limits, as in
+    /// 0.117.
     pub(super) fn brake_hold(&mut self, reason: Option<&str>) {
         if matches!(
             self.owner(),
@@ -248,6 +250,13 @@ impl Pilot {
         self.set_owner(Owner::Pilot, reason.unwrap_or("brake"));
         self.goto = None;
         self.swarm = None;
+        let now_ms = self.last_tick_ms.unwrap_or(0);
+        let v = self
+            .fc
+            .fresh_local(now_ms)
+            .map(|p| [p.vn, p.ve])
+            .unwrap_or([0.0, 0.0]);
+        self.mr.engage(v);
         self.hold_reason = reason.map(str::to_owned);
     }
 }

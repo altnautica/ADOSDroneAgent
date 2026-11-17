@@ -52,6 +52,7 @@ fn blocked() -> Record {
 fn a_blocked_airframe_refuses_the_launch() {
     let mut w = World::new();
     w.p.settings.pilot.link_loss_s = 300;
+    w.p.settings.pilot.supervised_liftoff = true;
     w.p.load_airframe("fc-a", Some(blocked()), Some(10.0));
     let row = balance_row(&w).expect("the airframe_balance row");
     assert_eq!((row.ok, row.severity), (false, Severity::Block));
@@ -63,6 +64,18 @@ fn a_blocked_airframe_refuses_the_launch() {
     );
     w.run(500);
     assert!(!w.armed, "nothing was armed");
+}
+
+/// With the steady take-off off, the Balance check neither shows nor gates:
+/// a blocked record still launches, on the FC's own take-off, as in 0.117.
+#[test]
+fn with_the_steady_take_off_off_a_blocked_airframe_still_launches() {
+    let mut w = World::new();
+    w.p.settings.pilot.link_loss_s = 300;
+    w.p.load_airframe("fc-a", Some(blocked()), Some(10.0));
+    assert!(balance_row(&w).is_none(), "no Balance check row");
+    let r = launch(&mut w);
+    assert!(matches!(&r, Reply::Action(a) if a.ok), "{r:?}");
 }
 
 #[test]

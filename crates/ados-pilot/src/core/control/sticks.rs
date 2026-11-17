@@ -180,7 +180,9 @@ impl Pilot {
         // Heading: the yaw rate ramps and brakes on the yaw acceleration,
         // and the heading holds where the turn stops.
         let yaw_cmd = r.slew_rate(ask.yaw_rate, lim.yaw_dps2.to_radians(), dt);
-        if unverified {
+        // Unverified, or landing: the height is flown as velocity only, never
+        // a reference leading the vehicle.
+        if unverified || self.landing {
             r.d = pos[2];
         }
         // A goal taking over goes on from the velocity flown.

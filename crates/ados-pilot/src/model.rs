@@ -408,5 +408,9 @@ impl StickAsk {
         self.ne == [0.0, 0.0] && self.vd == 0.0 && self.yaw_rate == 0.0
     }
 }
+
+mod hold;
+pub use hold::*;
+
 #[cfg(test)]
 mod tests;

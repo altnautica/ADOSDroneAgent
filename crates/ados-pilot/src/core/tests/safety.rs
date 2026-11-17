@@ -641,11 +641,7 @@ fn a_goto_arrival_hold_inside_the_margin_moves_back_out() {
     let a = w.last_setpoint().unwrap().x;
     feed(&mut w, 2000);
     let b = w.last_setpoint().unwrap();
-    assert_eq!(
-        b.type_mask.bits(),
-        crate::fc::MASK_POS_VEL_ACC_YAW,
-        "not a hold"
-    );
+    assert_eq!(b.type_mask.bits(), MASK_POS_VEL_YAW, "not a hold");
     assert!(b.x < a - 0.05, "push dropped by the hold: {a} -> {}", b.x);
 }
 

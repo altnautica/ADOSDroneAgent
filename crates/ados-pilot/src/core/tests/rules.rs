@@ -6,7 +6,7 @@ use ados_protocol::mavlink::ardupilotmega::{
 
 use super::harness::{World, FC_COMP, FC_SYS};
 use crate::core::Reply;
-use crate::fc::MASK_POS_VEL_ACC_YAW;
+use crate::fc::{MASK_POS_VEL_ACC_YAW, MASK_POS_VEL_YAW};
 use crate::modes::copter;
 
 #[test]
@@ -45,8 +45,7 @@ fn take_control_enters_guided_and_holds() {
     assert_eq!(w.mode, copter::GUIDED);
     assert_eq!(w.p.owner(), Owner::Pilot);
     let sp = w.last_setpoint().unwrap();
-    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_ACC_YAW);
-    assert_eq!([sp.vx, sp.vy, sp.vz], [0.0; 3], "a hold stands still");
+    assert_eq!(sp.type_mask.bits(), MASK_POS_VEL_YAW);
     assert_eq!(sp.z, -5.0);
 }
 

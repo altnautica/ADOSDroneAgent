@@ -53,7 +53,13 @@ impl Pilot {
             items.push(item);
         }
         items.extend(self.no_rc_items());
-        if let Some(item) = self.airframe.readiness(&self.fc) {
+        // The Balance check gates only the steady take-off: with it off,
+        // every launch is the FC's own take-off, as in 0.117.
+        if let Some(item) = self
+            .airframe
+            .readiness(&self.fc)
+            .filter(|_| self.supervised_liftoff_applies())
+        {
             items.push(item);
         }
         if let Some(item) = self.liftoff_switch_item() {

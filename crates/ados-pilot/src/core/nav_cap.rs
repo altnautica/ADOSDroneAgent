@@ -118,6 +118,23 @@ impl Pilot {
         l
     }
 
+    /// The limits the hold model flies under `axes` (no operator stick
+    /// session): [`Pilot::limits_now`]. A cap switching on mid-flight starts
+    /// the model from the capped speed, so only speeding up is ramped;
+    /// slowing down is never held to the cap's acceleration and uses the
+    /// profile's, as on GNSS.
+    pub(super) fn hold_limits(&mut self, axes: [f32; 4], now_ms: u64) -> Limits {
+        let mut lim = self.limits_now(now_ms);
+        if self.speed_capped(now_ms) {
+            self.mr.shaper.v = geo::clamp_len(self.mr.shaper.v, lim.v_h);
+            let most = axes[0].hypot(axes[1]).min(1.0) * lim.v_h;
+            if most < geo::norm(self.mr.shaper.v) {
+                lim.a_h = limits(self.settings.pilot.profile).a_h;
+            }
+        }
+        lim
+    }
+
     /// The horizontal velocity to ask for under the cap: `v` held to the
     /// capped speed, reached at no more than the capped acceleration from the
     /// velocity flown last tick (after a gap, the measured velocity), itself

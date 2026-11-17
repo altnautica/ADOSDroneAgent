@@ -399,11 +399,18 @@ impl Pilot {
         }
     }
 
-    /// Start flying as `pilot` from the current state: the reference flown
-    /// just before, or one starting at the vehicle's position and velocity,
-    /// brakes to a hold.
+    /// Start flying as `pilot` from the current state. The operator's
+    /// sticks start from the reference flown just before, or one at the
+    /// vehicle's position and velocity; the hold model (no stick session)
+    /// holds here.
     pub(super) fn engage_pilot(&mut self, now_ms: u64) {
+        let p = self.fc.fresh_local(now_ms);
         let yaw = self.yaw(now_ms);
+        self.mr
+            .engage(p.map(|p| [p.vn, p.ve]).unwrap_or([0.0, 0.0]));
+        if let Some(p) = p {
+            self.mr.hold_here([p.n, p.e, p.d], yaw);
+        }
         let lim = crate::fixedwing::PlaneLimits::from_params(|n| self.fc.params.get(n).copied());
         let alt = self
             .fc

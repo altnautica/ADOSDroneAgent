@@ -100,6 +100,9 @@ pub struct Pilot {
     pub nav_imu: crate::nav_imu::NavImuTrack,
     /// The airframe's learned trim and balance for the connected FC.
     pub airframe: crate::airframe::Airframe,
+    /// The hold model for the pilot's own holds and landing while no
+    /// operator stick session owns the vehicle ([`crate::model::Multirotor`]).
+    mr: crate::model::Multirotor,
     fw: Fixedwing,
     /// The brake's verdict this tick (stick flight, or a braked goal).
     brake_avoid: ados_protocol::pilot::AvoidState,
@@ -213,6 +216,7 @@ impl Pilot {
             lidar: Default::default(),
             nav_imu: Default::default(),
             airframe: Default::default(),
+            mr: Default::default(),
             fw: Fixedwing::default(),
             plan: Plan::hold(ados_protocol::pilot::AvoidState::Clear),
             plan_ms: 0,

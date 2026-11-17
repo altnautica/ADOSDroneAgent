@@ -35,7 +35,7 @@ const TAKEOFF_TIMEOUT_MS: u64 = 120_000;
 
 impl Pilot {
     /// This launch lifts off under the pilot.
-    pub(super) fn supervised_liftoff_applies(&self) -> bool {
+    pub(in crate::core) fn supervised_liftoff_applies(&self) -> bool {
         self.settings.pilot.supervised_liftoff
             && self.fc.firmware == Some(Firmware::Ardupilot)
             && self.fc.vehicle_class() == VehicleClass::Multirotor
