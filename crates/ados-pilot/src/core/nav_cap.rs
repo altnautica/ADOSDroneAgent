@@ -12,7 +12,7 @@ use ados_protocol::pilot::{PlaceClass, Profile, SpeedCap};
 
 use super::{Pilot, TICK_MS};
 use crate::geo::{self, V2};
-use crate::model::{fc_capped, limits, Limits};
+use crate::model::{fc_capped, limits, stick_limits, Limits, StickLimits};
 
 /// The EKF source set ArduPilot boots with.
 pub const BOOT_SOURCE_SET: u8 = 1;
@@ -66,29 +66,14 @@ impl Pilot {
         self.nav_capped(now_ms) || self.confined_near()
     }
 
-    /// The profile's stick limits before any speed cap: the airframe
-    /// class's row, Cine's in a confined place, held to the FC's own
-    /// guidance limits. No vehicle or bundle speed limit exists to hold
-    /// them to beyond these.
-    pub fn profile_limits(&self) -> Limits {
-        let class = self.fc.vehicle_class();
-        let mut l = limits(class, self.settings.pilot.profile);
-        if self.settings.pilot.place_class == PlaceClass::Confined {
-            l = l.min(limits(class, Profile::Cine));
-        }
-        fc_capped(l, |n| self.fc.params.get(n).copied())
-    }
-
-    /// [`Pilot::profile_limits`] with the caps in force applied: the
-    /// GNSS-denied cap to the horizontal speed and acceleration, the
-    /// confined cap to the speed.
+    /// The profile's limits, with the caps in force applied: the GNSS-denied
+    /// cap to the horizontal speed and acceleration, the confined cap to the
+    /// speed.
     pub fn limits_now(&self, now_ms: u64) -> Limits {
-        let mut l = self.profile_limits();
+        let mut l = limits(self.settings.pilot.profile);
         if self.nav_capped(now_ms) {
-            let a = self.settings.pilot.gnss_denied_max_accel_mps2;
             l.v_h = l.v_h.min(self.settings.pilot.gnss_denied_max_speed_mps);
-            l.a_acc = l.a_acc.min(a);
-            l.a_brk = l.a_brk.min(a);
+            l.a_h = l.a_h.min(self.settings.pilot.gnss_denied_max_accel_mps2);
         }
         if self.confined_near() {
             l.v_h = l.v_h.min(super::control::CONFINED_CAP_MPS);
@@ -96,19 +81,41 @@ impl Pilot {
         l
     }
 
-    /// The limits the sticks fly at: [`Pilot::limits_now`], held to the
+    /// The profile's stick limits before any speed cap: the airframe
+    /// class's row, Cine's in a confined place, held to the FC's own
+    /// guidance limits. The sticks alone fly them; every autonomous path
+    /// keeps [`Pilot::limits_now`].
+    pub fn profile_limits(&self) -> StickLimits {
+        let class = self.fc.vehicle_class();
+        let mut l = stick_limits(class, self.settings.pilot.profile);
+        if self.settings.pilot.place_class == PlaceClass::Confined {
+            l = l.min(stick_limits(class, Profile::Cine));
+        }
+        fc_capped(l, |n| self.fc.params.get(n).copied())
+    }
+
+    /// The limits the sticks fly at: [`Pilot::profile_limits`] with the caps
+    /// in force (the GNSS-denied cap to the horizontal speed and
+    /// acceleration, the confined cap to the speed), held to the
     /// unverified-position speed while the position is not trusted. Braking
     /// (a STOP, a hold, a smaller stick) is never held to a cap's
     /// acceleration and uses the profile's, as on GNSS.
-    pub(super) fn stick_limits(&self, now_ms: u64) -> Limits {
-        let mut lim = self.limits_now(now_ms);
-        lim.a_brk = self.profile_limits().a_brk;
-        if self.position_unverified(now_ms).is_some() {
-            lim.v_h = lim
-                .v_h
-                .min(super::position_check::UNVERIFIED_MAX_MPS);
+    pub(super) fn stick_limits(&self, now_ms: u64) -> StickLimits {
+        let profile = self.profile_limits();
+        let mut l = profile;
+        if self.nav_capped(now_ms) {
+            let a = self.settings.pilot.gnss_denied_max_accel_mps2;
+            l.v_h = l.v_h.min(self.settings.pilot.gnss_denied_max_speed_mps);
+            l.a_acc = l.a_acc.min(a);
         }
-        lim
+        if self.confined_near() {
+            l.v_h = l.v_h.min(super::control::CONFINED_CAP_MPS);
+        }
+        if self.position_unverified(now_ms).is_some() {
+            l.v_h = l.v_h.min(super::position_check::UNVERIFIED_MAX_MPS);
+        }
+        l.a_brk = profile.a_brk;
+        l
     }
 
     /// The horizontal velocity to ask for under the cap: `v` held to the
@@ -134,7 +141,7 @@ impl Pilot {
                 .map_or([0.0; 2], |l| [l.vn, l.ve]),
         };
         let from = geo::clamp_len(from, lim.v_h);
-        let step = lim.a_acc * TICK_MS as f32 / 1000.0;
+        let step = lim.a_h * TICK_MS as f32 / 1000.0;
         geo::add(from, geo::clamp_len(geo::sub(target, from), step))
     }
 

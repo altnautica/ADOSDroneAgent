@@ -124,7 +124,7 @@ impl Pilot {
                     && slow
                 {
                     self.goal_ref = None;
-                    self.brake_hold(now_ms, None);
+                    self.brake_hold(None);
                     return;
                 }
             }

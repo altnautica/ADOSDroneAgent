@@ -985,9 +985,11 @@ fn centred_sticks_hold_where_the_reference_stops() {
     w.action("take_control");
     w.stick([0.0; 4], 600);
     w.stick([0.0, 1.0, 0.0, 0.0], 1000);
-    // Sticks centred while the vehicle still coasts at 3 m/s.
+    // Sticks centred while the vehicle still coasts at 3 m/s. The reference
+    // (2 m/s at its peak) settles within its stop time plus 1.5 s: 1.45 s
+    // braking at Normal's 2.5 m/s² and 5 m/s³ after 0.15 s, then 1.5 s.
     w.vel = [3.0, 0.0, 0.0];
-    w.stick([0.0; 4], 2500);
+    w.stick([0.0; 4], 3000);
     let sp = w.last_setpoint().unwrap().clone();
     assert_eq!(sp.type_mask.bits(), crate::fc::MASK_POS_VEL_ACC_YAW);
     assert!(sp.vx.abs() < 1e-3 && sp.vy.abs() < 1e-3, "commands a stop");

@@ -79,7 +79,7 @@ impl Pilot {
             crate::config::LinkLossAction::Land => self.do_land(now_ms),
             crate::config::LinkLossAction::Hold => {
                 self.revoke("link-loss");
-                self.brake_hold(now_ms, Some("link-loss"));
+                self.brake_hold(Some("link-loss"));
                 Ok(())
             }
         };

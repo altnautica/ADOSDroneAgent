@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{ProfileLimits, StickCommand};
+use super::stick::{ProfileLimits, StickCommand};
 
 /// The frame of every position and velocity in [`PilotCommand`] and
 /// [`ShadowCommand`], and of `goal_ned`, `plan_ned` and `setpoint_ned`: the

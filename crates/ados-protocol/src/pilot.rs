@@ -16,6 +16,7 @@ mod rc;
 mod route;
 mod sensors;
 mod state;
+mod stick;
 mod wire;
 
 pub use command::*;
@@ -23,6 +24,7 @@ pub use rc::*;
 pub use route::*;
 pub use sensors::*;
 pub use state::*;
+pub use stick::*;
 pub use wire::*;
 
 use serde::{Deserialize, Serialize};

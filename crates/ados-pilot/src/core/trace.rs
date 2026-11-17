@@ -10,7 +10,7 @@ use ados_protocol::pilot::{
 
 use super::Pilot;
 use crate::geo::V2;
-use crate::model::{Limits, StickAsk};
+use crate::model::{StickAsk, StickLimits};
 
 /// Bits of [`Tick::limits`], one per [`COMMAND_LIMITS`] code at the same
 /// index.
@@ -114,7 +114,7 @@ pub(crate) struct StickTick {
     /// [`limit`] bits.
     pub limits: u16,
     /// The limits flown.
-    pub lim: Limits,
+    pub lim: StickLimits,
 }
 
 impl StickTick {
@@ -258,7 +258,7 @@ impl Pilot {
     }
 
     /// The published form of the stick limits `lim` of the profile in use.
-    pub(super) fn profile_limits_of(&self, lim: &Limits) -> ProfileLimits {
+    pub(super) fn profile_limits_of(&self, lim: &StickLimits) -> ProfileLimits {
         ProfileLimits {
             profile: self.settings.pilot.profile,
             v_h_mps: lim.v_h,

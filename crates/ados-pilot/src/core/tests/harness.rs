@@ -338,11 +338,19 @@ impl World {
 
     /// Put the vehicle airborne, armed, in `mode`.
     pub fn airborne(&mut self, mode: u32) {
+        self.airborne_at(mode, [0.0, 0.0, -5.0]);
+    }
+
+    /// [`World::airborne`] at `pos` (NED, the ground at 0 m). The pilot's
+    /// first tick there starts its reference at the vehicle, so a test that
+    /// wants the vehicle elsewhere puts it there before, never under a
+    /// reference already flying.
+    pub fn airborne_at(&mut self, mode: u32, pos: [f32; 3]) {
         self.armed = true;
         self.landed = false;
         self.mode = mode;
-        self.pos = [0.0, 0.0, -5.0];
-        self.agl = Some(5.0);
+        self.pos = pos;
+        self.agl = Some(-pos[2]);
         self.feed();
         self.p.tick(self.now);
         self.collect();

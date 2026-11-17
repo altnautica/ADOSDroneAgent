@@ -277,10 +277,15 @@ fn stick_flight_at_speed_drops_to_the_cap_when_it_switches_on() {
     w.airborne(copter::GUIDED);
     w.action("take_control");
     w.stick([0.0; 4], 600); // pass the gate
-                            // Full forward on GPS (source set 1): the stick model reaches 8 m/s.
+                            // Full forward on GPS (source set 1): the sticks reach Normal's 7 m/s.
     w.stick([0.0, 1.0, 0.0, 0.0], 5000);
+    let v_h = w.p.profile_limits().v_h;
     let sp = w.last_setpoint().unwrap();
-    assert!(sp.vx > 7.5, "uncapped stick flight at {} m/s", sp.vx);
+    assert!(
+        v_h > 3.0 * CAP,
+        "the test needs a profile well above the cap"
+    );
+    assert!(sp.vx > v_h - 0.1, "uncapped stick flight at {} m/s", sp.vx);
     // The EKF moves to external nav mid-flight.
     ext_nav(&mut w);
     let from = w.sent.len();

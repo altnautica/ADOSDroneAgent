@@ -238,10 +238,16 @@ fn throttle_and_yaw_ramp_and_brake_without_steps() {
     let released = c.len();
     c.extend(ticks(&mut w, Some(CENTRED), 4000));
     let vz_step = max_step(&c, |c| c.vel[2]);
-    assert!(vz_step <= A_V * DT * 1.1 + 1e-3, "vertical speed step {vz_step}");
+    assert!(
+        vz_step <= A_V * DT * 1.1 + 1e-3,
+        "vertical speed step {vz_step}"
+    );
     assert!(c.last().unwrap().vel[2].abs() < 0.05, "climb braked");
     // NED: up is negative. The height reached is held, never given back.
-    let top = c[released..].iter().map(|c| c.pos[2]).fold(f32::MAX, f32::min);
+    let top = c[released..]
+        .iter()
+        .map(|c| c.pos[2])
+        .fold(f32::MAX, f32::min);
     let back = c.last().unwrap().pos[2] - top;
     assert!(back <= 0.15, "height overshoot back {back} m");
 
@@ -260,7 +266,10 @@ fn throttle_and_yaw_ramp_and_brake_without_steps() {
         .position(|c| c.yaw_rate.abs() < 1f32.to_radians())
         .expect("yaw stops") as f32
         * DT;
-    assert!(stop <= rate0 / YAW_DPS2.to_radians() + 0.3, "yaw stop {stop} s");
+    assert!(
+        stop <= rate0 / YAW_DPS2.to_radians() + 0.3,
+        "yaw stop {stop} s"
+    );
     let held = c.last().unwrap().yaw;
     let at_release = c[released - 1].yaw;
     let furthest = c[released..]
@@ -268,7 +277,11 @@ fn throttle_and_yaw_ramp_and_brake_without_steps() {
         .map(|t| wrap(t.yaw - at_release))
         .fold(f32::MIN, f32::max);
     let back = furthest - wrap(held - at_release);
-    assert!(back.to_degrees() <= 2.0, "heading back {} °", back.to_degrees());
+    assert!(
+        back.to_degrees() <= 2.0,
+        "heading back {} °",
+        back.to_degrees()
+    );
     let drift = max_step(&c[c.len() - 50..], |c| c.yaw);
     assert!(drift < 1e-4, "heading holds");
 }
@@ -325,7 +338,10 @@ fn a_reordered_or_repeated_stick_frame_is_dropped() {
     let c = ticks(&mut w, Some(FWD), 4000);
     assert!(w.seq < 1000, "the count wrapped: {}", w.seq);
     for p in c.windows(2) {
-        assert!(p[1].vel[0] >= p[0].vel[0] - 1e-3, "a frame across the wrap was dropped");
+        assert!(
+            p[1].vel[0] >= p[0].vel[0] - 1e-3,
+            "a frame across the wrap was dropped"
+        );
     }
     assert!(c.last().unwrap().vel[0] > 0.9 * V_H);
     let last = w.seq - 1;
@@ -416,16 +432,26 @@ fn a_stick_takeover_of_a_skill_keeps_the_reference_velocity() {
     let mut c = Vec::new();
     for _ in 0..40 {
         let g = goal(&w);
-        w.req(Request::Goal { lease_id: id, goal: g });
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: g,
+        });
         c.extend(ticks(&mut w, None, 200));
     }
     assert!(c.last().unwrap().speed() > 4.5, "the skill cruises");
     for _ in 0..10 {
         let g = goal(&w);
-        w.req(Request::Goal { lease_id: id, goal: g });
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: g,
+        });
         c.extend(ticks(&mut w, Some(FWD), 200));
     }
-    assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Pilot, "taken over");
+    assert_eq!(
+        w.p.owner(),
+        ados_protocol::pilot::Owner::Pilot,
+        "taken over"
+    );
     c.extend(ticks(&mut w, Some(FWD), 4000));
     let step = c
         .windows(2)
@@ -453,7 +479,10 @@ fn the_stick_brake_plans_on_the_brake_deceleration() {
     let cap = crate::core::control::stop_cap(6.0, 0.0, A_BRK, margin);
     let v = c.last().unwrap().speed();
     assert!(v > 0.5, "flies toward the wall: {v}");
-    assert!(v <= cap + 0.02, "{v} m/s toward a wall 6 m away; stops in time at {cap}");
+    assert!(
+        v <= cap + 0.02,
+        "{v} m/s toward a wall 6 m away; stops in time at {cap}"
+    );
 }
 
 /// The pilot asks the FC for its guidance limits, under either name, and
@@ -512,7 +541,10 @@ fn a_slower_profile_or_a_handed_over_descent_brakes_the_vertical_speed() {
     let goal = || {
         let mut g = Goal::new(GoalKind::Position, [0.0, 0.0, -10.0], 5.0);
         g.vd = 2.0;
-        Request::Goal { lease_id: id, goal: g }
+        Request::Goal {
+            lease_id: id,
+            goal: g,
+        }
     };
     w.req(goal());
     ticks(&mut w, None, 200);
@@ -548,7 +580,10 @@ fn a_stick_to_skill_handover_at_speed_does_not_dip() {
     for _ in 0..10 {
         let mut g = Goal::new(GoalKind::Follow, [w.pos[0] + 10.0, 0.0, -5.0], 8.0);
         g.vn = v0;
-        w.req(Request::Goal { lease_id: id, goal: g });
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: g,
+        });
         for c in ticks(&mut w, None, 100) {
             low = low.min(c.speed());
         }

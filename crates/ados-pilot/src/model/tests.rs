@@ -2,13 +2,13 @@ use super::*;
 
 const DT: f32 = 0.02;
 
-fn normal() -> Limits {
-    limits(VehicleClass::Multirotor, Profile::Normal)
+fn normal() -> StickLimits {
+    stick_limits(VehicleClass::Multirotor, Profile::Normal)
 }
 
 /// Run `s` toward `target` for `n` ticks; the largest acceleration while
 /// speeding up and while slowing, and the largest jerk.
-fn peaks(s: &mut Shaper, target: V2, lim: &Limits, n: usize) -> (f32, f32, f32) {
+fn peaks(s: &mut Shaper, target: V2, lim: &StickLimits, n: usize) -> (f32, f32, f32) {
     let (mut up, mut down, mut jerk) = (0.0f32, 0.0f32, 0.0f32);
     let mut prev_a = s.a;
     for _ in 0..n {
@@ -85,7 +85,10 @@ fn the_vertical_shaper_ramps_and_brakes_within_its_acceleration() {
 fn the_sticks_ask_after_the_centre_threshold_and_the_expo() {
     let lim = normal();
     let a = StickAsk::of([0.015, -0.019, 0.01, -0.01], 0.0, &lim);
-    assert!(a.is_release(), "residuals under the threshold are centred: {a:?}");
+    assert!(
+        a.is_release(),
+        "residuals under the threshold are centred: {a:?}"
+    );
     let a = StickAsk::of([0.0, 1.0, 1.0, 1.0], 0.0, &lim);
     assert!((a.ne[0] - lim.v_h).abs() < 1e-4);
     assert!((a.vd + lim.v_up).abs() < 1e-4, "throttle up climbs");
@@ -110,7 +113,7 @@ fn forward_stick_follows_heading() {
 #[test]
 fn the_profiles_brake_firmer_than_they_accelerate_and_sport_has_the_most_expo() {
     let [c, n, s] = [Profile::Cine, Profile::Normal, Profile::Sport]
-        .map(|p| limits(VehicleClass::Multirotor, p));
+        .map(|p| stick_limits(VehicleClass::Multirotor, p));
     for l in [c, n, s] {
         assert!(l.a_brk >= l.a_acc);
         assert!(l.a_brk <= 2.5 && l.jerk <= 5.0 && l.a_v <= 1.0 && l.yaw_dps2 <= 270.0);
@@ -118,12 +121,12 @@ fn the_profiles_brake_firmer_than_they_accelerate_and_sport_has_the_most_expo() 
     assert!(s.expo_h > n.expo_h && s.expo_v > n.expo_v && s.expo_yaw > n.expo_yaw);
     assert_eq!([c.v_h, n.v_h, s.v_h], [3.0, 7.0, 10.0]);
     // A class without a row of its own flies the multirotor row held to Cine.
-    assert_eq!(limits(VehicleClass::Vtol, Profile::Sport).v_h, 3.0);
+    assert_eq!(stick_limits(VehicleClass::Vtol, Profile::Sport).v_h, 3.0);
 }
 
 #[test]
 fn the_fc_guidance_limits_cap_the_profile_in_either_unit() {
-    let lim = limits(VehicleClass::Multirotor, Profile::Sport);
+    let lim = stick_limits(VehicleClass::Multirotor, Profile::Sport);
     let p = |n: &str| match n {
         "WP_ACC" => Some(2.0),
         "PSC_NE_JERK" => Some(4.0),

@@ -274,7 +274,10 @@ mod tests {
     fn second_session_is_ignored_until_take() {
         let mut s = Sessions::default();
         assert_eq!(s.offer("mc", 1, 1, [0.0; 4], 0, 0), Accept::Accepted);
-        assert_eq!(s.offer("android", 9, 1, [0.5; 4], 0, 10), Accept::OtherSession);
+        assert_eq!(
+            s.offer("android", 9, 1, [0.5; 4], 0, 10),
+            Accept::OtherSession
+        );
         s.take("android", 9);
         assert_eq!(s.owner.as_ref().unwrap().src, "android");
         assert_eq!(s.offer("mc", 1, 2, [0.0; 4], 0, 20), Accept::OtherSession);
@@ -320,7 +323,10 @@ mod tests {
         assert_eq!(s.offer("mc", 1, 11, [0.0; 4], 0, 60), Accept::Accepted);
         // Across the wrap.
         s.take("mc", 2);
-        assert_eq!(s.offer("mc", 2, u32::MAX, [0.0; 4], 0, 80), Accept::Accepted);
+        assert_eq!(
+            s.offer("mc", 2, u32::MAX, [0.0; 4], 0, 80),
+            Accept::Accepted
+        );
         assert_eq!(s.offer("mc", 2, 0, [0.0; 4], 0, 100), Accept::Accepted);
         assert_eq!(s.offer("mc", 2, u32::MAX, [0.0; 4], 0, 120), Accept::Stale);
         // A new session starts its own count.
