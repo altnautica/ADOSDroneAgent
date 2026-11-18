@@ -1,6 +1,7 @@
 // L2: the HUD, drawn on one canvas over the video. It reads the flight store
-// once per animation frame (and repaints only when the sample, the staleness,
-// the size or the level changed), so telemetry never re-renders React.
+// on every redraw beat (`lib/redraw-beat`, 100 ms) and repaints in the next
+// frame only when the sample, the staleness, the size or the level changed,
+// so telemetry never re-renders React.
 //
 // Two parts (cockpit spec `layers.json`):
 // - centre marks, at every level: the centre reticle, a short horizon mark
@@ -23,6 +24,7 @@ import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { drawCentreMarks, drawReticle, type Palette } from "@/components/feed/hud-centre-marks";
 import { ALT_REF_BUTTON_H, HUD_UNIT_PX, altRefButtonPos, hudTapes } from "@/lib/hud-chrome";
 import { HIT_AREA } from "@/lib/flight-layout";
+import { subscribeBeat } from "@/lib/redraw-beat";
 import { cn } from "@/lib/utils";
 
 import {
@@ -350,22 +352,6 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
     let h = 0;
     let u = 16;
     let sized = 0;
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      w = rect.width;
-      h = rect.height;
-      u = unitRef.current;
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      sized += 1;
-    };
-    const ro = new ResizeObserver(resize);
-    ro.observe(canvas);
-    canvas.addEventListener("hud-unit", resize);
-    resize();
-
     let raf = 0;
     let paintedTelemetry: unknown = undefined;
     let paintedStale = false;
@@ -373,8 +359,10 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
     let paintedAlt: AltRef | null = null;
     let paintedSized = -1;
     let paintedInstruments = false;
-    const frame = () => {
-      raf = requestAnimationFrame(frame);
+    // Checked on the redraw beat (10 Hz) and drawn only when an input changed,
+    // so an idle HUD costs no frames.
+    const paint = () => {
+      raf = 0;
       const s = useFlightStore.getState();
       const stale = isInstrumentStale(performance.now(), s.lastLiveAt, s.live);
       const alt = altRefRef.current;
@@ -397,8 +385,28 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
       paintedInstruments = inst;
       draw(ctx, w, h, u, palette, s.telemetry, stale, s.home, alt, inst);
     };
-    raf = requestAnimationFrame(frame);
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(paint);
+    };
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      w = rect.width;
+      h = rect.height;
+      u = unitRef.current;
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      sized += 1;
+      schedule();
+    };
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
+    canvas.addEventListener("hud-unit", resize);
+    resize();
+    const unsub = subscribeBeat(schedule);
     return () => {
+      unsub();
       cancelAnimationFrame(raf);
       ro.disconnect();
       canvas.removeEventListener("hud-unit", resize);

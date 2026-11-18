@@ -1,8 +1,7 @@
 // The cockpit's active alerts (`lib/alerts` rules) from the live stores, aged
 // by one 1 Hz tick so the link timers advance between telemetry frames.
 
-import { useEffect, useState } from "react";
-
+import { useNow } from "@/hooks/use-now";
 import { computeAlerts, type CockpitAlert } from "@/lib/alerts";
 import { useFeedStore } from "@/stores/feed-store";
 import { useFlightStore } from "@/stores/flight-store";
@@ -16,12 +15,7 @@ export function useCockpitAlerts(): CockpitAlert[] {
   const video = useFeedStore((s) => (s.videoMounted ? s.video.state : null));
   const lastLiveAt = useFlightStore((s) => s.lastLiveAt);
   const armedAtLastLive = useFlightStore((s) => s.armedAtLastLive);
-  const [now, setNow] = useState(() => performance.now());
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(performance.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
+  const now = useNow(1000, "monotonic");
 
   return computeAlerts({
     status,

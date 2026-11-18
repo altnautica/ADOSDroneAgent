@@ -207,17 +207,17 @@
     color: var(--fs-stop-text);
     border-radius: var(--fs-radius-sm);
   }
-  .chrome-pill-flash {
-    animation: chrome-pill-flash 1s ease-in-out infinite;
+  /* The status pill's flash: two looks stepped every 500 ms by the redraw
+     beat (`chrome-pill-dim` on the odd phase), never a running animation. */
+  .chrome-pill-flashing {
+    background-color: color-mix(in srgb, currentColor 28%, transparent);
   }
-  @keyframes chrome-pill-flash {
-    50% {
-      background-color: color-mix(in srgb, currentColor 28%, transparent);
-    }
+  .chrome-pill-flashing.chrome-pill-dim {
+    background-color: transparent;
   }
   @media (prefers-reduced-motion: reduce) {
-    .chrome-pill-flash {
-      animation: none;
+    .chrome-pill-flashing,
+    .chrome-pill-flashing.chrome-pill-dim {
       background-color: color-mix(in srgb, currentColor 22%, transparent);
     }
   }

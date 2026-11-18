@@ -3,7 +3,7 @@
 // picker. A region change switches the plan the lane transmits under, so it is
 // applied with a slide and held while the vehicle is armed.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ParseKeys, TFunction } from "i18next";
 
@@ -11,6 +11,7 @@ import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { EmptyNote, ErrorNote, ProgressBar, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
 import { SelectSettingRow } from "@/components/ui/setting-row";
 import { SlideToConfirm } from "@/components/ui/slide-to-confirm";
+import { useNow } from "@/hooks/use-now";
 import { FOLLOW_COUNTRY, regionApplyBlock, regionBody } from "@/lib/lora-model";
 import { getArmedReading, isArmedRefusal, radioWriteBlock } from "@/lib/radio-gate";
 import { loraRuleKey, loraSourceKey, loraTransportKey } from "@/lib/screen-words";
@@ -150,11 +151,7 @@ export function LoraScreen() {
   const armed = useResource(useCallback((s: AbortSignal) => getArmedReading(s), []), 1_000);
 
   // The governor's countdowns run down from the moment the status arrived.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => window.clearInterval(id);
-  }, []);
+  const nowMs = useNow(1_000);
 
   const status = lora.data?.status ?? null;
   const fetchedAt = lora.data?.at ?? nowMs;

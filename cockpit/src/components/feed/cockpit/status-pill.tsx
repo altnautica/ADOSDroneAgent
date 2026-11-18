@@ -11,6 +11,7 @@ import { pillWiring } from "@/lib/alerts";
 import { chromeStyle, severityColor, severityIcon } from "@/lib/chrome-tokens";
 import { useNavSource } from "@/hooks/use-nav-source";
 import { HIT_AREA } from "@/lib/flight-layout";
+import { useBeatPhase } from "@/lib/redraw-beat";
 import { preflightChecks } from "@/shared/hud/preflight";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
@@ -20,7 +21,9 @@ import { useStatusPillStore } from "@/stores/status-pill-store";
 import { useStatusStore } from "@/stores/status-store";
 
 /** The status pill: "All systems OK", the one alert, or "<n> warnings",
- *  flashing on a new alert until the list is opened. The shared rules also
+ *  flashing on a new alert until the list is opened: it steps between two
+ *  looks every 500 ms on the redraw beat, so an unattended pill costs two
+ *  frames a second, not a 60 fps fade. The shared rules also
  *  read the pilot frame's age (no or a stale frame never reads OK, and drops
  *  what that frame said), whether the agent answers, a lost controller, and
  *  on the ground the pre-flight checklist's failing items. `fit`: every
@@ -30,6 +33,7 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
   const stamped = usePilot();
   const pilot = stamped?.data;
   const now = useNow(500);
+  const flashPhase = useBeatPhase(5);
   const readiness = pilot?.readiness ?? [];
   const fcStatus = pilot?.statustext;
   const telemetry = useFlightStore((s) => s.telemetry);
@@ -71,9 +75,12 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
         data-severity={summary.severity}
         className={cn(
           HIT_AREA,
-          "flex h-[var(--fs-control)] min-w-[44px] items-center gap-[6px] rounded-[var(--fs-radius-sm)] border bg-transparent px-[10px] font-semibold",
+          // The flash owns the background while it runs; `bg-transparent`
+          // is a utility and would outrank the component-layer flash class.
+          "flex h-[var(--fs-control)] min-w-[44px] items-center gap-[6px] rounded-[var(--fs-radius-sm)] border px-[10px] font-semibold",
           fit ? "min-w-0 shrink" : "shrink-0",
-          summary.flashing && "chrome-pill-flash",
+          summary.flashing ? "chrome-pill-flashing" : "bg-transparent",
+          summary.flashing && flashPhase % 2 === 1 && "chrome-pill-dim",
         )}
         // A dot in the severity colour; the outline in it unless all is well;
         // the words in the severity's text colour.

@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useMapChrome } from "@/hooks/use-map-chrome";
+import { useNow } from "@/hooks/use-now";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { apiFetch } from "@/shared/api-fetch";
 import { forcingView } from "@/lib/cockpit-view";
@@ -232,11 +233,7 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
   const { status, error } = useEngineStatus();
   const rootRef = useRef<HTMLElement>(null);
   const { scale } = useMapChrome(rootRef);
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
+  const now = useNow(1000);
   const fresh = batch !== null && now - batch.receivedAt < DETECTION_STALE_MS;
   const rows = useMemo(
     () => (fresh && batch ? [...batch.detections].sort((a, b) => b.confidence - a.confidence).slice(0, 20) : []),

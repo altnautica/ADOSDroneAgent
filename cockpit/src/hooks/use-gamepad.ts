@@ -163,6 +163,7 @@ export function useGamepad(): GamepadState {
     const onConnect = (e: GamepadEvent) => {
       preferred = e.gamepad.index;
       useInputStore.setState({ padAnnounced: true });
+      if (!raf) raf = requestAnimationFrame(poll);
     };
     const onDisconnect = (e: GamepadEvent) => {
       if (preferred === e.gamepad.index) preferred = null;
@@ -176,6 +177,8 @@ export function useGamepad(): GamepadState {
       if (s.pilotRaw !== prev.pilotRaw && s.pilotRaw !== null && s.pilot) feedback.frame(s.pilotRaw, s.pilot.at, Date.now());
     });
 
+    // Every frame while a pad is present; without one the loop stops after
+    // its lost-pad handling and `gamepadconnected` starts it again.
     const poll = () => {
       raf = requestAnimationFrame(poll);
       feedback.tick(useNavStreamStore.getState().pilot?.at, Date.now());
@@ -190,6 +193,8 @@ export function useGamepad(): GamepadState {
           router.lost();
           useInputStore.setState({ pad: null, holds: [], gimbalRateDps: 0, padAnnounced: false });
         }
+        cancelAnimationFrame(raf);
+        raf = 0;
         return;
       }
       const sample = sampleOf(pad);

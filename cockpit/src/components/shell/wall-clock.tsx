@@ -4,17 +4,13 @@
 // finer). Uses the panel's own local time; it makes no claim about a synced
 // source.
 
-import { useEffect, useState } from "react";
+import { useNow } from "@/hooks/use-now";
 
 function hhmm(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 export function WallClock() {
-  const [now, setNow] = useState(() => hhmm(new Date()));
-  useEffect(() => {
-    const id = setInterval(() => setNow(hhmm(new Date())), 10_000);
-    return () => clearInterval(id);
-  }, []);
-  return <span className="font-mono tabular-nums">{now}</span>;
+  const now = useNow(10_000);
+  return <span className="font-mono tabular-nums">{hhmm(new Date(now))}</span>;
 }
