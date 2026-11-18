@@ -73,7 +73,7 @@ parking_lot = { workspace = true }
 # (`download.rs`): a blocking client on rustls with the ring provider and the
 # bundled webpki roots, the one TLS posture the agent's other HTTPS clients use.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-manual-roots-no-provider",
     "blocking",
