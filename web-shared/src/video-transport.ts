@@ -38,7 +38,8 @@
 
 import { startHls } from "./hls";
 import i18n from "./i18n";
-import { readInboundVideo, videoStatsBetween, type InboundVideoCounters, type VideoStats, type VideoStatsSample } from "./video-stats";
+import { jitterTunedReader } from "./jitter";
+import { videoStatsBetween, type InboundVideoCounters, type VideoStats, type VideoStatsSample } from "./video-stats";
 import { startWhep } from "./whep";
 
 export type TransportKind = "whep" | "hls";
@@ -141,15 +142,16 @@ export function watchPeerFailure(pc: PeerStateSource, onLost: () => void): void 
 }
 
 /** The production dialer: a WHEP session reports a failed ICE or peer
- *  connection as lost and exposes its receiver counters; an HLS session
- *  reports hls.js giving up. */
+ *  connection as lost and exposes its receiver counters, each reading also
+ *  retuning the jitter buffer (`jitter.ts`); an HLS session reports hls.js
+ *  giving up. */
 export const defaultDialer: TransportDialer = async (kind, url, video, onLost) => {
   if (kind === "hls") return startHls(url, video, onLost);
   const res = await startWhep(url, video);
   if (!res.session) return res;
   const { pc, close } = res.session;
   watchPeerFailure(pc, onLost);
-  return { ok: res.ok, session: { close, inboundVideo: () => readInboundVideo(pc) } };
+  return { ok: res.ok, session: { close, inboundVideo: jitterTunedReader(pc) } };
 };
 
 type FrameCallbackVideo = HTMLVideoElement & {

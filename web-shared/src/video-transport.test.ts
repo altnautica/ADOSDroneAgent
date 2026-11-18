@@ -19,6 +19,10 @@ const ZERO_COUNTERS: InboundVideoCounters = {
   jitterBufferDelay: 0,
   jitterBufferEmittedCount: 0,
   bytesReceived: 0,
+  packetsReceived: 0,
+  packetsLost: 0,
+  jitter: 0,
+  freezeCount: 0,
   decoderImplementation: null,
 };
 

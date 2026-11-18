@@ -11,6 +11,10 @@ const base: InboundVideoCounters = {
   jitterBufferDelay: 2,
   jitterBufferEmittedCount: 100,
   bytesReceived: 1_000_000,
+  packetsReceived: 900,
+  packetsLost: 2,
+  jitter: 0.004,
+  freezeCount: 0,
   decoderImplementation: "ExternalDecoder",
 };
 

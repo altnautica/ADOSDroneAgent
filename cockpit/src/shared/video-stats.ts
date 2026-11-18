@@ -18,6 +18,12 @@ export interface InboundVideoCounters {
   jitterBufferDelay: number;
   jitterBufferEmittedCount: number;
   bytesReceived: number;
+  packetsReceived: number;
+  packetsLost: number;
+  /** RTP interarrival jitter, seconds. */
+  jitter: number;
+  /** Freezes the decoder reported so far. */
+  freezeCount: number;
   decoderImplementation: string | null;
 }
 
@@ -61,6 +67,10 @@ export async function readInboundVideo(pc: Pick<RTCPeerConnection, "getStats">):
       jitterBufferDelay: num(entry.jitterBufferDelay),
       jitterBufferEmittedCount: num(entry.jitterBufferEmittedCount),
       bytesReceived: num(entry.bytesReceived),
+      packetsReceived: num(entry.packetsReceived),
+      packetsLost: num(entry.packetsLost),
+      jitter: num(entry.jitter),
+      freezeCount: num(entry.freezeCount),
       decoderImplementation: typeof entry.decoderImplementation === "string" ? entry.decoderImplementation : null,
     };
   });
