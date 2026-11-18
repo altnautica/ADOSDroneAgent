@@ -447,6 +447,13 @@ jobs:
     runs-on: ubuntu-22.04-arm
     env:
       ORT_RUNTIME_VERSION: "1.24.2"
+      # sha256 of the official build's libonnxruntime.so for that version. The
+      # library is checked against it whichever source served it, and a
+      # version bump updates both lines together.
+      ORT_RUNTIME_SHA256: "e18fe095919d8613ead3a31ff78212bde4fad929418a9b48f49d61c829ed5c82"
+      # A release of this repo that already ships that exact library, used when
+      # the official download is unavailable.
+      ORT_FALLBACK_RELEASE: "rev-bf1a69ea835e8f866660e7746c05431917867bcd"
     steps:
       - uses: actions/checkout@v4
 
@@ -468,11 +475,17 @@ jobs:
           ver="${ORT_RUNTIME_VERSION}"
           tarball="onnxruntime-linux-aarch64-${ver}.tgz"
           url="https://github.com/microsoft/onnxruntime/releases/download/v${ver}/${tarball}"
-          curl -fSL --retry 3 -o "${tarball}" "${url}"
-          tar -xzf "${tarball}"
-          # The tarball ships lib/libonnxruntime.so.<ver> plus a versionless
-          # symlink; publish the real (dereferenced) shared object.
-          cp -L "onnxruntime-linux-aarch64-${ver}/lib/libonnxruntime.so" libonnxruntime-aarch64.so
+          if curl -fSL --retry 3 -o "${tarball}" "${url}"; then
+            tar -xzf "${tarball}"
+            # The tarball ships lib/libonnxruntime.so.<ver> plus a versionless
+            # symlink; publish the real (dereferenced) shared object.
+            cp -L "onnxruntime-linux-aarch64-${ver}/lib/libonnxruntime.so" libonnxruntime-aarch64.so
+          else
+            echo "official download unavailable; taking the same library from ${ORT_FALLBACK_RELEASE}"
+            curl -fSL --retry 3 -o libonnxruntime-aarch64.so \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${ORT_FALLBACK_RELEASE}/libonnxruntime-aarch64.so"
+          fi
+          echo "${ORT_RUNTIME_SHA256}  libonnxruntime-aarch64.so" | sha256sum -c -
           file libonnxruntime-aarch64.so
 
       - name: Stage artifacts + checksums
