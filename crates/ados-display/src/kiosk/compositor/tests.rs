@@ -64,7 +64,7 @@ async fn output_mode_with_no_connected_output_returns_at_once() {
     };
     tokio::time::timeout(
         Duration::from_secs(2),
-        apply_output_mode("1920x1080", dir.path(), &[], &drm),
+        apply_output_mode("1920x1080", None, dir.path(), &[], &drm),
     )
     .await
     .expect("nothing pending, nothing to wait for");
@@ -78,23 +78,29 @@ fn modes(list: &[&str]) -> BTreeSet<String> {
 fn auto_steps_a_4k_panel_down_to_1080p_and_leaves_smaller_panels_alone() {
     let tv = modes(&["3840x2160", "2560x1440", "1920x1080", "1280x720"]);
     assert_eq!(
-        mode_for_output(AUTO_MODE, &tv).as_deref(),
+        mode_for_output(AUTO_MODE, &tv, None).as_deref(),
         Some("1920x1080")
     );
     assert_eq!(
-        mode_for_output(AUTO_MODE, &modes(&["1920x1080", "1280x720"])),
+        mode_for_output(AUTO_MODE, &modes(&["1920x1080", "1280x720"]), None),
         None
     );
-    assert_eq!(mode_for_output(AUTO_MODE, &modes(&["1280x800"])), None);
+    assert_eq!(
+        mode_for_output(AUTO_MODE, &modes(&["1280x800"]), None),
+        None
+    );
     // A wide panel without a 1080p mode keeps its own.
-    assert_eq!(mode_for_output(AUTO_MODE, &modes(&["3840x2160"])), None);
+    assert_eq!(
+        mode_for_output(AUTO_MODE, &modes(&["3840x2160"]), None),
+        None
+    );
     // A 4K TV that also lists the 17:9 DCI mode or 8K still steps down.
     for panel in [
         &["4096x2160", "3840x2160", "1920x1080"][..],
         &["7680x4320", "3840x2160", "1920x1080"][..],
     ] {
         assert_eq!(
-            mode_for_output(AUTO_MODE, &modes(panel)).as_deref(),
+            mode_for_output(AUTO_MODE, &modes(panel), None).as_deref(),
             Some("1920x1080"),
             "{panel:?}"
         );
@@ -109,7 +115,11 @@ fn auto_steps_a_4k_panel_down_to_1080p_and_leaves_smaller_panels_alone() {
         &["5120x2160", "3840x2160", "1920x1080"][..],
         &["7680x2160", "3840x2160", "1920x1080"][..],
     ] {
-        assert_eq!(mode_for_output(AUTO_MODE, &modes(panel)), None, "{panel:?}");
+        assert_eq!(
+            mode_for_output(AUTO_MODE, &modes(panel), None),
+            None,
+            "{panel:?}"
+        );
     }
 }
 
@@ -117,8 +127,27 @@ fn auto_steps_a_4k_panel_down_to_1080p_and_leaves_smaller_panels_alone() {
 fn a_preset_applies_only_where_the_output_offers_it() {
     let tv = modes(&["3840x2160", "1920x1080"]);
     assert_eq!(
-        mode_for_output("1920x1080", &tv).as_deref(),
+        mode_for_output("1920x1080", &tv, None).as_deref(),
         Some("1920x1080")
     );
-    assert_eq!(mode_for_output("1280x720", &tv), None);
+    assert_eq!(mode_for_output("1280x720", &tv, None), None);
+}
+
+#[test]
+fn auto_prefers_the_board_declared_panel_mode_when_the_output_offers_it() {
+    let small = modes(&["1920x1080", "800x480"]);
+    assert_eq!(
+        mode_for_output(AUTO_MODE, &small, Some("800x480")).as_deref(),
+        Some("800x480")
+    );
+    // A screen that does not list the panel mode keeps its preferred one.
+    assert_eq!(
+        mode_for_output(AUTO_MODE, &modes(&["1920x1080"]), Some("800x480")),
+        None
+    );
+    // An explicit preset outranks the panel mode.
+    assert_eq!(
+        mode_for_output("1920x1080", &small, Some("800x480")).as_deref(),
+        Some("1920x1080")
+    );
 }

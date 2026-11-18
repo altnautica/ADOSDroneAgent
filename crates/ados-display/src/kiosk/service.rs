@@ -1,6 +1,7 @@
 //! The kiosk service body: config gate, waits, and the supervise loop.
 
 use std::future::Future;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
@@ -162,12 +163,16 @@ fn build_supervisor(
     if plan.session.is_none() {
         super::prepare_cage_dirs();
     }
+    let panel_mode = crate::conf::panel_mode(&crate::conf::parse(Path::new(
+        crate::conf::DISPLAY_CONF_PATH,
+    )));
     Ok(KioskSupervisor::new(super::make_spec(
         &plan.url,
         plan.session.as_ref(),
         plan.renderer,
         plan.lib_dir.as_deref(),
         output_mode,
+        panel_mode.as_deref(),
         &browser,
         &DrmPaths::default(),
     )))

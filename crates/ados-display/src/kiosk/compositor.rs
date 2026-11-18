@@ -97,13 +97,23 @@ const UHD_MIN: (u32, u32) = (3840, 2160);
 
 /// The mode to set on one output that advertises `modes`, or `None` to keep
 /// the one cage picked. A preset applies when the output offers it. Under
-/// [`AUTO_MODE`] a 4K panel that offers [`TV_MODE`] steps down to it: its
-/// largest mode is at least [`UHD_MIN`] and no wider than 2:1 (16:9, or the
-/// 17:9 4096x2160 many TVs also list). Any other panel keeps its preferred
-/// mode, QHD and ultrawide included (5120x2160 21:9, 7680x2160 32:9).
-pub fn mode_for_output(requested: &str, modes: &BTreeSet<String>) -> Option<String> {
+/// [`AUTO_MODE`] the board-declared `panel` mode wins when the output offers
+/// it: a small panel whose scaler also accepts 1080p lists that as preferred,
+/// and only its native mode draws sharp. Otherwise a 4K panel that offers
+/// [`TV_MODE`] steps down to it: its largest mode is at least [`UHD_MIN`] and
+/// no wider than 2:1 (16:9, or the 17:9 4096x2160 many TVs also list). Any
+/// other panel keeps its preferred mode, QHD and ultrawide included (5120x2160
+/// 21:9, 7680x2160 32:9).
+pub fn mode_for_output(
+    requested: &str,
+    modes: &BTreeSet<String>,
+    panel: Option<&str>,
+) -> Option<String> {
     if requested != AUTO_MODE {
         return modes.contains(requested).then(|| requested.to_string());
+    }
+    if let Some(panel) = panel.filter(|p| modes.contains(*p)) {
+        return Some(panel.to_string());
     }
     let largest = modes
         .iter()
@@ -124,19 +134,20 @@ fn mode_size(mode: &str) -> Option<(u32, u32)> {
 }
 
 /// Set `mode` (a preset or [`AUTO_MODE`], resolved per output by
-/// [`mode_for_output`]) through `wlr-randr` over cage's Wayland socket in
-/// `runtime_dir`. Retried every [`OUTPUT_MODE_POLL`] until the socket answers
-/// or [`OUTPUT_MODE_WAIT`] passes; an output without a mode to set keeps the
-/// one cage picked.
+/// [`mode_for_output`] with the board-declared `panel` mode) through
+/// `wlr-randr` over cage's Wayland socket in `runtime_dir`. Retried every
+/// [`OUTPUT_MODE_POLL`] until the socket answers or [`OUTPUT_MODE_WAIT`]
+/// passes; an output without a mode to set keeps the one cage picked.
 pub async fn apply_output_mode(
     mode: &str,
+    panel: Option<&str>,
     runtime_dir: &Path,
     env: &[(String, String)],
     drm: &DrmPaths,
 ) {
     let mut pending: BTreeMap<String, String> = BTreeMap::new();
     for (name, modes) in connected_outputs(drm) {
-        match mode_for_output(mode, &modes) {
+        match mode_for_output(mode, &modes, panel) {
             Some(set) => {
                 pending.insert(name, set);
             }

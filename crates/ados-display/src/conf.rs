@@ -99,6 +99,21 @@ pub fn physical_geometry_from_blob(blob: &BTreeMap<String, String>) -> PhysicalG
     }
 }
 
+/// The board-declared native mode of an HDMI panel (`resolution=800x480` with
+/// `type=hdmi-touch` or `type=hdmi`), which the kiosk's `auto` resolution
+/// prefers when the screen offers it. `None` for any other display type or a
+/// value that is not `<width>x<height>` (`auto`, empty).
+pub fn panel_mode(blob: &BTreeMap<String, String>) -> Option<String> {
+    let kind = blob.get("type").map(|t| t.trim())?;
+    if kind != "hdmi-touch" && kind != "hdmi" {
+        return None;
+    }
+    let value = blob.get("resolution")?.trim();
+    let (w, h) = value.split_once('x')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(w) && digits(h)).then(|| value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +136,26 @@ mod tests {
         let bad = physical_geometry_from_blob(&parse_str("panel_width=0\npanel_height=abc\n"));
         assert_eq!(bad.width, None);
         assert_eq!(bad.height, None);
+    }
+
+    #[test]
+    fn panel_mode_reads_an_hdmi_panels_native_mode_only() {
+        let blob = parse_str("type=hdmi-touch\nresolution=800x480\n");
+        assert_eq!(panel_mode(&blob).as_deref(), Some("800x480"));
+        assert_eq!(
+            panel_mode(&parse_str("type=hdmi\nresolution= 1024x600 \n")).as_deref(),
+            Some("1024x600")
+        );
+        assert_eq!(
+            panel_mode(&parse_str("type=spi-lcd\nresolution=800x480\n")),
+            None
+        );
+        assert_eq!(
+            panel_mode(&parse_str("type=hdmi-touch\nresolution=auto\n")),
+            None
+        );
+        assert_eq!(panel_mode(&parse_str("type=hdmi-touch\n")), None);
+        assert_eq!(panel_mode(&parse_str("type=hdmi\nresolution=800x\n")), None);
     }
 
     #[test]

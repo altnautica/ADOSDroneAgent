@@ -55,12 +55,15 @@ use supervisor::ChildSpec;
 /// Cage (the appliance): `DISPLAY` / `WAYLAND_DISPLAY` / `XAUTHORITY` removed,
 /// renderer, DRM device and scoped GPU libraries pinned, orphan sweep on, the
 /// persistent cage profile and the disk cache in the agent's tmpfs run dir.
+/// The board-declared `panel_mode` is what `auto` resolution prefers there.
+#[allow(clippy::too_many_arguments)]
 pub fn make_spec(
     url: &str,
     session: Option<&DesktopSession>,
     renderer: Renderer,
     lib_dir: Option<&str>,
     output_mode: Option<&str>,
+    panel_mode: Option<&str>,
     browser: &str,
     drm: &DrmPaths,
 ) -> ChildSpec {
@@ -81,6 +84,7 @@ pub fn make_spec(
             run_as_uid: Some(session.uid),
             sweep_orphans: false,
             output_mode: None,
+            panel_mode: None,
             profile_dir: Some(profile),
         };
     }
@@ -99,6 +103,7 @@ pub fn make_spec(
         run_as_uid: None,
         sweep_orphans: true,
         output_mode: output_mode.map(str::to_string),
+        panel_mode: panel_mode.map(str::to_string),
         profile_dir: Some(cage_profile_dir()),
     }
 }

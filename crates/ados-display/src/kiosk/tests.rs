@@ -34,6 +34,7 @@ fn a_desktop_session_honours_the_resolved_gpu_renderer() {
         Renderer::Gpu,
         None,
         None,
+        None,
         BROWSER,
         &pinned_drm(dir.path()),
     );
@@ -45,6 +46,7 @@ fn a_desktop_session_honours_the_resolved_gpu_renderer() {
         "http://target/cockpit",
         Some(&wayland_session()),
         Renderer::Software,
+        None,
         None,
         None,
         BROWSER,
@@ -62,6 +64,7 @@ fn the_windowed_path_runs_as_the_session_user_without_a_sweep() {
         Renderer::Gpu,
         Some("/opt/ados/gpu/mali"),
         Some("1920x1080"),
+        Some("800x480"),
         BROWSER,
         &pinned_drm(dir.path()),
     );
@@ -72,6 +75,7 @@ fn the_windowed_path_runs_as_the_session_user_without_a_sweep() {
         spec.output_mode, None,
         "the desktop owns its display settings"
     );
+    assert_eq!(spec.panel_mode, None);
     assert!(spec
         .argv
         .contains(&"--user-data-dir=/var/ados/kiosk/profile-1000".to_string()));
@@ -96,6 +100,7 @@ fn the_cage_path_strips_display_and_scopes_the_gpu_libraries() {
         Renderer::Gpu,
         Some("/opt/ados/gpu/mali"),
         Some("1920x1080"),
+        Some("800x480"),
         BROWSER,
         &drm,
     );
@@ -103,6 +108,7 @@ fn the_cage_path_strips_display_and_scopes_the_gpu_libraries() {
     assert!(spec.sweep_orphans);
     assert_eq!(spec.run_as_uid, None);
     assert_eq!(spec.output_mode.as_deref(), Some("1920x1080"));
+    assert_eq!(spec.panel_mode.as_deref(), Some("800x480"));
     assert!(spec
         .argv
         .contains(&"--user-data-dir=/var/ados/kiosk/profile".to_string()));

@@ -76,6 +76,8 @@ pub struct ChildSpec {
     pub sweep_orphans: bool,
     /// `WIDTHxHEIGHT` set on the outputs once cage is up.
     pub output_mode: Option<String>,
+    /// The board-declared panel mode `auto` prefers when the output offers it.
+    pub panel_mode: Option<String>,
     /// The browser's persistent profile: created (owned by `run_as_uid`) and
     /// cleared of a previous browser's singleton markers before each spawn.
     pub profile_dir: Option<PathBuf>,
@@ -296,9 +298,10 @@ impl KioskSupervisor {
             let mode_task = match (&self.spec.output_mode, self.spec.sweep_orphans) {
                 (Some(mode), true) => {
                     let (mode, env, drm) = (mode.clone(), self.spec.env.clone(), self.drm.clone());
+                    let panel = self.spec.panel_mode.clone();
                     let runtime = self.runtime_dir();
                     Some(tokio::spawn(async move {
-                        apply_output_mode(&mode, &runtime, &env, &drm).await;
+                        apply_output_mode(&mode, panel.as_deref(), &runtime, &env, &drm).await;
                     }))
                 }
                 _ => None,
