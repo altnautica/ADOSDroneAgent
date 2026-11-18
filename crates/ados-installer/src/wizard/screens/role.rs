@@ -211,9 +211,13 @@ pub(super) fn components_stage(
     if is_ground {
         items.push(CheckItem {
             id: "display".into(),
-            label: "Status screen".into(),
-            benefit: "Link + status on an attached I2C/SPI OLED or LCD.".into(),
-            checked: hw.sys.i2c_addrs.contains(&0x3c) || hw.sys.i2c_addrs.contains(&0x3d),
+            label: "Screen".into(),
+            benefit: "Status on an OLED or LCD, or the HDMI screen and its touch.".into(),
+            // Unticked writes `--display none`, which also turns the HDMI kiosk
+            // off, so a connected monitor ticks it.
+            checked: hw.sys.hdmi_connected
+                || hw.sys.i2c_addrs.contains(&0x3c)
+                || hw.sys.i2c_addrs.contains(&0x3d),
             locked: false,
         });
     }

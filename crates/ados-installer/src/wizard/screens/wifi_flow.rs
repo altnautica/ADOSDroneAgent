@@ -108,7 +108,7 @@ pub(super) fn wifi_stage(tty: &mut Tty, theme: &Theme, collected: &mut Collected
         theme,
         WIFI,
         "Add a backup network?",
-        &[theme.dim("If the main network is out of range, the device joins this one instead.")],
+        &[theme.dim("Used only when the main network is out of range.")],
         "Not now",
         "Add backup",
         true,
