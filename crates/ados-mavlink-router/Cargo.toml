@@ -47,7 +47,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 # burst tolerance is this crate's own contract rather than a side effect of the
 # installer's video sysctl. socket2 is pure Rust (libc only, no C build), so it
 # cross-compiles to the musl SBC target cleanly.
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]
 tempfile = "3"
