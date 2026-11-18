@@ -436,24 +436,28 @@ jobs:
   #
   # The backend loads the ONNX Runtime dynamically (the crate's `load-dynamic`
   # feature), so the binary carries no link-time dependency on the runtime. The
-  # runtime shared library is shipped separately: an official aarch64 build the
-  # installer places at a fixed path and hands to the binary via ORT_DYLIB_PATH.
-  # Its version must match the ABI the `ort` crate targets; bump it in lockstep
-  # with the `ort` dependency. Signing happens in the publish job: minisign is
-  # not packaged for this runner's apt.
+  # runtime shared library is shipped separately: the installer places it at a
+  # fixed path and hands it to the binary via ORT_DYLIB_PATH. Its version must
+  # match the ABI the `ort` crate targets; bump it in lockstep with the `ort`
+  # dependency. Signing happens in the publish job: minisign is not packaged
+  # for this runner's apt.
   vision-onnx:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-22.04-arm
     env:
       ORT_RUNTIME_VERSION: "1.24.2"
-      # sha256 of the official build's libonnxruntime.so for that version. The
-      # library is checked against it whichever source served it, and a
-      # version bump updates both lines together.
+      # The library comes from this repo's `deps-onnxruntime-<version>` release,
+      # which no workflow writes or prunes, so the build never depends on a
+      # third-party download staying up. A version bump uploads the new library
+      # there first (with its license and notices), then updates these lines.
+      ORT_RELEASE: "deps-onnxruntime-1.24.2"
       ORT_RUNTIME_SHA256: "e18fe095919d8613ead3a31ff78212bde4fad929418a9b48f49d61c829ed5c82"
-      # A release of this repo that already ships that exact library, used when
-      # the official download is unavailable.
-      ORT_FALLBACK_RELEASE: "rev-bf1a69ea835e8f866660e7746c05431917867bcd"
+      # Second source: the same version's aarch64 wheel on PyPI, pinned by the
+      # wheel's sha256 and the library's own.
+      ORT_WHEEL: "onnxruntime-1.24.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+      ORT_WHEEL_SHA256: "76c44fc9a89dcefcd5a4ab5c6bbbb9ff1604325ab2d5d0bc9ff5a9cba7b37f4a"
+      ORT_WHEEL_LIB_SHA256: "22a22a64e18aae2948e59b381c9d1b3a461bb706d8f02d561b4c39d8a737adc8"
     steps:
       - uses: actions/checkout@v4
 
@@ -469,24 +473,23 @@ jobs:
       - name: Build ados-vision with the onnx backend (dynamic load)
         run: cargo build --release --features onnx -p ados-vision-engine
 
-      - name: Fetch the ONNX Runtime shared library (official aarch64 build)
+      - name: Fetch the ONNX Runtime shared library (aarch64)
         run: |
           set -euo pipefail
-          ver="${ORT_RUNTIME_VERSION}"
-          tarball="onnxruntime-linux-aarch64-${ver}.tgz"
-          url="https://github.com/microsoft/onnxruntime/releases/download/v${ver}/${tarball}"
-          if curl -fSL --retry 3 -o "${tarball}" "${url}"; then
-            tar -xzf "${tarball}"
-            # The tarball ships lib/libonnxruntime.so.<ver> plus a versionless
-            # symlink; publish the real (dereferenced) shared object.
-            cp -L "onnxruntime-linux-aarch64-${ver}/lib/libonnxruntime.so" libonnxruntime-aarch64.so
+          lib=libonnxruntime-aarch64.so
+          if curl -fSL --retry 3 -o "${lib}" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${ORT_RELEASE}/${lib}"; then
+            echo "${ORT_RUNTIME_SHA256}  ${lib}" | sha256sum -c -
           else
-            echo "official download unavailable; taking the same library from ${ORT_FALLBACK_RELEASE}"
-            curl -fSL --retry 3 -o libonnxruntime-aarch64.so \
-              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${ORT_FALLBACK_RELEASE}/libonnxruntime-aarch64.so"
+            echo "${ORT_RELEASE} unavailable; taking the library from the PyPI wheel"
+            url=$(curl -fsSL --retry 3 "https://pypi.org/pypi/onnxruntime/${ORT_RUNTIME_VERSION}/json" \
+              | python3 -c 'import json,os,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["filename"] == os.environ["ORT_WHEEL"]))')
+            curl -fSL --retry 3 -o "${ORT_WHEEL}" "${url}"
+            echo "${ORT_WHEEL_SHA256}  ${ORT_WHEEL}" | sha256sum -c -
+            python3 -c 'import os,shutil,sys,zipfile; z=zipfile.ZipFile(os.environ["ORT_WHEEL"]); shutil.copyfileobj(z.open("onnxruntime/capi/libonnxruntime.so." + os.environ["ORT_RUNTIME_VERSION"]), open(sys.argv[1], "wb"))' "${lib}"
+            echo "${ORT_WHEEL_LIB_SHA256}  ${lib}" | sha256sum -c -
           fi
-          echo "${ORT_RUNTIME_SHA256}  libonnxruntime-aarch64.so" | sha256sum -c -
-          file libonnxruntime-aarch64.so
+          file "${lib}"
 
       - name: Stage artifacts + checksums
         run: |
