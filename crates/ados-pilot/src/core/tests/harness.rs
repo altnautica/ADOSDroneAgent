@@ -70,7 +70,19 @@ pub struct World {
     pub answers_params: bool,
     /// The scripted FC streams PID_TUNING and SERVO_OUTPUT_RAW while armed.
     pub rates_stream: bool,
+    /// The FC's own parameter table, answered through ArduPilot's request
+    /// queue: at most [`FC_PARAM_QUEUE`] by-name reads per heartbeat, the
+    /// rest dropped. `None`: the pilot's `p.fc.params` is the table and every
+    /// read is answered.
+    pub fc_table: Option<std::collections::HashMap<String, f32>>,
+    /// Names the FC table holds but whose replies wait in its full reply
+    /// queue (never sent during the test).
+    pub slow_params: Vec<&'static str>,
+    reads_this_beat: usize,
 }
+
+/// ArduPilot's by-name read queue (`GCS_Param.cpp`, `param_requests(20)`).
+pub const FC_PARAM_QUEUE: usize = 20;
 
 /// A scan with one return, `range_m` away in body bin `bin` (degrees
 /// clockwise from the nose): something small, a pole or a person.
@@ -151,8 +163,20 @@ impl World {
             af_engaged: false,
             answers_params: true,
             rates_stream: true,
+            fc_table: None,
+            slow_params: Vec::new(),
+            reads_this_beat: 0,
         };
         w.feed();
+        // The pilot has read the FC's table before a test starts: answer
+        // each burst of reads, at this instant, until none is left.
+        for _ in 0..32 {
+            w.collect();
+            if w.inbox.is_empty() {
+                break;
+            }
+            w.feed();
+        }
         w
     }
 
@@ -299,6 +323,8 @@ impl World {
     }
 
     pub fn collect(&mut self) {
+        // The FC's request queue drains between heartbeats.
+        self.reads_this_beat = 0;
         for o in self.p.drain() {
             match o {
                 Out::Mav(m) => {
@@ -313,9 +339,44 @@ impl World {
         }
     }
 
-    /// The scripted FC obeys mode, arm and takeoff commands.
+    /// The scripted FC obeys mode, arm and takeoff commands. Its parameter
+    /// table is [`World::fc_table`], else the pilot's own (tests write
+    /// `p.fc.params`): a read of a name not in it is answered `PARAM_ERROR`
+    /// DOES_NOT_EXIST, as ArduPilot 4.7 answers it.
     fn apply(&mut self, m: &MavMessage) {
         self.apply_airframe(m);
+        if let MavMessage::PARAM_REQUEST_READ(r) = m {
+            let name = r.param_id.to_str().unwrap_or("").trim_end_matches('\0');
+            let value = match &self.fc_table {
+                Some(t) => {
+                    self.reads_this_beat += 1;
+                    if self.reads_this_beat > FC_PARAM_QUEUE || self.slow_params.contains(&name) {
+                        return;
+                    }
+                    t.get(name).copied()
+                }
+                None => self.p.fc.params.get(name).copied(),
+            };
+            match value {
+                Some(v) if self.fc_table.is_some() => {
+                    self.inbox.push(MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                        param_value: v,
+                        param_count: 0,
+                        param_index: 0,
+                        param_id: r.param_id,
+                        param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+                    }))
+                }
+                Some(_) => {}
+                None => self.inbox.push(MavMessage::PARAM_ERROR(PARAM_ERROR_DATA {
+                    param_index: -1,
+                    target_system: 255,
+                    target_component: 0,
+                    param_id: r.param_id,
+                    error: MavParamError::MAV_PARAM_ERROR_DOES_NOT_EXIST,
+                })),
+            }
+        }
         if let MavMessage::COMMAND_LONG(c) = m {
             match c.command {
                 MavCmd::MAV_CMD_DO_SET_MODE => self.set_mode(c.param2 as u32),

@@ -148,12 +148,20 @@ fn profile_item(
     for row in rows {
         match check_row(&row, place, |n| fc.params.get(n).copied()) {
             RowCheck::Ok => {}
-            RowCheck::Absent => match row.absent_blocks {
-                Some(why) if !fc.params.is_empty() => {
+            // Absent only once every name of the row was asked for without
+            // an answer: a missing row is otherwise still being read.
+            RowCheck::Absent
+                if !std::iter::once(row.name)
+                    .chain(row.alt_names.iter().copied())
+                    .all(|n| fc.param_absent(n)) =>
+            {
+                unread = true
+            }
+            RowCheck::Absent => {
+                if let Some(why) = row.absent_blocks {
                     missing.push(format!("{} absent ({why})", row.name))
                 }
-                _ => unread |= fc.params.is_empty(),
-            },
+            }
             RowCheck::Mismatch { name, have, want } => {
                 missing.push(format!("{name} {have} (want {want})"))
             }
@@ -164,26 +172,26 @@ fn profile_item(
     } else {
         Severity::Warn
     };
-    if unread {
+    if !missing.is_empty() {
+        item(
+            "fc_profile",
+            false,
+            severity,
+            format!("FC parameters differ: {}", missing.join(", ")),
+        )
+    } else if unread {
         item(
             "fc_profile",
             false,
             severity,
             "Reading flight controller failsafe parameters",
         )
-    } else if missing.is_empty() {
+    } else {
         item(
             "fc_profile",
             true,
             severity,
             "FC failsafe parameters match the ADOS profile",
-        )
-    } else {
-        item(
-            "fc_profile",
-            false,
-            severity,
-            format!("FC parameters differ: {}", missing.join(", ")),
         )
     }
 }

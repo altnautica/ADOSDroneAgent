@@ -23,6 +23,17 @@ fn quad(fw: Firmware, params: &[(&str, f32)]) -> FcState {
     for (k, v) in params {
         fc.params.insert((*k).to_owned(), *v);
     }
+    // The table is fully read: every profile row not given was answered
+    // DOES_NOT_EXIST.
+    if !params.is_empty() {
+        let class = fc.vehicle_class();
+        for row in crate::fc_profile::fc_profile(fw, class) {
+            if !fc.params.contains_key(row.name) {
+                fc.param_asks
+                    .insert(row.name.into(), crate::fc::PARAM_ABSENT_ASKS);
+            }
+        }
+    }
     fc
 }
 
@@ -399,19 +410,43 @@ fn each_avoidance_and_return_row_blocks_when_it_differs() {
     }
 }
 
+/// `name` asked for by name until the pilot takes it as absent.
+fn asked_out(fc: &mut FcState, name: &str) {
+    fc.params.remove(name);
+    fc.param_asks
+        .insert(name.into(), crate::fc::PARAM_ABSENT_ASKS);
+}
+
 #[test]
 fn absent_smartrtl_blocks_while_another_absent_row_is_skipped() {
     let mut fc = copter();
-    fc.params.remove("GUID_TIMEOUT");
-    fc.params.remove("OA_TYPE");
+    asked_out(&mut fc, "GUID_TIMEOUT");
+    asked_out(&mut fc, "OA_TYPE");
     assert!(profile(&fc).ok, "{}", profile(&fc).msg);
 
     let mut fc = copter();
-    fc.params.remove("SRTL_POINTS");
+    asked_out(&mut fc, "SRTL_POINTS");
     let r = profile(&fc);
     assert!(!r.ok);
     assert_eq!(r.severity, Severity::Block);
     assert!(r.msg.contains("SRTL_POINTS absent"), "{}", r.msg);
+}
+
+#[test]
+fn a_parameter_not_answered_yet_is_still_being_read_not_absent() {
+    // ArduPilot drops by-name reads past its 20-deep request queue: on the
+    // bench SRTL_POINTS stayed unanswered for the whole 60 s readiness wait
+    // while the rest of the table arrived, and readiness called it "not in
+    // this firmware" and refused the flight.
+    let mut fc = copter();
+    fc.params.remove("SRTL_POINTS");
+    fc.param_asks.insert("SRTL_POINTS".into(), 1);
+    let r = profile(&fc);
+    assert!(!r.ok);
+    assert_eq!(r.msg, "Reading flight controller failsafe parameters");
+    // A real mismatch is not hidden behind the reading state.
+    fc.params.insert("GUID_TIMEOUT".into(), 99.0);
+    assert!(profile(&fc).msg.starts_with("FC parameters differ"));
 }
 
 /// The lift-off rows are the pilot's to set before a supervised lift-off:

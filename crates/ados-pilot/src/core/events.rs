@@ -9,9 +9,6 @@ use crate::flows::banner;
 
 mod params;
 
-/// Re-request missing parameters this often.
-const PARAM_RETRY_MS: u64 = 15_000;
-
 /// A ground station's mode command toward the FC, as the router saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMode {
@@ -154,9 +151,7 @@ impl Pilot {
         if !matches!(msg, MavMessage::HEARTBEAT(_)) || self.fc.heartbeat_ms != now_ms {
             return;
         }
-        if first || now_ms.saturating_sub(self.params_ms) >= PARAM_RETRY_MS {
-            self.request_params(now_ms);
-        }
+        self.request_params(now_ms);
         if was_armed && !self.fc.armed {
             self.on_disarmed();
             return;

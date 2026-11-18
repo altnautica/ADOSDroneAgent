@@ -155,7 +155,10 @@ pub struct Pilot {
     scratch: HashMap<String, Scratch>,
     obstacles_ms: u64,
     sticks_ms: u64,
+    /// When the parameters taken as absent were last asked for again.
     params_ms: u64,
+    /// When each parameter was last asked for.
+    param_asked_ms: HashMap<String, u64>,
     setpoint: Option<[f32; 3]>,
     /// This tick's command of a skill goal or a goto ([`trace`]); `None`
     /// on a tick that flew none.
@@ -251,6 +254,7 @@ impl Pilot {
             obstacles_ms: 0,
             sticks_ms: 0,
             params_ms: 0,
+            param_asked_ms: HashMap::new(),
             setpoint: None,
             command: None,
             stick: None,

@@ -4,7 +4,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use ados_protocol::mavlink::ardupilotmega::{
-    EkfStatusFlags, MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavType, MavVtolState,
+    EkfStatusFlags, MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavParamError, MavType,
+    MavVtolState,
 };
 use ados_protocol::pilot::VehicleClass;
 
@@ -36,6 +37,9 @@ pub const STATUSTEXT_MIN_SEVERITY: u8 = 4;
 pub const STATUSTEXT_RING: usize = 8;
 /// How long a line stays on the pilot kind.
 pub const STATUSTEXT_MAX_AGE_MS: u64 = 30_000;
+/// A parameter asked for this many times by name with no answer is taken as
+/// absent from the FC's firmware ([`FcState::param_absent`]).
+pub const PARAM_ABSENT_ASKS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Stamped<T> {
@@ -98,6 +102,9 @@ pub struct FcState {
     pub statustext: VecDeque<Stamped<(u8, String)>>,
     pub battery_pct: Option<f32>,
     pub params: HashMap<String, f32>,
+    /// How often the pilot has asked the FC for each parameter it has not
+    /// had an answer for (`PARAM_REQUEST_READ`).
+    pub param_asks: HashMap<String, u32>,
     /// GPS_RAW_INT `fix_type` (3 = 3-D fix), `None` until one arrives.
     pub gps_fix: Option<Stamped<u8>>,
     pub rc: Option<Stamped<[u16; 18]>>,
@@ -260,7 +267,20 @@ impl FcState {
                 let raw: Vec<u8> = p.param_id.iter().copied().take_while(|&b| b != 0).collect();
                 let end = raw.len();
                 if let Ok(name) = std::str::from_utf8(&raw[..end]) {
+                    self.param_asks.remove(name);
                     self.params.insert(name.to_owned(), p.param_value);
+                }
+            }
+            // ArduPilot 4.7 answers a read of a name it does not have.
+            MavMessage::PARAM_ERROR(e)
+                if e.error == MavParamError::MAV_PARAM_ERROR_DOES_NOT_EXIST
+                    && self.from_fc(sysid, compid) =>
+            {
+                let raw: Vec<u8> = e.param_id.iter().copied().take_while(|&b| b != 0).collect();
+                if let Ok(name) = std::str::from_utf8(&raw) {
+                    if !self.params.contains_key(name) {
+                        self.param_asks.insert(name.to_owned(), PARAM_ABSENT_ASKS);
+                    }
                 }
             }
             // A frame with no channel carries no receiver: the FC repeats
@@ -374,6 +394,18 @@ impl FcState {
         self.rangefinder
             .filter(|s| now_ms.saturating_sub(s.at_ms) < 500 && s.v < AGL_RANGEFINDER_MAX_M)
             .map(|s| s.v)
+    }
+
+    /// The FC does not have `name`: asked [`PARAM_ABSENT_ASKS`] times by name
+    /// with no answer. Before that a missing parameter is still being read:
+    /// ArduPilot drops a read request when its 20-deep request queue (shared
+    /// by every link) is full, and a reply when its 5-deep reply queue is.
+    pub fn param_absent(&self, name: &str) -> bool {
+        !self.params.contains_key(name)
+            && self
+                .param_asks
+                .get(name)
+                .is_some_and(|&n| n >= PARAM_ABSENT_ASKS)
     }
 
     /// Height above the take-off point from the EKF (home-relative).

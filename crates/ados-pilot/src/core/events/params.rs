@@ -1,6 +1,26 @@
 //! The FC parameters the pilot reads, requested until the FC has sent them.
+//!
+//! ArduPilot queues by-name reads in a 20-deep request queue shared by every
+//! link and drops a read that does not fit. The pilot once sent every missing
+//! name in one burst every 15 s, so most were dropped, and a parameter could
+//! stay unread for a minute. It now asks for at most [`PARAM_BURST`] names
+//! per FC heartbeat, fewest-asked first, one name no oftener than every
+//! [`PARAM_ASK_GAP_MS`]. A name the FC answers `PARAM_ERROR`
+//! DOES_NOT_EXIST, or asked [`crate::fc::PARAM_ABSENT_ASKS`] times without an
+//! answer, is absent from the firmware; those are asked again every
+//! [`PARAM_RETRY_MS`].
 
 use super::Pilot;
+use crate::fc::PARAM_ABSENT_ASKS;
+
+/// Names asked per FC heartbeat: half the FC's request queue, which other
+/// links share.
+const PARAM_BURST: usize = 10;
+/// Names taken as absent are asked again this often.
+const PARAM_RETRY_MS: u64 = 15_000;
+/// One name is asked again no sooner than this, so the reads that make it
+/// absent span seconds: a full reply queue makes the FC's answers wait.
+const PARAM_ASK_GAP_MS: u64 = 2_000;
 
 /// FC parameters the pilot reads.
 const EXTRA_PARAMS: &[&str] = &[
@@ -44,8 +64,8 @@ const EXTRA_PARAMS: &[&str] = &[
 ];
 
 impl Pilot {
+    /// Once per FC heartbeat: ask for the next missing parameters.
     pub(super) fn request_params(&mut self, now_ms: u64) {
-        self.params_ms = now_ms;
         let Some(fw) = self.fc.firmware else { return };
         let class = self.fc.vehicle_class();
         // The flow, rangefinder and battery-failsafe rules read ArduPilot
@@ -79,11 +99,39 @@ impl Pilot {
             .collect();
         names.sort_unstable();
         names.dedup();
-        for n in names {
-            if !self.fc.params.contains_key(n) {
-                let m = self.tx().param_request(n);
-                self.mav(m);
+        let asks = |n: &str| self.fc.param_asks.get(n).copied().unwrap_or(0);
+        let mut missing: Vec<(u32, &str)> = names
+            .into_iter()
+            .filter(|n| !self.fc.params.contains_key(*n))
+            .map(|n| (asks(n), n))
+            .collect();
+        // Still being read first; the absent ones only every PARAM_RETRY_MS.
+        let reading = missing.iter().any(|&(a, _)| a < PARAM_ABSENT_ASKS);
+        if !reading {
+            if now_ms.saturating_sub(self.params_ms) < PARAM_RETRY_MS {
+                return;
             }
+            self.params_ms = now_ms;
+        }
+        missing.retain(|&(a, n)| {
+            !reading
+                || (a < PARAM_ABSENT_ASKS
+                    && self
+                        .param_asked_ms
+                        .get(n)
+                        .is_none_or(|&t| now_ms.saturating_sub(t) >= PARAM_ASK_GAP_MS))
+        });
+        missing.sort_unstable();
+        let ask: Vec<String> = missing
+            .iter()
+            .take(PARAM_BURST)
+            .map(|&(_, n)| n.to_owned())
+            .collect();
+        for n in ask {
+            let m = self.tx().param_request(&n);
+            self.mav(m);
+            *self.fc.param_asks.entry(n.clone()).or_insert(0) += 1;
+            self.param_asked_ms.insert(n, now_ms);
         }
     }
 }

@@ -441,3 +441,58 @@ fn a_visual_odometry_only_ekf_is_asked_for_and_passes() {
     run_with_ekf(&mut w, &ekf(rel, 0.1), 600);
     assert!(position_item(&w).0, "{:?}", position_item(&w));
 }
+
+/// The FC's failsafe parameters are read through ArduPilot's 20-deep read
+/// queue, which drops what does not fit. On the bench the pilot sent every
+/// missing name at once every 15 s, so `SRTL_POINTS` went unanswered for the
+/// whole 60 s readiness wait, and readiness called it "not in this firmware"
+/// and refused the flight.
+#[test]
+fn the_failsafe_parameters_are_read_through_the_fcs_request_queue() {
+    let mut w = World::new();
+    let table = std::mem::take(&mut w.p.fc.params);
+    w.p.fc.param_asks.clear();
+    w.fc_table = Some(table);
+    w.run(3_000);
+    assert_eq!(w.p.fc.params.get("SRTL_POINTS"), Some(&500.0));
+    let r =
+        w.p.state(w.now)
+            .readiness
+            .into_iter()
+            .find(|r| r.id == "fc_profile")
+            .expect("an fc_profile item");
+    assert!(r.ok, "{}", r.msg);
+}
+
+fn fc_profile_msg(w: &World) -> String {
+    w.p.state(w.now)
+        .readiness
+        .into_iter()
+        .find(|r| r.id == "fc_profile")
+        .expect("an fc_profile item")
+        .msg
+}
+
+/// A reply held up in the FC's full reply queue is not an absent parameter:
+/// the reads that make one absent are spaced seconds apart. Asked every
+/// heartbeat, three reads went out in 2 s and a late `SRTL_POINTS` read as
+/// "not in this firmware".
+#[test]
+fn a_slow_reply_is_still_being_read_until_the_spaced_reads_run_out() {
+    let mut w = World::new();
+    let table = std::mem::take(&mut w.p.fc.params);
+    w.p.fc.param_asks.clear();
+    w.fc_table = Some(table);
+    w.slow_params = vec!["SRTL_POINTS"];
+    w.run(3_000);
+    assert_eq!(
+        fc_profile_msg(&w),
+        "Reading flight controller failsafe parameters"
+    );
+    w.run(3_000);
+    assert!(
+        fc_profile_msg(&w).contains("SRTL_POINTS absent"),
+        "{}",
+        fc_profile_msg(&w)
+    );
+}
