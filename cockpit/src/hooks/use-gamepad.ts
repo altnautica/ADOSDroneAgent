@@ -163,7 +163,12 @@ export function useGamepad(): GamepadState {
     const onConnect = (e: GamepadEvent) => {
       preferred = e.gamepad.index;
       useInputStore.setState({ padAnnounced: true });
-      if (!raf) raf = requestAnimationFrame(poll);
+      if (!raf) {
+        // Settle the feedback state the sleeping loop skipped while no pad
+        // could rumble, so a link lost long ago does not buzz the new pad.
+        feedback.tick(useNavStreamStore.getState().pilot?.at, Date.now());
+        raf = requestAnimationFrame(poll);
+      }
     };
     const onDisconnect = (e: GamepadEvent) => {
       if (preferred === e.gamepad.index) preferred = null;
