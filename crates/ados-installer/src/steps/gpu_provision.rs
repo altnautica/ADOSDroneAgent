@@ -148,8 +148,11 @@ fn render_marker_body(lib_dir: Option<&str>) -> String {
 /// Rockchip Valhall boards we target those are the BROKEN path (a Valhall Mali
 /// is handled by the libmali route via `/dev/mali0`, not Mesa). `v3d`/`vc4` =
 /// Raspberry Pi VideoCore, `i915` = Intel, `amdgpu`/`radeon` = AMD, `nouveau` =
-/// NVIDIA.
-const MESA_GOOD_DRIVERS: &[&str] = &["v3d", "vc4", "i915", "amdgpu", "radeon", "nouveau"];
+/// NVIDIA, `msm_dpu` = Qualcomm Adreno through the mainline msm driver and Mesa
+/// freedreno (Dragon Q6A, QCS6490).
+const MESA_GOOD_DRIVERS: &[&str] = &[
+    "v3d", "vc4", "i915", "amdgpu", "radeon", "nouveau", "msm_dpu",
+];
 
 /// Return the name of a known-good Mesa GL DRM driver bound to a GPU on this
 /// box, or None. Reads the driver symlink of the render/display nodes — a safe
@@ -484,7 +487,9 @@ mod tests {
         // Conservative allowlist: the reliably-Mesa-driven GPUs are enabled, but
         // panfrost/lima are excluded — on the Rockchip Valhall boards we target
         // those are the broken path (a Valhall Mali is handled via libmali).
-        for good in ["v3d", "vc4", "i915", "amdgpu", "radeon", "nouveau"] {
+        for good in [
+            "v3d", "vc4", "i915", "amdgpu", "radeon", "nouveau", "msm_dpu",
+        ] {
             assert!(MESA_GOOD_DRIVERS.contains(&good), "missing {good}");
         }
         assert!(!MESA_GOOD_DRIVERS.contains(&"panfrost"));
