@@ -2,12 +2,12 @@
 // out even when no new data arrives to re-render it. Reading the clock from
 // state (not `Date.now()` in render) keeps renders pure. A null interval
 // stops the tick (nothing to age). The tick lands on the cockpit's redraw
-// beat, rounded to whole beats, so every clock on screen updates in the
-// same frame.
+// beat, on the shared beat count rounded to whole beats, so clocks with the
+// same interval (or one dividing another) update in the same frame.
 
 import { useEffect, useState } from "react";
 
-import { BEAT_MS, subscribeBeat } from "@/lib/redraw-beat";
+import { BEAT_MS, beatNow, subscribeBeat } from "@/lib/redraw-beat";
 
 /** Which clock the tick reads: the wall clock (epoch ms, comparable with
  *  `Date.now()` stamps) or the monotonic `performance.now()` clock (for
@@ -23,12 +23,8 @@ export function useNow(intervalMs: number | null, clock: NowClock = "wall"): num
   useEffect(() => {
     if (intervalMs === null) return;
     const every = Math.max(1, Math.round(intervalMs / BEAT_MS));
-    let beats = 0;
     return subscribeBeat(() => {
-      beats += 1;
-      if (beats < every) return;
-      beats = 0;
-      setNow(read(clock));
+      if (beatNow() % every === 0) setNow(read(clock));
     });
   }, [intervalMs, clock]);
   return now;
