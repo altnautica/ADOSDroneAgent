@@ -203,13 +203,17 @@ export function connectPilotLink(source: PilotSource): () => void {
       store.setLink("connected");
     };
     socket.onmessage = (msg) => {
-      backoff.message();
       armSilence();
+      let frame: unknown;
       try {
-        handlePilotFrame(JSON.parse(typeof msg.data === "string" ? msg.data : ""));
+        frame = JSON.parse(typeof msg.data === "string" ? msg.data : "");
       } catch {
-        // malformed frame: ignored
+        return; // malformed frame: ignored
       }
+      // A node with no pilot answers one error frame and closes; that is not
+      // a working session, so it must not reset the backoff to 1 s.
+      if ((frame as { kind?: unknown } | null)?.kind !== "error") backoff.message();
+      handlePilotFrame(frame);
     };
     socket.onclose = () => {
       socket = null;
