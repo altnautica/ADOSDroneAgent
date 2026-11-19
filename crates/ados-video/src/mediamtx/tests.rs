@@ -1,4 +1,4 @@
-use super::net::find_subslice;
+use super::net::{de_chunk, find_subslice};
 use super::*;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -587,4 +587,10 @@ fn find_subslice_basic() {
     assert_eq!(find_subslice(b"abc\r\n\r\nxyz", b"\r\n\r\n"), Some(3));
     assert_eq!(find_subslice(b"no-sep-here", b"\r\n\r\n"), None);
     assert_eq!(find_subslice(b"", b"x"), None);
+}
+
+#[test]
+fn de_chunk_joins_the_chunks() {
+    assert_eq!(de_chunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"), b"Wikipedia");
+    assert_eq!(de_chunk(b"0\r\n\r\n"), b"");
 }

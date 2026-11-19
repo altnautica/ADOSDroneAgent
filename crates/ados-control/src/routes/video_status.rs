@@ -18,13 +18,14 @@
 //! live in the roster (`GET /api/video/roster`), not here. Guaranteed 200.
 
 use ados_video::mediamtx::DEFAULT_WEBRTC_PORT;
+use ados_video::status_verdict::{
+    main_path, mediamtx_whep_serving, path_ready, read_paths_list, read_pipeline_outcome,
+};
 use axum::Json;
 use serde_json::{json, Map, Value};
 
-use crate::mediamtx_probe::{main_path, path_ready, read_paths_list};
 use crate::routes::camera_config::discovered_camera_entries;
 use crate::routes::status::{binary_path, VIDEO_DEPENDENCIES};
-use crate::routes::status_full::mediamtx_whep_serving;
 
 /// The primary stream's WHEP endpoint on this front (addresses mediamtx `main`).
 const PRIMARY_WHEP_URL: &str = "/whep";
@@ -47,7 +48,7 @@ pub async fn get_video_status() -> Json<Value> {
     );
     // The frame-bus feed counters (frames skipped on the way to the encoder),
     // when a fresh pipeline sidecar carries them.
-    if let Some(feeds) = crate::routes::status_full::read_pipeline_outcome().framebus {
+    if let Some(feeds) = read_pipeline_outcome().framebus {
         body["framebus"] = feeds;
     }
     Json(body)

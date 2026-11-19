@@ -232,13 +232,6 @@
         "null"
       ]
     },
-    "mavlinkWsPort": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    },
     "mavlinkWsUrl": {
       "type": [
         "string",
@@ -416,13 +409,6 @@
       "items": {
         "$ref": "#/$defs/VideoStreamHb"
       }
-    },
-    "videoWhepPort": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
     },
     "videoWhepUrl": {
       "type": [

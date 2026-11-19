@@ -98,10 +98,13 @@ pub(super) fn spawn_heartbeat(
                     // The profile in WIRE form. Posting the internal form told
                     // the cloud `ground_station` or `auto`, neither of which the
                     // fleet view classifies.
+                    let profile = config.wire_profile();
+                    // The same video verdict the LAN status reports, each tick.
+                    let video = heartbeat::video_verdict(&profile).await;
                     let base = heartbeat::HeartbeatBase {
                         device_id: config.agent.device_id.clone(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
-                        profile: Some(config.wire_profile()),
+                        profile: Some(profile),
                         role: None,
                         uptime_seconds: started.elapsed().as_secs() as i64,
                         board_name,
@@ -110,6 +113,7 @@ pub(super) fn spawn_heartbeat(
                         board_arch,
                         board_npu_tops,
                         live_detector,
+                        video,
                     };
                     // Live status (resources + FC link + service fleet) built in
                     // Rust from the real sources each tick, folded over the base.

@@ -81,6 +81,57 @@ pub struct HeartbeatBase {
     /// Where the vision engine's live backend runs its detector, read this tick
     /// with the same query `/api/status` makes. Feeds the perception tier.
     pub live_detector: LiveDetector,
+    /// The video verdict read this tick ([`video_verdict`]): the same answer
+    /// the LAN `/api/status/full` video block gives.
+    pub video: VideoVerdict,
+}
+
+/// The heartbeat's `videoState` and `videoWhepUrl`, taken from the shared
+/// ados-video verdict so the cloud row and the LAN status never disagree. A
+/// state that is not `running` carries no URL.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VideoVerdict {
+    pub state: Option<String>,
+    pub whep_url: Option<String>,
+}
+
+impl VideoVerdict {
+    /// The two fields out of a consolidated-status `video` block.
+    pub fn from_block(block: &serde_json::Value) -> Self {
+        let text = |k: &str| block.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        VideoVerdict {
+            state: text("state"),
+            whep_url: text("whep_url"),
+        }
+    }
+}
+
+/// Read this tick's video verdict for `profile` (wire form): the pipeline
+/// sidecar, the local mediamtx readiness and, on a ground station, the WFB
+/// receive status from the radio's stats sidecar.
+pub async fn video_verdict(profile: &str) -> VideoVerdict {
+    use ados_video::status_verdict::{
+        build_video_block_with, read_pipeline_outcome, resolve_mediamtx_ready,
+    };
+    let wfb = if profile == "drone" {
+        None
+    } else {
+        let cfg = ados_protocol::wfb_status::WfbStatusConfig::load(&crate::config::config_path());
+        ados_protocol::wfb_status::build_status_from_stats_file_at(
+            &cfg,
+            std::path::Path::new(WFB_STATS_SIDECAR),
+        )
+        .as_object()
+        .cloned()
+    };
+    let block = build_video_block_with(
+        profile,
+        &wfb,
+        resolve_mediamtx_ready().await,
+        Vec::new(),
+        read_pipeline_outcome(),
+    );
+    VideoVerdict::from_block(&block)
 }
 
 /// Build the heartbeat wire object from the native base plus an optional
@@ -275,11 +326,9 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         setup_url: None,
         api_url: None,
         agent_version: base.version.clone(),
-        video_state: None,
-        video_whep_port: None,
-        mavlink_ws_port: None,
+        video_state: base.video.state.clone(),
         mavlink_ws_url: None,
-        video_whep_url: None,
+        video_whep_url: base.video.whep_url.clone(),
         mission_control_url: None,
         remote_access: RemoteAccess {
             provider: "none".to_string(),

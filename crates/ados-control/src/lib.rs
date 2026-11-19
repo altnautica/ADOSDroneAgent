@@ -26,7 +26,6 @@ pub mod hw_local;
 pub mod ipc;
 pub mod mcp;
 pub mod mdns;
-pub(crate) mod mediamtx_probe;
 pub mod pairing_store;
 pub mod param_store;
 pub mod probe;

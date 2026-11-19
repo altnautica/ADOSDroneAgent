@@ -233,16 +233,10 @@ pub struct HeartbeatPayload {
     pub agent_version: String,
 
     // --- video / mavlink discovery ---
-    // The pipeline state is the enrichment producer's to report; absent reads as
-    // "unknown" rather than the native loop asserting "stopped" over a live feed.
+    // The pipeline verdict, the same one `/api/status/full` reports (the shared
+    // ados-video verdict); absent only when the loop has no verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_state: Option<String>,
-    // The media and MAVLink WebSocket ports: omitted until a producer reports
-    // a port it actually serves on, never a fabricated 0.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub video_whep_port: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mavlink_ws_port: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mavlink_ws_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

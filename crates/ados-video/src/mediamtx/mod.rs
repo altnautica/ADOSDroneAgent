@@ -28,7 +28,7 @@ use serde::Serialize;
 
 mod config;
 mod manager;
-mod net;
+pub(crate) mod net;
 
 pub use config::{mediamtx_config_yaml, ConfigParams};
 pub use manager::MediamtxManager;

@@ -14,9 +14,9 @@
 //! radio view instead of being omitted. The receiver declares both as
 //! `v.optional(v.union(T, v.null()))` — it agrees, and it needs the null to
 //! clear a previous tick's verdict. The stripped fixture carries them. And the
-//! unmeasured `fcPort` / `fcBaud` / `videoWhepPort` / `mavlinkWsPort` are
-//! omitted instead of asserted as `""` / `0`: the receiver declares each
-//! optional, and a fabricated zero reads as a real port.
+//! unmeasured `fcPort` / `fcBaud` are omitted instead of asserted as `""` /
+//! `0`: the receiver declares each optional, and a fabricated zero reads as a
+//! real port. `videoWhepPort` / `mavlinkWsPort` were never set and are gone.
 //!
 //! This builds the same logical input in Rust and asserts the Rust
 //! serialization equals the fixture as a `serde_json::Value` — comparing as
@@ -80,8 +80,6 @@ fn base_payload() -> HeartbeatPayload {
         api_url: Some("http://127.0.0.1:8080/api".to_string()),
         agent_version: VERSION.to_string(),
         video_state: Some("stopped".to_string()),
-        video_whep_port: None,
-        mavlink_ws_port: None,
         mavlink_ws_url: None,
         video_whep_url: None,
         mission_control_url: None,

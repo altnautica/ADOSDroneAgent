@@ -1,5 +1,8 @@
 use super::*;
 use ados_protocol::wfb_status::WfbStatusConfig;
+use ados_video::status_verdict::{
+    build_video_block_with, gs_video_delivering, read_pipeline_outcome_in, PipelineSidecar,
+};
 // Test-only: the base block is the shared module's, exercised here because
 // this is where the radio block's null-verdict contract is pinned.
 use ados_protocol::wfb_status::wfb_base_block;

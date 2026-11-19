@@ -91,7 +91,44 @@ fn base() -> HeartbeatBase {
         board_arch: "aarch64".to_string(),
         board_npu_tops: 6.0,
         live_detector: LiveDetector::Off,
+        video: VideoVerdict::default(),
     }
+}
+
+#[test]
+fn heartbeat_reports_running_video_state_from_the_shared_verdict() {
+    use ados_video::status_verdict::{build_video_block_with, PipelineSidecar};
+    // A drone whose pipeline says `streaming` behind a ready mediamtx: the
+    // shared verdict is `running` with the same-origin WHEP path, and the
+    // heartbeat carries exactly that.
+    let streaming = PipelineSidecar {
+        fresh: true,
+        state: Some("streaming".to_string()),
+        ..PipelineSidecar::default()
+    };
+    let block = build_video_block_with("drone", &None, true, vec![], streaming);
+    let b = HeartbeatBase {
+        video: VideoVerdict::from_block(&block),
+        ..base()
+    };
+    let v = build_payload(&b, None);
+    assert_eq!(v["videoState"], "running");
+    assert_eq!(v["videoWhepUrl"], "/whep");
+
+    // A pipeline in error: the state rides, and no playable URL does.
+    let error = PipelineSidecar {
+        fresh: true,
+        state: Some("error".to_string()),
+        ..PipelineSidecar::default()
+    };
+    let block = build_video_block_with("drone", &None, true, vec![], error);
+    let b = HeartbeatBase {
+        video: VideoVerdict::from_block(&block),
+        ..base()
+    };
+    let v = build_payload(&b, None);
+    assert_eq!(v["videoState"], "error");
+    assert!(v.get("videoWhepUrl").is_none());
 }
 
 #[test]
@@ -346,7 +383,6 @@ fn enrichment_folds_over_the_native_base() {
         "cpuPercent": 12.5,
         "temperature": 47.0,
         "videoState": "running",
-        "videoWhepPort": 8889,
         "radio": {
             "state": "connected",
             "channel": 149,

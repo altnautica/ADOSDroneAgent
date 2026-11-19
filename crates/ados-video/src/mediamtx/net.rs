@@ -76,9 +76,20 @@ pub async fn wait_for_tcp_port(host: &str, port: u16, timeout: Duration) -> bool
 
 /// Minimal async HTTP/1.1 GET to 127.0.0.1:`port``path`. Returns the response
 /// body bytes on a 200, `None` on connection-refused / timeout / non-200 /
-/// malformed response. Loopback-only, so `Connection: close` + read-to-EOF is
-/// sufficient (no chunked / keep-alive handling).
-pub(super) async fn http_get(port: u16, path: &str) -> Option<Vec<u8>> {
+/// malformed response.
+pub(crate) async fn http_get(port: u16, path: &str) -> Option<Vec<u8>> {
+    match http_get_status(port, path).await? {
+        (200, body) => Some(body),
+        _ => None,
+    }
+}
+
+/// The status code and body of a loopback HTTP/1.1 GET, `None` on
+/// connection-refused / timeout / a malformed or oversized response.
+/// `Connection: close` reads the body to EOF; a chunked body is de-chunked.
+/// Bounded in size (4 MiB) and time so a stalled peer cannot hold the caller.
+pub(crate) async fn http_get_status(port: u16, path: &str) -> Option<(u16, Vec<u8>)> {
+    const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
     let connect = TcpStream::connect(("127.0.0.1", port));
     let mut stream = tokio::time::timeout(API_CONNECT_TIMEOUT, connect)
         .await
@@ -92,8 +103,12 @@ pub(super) async fn http_get(port: u16, path: &str) -> Option<Vec<u8>> {
         stream.write_all(request.as_bytes()).await.ok()?;
         stream.flush().await.ok()?;
         let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.ok()?;
-        Some(buf)
+        (&mut stream)
+            .take(MAX_READ_BYTES + 1)
+            .read_to_end(&mut buf)
+            .await
+            .ok()?;
+        (buf.len() as u64 <= MAX_READ_BYTES).then_some(buf)
     };
     let raw = tokio::time::timeout(API_TIMEOUT, exchange).await.ok()??;
 
@@ -106,10 +121,36 @@ pub(super) async fn http_get(port: u16, path: &str) -> Option<Vec<u8>> {
     let status_line_end = find_subslice(head, b"\r\n").unwrap_or(head.len());
     let status_line = std::str::from_utf8(&head[..status_line_end]).ok()?;
     let code: u16 = status_line.split_whitespace().nth(1)?.parse().ok()?;
-    if code != 200 {
-        return None;
+    let chunked = String::from_utf8_lossy(head)
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    let body = if chunked {
+        de_chunk(body)
+    } else {
+        body.to_vec()
+    };
+    Some((code, body))
+}
+
+/// De-chunk a `Transfer-Encoding: chunked` body: `<hexlen>\r\n<data>\r\n`
+/// repeated until a zero-length chunk.
+pub(super) fn de_chunk(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(crlf) = find_subslice(rest, b"\r\n") {
+        let len = std::str::from_utf8(&rest[..crlf])
+            .ok()
+            .and_then(|l| usize::from_str_radix(l.trim(), 16).ok())
+            .unwrap_or(0);
+        if len == 0 {
+            break;
+        }
+        let start = crlf + 2;
+        let end = (start + len).min(rest.len());
+        out.extend_from_slice(&rest[start..end]);
+        rest = rest.get(end + 2..).unwrap_or(&[]);
     }
-    Some(body.to_vec())
+    out
 }
 
 /// Find the first index of `needle` in `haystack`.

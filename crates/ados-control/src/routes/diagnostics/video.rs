@@ -95,8 +95,8 @@ impl VideoSample {
     /// from an explicit run dir in a test.
     pub(super) async fn take(run_dir: &Path) -> Self {
         let (mtx_bytes_received, mtx_serving) = tokio::join!(
-            crate::routes::status_full::mediamtx_main_bytes_received(),
-            crate::routes::status_full::mediamtx_whep_serving(),
+            ados_video::status_verdict::mediamtx_main_bytes_received(),
+            ados_video::status_verdict::mediamtx_whep_serving(),
         );
         Self::from_run_dir(run_dir, mtx_bytes_received, mtx_serving)
     }

@@ -30,9 +30,9 @@ use serde_json::{json, Map, Value};
 
 use ados_protocol::pairing_posture::CallerClass;
 use ados_video::config::{CameraConfig, RosterVideoConfig};
+use ados_video::status_verdict;
 
 use crate::config::PairingConfig;
-use crate::mediamtx_probe;
 use crate::routes::pairing;
 use crate::state::AppState;
 
@@ -53,9 +53,9 @@ pub async fn get_dashboard_snapshot(
 ) -> Json<Value> {
     let paths = &state.pairing_paths;
 
-    let list = mediamtx_probe::read_paths_list().await;
-    let main = list.as_ref().and_then(mediamtx_probe::main_path);
-    let ready = main.is_some_and(mediamtx_probe::path_ready);
+    let list = status_verdict::read_paths_list().await;
+    let main = list.as_ref().and_then(status_verdict::main_path);
+    let ready = main.is_some_and(status_verdict::path_ready);
     let config_text = std::fs::read_to_string(&paths.config).unwrap_or_default();
     let camera = RosterVideoConfig::from_text(&config_text).primary_camera();
     let stream_state = video_state(

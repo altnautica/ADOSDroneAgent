@@ -211,8 +211,6 @@ fn minimal_payload() -> HeartbeatPayload {
         api_url: None,
         agent_version: "0.1.0".to_string(),
         video_state: Some("stopped".to_string()),
-        video_whep_port: None,
-        mavlink_ws_port: None,
         mavlink_ws_url: None,
         video_whep_url: None,
         mission_control_url: None,

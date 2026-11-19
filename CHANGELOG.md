@@ -64,6 +64,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Every installed retired extension is stopped before any successor installs, and one is switched back on only when none of its successors installed, so the 3D-capture extension and Navigation never run together when Capture fails to install.
 - A Python manifest check knows `plugin.http.<extension id>` as a GCS capability, as Mission Control does.
 - The units that skip when their binary is missing (`ados-cloud`, `ados-control`, `ados-input`, `ados-oled-i2c`, `ados-pic`, `ados-pilot`, `ados-plugin-host`, `ados-swarmbus`, `ados-vision`) now gate on `ConditionFileIsExecutable=`, so a binary that is present but not executable also skips the unit instead of failing with 203/EXEC on every restart.
+- The cloud heartbeat reports `videoState` and `videoWhepUrl` every tick from the same video verdict `/api/status/full` gives (now in `ados-video`'s `status_verdict`), so a cloud-relayed node no longer shows no video state while its camera streams. The never-set `videoWhepPort` and `mavlinkWsPort` heartbeat fields are removed.
 
 ## [0.118.0] - 2026-11-17
 
