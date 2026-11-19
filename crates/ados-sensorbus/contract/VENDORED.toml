@@ -1,12 +1,12 @@
 # Byte-identical copy of the capture contract `ados.capture/1` (MIT, see
-# LICENSE in this directory). Upstream: the world-engine extension's
+# LICENSE in this directory). Upstream: the shared mapping-protocol crate's
 # `contract/` directory in the ADOSExtensions repository. The
 # `vendored_contract_is_byte_identical` test in this crate checks every file
 # against the hashes below, and against the upstream tree when a sibling
 # checkout is present. Refresh by copying the files and updating the hashes.
 upstream_repo = "https://github.com/altnautica/ADOSExtensions"
-upstream_path = "extensions/world-engine/contract"
-upstream_commit = "206277c0b368eeb7d416eaa18824887eb509161b"
+upstream_path = "crates/mapping-protocol/contract"
+upstream_commit = "e81f258e73938121d13300fdeb3e8ccf9be2dc56"
 
 [files]
 "LICENSE" = "8008f798233a3d9ce323f9afd798d75facf3157a53c4cec60bc8fa5386950386"
