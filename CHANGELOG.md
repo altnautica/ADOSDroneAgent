@@ -8,6 +8,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+
+## [0.123.0] - 2026-11-20
+
+### Added
+
 - The flight-state chip on the cockpit, the agent dashboard and the TUI says which limit cut the commanded speed while a skill, a goto or the sticks fly, from the pilot's `command.limits`: "Stopped: obstacle", "Slowed: obstacle", "Slowed: obstacle closing", "Slowed: sensor range", "Slowed: tight space", "Pushing off obstacle", "Keeping distance from subject" or "Slowed: geofence" (the obstacle lines stay hidden while the chip already reads Blocked). The cockpit spec carries the words (`command_limit_labels`, `pilot.command_limit.*`); the cockpit and dashboard bundles are rebuilt.
 - An in-process deterministic simulation of the pilot (`crates/ados-pilot/tests/dst`, run by `cargo test -p ados-pilot dst`): the pilot core flown from the ground on one thread against a simulated ArduPilot copter, an operator surface and the router's mission state, with no sockets or clock, about a hundred times faster than real time in a debug build. Its matrix covers the low-battery floor's countdown and SmartRTL return, the supervised lift-off to a hover, the operator link-loss return, and a mission's pause, resume and stalled-waypoint skip on several seeds; a meta-test checks that one seed replays byte for byte and that seeds differ. `DST_TRACE_DIR` writes each run's trace for reading.
 - A declared plugin service may list `udp_listen_ports` (1024-65535, at
