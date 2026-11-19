@@ -1,4 +1,5 @@
-//! Extensions: seed the plugin revocation list, then install the first-party
+//! Extensions: seed the plugin revocation list, replace the first-party
+//! extensions this agent retired ([`retire`]), then install the first-party
 //! Reconstruct extension (`com.altnautica.reconstruct`) on a node whose
 //! operator asked for it. Optional, and after `health`, so it runs against a
 //! node whose plugin host, control surface and loopback guard are already up.
@@ -55,9 +56,8 @@ pub const RECONSTRUCT_ID: &str = "com.altnautica.reconstruct";
 /// The command an operator runs to install the extension by hand.
 pub const MANUAL_INSTALL: &str = "ados plugin install com.altnautica.reconstruct";
 
-/// The single archive Capture and Reconstruct replaced. A node that still has
-/// it gets it removed before Reconstruct installs; its data directory is kept.
-const RETIRED_ID: &str = "com.altnautica.world-engine";
+#[path = "extensions_retire.rs"]
+pub mod retire;
 
 /// The bundled first-party catalog, embedded so the installer reads the exact
 /// document the agent it installs will serve.
@@ -173,12 +173,24 @@ pub struct NodeTarget {
     pub retry_delay: Duration,
 }
 
-/// Install Reconstruct on this node. Runs on its own OS thread: the
-/// installer drives its steps from inside the async entry point, and the
-/// blocking HTTPS client must not be built or dropped on a runtime thread.
-pub fn install_reconstruct(target: NodeTarget) -> Result<ExtensionOutcome, String> {
+/// What the extension pass did on a node.
+#[derive(Debug)]
+pub struct NodeExtensions {
+    pub retired: Vec<retire::Retirement>,
+    /// `None` when Reconstruct was not selected.
+    pub reconstruct: Option<Result<ExtensionOutcome, String>>,
+}
+
+/// Replace retired extensions, then install Reconstruct when `reconstruct`
+/// is set. Runs on its own OS thread: the installer drives its steps from
+/// inside the async entry point, and the blocking HTTPS client must not be
+/// built or dropped on a runtime thread.
+pub fn install_node_extensions(
+    target: NodeTarget,
+    reconstruct: bool,
+) -> Result<NodeExtensions, String> {
     std::thread::Builder::new()
-        .name("reconstruct-install".to_string())
+        .name("extension-install".to_string())
         .spawn(move || {
             let (board_id, board_tier) = PluginSupervisor::board_identity(&target.board_sidecar);
             let mut supervisor =
@@ -186,36 +198,32 @@ pub fn install_reconstruct(target: NodeTarget) -> Result<ExtensionOutcome, Strin
                     .with_profile(target.profile)
                     .with_board_tier(board_tier)
                     .with_ungrantable_caps(RealHost::ungrantable_caps());
-            remove_retired(&mut supervisor);
-            install_from_catalog(
+            let source = HttpDownloadSource::new();
+            let retired = retire::retire_all(
                 &mut supervisor,
-                RECONSTRUCT_ID,
                 CATALOG_JSON,
-                &HttpDownloadSource::new(),
+                &source,
                 target.guard_wait,
                 target.retry_delay,
-            )
+            );
+            let reconstruct = reconstruct.then(|| {
+                install_from_catalog(
+                    &mut supervisor,
+                    RECONSTRUCT_ID,
+                    CATALOG_JSON,
+                    &source,
+                    target.guard_wait,
+                    target.retry_delay,
+                )
+            });
+            NodeExtensions {
+                retired,
+                reconstruct,
+            }
         })
         .map_err(|e| format!("could not start the install thread: {e}"))?
         .join()
-        .map_err(|_| "the install thread panicked".to_string())?
-}
-
-/// Remove the retired archive when it is installed. A failure is logged and
-/// does not stop the Reconstruct install.
-fn remove_retired(supervisor: &mut PluginSupervisor) {
-    if supervisor.discover().is_err() || supervisor.find_install(RETIRED_ID).is_none() {
-        return;
-    }
-    match supervisor.remove(RETIRED_ID, true) {
-        Ok(_) => tracing::info!(
-            plugin = RETIRED_ID,
-            "removed the retired extension; Capture and Reconstruct replace it"
-        ),
-        Err(e) => {
-            tracing::warn!(plugin = RETIRED_ID, error = %e, "the retired extension could not be removed")
-        }
-    }
+        .map_err(|_| "the install thread panicked".to_string())
 }
 
 /// Install `plugin_id` from `catalog_json` through `supervisor`: finish an
@@ -483,29 +491,50 @@ impl Step for Extensions {
             Ok(false) => {}
             Err(e) => tracing::warn!(error = %e, "plugin revocation list not seeded"),
         }
+        let Some(agent_version) = crate::env::installed_agent_version() else {
+            let why = "the installed agent version could not be read, so an extension's \
+                       compatibility range cannot be checked";
+            if !ctx.install_reconstruct {
+                tracing::warn!("retired extensions not checked: {why}");
+                return StepOutcome::Skipped;
+            }
+            return step_outcome(Err(why.to_string()));
+        };
         if !ctx.install_reconstruct {
             tracing::info!(profile = %ctx.profile, "Reconstruct extension not selected");
-            return StepOutcome::Skipped;
         }
-        let Some(agent_version) = crate::env::installed_agent_version() else {
-            return step_outcome(Err(
-                "the installed agent version could not be read, so the extension's \
-                 compatibility range cannot be checked"
-                    .to_string(),
-            ));
-        };
-        ctx.progress.activity(
-            self.id(),
-            "installing the Reconstruct extension".to_string(),
+        ctx.progress
+            .activity(self.id(), "installing extensions".to_string());
+        let done = install_node_extensions(
+            NodeTarget {
+                paths: Paths::from_env(),
+                profile: ados_config::normalize_profile(Some(&ctx.profile)),
+                agent_version,
+                board_sidecar: ados_hal_probe::board_sidecar::sidecar_path(),
+                guard_wait: GUARD_WAIT,
+                retry_delay: DOWNLOAD_RETRY_DELAY,
+            },
+            ctx.install_reconstruct,
         );
-        step_outcome(install_reconstruct(NodeTarget {
-            paths: Paths::from_env(),
-            profile: ados_config::normalize_profile(Some(&ctx.profile)),
-            agent_version,
-            board_sidecar: ados_hal_probe::board_sidecar::sidecar_path(),
-            guard_wait: GUARD_WAIT,
-            retry_delay: DOWNLOAD_RETRY_DELAY,
-        }))
+        let done = match done {
+            Ok(d) => d,
+            Err(e) => return step_outcome(Err(e)),
+        };
+        // Every retirement is logged; one that left both generations
+        // installed needs a re-run.
+        let reports: Vec<bool> = done.retired.iter().map(retire::report).collect();
+        if reports.contains(&true) {
+            return StepOutcome::Failed(
+                "a retired extension could not be removed after its successor installed; \
+                 re-run the installer"
+                    .into(),
+            );
+        }
+        match done.reconstruct {
+            Some(r) => step_outcome(r),
+            None if done.retired.is_empty() => StepOutcome::Skipped,
+            None => StepOutcome::Ok,
+        }
     }
 }
 

@@ -8,9 +8,10 @@ use ados_term::exec;
 use anyhow::{Context, Result};
 
 use crate::cli::Args;
+use crate::steps::extensions::retire::{self, Retirement};
 use crate::steps::extensions::{
-    install_reconstruct, reconstruct_default, ExtensionOutcome, NodeTarget, DOWNLOAD_RETRY_DELAY,
-    MANUAL_INSTALL,
+    install_node_extensions, reconstruct_default, ExtensionOutcome, NodeTarget,
+    DOWNLOAD_RETRY_DELAY, MANUAL_INSTALL,
 };
 
 use super::{HealthReport, Paths, DAEMONS};
@@ -145,8 +146,9 @@ pub(super) fn resolve_plugin_runner(paths: &Paths) -> PathBuf {
     fallback
 }
 
-/// Install the Reconstruct extension when the operator (`--reconstruct`) or
-/// the profile default asked for it: the same controller, bundled catalog and
+/// Replace retired first-party extensions with their successors, then install
+/// the Reconstruct extension when the operator (`--reconstruct`) or the
+/// profile default asked for it: the same controller, bundled catalog and
 /// sha256 pin as the Linux `extensions` step. Runs only on a node that came up,
 /// since the extension's agent half talks to the plugin host. Best-effort: an
 /// unpublished extension or a failed install prints the manual command and
@@ -159,45 +161,79 @@ pub(super) fn install_extensions(
     runner: &Path,
     report: &HealthReport,
 ) {
-    if !args
+    let reconstruct = args
         .reconstruct
-        .unwrap_or_else(|| reconstruct_default(profile))
-    {
-        println!("  extensions: Reconstruct not selected");
-        return;
-    }
+        .unwrap_or_else(|| reconstruct_default(profile));
     if !report.up {
         println!(
-            "  extensions: Reconstruct skipped because the node did not come up; install it \
-             later with `{MANUAL_INSTALL}`"
+            "  extensions: skipped because the node did not come up; re-run the installer, or \
+             install Reconstruct later with `{MANUAL_INSTALL}`"
         );
         return;
     }
-    println!("  extensions: installing Reconstruct …");
-    let result = install_reconstruct(NodeTarget {
-        paths: paths.plugin_paths(runner),
-        profile: ados_config::normalize_profile(Some(profile)),
-        agent_version: agent_version.to_string(),
-        // The HAL sidecar under the daemons' ADOS_RUN_DIR.
-        board_sidecar: paths.run.join("board.json"),
-        // launchd enforces no sandbox, so a network grant never waits on the
-        // Linux-only loopback guard.
-        guard_wait: Duration::ZERO,
-        retry_delay: DOWNLOAD_RETRY_DELAY,
-    });
-    match result {
-        Ok(ExtensionOutcome::Installed { version, .. }) => {
+    if !reconstruct {
+        println!("  extensions: Reconstruct not selected");
+    }
+    let result = install_node_extensions(
+        NodeTarget {
+            paths: paths.plugin_paths(runner),
+            profile: ados_config::normalize_profile(Some(profile)),
+            agent_version: agent_version.to_string(),
+            // The HAL sidecar under the daemons' ADOS_RUN_DIR.
+            board_sidecar: paths.run.join("board.json"),
+            // launchd enforces no sandbox, so a network grant never waits on the
+            // Linux-only loopback guard.
+            guard_wait: Duration::ZERO,
+            retry_delay: DOWNLOAD_RETRY_DELAY,
+        },
+        reconstruct,
+    );
+    let done = match result {
+        Ok(d) => d,
+        Err(reason) => {
+            println!("  extensions: not installed: {reason}");
+            return;
+        }
+    };
+    for r in &done.retired {
+        retire::report(r);
+        match r {
+            Retirement::Replaced {
+                retired, successor, ..
+            } => {
+                println!("  extensions: {retired} replaced by {successor}")
+            }
+            Retirement::Kept {
+                retired,
+                successor,
+                reason,
+            } => {
+                println!("  extensions: {retired} kept until {successor} can install: {reason}")
+            }
+            Retirement::NotRemoved {
+                retired,
+                successor,
+                reason,
+            } => println!(
+                "  extensions: {successor} is in but {retired} could not be removed ({reason}); \
+                 re-run the installer"
+            ),
+        }
+    }
+    match done.reconstruct {
+        None => {}
+        Some(Ok(ExtensionOutcome::Installed { version, .. })) => {
             println!("  extensions: Reconstruct {version} installed and enabled")
         }
-        Ok(ExtensionOutcome::AlreadyInstalled { version }) => println!(
+        Some(Ok(ExtensionOutcome::AlreadyInstalled { version })) => println!(
             "  extensions: Reconstruct {version} already installed; plugin auto-update keeps \
              it current"
         ),
-        Ok(ExtensionOutcome::Finished { version, .. }) => println!(
+        Some(Ok(ExtensionOutcome::Finished { version, .. })) => println!(
             "  extensions: Reconstruct {version} was installed but off; required permissions \
              granted and enabled"
         ),
-        Ok(ExtensionOutcome::Unavailable(reason)) | Err(reason) => println!(
+        Some(Ok(ExtensionOutcome::Unavailable(reason)) | Err(reason)) => println!(
             "  extensions: Reconstruct not installed: {reason}. Install it later with \
              `{MANUAL_INSTALL}`"
         ),
