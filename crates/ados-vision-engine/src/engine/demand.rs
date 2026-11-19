@@ -269,6 +269,8 @@ impl VisionEngine {
                     leases: held,
                     crop_runs: crop.runs,
                     crop_hits: crop.hits,
+                    subject_full_runs: crop.whole_runs,
+                    subject_full_hits: crop.whole_hits,
                     turn_moves: self.turn_moves(&id),
                     batches: self.batch_status(&id),
                 };

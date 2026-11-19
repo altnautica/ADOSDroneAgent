@@ -63,16 +63,14 @@ impl Pilot {
                     yaw: att.yaw,
                     agl: self.agl(now_ms),
                 };
-                // The brake's trust bound on a standing obstacle's closing
-                // speed (`brake_limit`), on the FC's speed now; the widest
-                // bound without a finite one.
+                // The widest of the brake's per-direction trust bounds on a
+                // standing obstacle's closing speed (`scan_closing_bound`, a
+                // direction along the FC's velocity now); the widest bound
+                // without a finite one.
                 let closing_max = self
                     .fc
                     .fresh_local(now_ms)
-                    .map(|l| {
-                        super::control::SCAN_CLOSING_VEL_FACTOR * l.vn.hypot(l.ve)
-                            + super::control::SCAN_CLOSING_FLOOR_MPS
-                    })
+                    .map(|l| super::control::scan_closing_bound_max(l.vn.hypot(l.ve)))
                     .filter(|v| v.is_finite())
                     .unwrap_or(crate::obstacles::SCAN_CLOSING_MAX_MPS);
                 self.obstacles

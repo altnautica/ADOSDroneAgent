@@ -1069,7 +1069,8 @@ fn a_miss_after_a_reconfirm_frame_owes_a_new_one() {
     // Out of the coast: the re-confirm frame.
     let u = t.update(&[obj(104.0, 100.0)]);
     assert_eq!(u.detection.unwrap().lock_state, Some(LockState::Uncertain));
-    // Missed again before the re-confirm completed, then seen: still owed.
+    // Missed again before the re-confirm completed, then seen: still owed,
+    // as a motion-only association carries no identity cue to complete it.
     t.update(&[]);
     let u = t.update(&[obj(106.0, 100.0)]);
     assert_eq!(u.detection.unwrap().lock_state, Some(LockState::Uncertain));
@@ -1281,4 +1282,60 @@ fn a_coast_reports_about_the_same_confidence_after_a_second_at_any_rate() {
         at10 > at3 / 3.0 && at10 < at3 * 3.0,
         "3 Hz {at3}, 10 Hz {at10}"
     );
+}
+
+/// A tracker locked on a still, appearance-tagged subject at `(100, 100)`,
+/// then out of one miss coast through its re-confirm frame (Uncertain).
+fn reconfirming_tracker() -> SingleObjectTracker {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let subject = || cand(obj(100.0, 100.0), 0);
+    for _ in 0..4 {
+        t.update_with_appearance(&[subject()]);
+    }
+    let u = t.update_with_appearance(&[subject()]);
+    assert_eq!(lock(&u), Some(LockState::Locked));
+    t.update_with_appearance(&[]);
+    let u = t.update_with_appearance(&[subject()]);
+    assert_eq!(lock(&u), Some(LockState::Uncertain), "the re-confirm frame");
+    t
+}
+
+fn lock(u: &TrackUpdate) -> Option<LockState> {
+    u.detection.as_ref().and_then(|d| d.lock_state)
+}
+
+#[test]
+fn hit_miss_hit_inside_the_reconfirm_window_locks() {
+    // A crop pass that misses one batch in two: the re-confirm frame, a
+    // miss, then a clean appearance-backed association confirms.
+    let mut t = reconfirming_tracker();
+    let u = t.update_with_appearance(&[]);
+    assert_eq!(lock(&u), Some(LockState::Uncertain));
+    let u = t.update_with_appearance(&[cand(obj(100.0, 100.0), 0)]);
+    assert!(u.measured);
+    assert_eq!(lock(&u), Some(LockState::Locked));
+}
+
+#[test]
+fn ambiguous_hit_inside_the_reconfirm_window_stays_uncertain() {
+    // An appearance-ambiguity hold voids the pending re-confirm: after it a
+    // miss coast owes a new re-confirm frame, however clean the hit.
+    let mut t = reconfirming_tracker();
+    let u = t.update_with_appearance(&[cand(obj(100.0, 100.0), 0), cand(obj(112.0, 100.0), 0)]);
+    assert!(u.needs_redesignation, "two look-alikes: ambiguous");
+    t.update_with_appearance(&[]);
+    let u = t.update_with_appearance(&[cand(obj(100.0, 100.0), 0)]);
+    assert_eq!(lock(&u), Some(LockState::Uncertain));
+}
+
+#[test]
+fn a_miss_longer_than_the_reconfirm_window_owes_a_new_reconfirm() {
+    let mut t = reconfirming_tracker();
+    for _ in 0..4 {
+        t.update_with_appearance(&[]);
+    }
+    let u = t.update_with_appearance(&[cand(obj(100.0, 100.0), 0)]);
+    assert_eq!(lock(&u), Some(LockState::Uncertain));
+    let u = t.update_with_appearance(&[cand(obj(100.0, 100.0), 0)]);
+    assert_eq!(lock(&u), Some(LockState::Locked));
 }

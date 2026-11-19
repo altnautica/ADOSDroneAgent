@@ -48,6 +48,9 @@ impl VisionEngine {
         } else {
             Vec::new()
         };
+        if let (true, Some(subject)) = (plan.whole, &plan.subject) {
+            self.note_whole_pass(&desc.camera_id, subject, &detections);
+        }
         if let Some(crop) = &plan.crop {
             match self.run_crop_pass(model_id, desc, frame, crop).await {
                 Ok((found, ms, stages)) => {
@@ -70,6 +73,9 @@ impl VisionEngine {
                             .run_whole_pass(model_id, desc, frame, &mut times, &mut infer_ms)
                             .await?;
                         ran_whole = true;
+                        if let Some(subject) = &plan.subject {
+                            self.note_whole_pass(&desc.camera_id, subject, &detections);
+                        }
                     }
                 }
             }
@@ -98,8 +104,19 @@ impl VisionEngine {
         }
         let detections = if self.tracker_enabled {
             let apps = if for_tracker { appearances } else { None };
-            self.track(&desc.camera_id, detections, apps, Some(desc.ts_ns))
-                .await
+            let tracked = self
+                .track(&desc.camera_id, detections, apps, Some(desc.ts_ns))
+                .await;
+            if plan.subject.is_some() {
+                let associated = self
+                    .trackers
+                    .lock()
+                    .await
+                    .get(&desc.camera_id)
+                    .is_some_and(|t| t.coast_steps() == 0.0);
+                self.note_crop_outcome(&desc.camera_id, times.crop_ms.is_some(), associated);
+            }
+            tracked
         } else {
             detections
         };

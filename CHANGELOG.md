@@ -10,6 +10,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 
 - A ground station reached only over the radio hears the drone's pilot again. A pilot state that does not fit one aux frame goes down as the fields a ground reads instead of being dropped silently; the router status counts states sent, dropped as oversized and failed (`pilot_downlink`) and logs the first drop. A phone's uplink take during a bind is refused with 409 `E_BIND_ACTIVE` instead of 503, since the bind stops the radio service that would have refused it.
+- The vision status counts each detector pass's hits on a designated subject: beside `crop_runs`/`crop_hits`, `subject_full_runs` and `subject_full_hits` count the whole-frame passes run while the track is live and those that found a box of its class in the window a crop around it looks in.
+
+
+- A followed subject locks again through a crop pass that misses one batch in two. The tracker kept a re-association out of a miss coast uncertain until a second association in a row; a pending re-confirm now survives a miss coast of up to 3 steps (1 s), and the next clean association (the lone appearance winner, appearance ≥ 0.5) confirms it. An appearance-ambiguity hold or a longer miss still owes a new re-confirm frame, and a motion-only association never completes one. After two crop batches in a row that leave the track coasting, every batch runs the whole frame as well until the track re-associates.
+
+- The obstacle brake trusts the scans' closing speed per direction: up to twice the estimated velocity toward that direction, plus 0.3 m/s, rising with the cosine to the flight line to 1 m/s straight ahead once the estimate reads 0.5 m/s (an estimate trailing a start still brakes as the true speed). It trusted 1 m/s plus twice the speed in every direction, so a vehicle hovering among trunks read occlusion steps as closing and lost its stop cap 2 m from every trunk.
 
 ## [0.123.1] - 2026-11-20
 

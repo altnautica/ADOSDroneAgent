@@ -133,8 +133,10 @@ struct Track {
     /// Set when a re-association just brought the track out of a MISS-induced
     /// coast. The first such re-association stays Coasting (reported Uncertain)
     /// for one transitional re-confirm frame instead of snapping to Confirmed;
-    /// the next clean association clears this and confirms. This makes a handover
-    /// laundered during an occlusion surface doubt for at least one frame.
+    /// the next association clears this and confirms, when it follows at once
+    /// or, if clean (the unambiguous appearance winner), after a miss coast of
+    /// up to `RECONFIRM_MISS_STEPS`. This makes a handover laundered during an
+    /// occlusion surface doubt for at least one frame.
     reconfirming: bool,
     /// True while the current coast is an APPEARANCE-AMBIGUITY hold (two
     /// indistinguishable candidates) rather than a genuine miss. An ambiguity

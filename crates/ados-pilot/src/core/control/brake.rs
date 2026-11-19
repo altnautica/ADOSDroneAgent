@@ -28,10 +28,45 @@ pub const PUSH_MAX_MPS: f32 = 0.5;
 /// A push at least this fast counts as the brake acting (`Braked::cut`);
 /// below it, grid quantisation between two walls the vehicle is centred in.
 pub const PUSH_REPORT_MPS: f32 = 0.1;
-/// The scans' closing speed is trusted up to this many times the EKF's
-/// horizontal speed plus [`SCAN_CLOSING_FLOOR_MPS`].
+/// The scans' closing speed toward a direction is trusted up to this many
+/// times the EKF's velocity component along it, plus a floor
+/// ([`scan_closing_bound`]).
 pub const SCAN_CLOSING_VEL_FACTOR: f32 = 2.0;
-pub const SCAN_CLOSING_FLOOR_MPS: f32 = 1.0;
+/// The closing speed the scans may read toward a direction the vehicle is not
+/// flying: a creep under what the estimate resolves. A hovering vehicle among
+/// trunks reads occlusion steps (one trunk stepping in front of another) and
+/// range noise as closing; a full 1 m/s in every direction cut its stop cap
+/// to nothing 2 m from every trunk around it.
+pub const SCAN_CLOSING_FLOOR_MPS: f32 = 0.3;
+/// The floor straight along the estimated flight line once the estimate
+/// reads [`SCAN_CLOSING_LAG_FROM_MPS`]: an estimate trailing the real motion
+/// (half or a third of it on a full-stick start) must still brake as the true
+/// speed toward what lies ahead.
+pub const SCAN_CLOSING_LAG_MPS: f32 = 1.0;
+/// The estimated speed from which the floor along the flight line is the full
+/// [`SCAN_CLOSING_LAG_MPS`]; slower, it ramps from [`SCAN_CLOSING_FLOOR_MPS`],
+/// so a hover's velocity noise points it nowhere.
+pub const SCAN_CLOSING_LAG_FROM_MPS: f32 = 0.5;
+
+/// The most the brake trusts the scans' closing speed toward `dir` (unit) at
+/// the EKF velocity `vel`: a standing obstacle closes no faster than the
+/// vehicle flies toward it, so twice that component, plus a floor for an
+/// estimate trailing the real motion. The floor is
+/// [`SCAN_CLOSING_FLOOR_MPS`] toward directions the vehicle flies away from
+/// or across (or while it hovers), rising with the cosine to the flight line
+/// to [`SCAN_CLOSING_LAG_MPS`] straight along it.
+pub fn scan_closing_bound(vel: V2, dir: V2) -> f32 {
+    let along = geo::dot(vel, dir).max(0.0);
+    let lag = (SCAN_CLOSING_LAG_MPS - SCAN_CLOSING_FLOOR_MPS) * along
+        / geo::norm(vel).max(SCAN_CLOSING_LAG_FROM_MPS);
+    SCAN_CLOSING_VEL_FACTOR * along + SCAN_CLOSING_FLOOR_MPS + lag
+}
+
+/// The widest of [`scan_closing_bound`] over every direction, at the EKF's
+/// horizontal `speed`: the bound straight along the flight line.
+pub fn scan_closing_bound_max(speed: f32) -> f32 {
+    scan_closing_bound([speed, 0.0], [1.0, 0.0])
+}
 
 /// What the stick brake did to one velocity.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,14 +120,15 @@ pub fn brake_limit(
     now_ms: u64,
 ) -> Braked {
     let margin = geom.margin;
-    // A standing obstacle closes no faster than the vehicle flies: the scans'
-    // range rate is trusted up to twice the EKF speed plus 1 m/s (an estimate
-    // trailing the real motion), so a nearer surface stepping into a sector
-    // (a post in front of a wall, a flickering edge) is not read as motion.
-    let scan_bound = SCAN_CLOSING_VEL_FACTOR * geo::norm(vel) + SCAN_CLOSING_FLOOR_MPS;
+    // A standing obstacle closes no faster than the vehicle flies toward it:
+    // the scans' range rate is trusted per direction up to
+    // [`scan_closing_bound`], so a nearer surface stepping into a sector (a
+    // post in front of a wall, a trunk occluding another, a flickering edge)
+    // is not read as motion. The reach uses the widest of those bounds.
+    let reach_bound = scan_closing_bound_max(geo::norm(vel));
     let speed = geo::norm(v)
         .max(geo::norm(vel))
-        .max(obs.max_scan_closing(now_ms).min(scan_bound));
+        .max(obs.max_scan_closing(now_ms).min(reach_bound));
     let reach = (margin + speed * speed / (2.0 * a_h) + speed * BRAKE_LAG_S + 1.0)
         .clamp(margin, BRAKE_RANGE_M);
     let stop_at = HARD_STOP_FRAC * margin;
@@ -121,7 +157,9 @@ pub fn brake_limit(
         }
         // Closing speed: the EKF's, or the scans' own range rate when that
         // is faster (an estimate lagging the real motion brakes too late).
-        let scan = obs.scan_closing(dir, now_ms).min(scan_bound);
+        let scan = obs
+            .scan_closing(dir, now_ms)
+            .min(scan_closing_bound(vel, dir));
         let closing = geo::dot(vel, dir).max(scan);
         let cap = stop_cap(d, closing, a_h, margin);
         let sector = (geo::bearing_of(dir).rem_euclid(std::f32::consts::TAU)

@@ -774,3 +774,43 @@ async fn a_crop_model_that_fails_every_run_falls_back_to_the_whole_frame() {
         }
     }
 }
+
+/// Two crop batches in a row that leave the designated track coasting turn
+/// the whole frame on for every batch until the track re-associates; then
+/// the crop is primary again. The status counts each pass's hits on the
+/// subject.
+#[tokio::test]
+async fn two_crop_misses_while_coasting_run_the_whole_frame_until_reassociation() {
+    let (e, _, log) = logged_follow_engine().await;
+    // The whole frame's own interval never comes due in this replay.
+    e.configure_crop_primary("det", None, 10_000_000_000);
+    let at = |i: u64| desc_at(i, 1_000_000_000 + i * 100_000_000);
+    let walker = |i: u64| bbox([600.0 + i as f32 * 4.0, 300.0, 70.0, 200.0]);
+    let hidden = bbox([0.0; 4]);
+    let first = e
+        .infer_and_publish("det", &at(0), &frame_with(&walker(0)))
+        .await
+        .unwrap();
+    e.designate("main", &first.detections[0]).await.unwrap();
+    // Seen, seen, then hidden for four batches, then seen again.
+    let seen = [true, true, false, false, false, false, true, true];
+    let mut whole = Vec::new();
+    for (k, &visible) in seen.iter().enumerate() {
+        let i = k as u64 + 1;
+        log.lock().unwrap().clear();
+        let b = if visible { walker(i) } else { hidden };
+        e.infer_and_publish("det", &at(i), &frame_with(&b))
+            .await
+            .unwrap();
+        whole.push(log.lock().unwrap().contains(&(W, H)));
+    }
+    assert_eq!(
+        whole,
+        [false, false, false, false, true, true, true, false],
+        "whole-frame pass per batch"
+    );
+    let status = e.detection_status(&["main".to_string()], 0);
+    let c = &status.cameras["main"];
+    assert_eq!((c.subject_full_runs, c.subject_full_hits), (3, 1));
+    assert!(c.crop_runs >= 5 && c.crop_hits >= 3, "{c:?}");
+}

@@ -21,6 +21,11 @@
 //! every batch is a whole-frame pass. All passes run through the same
 //! accelerator lease and priority, so the detector's priority over depth is
 //! unchanged.
+//!
+//! A crop that keeps missing a coasting subject is looking in the wrong place
+//! (the subject stepped out of the window, or the crop model does not find it
+//! where the whole frame does): after `CROP_MISSES_TO_WHOLE` such batches in a
+//! row, every batch runs the whole frame too until the track re-associates.
 
 use std::collections::HashMap;
 
@@ -60,6 +65,10 @@ pub(super) const CROP_COAST_SHRINK: f32 = 0.95;
 /// How early a whole-frame pass counts as due: half a 30 fps frame, as the
 /// detector's own pace (`perception_scheduler`).
 const FULL_FRAME_SLACK_NS: u64 = 16_000_000;
+
+/// Crop batches in a row after which the track still coasts, before every
+/// batch runs the whole frame as well until the track re-associates.
+pub(super) const CROP_MISSES_TO_WHOLE: u32 = 2;
 
 /// The frame window the crop pass runs on: the model's input aspect, centred on
 /// the predicted box, scaled so the box is `CROP_SUBJECT_MODEL_HEIGHT` tall in
@@ -177,6 +186,10 @@ pub(super) struct BatchPlan {
     pub(super) whole: bool,
     /// The crop pass around the designated track.
     pub(super) crop: Option<CropPass>,
+    /// While a designated track is live: the window a crop pass around it
+    /// looks in (unmagnified) and its class, which a whole-frame pass's hit
+    /// is counted in.
+    pub(super) subject: Option<(BoundingBox, String)>,
 }
 
 /// One crop pass: the model, the frame window and its input size, and the
@@ -200,11 +213,14 @@ struct CropSetup {
 }
 
 /// One camera's detector batches: the last whole-frame pass, the crop
-/// counters, a pending designation and the stage times.
+/// counters, the crop misses in a row, a pending designation and the stage
+/// times.
 #[derive(Debug, Clone, Default)]
 struct CameraBatches {
     last_full_ts_ns: Option<u64>,
     counts: CropCounts,
+    /// Crop batches in a row after which the designated track still coasted.
+    crop_misses: u32,
     designated: bool,
     stats: BatchStats,
 }
@@ -254,22 +270,24 @@ impl VisionEngine {
 
     /// Note a designation on `camera_id` for [`Self::take_designation`].
     pub(super) fn note_designation(&self, camera_id: &str) {
-        self.batch_state()
-            .cameras
-            .entry(camera_id.to_string())
-            .or_default()
-            .designated = true;
+        let mut state = self.batch_state();
+        let c = state.cameras.entry(camera_id.to_string()).or_default();
+        c.designated = true;
+        c.crop_misses = 0;
     }
 
     /// What detector `model_id`'s batch on the frame `desc` names runs: the
     /// whole frame alone when the camera holds no live designated track (or
     /// the frame is not rgb24, which the crop is cut from); otherwise the crop
     /// around the track's predicted box, joined by the whole frame when its
-    /// interval is up (and then the crop only when it magnifies the subject).
+    /// interval is up or the coasting track's crop batches missed
+    /// [`CROP_MISSES_TO_WHOLE`] times in a row (and then the crop only when it
+    /// magnifies the subject).
     pub(super) async fn plan_batch(&self, model_id: &str, desc: &FrameDescriptor) -> BatchPlan {
         let whole_only = BatchPlan {
             whole: true,
             crop: None,
+            subject: None,
         };
         if !self.tracker_enabled || desc.format != FrameFormat::Rgb24 {
             return whole_only;
@@ -286,14 +304,16 @@ impl VisionEngine {
         else {
             return whole_only;
         };
-        let (crop_id, interval_ns, last_full_ns) = {
+        let (crop_id, interval_ns, last_full_ns, crop_misses) = {
             let state = self.batch_state();
             let setup = state.setups.get(model_id).cloned().unwrap_or_default();
-            let last = state
-                .cameras
-                .get(&desc.camera_id)
-                .and_then(|c| c.last_full_ts_ns);
-            (setup.crop_model_id, setup.full_frame_interval_ns, last)
+            let cam = state.cameras.get(&desc.camera_id);
+            (
+                setup.crop_model_id,
+                setup.full_frame_interval_ns,
+                cam.and_then(|c| c.last_full_ts_ns),
+                cam.map_or(0, |c| c.crop_misses),
+            )
         };
         let (crop_model, crop_input, whole_input_h) = {
             let models = self.models.lock().await;
@@ -312,9 +332,11 @@ impl VisionEngine {
                 None => (model_id.to_string(), whole, whole.1),
             }
         };
-        let whole_due = interval_ns == 0
+        let interval_due = interval_ns == 0
             || last_full_ns
                 .is_none_or(|t| desc.ts_ns.saturating_sub(t) + FULL_FRAME_SLACK_NS >= interval_ns);
+        let crop_lost = coast_steps > 0.0 && crop_misses >= CROP_MISSES_TO_WHOLE;
+        let whole_due = interval_due || crop_lost;
         let magnify_over = whole_due.then(|| whole_input_h as f32 / desc.height as f32);
         let window = crop_window(
             &predicted,
@@ -325,15 +347,65 @@ impl VisionEngine {
             crop_input.1,
             magnify_over,
         );
+        let looked_in = crop_window(
+            &predicted,
+            coast_steps,
+            desc.width,
+            desc.height,
+            crop_input.0,
+            crop_input.1,
+            None,
+        );
         BatchPlan {
             whole: whole_due || window.is_none(),
             crop: window.map(|window| CropPass {
                 model_id: crop_model,
                 window,
                 input: crop_input,
-                class,
+                class: class.clone(),
             }),
+            subject: looked_in.map(|w| (w, class)),
         }
+    }
+
+    /// After the batch's tracker step: a batch that ran the crop pass while a
+    /// designated track is live counts a crop miss when the track still
+    /// coasts after it, and any association ends the run of misses.
+    pub(super) fn note_crop_outcome(&self, camera_id: &str, crop_ran: bool, associated: bool) {
+        let mut state = self.batch_state();
+        let c = state.cameras.entry(camera_id.to_string()).or_default();
+        if associated {
+            c.crop_misses = 0;
+        } else if crop_ran {
+            c.crop_misses += 1;
+        }
+    }
+
+    /// Count a whole-frame pass that ran while a designated track is live,
+    /// and a hit when it found a box of the track's class whose centre lies in
+    /// the window `subject` a crop around it looks in.
+    pub(super) fn note_whole_pass(
+        &self,
+        camera_id: &str,
+        subject: &(BoundingBox, String),
+        found: &[Detection],
+    ) {
+        let (w, class) = subject;
+        let hit = found.iter().any(|d| {
+            d.class_label == *class
+                && d.bbox.as_ref().is_some_and(|b| {
+                    let (cx, cy) = (b.x + b.width / 2.0, b.y + b.height / 2.0);
+                    cx >= w.x && cx <= w.x + w.width && cy >= w.y && cy <= w.y + w.height
+                })
+        });
+        let mut state = self.batch_state();
+        let c = &mut state
+            .cameras
+            .entry(camera_id.to_string())
+            .or_default()
+            .counts;
+        c.whole_runs += 1;
+        c.whole_hits += u64::from(hit);
     }
 
     /// Run `pass` on the frame `desc` names and return the subject-class
@@ -412,11 +484,16 @@ impl VisionEngine {
     }
 }
 
-/// One camera's crop-pass counters.
+/// One camera's per-pass counters while a designated track is live.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct CropCounts {
     /// Batches the crop pass ran on.
     pub(super) runs: u64,
     /// Of those, batches it found a box of the designated track's class on.
     pub(super) hits: u64,
+    /// Batches the whole-frame pass ran on.
+    pub(super) whole_runs: u64,
+    /// Of those, batches it found a box of the track's class centred in the
+    /// window a crop around the track looks in.
+    pub(super) whole_hits: u64,
 }

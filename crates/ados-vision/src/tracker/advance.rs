@@ -5,6 +5,13 @@ use ados_protocol::framebus::{BoundingBox, LockState};
 use super::scoring::{reported, Decision};
 use super::{Candidate, SingleObjectTracker, Track, TrackState, TrackUpdate};
 
+/// The longest miss coast, in steps, that keeps a pending re-confirm: a
+/// re-confirm frame followed by misses for no more than this (1 s at the
+/// default 1/3 s step) still confirms on the next clean, appearance-backed
+/// association. A crop pass that misses one batch in two then still locks
+/// the subject; a longer miss, or an appearance-ambiguity hold, voids it.
+const RECONFIRM_MISS_STEPS: f32 = 3.0;
+
 impl SingleObjectTracker {
     /// A track exists: predict `dt` steps, score in-gate candidates by the
     /// combined cue, associate / coast / hold-on-ambiguity, and run the
@@ -39,11 +46,20 @@ impl SingleObjectTracker {
                 let cand = scored[idx].cand;
                 let det = &cand.detection;
                 let assoc = scored[idx].assoc_confidence;
+                // Clean: the unambiguous appearance winner (a lone member of
+                // its appearance-tie group) clearing the appearance gate. The
+                // motion-only path has no identity cue and never is.
+                let clean =
+                    scored[idx].has_app && scored[idx].appearance >= self.cfg.min_appearance;
                 // A re-association out of a genuine MISS-induced coast owes a
                 // transitional re-confirm frame; one out of an appearance-
                 // ambiguity hold that is now resolved by a lone candidate does
                 // not (the ambiguity was resolved by the competitor leaving).
                 let was_miss_coast = track.state == TrackState::Coasting && !track.coast_ambiguous;
+                // A re-confirm frame already passed: the next association
+                // completes it when it follows at once, or follows a short
+                // miss coast (`RECONFIRM_MISS_STEPS`) and is clean.
+                let completes = track.reconfirming && (track.coast_steps == 0.0 || clean);
                 track.kf.update(
                     det.bbox
                         .as_ref()
@@ -72,7 +88,7 @@ impl SingleObjectTracker {
                 // before it is trusted as Confirmed again, a handover laundered
                 // during an occlusion surfaces doubt for at least one frame
                 // instead of snapping straight Coasting→Confirmed.
-                let entering_reconfirm = was_miss_coast && !track.reconfirming;
+                let entering_reconfirm = was_miss_coast && !completes;
                 // Suppress template poisoning: only walk the EMA on a clean,
                 // unambiguous association whose chosen candidate is the clear
                 // appearance winner (no near-competitor) AND that is not the
@@ -217,9 +233,14 @@ impl SingleObjectTracker {
         // Remember whether this coast is an ambiguity hold or a genuine miss, so
         // the re-association out of it knows whether it owes a re-confirm frame.
         track.coast_ambiguous = ambiguous;
-        // A re-confirm frame followed by a miss proved nothing: the next
-        // re-association out of this coast owes its own re-confirm frame.
-        track.reconfirming = false;
+        // A re-confirm frame followed by a short miss coast stays pending: the
+        // next clean association completes it (see `advance`). An ambiguity
+        // hold, or a miss longer than `RECONFIRM_MISS_STEPS`, proved nothing:
+        // the next re-association out of this coast owes its own re-confirm
+        // frame.
+        if ambiguous || track.coast_steps > RECONFIRM_MISS_STEPS {
+            track.reconfirming = false;
+        }
         // Association confidence decays with the coast length so a long hold
         // reads as a weak identity claim on the wire. The divisor applies per
         // step (`powf(dt)`), so the decay over a coast's seconds does not grow

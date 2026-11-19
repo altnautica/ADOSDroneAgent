@@ -394,9 +394,11 @@ async fn main() -> Result<()> {
         if let Some(c) = status.cameras.get(CAMERA) {
             let b = &c.batches;
             println!(
-                "batches {}\twhole-frame {}\tcrop {} (found {})\tEWMA ms: whole {:.1} crop {:.1} preprocess {:.1} inference {:.1} decode {:.2} track {:.1}",
+                "batches {}\twhole-frame {} (on the subject {}, found {})\tcrop {} (found {})\tEWMA ms: whole {:.1} crop {:.1} preprocess {:.1} inference {:.1} decode {:.2} track {:.1}",
                 b.batches,
                 b.full_frame_runs,
+                c.subject_full_runs,
+                c.subject_full_hits,
                 c.crop_runs,
                 c.crop_hits,
                 b.full_frame_us as f64 / 1000.0,

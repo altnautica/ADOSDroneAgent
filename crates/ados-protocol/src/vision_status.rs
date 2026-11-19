@@ -117,6 +117,16 @@ pub struct CameraDemandStatus {
     /// track's class.
     #[serde(default)]
     pub crop_hits: u64,
+    /// Detector batches on which the engine ran the whole frame while a
+    /// designated track was live (since the engine started).
+    #[serde(default)]
+    pub subject_full_runs: u64,
+    /// Of those, the batches on which the whole frame found a box of the
+    /// designated track's class centred in the window a crop around the track
+    /// looks in: with `crop_hits / crop_runs`, the hit rate of each pass on
+    /// the subject.
+    #[serde(default)]
+    pub subject_full_hits: u64,
     /// Detector batches on which the engine moved the camera's track by the
     /// camera's own turn since the previous batch (the flight controller's
     /// attitude at the two frames' exposures), since the engine started.
@@ -263,6 +273,8 @@ mod tests {
                         }],
                         crop_runs: 9,
                         crop_hits: 7,
+                        subject_full_runs: 3,
+                        subject_full_hits: 2,
                         turn_moves: 5,
                         batches: DetectorBatchStatus {
                             batches: 40,

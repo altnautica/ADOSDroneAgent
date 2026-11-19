@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::safety::{wall_scan, G};
 use crate::core::control::{
-    brake_limit, stop_cap, SCAN_CLOSING_FLOOR_MPS, SCAN_CLOSING_VEL_FACTOR,
+    brake_limit, scan_closing_bound, stop_cap, SCAN_CLOSING_FLOOR_MPS, SCAN_CLOSING_VEL_FACTOR,
 };
 use crate::geo::{self, V2};
 use crate::obstacles::{Level, Obstacles, CELL_M, SCAN_CLOSING_MAX_MPS};
@@ -154,7 +154,7 @@ fn worst_excess(v: f32, lateral: f32, scale: f32, hz: u64, seed: u64) -> (f32, f
     let period = 1000 / hz;
     let post_x = 14.0;
     let est = scale * v;
-    let bound = 2.0 * est + 1.0;
+    let est_v = [est, 0.0];
     let mut o = Obstacles::new();
     let mut ema = PairEma::new();
     let mut worst = (0.0f32, f32::NAN);
@@ -169,7 +169,8 @@ fn worst_excess(v: f32, lateral: f32, scale: f32, hz: u64, seed: u64) -> (f32, f
         let scan = post_scan(x, post_x, lateral, seed, k);
         o.ingest_scan(&scan, LEVEL, pos, SCAN_CLOSING_MAX_MPS, now);
         ema.push(&o, pos, now);
-        let lagging = |scan: f32, dir: V2| (est * dir[0]).max(scan.min(bound));
+        let lagging =
+            |scan: f32, dir: V2| (est * dir[0]).max(scan.min(scan_closing_bound(est_v, dir)));
         let fix = allowed(&o, pos, now, v, 0.0, |d| lagging(o.scan_closing(d, now), d));
         let old = allowed(&o, pos, now, v, 0.0, |d| lagging(ema.toward(d), d));
         let truth = allowed(&o, pos, now, v, RANGE_SLACK_M, |d| v * d[0]);
@@ -345,7 +346,7 @@ fn a_nearer_wall_at_a_bend_is_not_an_approach_at_the_vehicles_speed() {
     // Flying 0.5 m/s up a tunnel, the bore turns ahead: the sector's nearest
     // return steps from the far wall 3.85 m off to the bend's wall 2.6 m off
     // between two scans. The step never reads faster than the brake's
-    // trust bound on that speed (2 × 0.5 + 1 m/s); the bend's wall then
+    // trust bound on that speed (2 × 0.5 + 0.3 m/s); the bend's wall then
     // nearing at the vehicle's own speed is measured.
     let bound = SCAN_CLOSING_VEL_FACTOR * 0.5 + SCAN_CLOSING_FLOOR_MPS;
     let mut o = Obstacles::new();
@@ -366,7 +367,7 @@ fn a_nearer_wall_at_a_bend_is_not_an_approach_at_the_vehicles_speed() {
 
 #[test]
 fn something_closing_faster_than_the_bound_reads_the_bound() {
-    // A hovering vehicle (bound 1 m/s) and a wall closing at 3 m/s: never
+    // A hovering vehicle (bound 0.3 m/s) and a wall closing at 3 m/s: never
     // less than a slower approach would read, it reads the bound the brake
     // trusts.
     let bound = SCAN_CLOSING_FLOOR_MPS;
@@ -377,4 +378,66 @@ fn something_closing_faster_than_the_bound_reads_the_bound() {
     }
     let c = o.scan_closing([1.0, 0.0], 1300);
     assert!((c - bound).abs() < 1e-3, "closing {c}");
+}
+
+/// A planar scan from the origin of trunks of radius 0.15 m at `trunks`
+/// (north, east), the nearest return per 1° beam, to 12 m, captured at `t_ms`.
+fn trunks_scan(trunks: &[V2], t_ms: u64) -> Value {
+    let rp = 0.15f32;
+    let ranges: Vec<f32> = (0..360)
+        .map(|i| {
+            let th = (i as f32).to_radians();
+            let (dx, dy) = (th.cos(), th.sin());
+            trunks
+                .iter()
+                .filter_map(|&[tx, ty]| {
+                    let b = -(tx * dx + ty * dy);
+                    let disc = b * b - (tx * tx + ty * ty - rp * rp);
+                    let t = -b - disc.max(0.0).sqrt();
+                    (disc >= 0.0 && t > 0.05 && t <= 12.0).then_some(t)
+                })
+                .fold(0.0f32, |m, t| if m == 0.0 { t } else { m.min(t) })
+        })
+        .collect();
+    json!({"frame": "body_frd", "angle_start_rad": 0.0, "t_ns": t_ms * 1_000_000,
+           "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
+}
+
+#[test]
+fn hovering_among_trunks_rate_noise_does_not_cut_below_the_zero_closing_stop_cap() {
+    // Hovering in a stand, trunks 2 m off on every side. Ahead, one trunk
+    // after another steps into the sector's nearest return as the vehicle
+    // sways (occlusion), reading as 1 m/s of closing, stored unbounded. The
+    // vehicle is not flying toward them: the brake trusts no more than the
+    // floor, so north it still allows the stop cap of a standing trunk.
+    let around = [[0.0, 2.15], [0.0, -2.15], [-2.15, 0.0]];
+    let mut o = Obstacles::new();
+    let mut now = 1000;
+    for k in 0..5u64 {
+        let mut trunks = around.to_vec();
+        trunks.push([2.55 - 0.1 * k as f32, 0.0]);
+        now = 1000 + 100 * k;
+        o.ingest_scan(
+            &trunks_scan(&trunks, 100 * k),
+            LEVEL,
+            [0.0; 2],
+            SCAN_CLOSING_MAX_MPS,
+            now,
+        );
+    }
+    let read = o.scan_closing([1.0, 0.0], now);
+    assert!(read > 0.8, "the occlusion steps read as closing: {read:.2}");
+    let zero = allowed(&o, [0.0; 2], now, 1.5, 0.0, |_| 0.0);
+    assert!(zero > 0.3, "a trunk 2 m off leaves a stop cap: {zero:.2}");
+    for vel in [[0.0, 0.0], [0.0, 0.6], [-0.4, 0.0]] {
+        let b = brake_limit(&o, [0.0; 2], vel, [1.5, 0.0], A_H, G, now);
+        assert!(
+            b.v[0] >= zero - 1e-3,
+            "velocity {vel:?}: north {:.2} m/s, the zero-closing stop cap {zero:.2}",
+            b.v[0]
+        );
+    }
+    // Flying at the trunk, the scans' closing is trusted again.
+    let b = brake_limit(&o, [0.0; 2], [0.3, 0.0], [1.5, 0.0], A_H, G, now);
+    assert!(b.v[0] < zero - 0.05, "closing at 0.3 m/s: {:.2}", b.v[0]);
 }
