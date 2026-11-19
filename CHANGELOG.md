@@ -12,7 +12,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - The pilot's low-battery return counts the charge the way home needs: from the battery current (an average over the last 30 s, used after 10 s airborne), the SmartRTL path back with its loops pruned as the FC prunes them (`SRTL_ACCURACY`), the descent (`WP_SPD_DN`) and landing (`LAND_ALT_LOW`, the landing speed), the countdown, a 1.3 margin and the critical reserve (`BATT_CRT_MAH`, else 15 % of `BATT_CAPACITY`). The return now starts when the charge left reaches that need, even above the fixed floor, which stays as the backstop; the countdown banner then says "Battery {pct}% · need {need_pct}% to reach home". The pilot publishes `battery_reserve {need_pct, basis, return_s}` every tick airborne (`basis` `energy` or `floor`) and logs the basis and the time home on `pilot_battery_reserve`; the TUI's low-battery item names the need. A landing in place keeps the floor.
 
-- A ground station reached only over the radio hears the drone's pilot again. A pilot state that does not fit one aux frame goes down as the fields a ground reads instead of being dropped silently; the router status counts states sent, dropped as oversized and failed (`pilot_downlink`) and logs the first drop. A phone's uplink take during a bind is refused with 409 `E_BIND_ACTIVE` instead of 503, since the bind stops the radio service that would have refused it.
 - The vision status counts each detector pass's hits on a designated subject: beside `crop_runs`/`crop_hits`, `subject_full_runs` and `subject_full_hits` count the whole-frame passes run while the track is live and those that found a box of its class in the window a crop around it looks in.
 
 ### Changed
@@ -25,7 +24,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- The obstacle brake trusts the scans' closing speed per direction: up to twice the estimated velocity toward that direction, plus 0.3 m/s, rising with the cosine to the flight line to 1 m/s straight ahead once the estimate reads 0.5 m/s (an estimate trailing a start still brakes as the true speed). It trusted 1 m/s plus twice the speed in every direction, so a vehicle hovering among trunks read occlusion steps as closing and lost its stop cap 2 m from every trunk.
 - The sticks' yaw rate and speed cap tell the truth. ArduCopter's GUIDED turns the heading target the pilot sends no faster than `ATC_RATE_WPY_MAX` (60 °/s by default; `ATC_SLEW_YAW` on older firmware) and `ATC_RATE_Y_MAX` when set, so Normal and Sport asked 90 and 150 °/s and turned at 60. The pilot now reads both and holds the profile's yaw rate to them. With avoidance on, the pilot frame's `command.v_cap_mps` is the speed the seen-space brake holds the sticks to (about 5.3 m/s on a 12 m planar lidar), not the profile's 7 or 10 m/s.
 
 - A launch holds at the height it was asked for. The take-off step ends at 90 % of the launch height, and the pilot's hold kept the height it had then, so a 3 m launch hovered near 2.6 m; the hold now takes the launch height above the steady take-off's start point (above the ground the height reading measures, for the FC's own take-off).
