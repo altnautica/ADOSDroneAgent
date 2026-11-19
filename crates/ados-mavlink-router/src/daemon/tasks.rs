@@ -213,20 +213,9 @@ pub(super) fn spawn_core(
     {
         let fc = fc.clone();
         let cancel = cancel.clone();
-        tasks.push(tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                tokio::select! {
-                    _ = tick.tick() => {
-                        fc.tick_streams().await;
-                        fc.tick_banner_request().await;
-                        fc.tick_landed_state_request().await;
-                        fc.tick_param_sweep().await;
-                    }
-                    _ = cancel.wait() => break,
-                }
-            }
-        }));
+        tasks.push(tokio::spawn(
+            async move { fc.run_request_ticks(cancel).await },
+        ));
     }
 }
 

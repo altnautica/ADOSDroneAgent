@@ -76,3 +76,44 @@ async fn arbitration_inactive_on_drone_gates_nothing() {
     // No sidecar fed: the swarm layer keeps its own gates.
     assert!(!c.swarm_refused_by_pic());
 }
+
+#[tokio::test]
+async fn link_idle_counts_sim_time_not_wall_time() {
+    use crate::clock::tests::{advance, sim_clock};
+    let (clock, feed) = sim_clock();
+    let dir = std::env::temp_dir().join("ados-link-state-sim-test-params.json");
+    let c = FcConnection::with_clock(
+        crate::config::MavlinkConfig::default(),
+        std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::VehicleState::default(),
+        )),
+        std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::param_cache::ParamCache::new(dir),
+        )),
+        clock,
+    );
+    advance(&feed, 1, 1_000);
+    c.stamp_last_msg();
+    assert_eq!(c.last_msg_idle(), Duration::ZERO);
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(
+        c.last_msg_idle(),
+        Duration::ZERO,
+        "wall time alone idles nothing"
+    );
+    // Past the stream cadence's stall threshold in sim time, no wall time.
+    advance(&feed, 2, 6_500);
+    assert_eq!(c.last_msg_idle(), Duration::from_millis(5_500));
+    c.stamp_last_msg();
+    assert_eq!(c.last_msg_idle(), Duration::ZERO);
+}
+
+#[tokio::test]
+async fn link_idle_on_wall_time_counts_wall_time() {
+    let c = conn();
+    c.stamp_last_msg();
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(c.last_msg_idle() >= Duration::from_millis(20));
+    c.stamp_last_msg();
+    assert!(c.last_msg_idle() < Duration::from_secs(1));
+}

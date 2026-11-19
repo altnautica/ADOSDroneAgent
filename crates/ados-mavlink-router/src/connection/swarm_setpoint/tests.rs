@@ -396,3 +396,95 @@ fn a_malformed_block_degrades_to_defaults_rather_than_panicking() {
     );
     assert_eq!(load_swarm_config(&p), SwarmControlConfig::default());
 }
+
+/// Every controller tick lands in one of the two published counters.
+fn ticks(s: &SwarmSetpointStatus) -> u64 {
+    s.ticks_suppressed() + s.setpoints_emitted()
+}
+
+/// Wait (wall time, bounded) until the loop has ticked `n` times.
+async fn ticked(s: &SwarmSetpointStatus, n: u64) {
+    let reached = tokio::time::timeout(Duration::from_secs(5), async {
+        while ticks(s) < n {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "{} ticks, waited for {n}", ticks(s));
+}
+
+/// Spawn the control loop on `clock` for an eligible slot-1 node whose FC
+/// identity is latched.
+fn spawn_lane(
+    clock: crate::clock::RouterClock,
+    dir: &Path,
+) -> (Arc<SwarmSetpointStatus>, Shutdown) {
+    let path = dir.join("config.yaml");
+    replace(&path, ENABLED_SLOT_1);
+    let mut source = SwarmConfigSource::new(path);
+    let live = LiveSwarm::new(source.poll().expect("first poll reads"));
+    let state = Arc::new(Mutex::new(VehicleState {
+        clock: clock.clone(),
+        ..VehicleState::default()
+    }));
+    let fc = FcConnection::with_clock(
+        crate::config::MavlinkConfig::default(),
+        state.clone(),
+        Arc::new(Mutex::new(crate::param_cache::ParamCache::new(
+            dir.join("params.json"),
+        ))),
+        clock,
+    );
+    fc.latch_fc_identity(1, 1);
+    let status = Arc::new(SwarmSetpointStatus::default());
+    let cancel = Shutdown::new();
+    let (tx, rx) = watch::channel(None);
+    {
+        let (status, cancel) = (status.clone(), cancel.clone());
+        tokio::spawn(async move {
+            // Held so the payload channel stays open while the loop runs.
+            let _tx = tx;
+            control_loop(fc, state, live, &mut source, rx, status, cancel).await;
+        });
+    }
+    (status, cancel)
+}
+
+#[tokio::test]
+async fn the_control_lane_ticks_on_sim_time_not_wall_time() {
+    use crate::clock::tests::{advance, sim_clock};
+    let period = CONTROL_PERIOD.as_millis() as u64;
+    let dir = tempfile::tempdir().unwrap();
+    let (clock, feed) = sim_clock();
+    let (status, cancel) = spawn_lane(clock, dir.path());
+    // No sim time yet: several wall control periods pass and nothing ticks.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(ticks(&status), 0);
+
+    advance(&feed, 1, 0);
+    ticked(&status, 1).await;
+    // Wall time alone never ticks the lane.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(ticks(&status), 1);
+    // Half a control period of sim time is not a tick; a full one is.
+    advance(&feed, 2, period / 2);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(ticks(&status), 1);
+    advance(&feed, 3, period);
+    ticked(&status, 2).await;
+    // A sim jump of several periods is one tick: missed ticks are skipped.
+    advance(&feed, 4, period * 5);
+    ticked(&status, 3).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(ticks(&status), 3);
+    cancel.trigger();
+}
+
+#[tokio::test]
+async fn the_control_lane_on_wall_time_ticks_at_the_control_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let (status, cancel) = spawn_lane(crate::clock::RouterClock::wall(), dir.path());
+    // The first tick is immediate, then one per CONTROL_PERIOD of wall time.
+    ticked(&status, 3).await;
+    cancel.trigger();
+}

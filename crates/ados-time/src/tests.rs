@@ -5,8 +5,14 @@ use super::*;
 #[test]
 fn feed_peers_bind_apart() {
     let base: SocketAddr = "127.0.0.1:14650".parse().unwrap();
-    let ports = [FeedPeer::Pilot, FeedPeer::Logd, FeedPeer::Plugins].map(|p| p.addr(base).port());
-    assert_eq!(ports, [14650, 14651, 14652]);
+    let ports = [
+        FeedPeer::Pilot,
+        FeedPeer::Logd,
+        FeedPeer::Plugins,
+        FeedPeer::Router,
+    ]
+    .map(|p| p.addr(base).port());
+    assert_eq!(ports, [14650, 14651, 14652, 14653]);
 }
 
 #[test]

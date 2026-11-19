@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::connection::imu_fallback::{MSG_HIGHRES_IMU, MSG_RAW_IMU, RAW_IMU_FALLBACK_HZ};
+use ados_protocol::shutdown::Shutdown;
 
 /// The FC identity (system id, component id) each vehicle-addressed request
 /// lane last went to. Until an autopilot HEARTBEAT latches the identity
@@ -95,7 +96,8 @@ impl FcConnection {
         let changed = retargeted || self.sensor_streams.changed(&table);
         let due = changed || {
             let last = self.last_stream_req.lock().await;
-            last.map(|t| t.elapsed() >= interval).unwrap_or(true)
+            last.map(|t| self.clock.since(t) >= interval)
+                .unwrap_or(true)
         };
         if !due {
             return;
