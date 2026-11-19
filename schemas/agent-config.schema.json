@@ -3797,6 +3797,20 @@
           "title": "Shm Budget Mb",
           "type": "integer"
         },
+        "sim_latency_ms": {
+          "anyOf": [
+            {
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sim Latency Ms"
+        },
         "slot_count": {
           "default": 4,
           "maximum": 4294967295,
@@ -5062,6 +5076,7 @@
         "reid_enabled": false,
         "reid_model_id": null,
         "shm_budget_mb": 64,
+        "sim_latency_ms": null,
         "slot_count": 4,
         "socket_dir": "/run/ados",
         "tracker_enabled": false

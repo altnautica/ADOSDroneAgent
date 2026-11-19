@@ -195,6 +195,8 @@ pub struct VisionEngine {
     /// Each configured camera's `cameras[]` mount, stamped on its frames and
     /// detection batches.
     camera_mounts: std::sync::Mutex<HashMap<String, CameraMount>>,
+    /// Results paced on the simulator's clock ([`crate::sim_pacing`]).
+    sim_pacing: std::sync::OnceLock<Arc<crate::sim_pacing::SimPacing>>,
 }
 
 /// How a camera ring is sized.
@@ -304,6 +306,7 @@ impl VisionEngine {
             camera_motion: std::sync::Mutex::new(camera_motion::CameraMotion::default()),
             capture_ids: std::sync::Mutex::new(Vec::new()),
             camera_mounts: std::sync::Mutex::new(HashMap::new()),
+            sim_pacing: std::sync::OnceLock::new(),
         })
     }
 

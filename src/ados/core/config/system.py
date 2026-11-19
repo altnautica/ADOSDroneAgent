@@ -114,6 +114,11 @@ class VisionConfig(BaseModel):
     # lens); 1 keeps every box.
     max_box_area_frac: float = Field(default=0.5, gt=0, le=1)
     depth: VisionDepthConfig = VisionDepthConfig()
+    # On a node following the simulator's clock, a result of a simulated frame
+    # is released this long after the frame's sim time (the bench writes the
+    # measured p50 of a real-time take of the same profile); unset, the
+    # detector's own measured latency.
+    sim_latency_ms: int | None = Field(default=None, ge=0, le=U32_MAX)
 
 
 class LogStoreConfig(BaseModel):

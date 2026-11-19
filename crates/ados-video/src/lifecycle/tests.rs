@@ -163,7 +163,13 @@ fn encoder_respawn_sweep_kills_publishers_and_spares_every_reader() {
         ),
         (
             "sei tap",
-            cmdline("/opt/ados/venv/bin/python3", &sei_tap_args(&uri)),
+            cmdline(
+                "/opt/ados/venv/bin/python3",
+                &sei_tap_args(
+                    &uri,
+                    Some(std::path::Path::new("/run/ados/simclock/relay.sock")),
+                ),
+            ),
         ),
     ];
     for (name, line) in &readers {
@@ -181,4 +187,25 @@ fn encoder_respawn_sweep_kills_publishers_and_spares_every_reader() {
             "{name} only reads `main` and MUST survive an encoder respawn: {line}"
         );
     }
+}
+
+/// On a node following the simulator's clock the SEI tap is handed the relay
+/// socket, so it measures a simulated frame's age on ADOS time; on wall time
+/// its command line is unchanged.
+#[test]
+fn the_sei_tap_follows_the_sim_clock_only_when_handed_its_feed() {
+    let uri = "rtsp://127.0.0.1:8554/main";
+    let wall = sei_tap_args(uri, None);
+    assert_eq!(
+        wall,
+        ["-m", "ados.services.video.sei_tap", "--once", "--rtsp", uri]
+    );
+    let sim = sei_tap_args(
+        uri,
+        Some(std::path::Path::new("/run/ados/simclock/relay.sock")),
+    );
+    assert_eq!(
+        &sim[wall.len()..],
+        ["--clock-feed", "/run/ados/simclock/relay.sock"]
+    );
 }

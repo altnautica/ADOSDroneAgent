@@ -72,7 +72,9 @@ cameras:
         c.tap_sink.as_deref(),
         Some("/run/ados/vision-tap-main.sock")
     );
-    assert!(c.simulation);
+    assert!(c.sim.enabled());
+    // No modelled latency written: the measured one stands in.
+    assert_eq!(c.sim.latency_ms, None);
     assert_eq!(c.vision_socket_path(), "/tmp/run/vision.sock");
     assert_eq!(c.rknn_socket_path(), "/tmp/run/vision-rknn.sock");
     assert_eq!(
@@ -344,7 +346,7 @@ fn captured_cameras_run_the_engine_without_a_vision_block() {
     let c = VisionConfig::load_from(&p);
     assert!(!c.enabled);
     assert!(c.should_run());
-    assert!(c.simulation);
+    assert!(c.sim.enabled());
     let ids: Vec<&str> = c.cameras.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, ["cam_fl", "cam_fr"]);
     assert!(c.tap_sink.is_none());

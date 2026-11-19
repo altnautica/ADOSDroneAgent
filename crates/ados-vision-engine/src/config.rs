@@ -84,10 +84,10 @@ pub struct VisionConfig {
     /// as camera `main`.
     #[serde(skip)]
     pub tap_sink: Option<String>,
-    /// `simulation.enabled`: frames carry simulator time, which the engine
-    /// reports to the clock.
+    /// `simulation.*` and `vision.sim_latency_ms`: frames carry simulator
+    /// time, which the engine reports to the clock and paces results on.
     #[serde(skip)]
-    pub simulation: bool,
+    pub sim: crate::sim_pacing::SimSetup,
     /// `cameras[]` entries that do not validate: skipped by every consumer,
     /// reported in the status sidecar's `source_errors`.
     #[serde(skip)]
@@ -179,7 +179,7 @@ impl Default for VisionConfig {
             other_camera_ids: Vec::new(),
             primary_captured: false,
             tap_sink: None,
-            simulation: false,
+            sim: crate::sim_pacing::SimSetup::default(),
             invalid_cameras: Vec::new(),
             downscale_width: default_downscale_width(),
             downscale_height: default_downscale_height(),
@@ -300,7 +300,7 @@ impl VisionConfig {
         let other_camera_ids: Vec<String> = others.into_iter().map(|c| c.id).collect();
         let invalid_cameras = entries.invalid;
         let camera_mounts = crate::depth::geometry::mounts_from_config(&text);
-        let simulation = ados_config::simulation::read_gate_from(&text).enabled;
+        let sim = crate::sim_pacing::SimSetup::from_config(&text);
         let tap_sink = raw.video.vision.enabled.then(|| {
             raw.video
                 .vision
@@ -317,7 +317,7 @@ impl VisionConfig {
                 other_camera_ids,
                 primary_captured,
                 tap_sink,
-                simulation,
+                sim,
                 invalid_cameras,
                 camera_mounts,
                 ..VisionConfig::default()
@@ -332,7 +332,7 @@ impl VisionConfig {
             other_camera_ids,
             primary_captured,
             tap_sink,
-            simulation,
+            sim,
             invalid_cameras,
             downscale_width: v.downscale_width,
             downscale_height: v.downscale_height,

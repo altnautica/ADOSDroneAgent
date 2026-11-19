@@ -19,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
+# The sim-clock relay socket the SEI tap follows on a simulated node.
+ados-time = { path = "../ados-time" }
 ados-proc = { path = "../ados-proc" }
 ados-hal-probe = { workspace = true }
 serde = { workspace = true }

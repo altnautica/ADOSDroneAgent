@@ -94,6 +94,9 @@ pub(super) async fn run_camera(
     let infer_sem = Arc::new(tokio::sync::Semaphore::new(1));
     // The camera's depth runs: paced, one in flight.
     let mut depth = DepthPacer::new(depth_interval_ms);
+    // On the simulator's clock: each simulated frame keeps the camera's lane
+    // busy (in lockstep, the simulator waits) until its batch is out.
+    let pacing = engine.sim_pacing();
     // The last source failure, surfaced in the status sidecar and logged at
     // warn once per distinct reason, cleared by the next delivered frame.
     let mut last_error: Option<String> = None;
@@ -171,8 +174,12 @@ pub(super) async fn run_camera(
                                     // decoupled, latest-wins). Acquire the slot
                                     // FIRST so a busy frame never consumes a model's
                                     // scheduling turn; only mark models run when they
-                                    // actually run.
+                                    // actually run. The models are paced on the
+                                    // frame clock (a simulated frame's sim time).
                                     let now_ms = mono_ns() / 1_000_000;
+                                    let frame_ms = frame_clock_ns(&desc).map_or(now_ms, |ns| ns / 1_000_000);
+                                    let lane = pacing.as_ref().filter(|p| p.frame(&camera_id, &desc)).cloned();
+                                    let mut spawned = false;
                                     depth.offer(&engine, &desc, now_ms);
                                     if !paces.is_empty() && engine.detection_wanted(&camera_id, now_ms) {
                                         if let Ok(permit) =
@@ -183,11 +190,14 @@ pub(super) async fn run_camera(
                                             if engine.take_designation(&camera_id) {
                                                 scheduler.make_all_due();
                                             }
-                                            let due = scheduler.take_due(now_ms);
+                                            let due = scheduler.take_due(frame_ms);
                                             if !due.is_empty() {
                                                 let eng = engine.clone();
                                                 let data = spare.take().unwrap_or_default();
                                                 let back = recycle.clone();
+                                                let lane = lane.clone();
+                                                let cam = camera_id.clone();
+                                                spawned = true;
                                                 tokio::spawn(async move {
                                                     let _permit = permit;
                                                     for det in due {
@@ -199,11 +209,17 @@ pub(super) async fn run_camera(
                                                         }
                                                     }
                                                     back.give(data);
+                                                    if let Some(p) = lane {
+                                                        p.free(&cam);
+                                                    }
                                                 });
                                             }
                                             // else: permit drops here, released; no
                                             // model was due this frame.
                                         }
+                                    }
+                                    if let Some(p) = lane.filter(|_| !spawned) {
+                                        p.free(&camera_id);
                                     }
                                 }
                                 Err(e) => {
@@ -227,6 +243,9 @@ pub(super) async fn run_camera(
             }
         }
         input.lost();
+        if let Some(p) = &pacing {
+            p.lost(&camera_id);
+        }
         if backoff(&cancel, reopen_pause(opened.elapsed())).await {
             return;
         }

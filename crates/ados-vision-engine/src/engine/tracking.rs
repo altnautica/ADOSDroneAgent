@@ -4,10 +4,30 @@ use super::*;
 
 impl VisionEngine {
     /// Publish a detection batch on `vision.detection`. A plugin-side model
-    /// calls this; an engine-run flow calls it after [`Self::infer`]. Returns
-    /// the subscriber count the batch reached (0 when none).
+    /// calls this; an engine-run flow calls it after [`Self::infer`]. On the
+    /// simulator's clock a batch of a simulated frame goes out at its frame's
+    /// sim time plus the modelled latency ([`crate::sim_pacing`]). Returns the
+    /// subscriber count the batch reached or will reach (0 when none).
     pub fn publish_detection(&self, batch: DetectionBatch) -> usize {
-        self.detection_tx.send(batch).unwrap_or(0)
+        match self.sim_pacing.get() {
+            Some(p) => p.publish(batch),
+            None => self.detection_tx.send(batch).unwrap_or(0),
+        }
+    }
+
+    /// Pace results on the simulator's clock; set once, at start.
+    pub fn set_sim_pacing(&self, pacing: Arc<crate::sim_pacing::SimPacing>) {
+        let _ = self.sim_pacing.set(pacing);
+    }
+
+    /// The pacing on the simulator's clock, when the node follows it.
+    pub fn sim_pacing(&self) -> Option<Arc<crate::sim_pacing::SimPacing>> {
+        self.sim_pacing.get().cloned()
+    }
+
+    /// Where detection batches are broadcast (the pacing releases into it).
+    pub fn detection_sender(&self) -> broadcast::Sender<DetectionBatch> {
+        self.detection_tx.clone()
     }
 
     /// Convenience for the engine-run flow: infer then publish, building the
@@ -104,8 +124,11 @@ impl VisionEngine {
         }
         let detections = if self.tracker_enabled {
             let apps = if for_tracker { appearances } else { None };
+            // The tracker steps on the frame clock: a simulated frame's sim
+            // time, else its capture time.
+            let ts = crate::sim_pacing::frame_clock_ns(desc).unwrap_or(desc.ts_ns);
             let tracked = self
-                .track(&desc.camera_id, detections, apps, Some(desc.ts_ns))
+                .track(&desc.camera_id, detections, apps, Some(ts))
                 .await;
             if plan.subject.is_some() {
                 let associated = self
@@ -124,6 +147,9 @@ impl VisionEngine {
         let mut batch = self.detection_batch(model_id, desc, detections);
         if !ran_whole {
             batch.crop_window = plan.crop.as_ref().map(|c| c.window);
+        }
+        if let Some(p) = self.sim_pacing.get() {
+            p.observe_infer_ms(infer_ms);
         }
         self.publish_detection(batch.clone());
         times.capture_to_publish_ms = ms_since(desc.ts_ns);

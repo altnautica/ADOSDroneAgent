@@ -8,6 +8,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Vision on the simulator's clock: a simulated frame's SEI sim time is the engine's frame clock (model schedule, tracker steps); a detector result of a simulated frame is released at the frame's sim time plus `vision.sim_latency_ms` (unset: the detector's measured latency); in lockstep each simulated camera is a barrier participant per frame, and leaves the barrier when its source fails. The SEI tap reports a simulated frame's age on ADOS time (`--clock-feed`, file fields `clock`, `sim_time_ns`).
+
 - Sim clock lockstep (`simulation.clock_mode: lockstep`): the plugin relay in ados-clock-service is also a barrier that answers each World Engine grant (`simclock.v1` ACK, `done_ns` = the grant) once every registered participant is done. Participants connect to `simclock/participants.sock` beside the relay and write 16-byte DONE frames: the pilot core reports its next tick once that tick's MAVLink frames are written to the router; the router's request-tick and swarm-control lanes report theirs too; plugins opt in with `ados_sdk::clock::done` / `ados.sdk.clock.done`. With nobody registered, a grant is acknowledged at once.
 
 - The pilot shapes sticks and goals with one reference and one shaper: a goal's limits feed the same jerk-limited tracker the sticks use (each kind keeps its own rest and unwind rule), with recorded trajectory pins for goal, goto arrival, blocked hold, stick takeover and landing that the merge reproduces to within 1e-6.

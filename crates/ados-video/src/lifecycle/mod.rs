@@ -70,15 +70,22 @@ impl PrimaryCommand {
 ///
 /// Pure and separate from the spawn so the sweep-classification test can feed
 /// the REAL command line in. `--rtsp` marks `pipe_uri` as this process's INPUT,
-/// which is what keeps it out of the publisher orphan sweep.
-pub fn sei_tap_args(pipe_uri: &str) -> Vec<String> {
-    vec![
+/// which is what keeps it out of the publisher orphan sweep. `clock_feed` (the
+/// sim-clock relay socket, on a node following the simulator's clock) has the
+/// tap measure a simulated frame's age on ADOS time from its SEI sim time.
+pub fn sei_tap_args(pipe_uri: &str, clock_feed: Option<&std::path::Path>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "-m".into(),
         "ados.services.video.sei_tap".into(),
         "--once".into(),
         "--rtsp".into(),
         pipe_uri.to_string(),
-    ]
+    ];
+    if let Some(feed) = clock_feed {
+        args.push("--clock-feed".into());
+        args.push(feed.display().to_string());
+    }
+    args
 }
 
 /// The cloud-relay push's `ffmpeg` arguments: re-mux the local `main` stream to

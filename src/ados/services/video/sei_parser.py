@@ -13,11 +13,15 @@ pay the cost of loading PIL just to walk bytes.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import NamedTuple
 
 # Mirror of ADOS_LATENCY_SEI_UUID in crates/ados-video/src/sei.rs. Kept as a literal so
 # this module imports cheaply.
 ADOS_LATENCY_SEI_UUID = bytes.fromhex("ad05140e9c2c4f6e8a31f0e5b7d4c8a2")
 assert len(ADOS_LATENCY_SEI_UUID) == 16
+# Mirror of WE_SEI_UUID in crates/ados-vision-engine/src/sei.rs: the frame
+# identity a simulated camera stamps on every frame.
+WE_FRAME_SEI_UUID = bytes.fromhex("5745454e47494e458000000000000001")
 
 
 def _iter_nal_units(stream: bytes) -> Iterator[tuple[int, bytes]]:
@@ -141,12 +145,9 @@ def _remove_emulation_prevention(ebsp: bytes) -> bytes:
     return bytes(out)
 
 
-def parse_sei_latency_ns(stream: bytes) -> int | None:
-    """Extract the air-side wall-clock-time-ns from a SEI marker.
-
-    Returns the ns timestamp encoded by ``build_sei_nal`` in ``crates/ados-video/src/sei.rs``,
-    or ``None`` if no matching SEI is present in the buffer.
-    """
+def _iter_user_data(stream: bytes) -> Iterator[tuple[bytes, bytes]]:
+    """Yield ``(uuid, body)`` of every ``user_data_unregistered`` SEI
+    message (payload type 5) in ``stream``, in stream order."""
     for nal_type, raw_payload in _iter_nal_units(stream):
         if nal_type != 6:
             continue
@@ -176,17 +177,50 @@ def parse_sei_latency_ns(stream: bytes) -> int | None:
                 break
             data = payload[idx : idx + psize]
             idx += psize
-            if (
-                ptype == 5
-                and len(data) >= 16 + 8
-                and data[:16] == ADOS_LATENCY_SEI_UUID
-            ):
-                ns = int.from_bytes(data[16 : 16 + 8], "big", signed=False)
-                return ns
+            if ptype == 5 and len(data) >= 16:
+                yield data[:16], data[16:]
+
+
+def parse_sei_latency_ns(stream: bytes) -> int | None:
+    """Extract the air-side wall-clock-time-ns from a SEI marker.
+
+    Returns the ns timestamp encoded by ``build_sei_nal`` in ``crates/ados-video/src/sei.rs``,
+    or ``None`` if no matching SEI is present in the buffer.
+    """
+    for uuid, body in _iter_user_data(stream):
+        if uuid == ADOS_LATENCY_SEI_UUID and len(body) >= 8:
+            return int.from_bytes(body[:8], "big", signed=False)
     return None
+
+
+class WeFrameId(NamedTuple):
+    """A simulated camera frame's identity (``crates/ados-vision-engine/src/sei.rs``)."""
+
+    seq: int
+    sim_time_ns: int
+    cam: int
+
+
+def parse_we_frame_id(stream: bytes) -> WeFrameId | None:
+    """The newest World Engine frame identity in ``stream``: the simulator's
+    camera puts one in every frame, 24 bytes little-endian after the UUID
+    (``seq`` u64, ``sim_time_ns`` u64, ``cam`` u32, reserved u32). ``None``
+    when the buffer holds none (a real camera's stream)."""
+    found: WeFrameId | None = None
+    for uuid, body in _iter_user_data(stream):
+        if uuid == WE_FRAME_SEI_UUID and len(body) >= 24:
+            found = WeFrameId(
+                seq=int.from_bytes(body[0:8], "little"),
+                sim_time_ns=int.from_bytes(body[8:16], "little"),
+                cam=int.from_bytes(body[16:20], "little"),
+            )
+    return found
 
 
 __all__ = [
     "ADOS_LATENCY_SEI_UUID",
+    "WE_FRAME_SEI_UUID",
+    "WeFrameId",
     "parse_sei_latency_ns",
+    "parse_we_frame_id",
 ]

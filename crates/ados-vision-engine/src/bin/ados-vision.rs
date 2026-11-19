@@ -32,6 +32,7 @@ use ados_vision_engine::detection_bus;
 use ados_vision_engine::engine::{CameraMotionSetup, DepthSetup, VisionEngine};
 use ados_vision_engine::frame_bus;
 use ados_vision_engine::perception_scheduler::PerceptionScheduler;
+use ados_vision_engine::sim_pacing::{frame_clock_ns, SimPacing};
 use ados_vision_engine::source::{AnySource, FrameSource, SimClock};
 use ados_vision_engine::visionsock;
 use ados_vision_engine::work_status::{self, InputLiveness, WorkStatus, INPUT_SILENCE_TIMEOUT};
@@ -273,10 +274,19 @@ async fn main() {
     // simulator's clock, the one the simulated cameras stamp exposures with.
     engine.configure_camera_motion(CameraMotionSetup {
         geometries: geometries_of(&config.camera_mounts),
-        fc_on_sim_clock: config.simulation,
+        fc_on_sim_clock: config.sim.enabled(),
     });
     // Every frame and detection batch carries its camera's configured mount.
     engine.configure_camera_mounts(config.camera_mounts.clone());
+    // On the simulator's clock, results are released at their frame's sim time
+    // plus the modelled latency, and in lockstep each camera joins the barrier.
+    if let Some(p) = SimPacing::start(&config.sim, &run_dir(), engine.detection_sender()) {
+        tracing::info!(
+            latency_ms = p.latency_ns() / 1_000_000,
+            "vision paced on sim time"
+        );
+        engine.set_sim_pacing(p);
+    }
 
     // Build the per-camera schedule input: every registered engine-run detection
     // model, each with a target rate + priority so the perception scheduler paces
@@ -335,7 +345,7 @@ async fn main() {
             .triggers
             .spawn_subscriber(ados_sensorbus::socket_path())
     });
-    if config.simulation {
+    if config.sim.enabled() {
         factory.sim = SimClock::publishing(ados_sensorbus::Publisher::spawn(
             ados_sensorbus::socket_path(),
             ados_sensorbus::Origin::Vision,

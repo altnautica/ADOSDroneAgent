@@ -4707,6 +4707,16 @@
       "type": "integer"
     },
     {
+      "default": null,
+      "description": "Sim Latency Ms",
+      "enum": null,
+      "key": "vision.sim_latency_ms",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
       "default": 4,
       "description": "Slot Count",
       "enum": null,

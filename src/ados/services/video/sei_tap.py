@@ -13,6 +13,14 @@ OLED tap never runs and the latency file never gets written, so the
 GCS popover AIR row stayed blank even with SEI on. This tap fills the
 gap by being unconditional whenever wfb.sei_latency is true.
 
+On a node following the simulator's clock (``--clock-feed``, the agent's
+sim-clock relay socket) the frames are a simulated camera's, each carrying
+the World Engine frame identity SEI with its ``sim_time_ns``: the tap then
+reports a frame's age on ADOS time (sim now minus the frame's sim time), the
+only latency that means anything when sim time runs at N x wall time.
+``clock`` in the file says which (``sim`` or ``wall``), and ``sim_time_ns``
+carries the newest frame's sim time.
+
 The tap is best-effort: any subprocess failure, parse error, or
 ffmpeg restart loop is logged and the latency file simply stops
 updating — the GCS popover degrades to "measuring..." via the
@@ -29,7 +37,8 @@ from pathlib import Path
 from typing import Any
 
 from ados.core.logging import get_logger
-from ados.services.video.sei_parser import parse_sei_latency_ns
+from ados.sdk.clock import SimFeed
+from ados.services.video.sei_parser import parse_sei_latency_ns, parse_we_frame_id
 
 log = get_logger("video.sei_tap")
 
@@ -61,9 +70,12 @@ class HeadlessSeiTap:
         rtsp_url: str,
         *,
         output_path: Path = _LCD_LATENCY_PATH,
+        sim_clock: SimFeed | None = None,
     ) -> None:
         self._rtsp_url = rtsp_url
         self._output_path = output_path
+        # ADOS time on a node following the simulator's clock; None on wall.
+        self._sim_clock = sim_clock
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
@@ -74,6 +86,58 @@ class HeadlessSeiTap:
         self._sample_count_window = 0
         self._sample_count_last_flush = 0
         self._last_flush_at = time.monotonic()
+        # The newest simulated frame's sim time, ns.
+        self._last_sim_time_ns: int | None = None
+
+    @property
+    def clock(self) -> str:
+        """``sim`` when latency is a frame's age on ADOS time, else ``wall``."""
+        return "wall" if self._sim_clock is None else "sim"
+
+    def take_sample(self, data: bytes) -> bool:
+        """Read the newest marker in ``data`` into the rolling stats.
+
+        On the sim clock the latency is a simulated frame's age on ADOS time
+        (its SEI ``sim_time_ns`` against the simulator's time now); on wall
+        time it is the latency SEI's stamp against this host's clock. Returns
+        True when ``data`` held a marker (the caller drops the bytes read)."""
+        frame = parse_we_frame_id(data)
+        stamp = parse_sei_latency_ns(data)
+        if frame is None and stamp is None:
+            return False
+        if frame is not None:
+            self._last_sim_time_ns = frame.sim_time_ns
+        if self._sim_clock is not None:
+            now = self._sim_clock.sim_ns()
+            if frame is None or now is None or self._sim_clock.stale():
+                return True
+            delta_ns = now - frame.sim_time_ns
+            # Within one grant ADOS time may not have reached the frame yet.
+            if delta_ns < 0 or delta_ns > 60_000_000_000:
+                return True
+        else:
+            if stamp is None:
+                return True
+            # The SEI carries `time.time_ns()` stamped by the injector, which
+            # `encoder.wrap_with_sei_inject` splices AFTER the encoder, so
+            # this is stamp-to-readback: muxing, publish and drone-side
+            # buffering, not capture or encode. Both sides rely on
+            # chrony/systemd-timesyncd to stay within a few ms.
+            delta_ns = time.time_ns() - stamp
+            if delta_ns <= 0 or delta_ns > 60_000_000_000:
+                # Sample is bogus (clock skew, stale buffer); skip.
+                return True
+        delta_ms = delta_ns / 1_000_000
+        self._last_latency_ms = delta_ms
+        self._sample_count_window += 1
+        if self._latency_ewma_ms is None:
+            self._latency_ewma_ms = delta_ms
+        else:
+            self._latency_ewma_ms = (
+                _EWMA_ALPHA * delta_ms
+                + (1.0 - _EWMA_ALPHA) * self._latency_ewma_ms
+            )
+        return True
 
     async def start(self) -> None:
         """Begin reading. Idempotent; no-op if already running."""
@@ -165,29 +229,8 @@ class HeadlessSeiTap:
                     # Keep the tail; the next SEI marker is more likely
                     # to land near the freshest bytes.
                     del buf[: len(buf) - 2 * _READ_CHUNK]
-                ns = parse_sei_latency_ns(bytes(buf))
-                if ns is None:
+                if not self.take_sample(bytes(buf)):
                     continue
-                # Compute latency against our wall clock. The SEI carries
-                # `time.time_ns()` stamped by the injector, which
-                # `encoder.wrap_with_sei_inject` splices AFTER the encoder,
-                # so this is stamp-to-readback: muxing, publish and
-                # drone-side buffering, not capture or encode. Both sides
-                # rely on chrony/systemd-timesyncd to stay within a few ms.
-                delta_ns = time.time_ns() - ns
-                if delta_ns <= 0 or delta_ns > 60_000_000_000:
-                    # Sample is bogus (clock skew, stale buffer); skip.
-                    continue
-                delta_ms = delta_ns / 1_000_000
-                self._last_latency_ms = delta_ms
-                self._sample_count_window += 1
-                if self._latency_ewma_ms is None:
-                    self._latency_ewma_ms = delta_ms
-                else:
-                    self._latency_ewma_ms = (
-                        _EWMA_ALPHA * delta_ms
-                        + (1.0 - _EWMA_ALPHA) * self._latency_ewma_ms
-                    )
                 # Reset the buffer to just past the parsed SEI so the
                 # next iteration doesn't re-find the same marker.
                 buf.clear()
@@ -228,11 +271,11 @@ class HeadlessSeiTap:
         except Exception:  # noqa: BLE001
             return
 
-    async def _persist(self) -> None:
-        """Write the rolling stats to /run/ados/lcd-latency.json."""
+    def payload(self) -> dict[str, Any]:
+        """The rolling stats as written to the latency file."""
         samples_since_last = self._sample_count_window - self._sample_count_last_flush
         self._sample_count_last_flush = self._sample_count_window
-        payload: dict[str, Any] = {
+        return {
             "latency_ms": (
                 round(self._last_latency_ms, 2)
                 if self._last_latency_ms is not None
@@ -245,7 +288,13 @@ class HeadlessSeiTap:
             ),
             "samples": samples_since_last,
             "source": "sei",
+            "clock": self.clock,
+            "sim_time_ns": self._last_sim_time_ns,
         }
+
+    async def _persist(self) -> None:
+        """Write the rolling stats to /run/ados/lcd-latency.json."""
+        payload = self.payload()
         try:
             self._output_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._output_path.with_suffix(self._output_path.suffix + ".tmp")
@@ -281,9 +330,18 @@ def _run_once_main(argv: list[str] | None = None) -> int:
         required=True,
         help="Local mediamtx RTSP URL to read SEI markers from.",
     )
+    parser.add_argument(
+        "--clock-feed",
+        default=None,
+        help="The agent's sim-clock relay socket: measure a simulated frame's age on ADOS time.",
+    )
     args = parser.parse_args(argv)
 
-    tap = HeadlessSeiTap(rtsp_url=args.rtsp)
+    sim_clock = None
+    if args.clock_feed:
+        sim_clock = SimFeed()
+        sim_clock.follow(args.clock_feed)
+    tap = HeadlessSeiTap(rtsp_url=args.rtsp, sim_clock=sim_clock)
     try:
         asyncio.run(tap._read_once())
     except KeyboardInterrupt:

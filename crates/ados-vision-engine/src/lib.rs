@@ -39,6 +39,8 @@
 //! - [`depth`] — the depth layer: a monocular depth model's output pooled to
 //!   the per-camera grid, scaled with the ranging hits, and searched for
 //!   landing zones; [`depth_bus`] re-publishes it on `vision-depth.sock`.
+//! - [`sim_pacing`] — vision on the simulator's clock: the frame clock, the
+//!   modelled-latency release of results, and each camera's lockstep lane.
 
 pub mod backend;
 pub mod camera_control;
@@ -53,6 +55,7 @@ pub mod frame_bus;
 pub mod perception_scheduler;
 pub mod ring;
 pub mod sei;
+pub mod sim_pacing;
 pub mod source;
 pub mod trigger;
 pub mod visionsock;

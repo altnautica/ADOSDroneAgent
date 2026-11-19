@@ -45,6 +45,11 @@ pub struct AgentVideoConfig {
     /// recorder through the rendered `pathDefaults` block. Default OFF.
     #[serde(default)]
     pub recording: RecordingConfig,
+    /// The agent's sim-clock relay socket on a node following the
+    /// simulator's clock (`simulation.clock: sim`): the SEI tap measures a
+    /// simulated frame's age on ADOS time. `None` on wall time.
+    #[serde(skip)]
+    pub clock_feed: Option<std::path::PathBuf>,
 }
 
 impl Default for AgentVideoConfig {
@@ -57,6 +62,7 @@ impl Default for AgentVideoConfig {
             vision: VisionTapConfig::default(),
             cameras: Vec::new(),
             recording: RecordingConfig::default(),
+            clock_feed: None,
         }
     }
 }
@@ -128,6 +134,8 @@ impl AgentVideoConfig {
             vision: raw.video.vision,
             cameras: super::legs::legs_from(&text),
             recording: raw.video.recording,
+            clock_feed: ados_time::plugin_feed(&ados_config::simulation::read_gate_from(&text))
+                .map(|_| ados_time::relay_socket(&ados_protocol::paths::run_dir())),
         }
     }
 

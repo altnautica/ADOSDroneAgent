@@ -255,7 +255,7 @@ impl VideoOrchestrator {
             tracing::debug!("sei_tap_deferred: mediamtx path not ready");
             return;
         }
-        let args = sei_tap_args(&self.pipe_uri());
+        let args = sei_tap_args(&self.pipe_uri(), self.config.clock_feed.as_deref());
         let mut tap = match ManagedProcess::spawn("sei_tap", &self.python_executable, &args) {
             Ok(p) => p,
             Err(e) => {

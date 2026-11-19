@@ -53,6 +53,8 @@ ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
 # Trigger records in, simulator time pairs out, on the sensor bus.
 ados-sensorbus = { path = "../ados-sensorbus" }
+# ADOS time: the simulator's clock and the lockstep barrier (`sim_pacing`).
+ados-time = { path = "../ados-time" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
