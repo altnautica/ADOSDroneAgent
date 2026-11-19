@@ -172,13 +172,12 @@ pub struct Pilot {
     /// The shadow planner's latest command and its source.
     shadow: Option<(&'static str, ShadowCmd)>,
     plan_hold: Option<[f32; 3]>,
-    /// The shaped reference the latest goal tick flew ([`control::GoalRef`]).
-    goal_ref: Option<control::GoalRef>,
     /// The subject the skill's goals name, for the subject brake
     /// ([`control::SubjectTrack`]).
     subject_track: control::SubjectTrack,
-    /// The shaped reference the latest tick flew, whoever owned it: the
-    /// sticks, a goal or a hold ([`control::MotionRef`]).
+    /// The pilot's one shaped reference, as the latest tick that flew it
+    /// left it: the sticks or a hold flown as their owner, a skill goal or a
+    /// goto ([`control::MotionRef`]).
     motion_ref: Option<control::MotionRef>,
     /// Where a skill goal or goto holds while the obstacle data is stale,
     /// from the tick it went stale; cleared on any tick that does not keep it.
@@ -265,7 +264,6 @@ impl Pilot {
             latch: trace::Latch::default(),
             shadow: None,
             plan_hold: None,
-            goal_ref: None,
             subject_track: control::SubjectTrack::default(),
             motion_ref: None,
             stale_hold: None,

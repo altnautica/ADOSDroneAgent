@@ -13,7 +13,7 @@ fn peaks(s: &mut Shaper, target: V2, lim: &StickLimits, n: usize) -> (f32, f32, 
     let mut prev_a = s.a;
     for _ in 0..n {
         let v0 = s.v;
-        s.track_ab(target, lim.a_acc, lim.a_brk, lim.jerk, DT);
+        s.track(target, &lim.shape(), DT);
         let a = geo::scale(geo::sub(s.v, v0), 1.0 / DT);
         if geo::norm(s.v) >= geo::norm(v0) {
             up = up.max(geo::norm(a));
@@ -51,7 +51,7 @@ fn a_release_brakes_on_the_brake_limit_to_rest_without_reversing() {
     let mut s = Shaper::default();
     peaks(&mut s, [lim.v_h, 0.0], &lim, 500);
     for _ in 0..300 {
-        s.track_ab([0.0, 0.0], lim.a_acc, lim.a_brk, lim.jerk, DT);
+        s.track([0.0, 0.0], &lim.shape(), DT);
         assert!(s.v[0] >= 0.0, "reversed to {}", s.v[0]);
     }
 }

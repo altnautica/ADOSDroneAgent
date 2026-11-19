@@ -94,6 +94,23 @@ pub fn goal_limits(p: Profile) -> GoalLimits {
     }
 }
 
+impl GoalLimits {
+    /// The shaper's limits for a goal: one acceleration both ways, settling
+    /// on jerk over acceleration (2/s on Normal), softer than the sticks'.
+    /// A lower acceleration coming on (a speed cap's) holds at once, and a
+    /// stop settles on without coming to rest at a speed.
+    pub fn shape(&self) -> ShapeLimits {
+        ShapeLimits {
+            a_acc: self.a_h,
+            a_brk: self.a_h,
+            jerk: self.jerk,
+            settle: self.jerk / self.a_h,
+            unwind: f32::INFINITY,
+            rest_mps: 0.0,
+        }
+    }
+}
+
 /// One profile's stick limits: what the operator's sticks fly at, and only
 /// they. Every autonomous path (goals, gotos, holds, returns, landing, the
 /// obstacle brake on them) keeps [`Limits`] and [`GoalLimits`].
@@ -142,6 +159,21 @@ impl StickLimits {
             expo_h: self.expo_h,
             expo_v: self.expo_v,
             expo_yaw: self.expo_yaw,
+        }
+    }
+
+    /// The shaper's limits for the sticks: speeding up and braking on their
+    /// own accelerations, settling on [`SETTLE_GAIN`], a brake ending in a
+    /// new push unwinding at the jerk limit, and a hold coming to rest
+    /// ([`REST_MPS`]).
+    pub fn shape(&self) -> ShapeLimits {
+        ShapeLimits {
+            a_acc: self.a_acc,
+            a_brk: self.a_brk,
+            jerk: self.jerk,
+            settle: SETTLE_GAIN,
+            unwind: self.jerk,
+            rest_mps: REST_MPS,
         }
     }
 }
@@ -291,12 +323,37 @@ pub fn centred(x: f32) -> f32 {
 
 /// Gain the stick reference settles on near its target, 1/s: a 0.25 s
 /// time constant below `jerk`/16 m/s of the target (0.3 m/s at 5 m/s³).
-/// The goal shaper's own gain (jerk over acceleration, 2/s on a 2.5 m/s²
-/// brake) leaves a stop crawling for over a second below 0.5 m/s.
+/// A goal's own gain (jerk over acceleration, 2/s on Normal) would leave a
+/// stick stop crawling for over a second below 0.5 m/s.
 pub const SETTLE_GAIN: f32 = 4.0;
 
-/// A 2-D velocity shaper: acceleration magnitude ≤ `a_max`, change of
-/// acceleration ≤ `jerk`·dt.
+/// A stick reference asked to stop comes to rest from below this speed,
+/// m/s, so a hold stands still.
+pub const REST_MPS: f32 = 1e-3;
+
+/// The limits the one shaper ([`Shaper::track`]) moves a reference's
+/// horizontal velocity on: the sticks' ([`StickLimits::shape`]) or a goal's
+/// ([`GoalLimits::shape`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeLimits {
+    /// Acceleration while speeding up, and while slowing (a smaller or
+    /// reversed target), m/s².
+    pub a_acc: f32,
+    pub a_brk: f32,
+    /// Jerk, m/s³.
+    pub jerk: f32,
+    /// Gain the velocity settles on near its target, 1/s.
+    pub settle: f32,
+    /// How fast an acceleration above the limit now in force falls, m/s³
+    /// (infinite: held to the limit at once).
+    pub unwind: f32,
+    /// Asked to stop, the reference comes to rest once slower than this,
+    /// m/s, its acceleration within one jerk step of none (0: never).
+    pub rest_mps: f32,
+}
+
+/// A 2-D velocity shaper: acceleration magnitude within the limits, change
+/// of acceleration ≤ `jerk`·dt.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Shaper {
     pub v: V2,
@@ -309,43 +366,32 @@ impl Shaper {
         self.a = [0.0, 0.0];
     }
 
-    /// Advance one step toward `target`, with the acceleration held to
-    /// `a_max` and its change to `jerk`·`dt`, never to zero at once: the
-    /// setpoints of a skill goal. Near the target the acceleration falls off
-    /// linearly, so it settles without snapping to zero.
-    pub fn track(&mut self, target: V2, a_max: f32, jerk: f32, dt: f32) -> V2 {
-        self.track_gain(target, a_max, jerk, jerk / a_max, dt)
-    }
-
-    /// [`Shaper::track`] settling on the linear gain `k` (1/s) within
-    /// `jerk`/`k`² of the target.
-    fn track_gain(&mut self, target: V2, a_max: f32, jerk: f32, k: f32, dt: f32) -> V2 {
+    /// Advance one step toward `target` on `lim`: speeding up at `a_acc`
+    /// and slowing at `a_brk`, the change of acceleration held to
+    /// `jerk`·`dt`, never to zero at once. Near the target the acceleration
+    /// falls off linearly on the `settle` gain (within `jerk`/`settle`² of
+    /// it), so it settles without snapping. An acceleration above the limit
+    /// now in force (a brake that ends in a new stick push) falls at
+    /// `unwind`. A target of zero comes to rest below `rest_mps`.
+    pub fn track(&mut self, target: V2, lim: &ShapeLimits, dt: f32) -> V2 {
+        let slowing = geo::norm(target) < geo::norm(self.v) || geo::dot(target, self.v) < 0.0;
+        let a_max = if slowing { lim.a_brk } else { lim.a_acc };
+        let a_max = a_max.max(geo::norm(self.a) - lim.unwind * dt);
         let err = geo::sub(target, self.v);
         let e = geo::norm(err);
-        let a_mag = sqrt_rate(e, k, jerk, a_max, dt);
+        let a_mag = sqrt_rate(e, lim.settle, lim.jerk, a_max, dt);
         let a_des = if e > 1e-6 {
             geo::scale(err, a_mag / e)
         } else {
             [0.0, 0.0]
         };
-        let da = geo::clamp_len(geo::sub(a_des, self.a), jerk * dt);
+        let da = geo::clamp_len(geo::sub(a_des, self.a), lim.jerk * dt);
         self.a = geo::clamp_len(geo::add(self.a, da), a_max);
         self.v = geo::add(self.v, geo::scale(self.a, dt));
-        self.v
-    }
-
-    /// The sticks' [`Shaper::track`]: speeding up at `a_acc` and slowing (a
-    /// smaller or reversed `target`) at `a_brk`, settling on
-    /// [`SETTLE_GAIN`]. An acceleration above the limit now in force (a
-    /// brake that ends in a new stick push) falls at the jerk limit, never
-    /// at once. A target of zero reached within one jerk step comes to rest,
-    /// so a hold stands still.
-    pub fn track_ab(&mut self, target: V2, a_acc: f32, a_brk: f32, jerk: f32, dt: f32) -> V2 {
-        let slowing = geo::norm(target) < geo::norm(self.v) || geo::dot(target, self.v) < 0.0;
-        let a_max = if slowing { a_brk } else { a_acc };
-        let a_max = a_max.max(geo::norm(self.a) - jerk * dt);
-        self.track_gain(target, a_max, jerk, SETTLE_GAIN, dt);
-        if geo::norm(target) < 1e-6 && geo::norm(self.v) < 1e-3 && geo::norm(self.a) <= jerk * dt {
+        if geo::norm(target) < 1e-6
+            && geo::norm(self.v) < lim.rest_mps
+            && geo::norm(self.a) <= lim.jerk * dt
+        {
             self.reset([0.0, 0.0]);
         }
         self.v
@@ -365,13 +411,22 @@ impl Shaper1 {
         self.a = 0.0;
     }
 
-    /// [`Shaper::track_ab`] on one axis, at `a_max` both ways.
+    /// [`Shaper::track`] on one axis on the sticks' terms, at `a_max` both
+    /// ways.
     pub fn track(&mut self, target: f32, a_max: f32, jerk: f32, dt: f32) -> f32 {
         let mut s = Shaper {
             v: [self.v, 0.0],
             a: [self.a, 0.0],
         };
-        s.track_ab([target, 0.0], a_max, a_max, jerk, dt);
+        let lim = ShapeLimits {
+            a_acc: a_max,
+            a_brk: a_max,
+            jerk,
+            settle: SETTLE_GAIN,
+            unwind: jerk,
+            rest_mps: REST_MPS,
+        };
+        s.track([target, 0.0], &lim, dt);
         self.v = s.v[0];
         self.a = s.a[0];
         self.v

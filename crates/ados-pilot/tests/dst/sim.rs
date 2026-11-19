@@ -306,6 +306,16 @@ impl Sim {
         }
     }
 
+    /// A request from Mission Control answered at once (a goto).
+    pub fn request(&mut self, r: Request) -> Reply {
+        self.trace.line(format_args!("{} request {r:?}", self.now));
+        self.last_contact_ms = self.now;
+        let rep = self.p.on_request(r, self.now);
+        self.collect();
+        self.reply(rep.clone());
+        rep
+    }
+
     /// Run for `ms`.
     pub fn run(&mut self, ms: u64) {
         let end = self.now + ms;

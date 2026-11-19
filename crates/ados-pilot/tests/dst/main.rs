@@ -14,13 +14,18 @@
 //! the low-battery floor's countdown and SmartRTL return, the supervised
 //! lift-off to a hover, the operator link-loss return, and a mission's
 //! pause, resume and stalled-waypoint skip. Latency, stick feel and
-//! throughput stay with the real-time World Engine benches.
+//! throughput stay with the real-time World Engine benches. The shaper pins
+//! ([`shaper_pins`]) hold the trajectories of goals, holds and landings to
+//! their recordings.
 //!
 //! Every test name starts `dst_`: `cargo test -p ados-pilot dst` runs them.
 
 mod fc;
+#[path = "../pins/mod.rs"]
+mod pins;
 mod rng;
 mod scenarios;
+mod shaper_pins;
 mod sim;
 
 use std::time::Instant;

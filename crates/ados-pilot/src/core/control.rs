@@ -15,7 +15,6 @@ mod brake;
 mod energy;
 mod failsafes;
 mod goal_brake;
-mod goal_ref;
 mod hold_flight;
 mod motion_ref;
 mod obstacle_data;
@@ -28,7 +27,6 @@ pub(super) mod supervisor;
 mod trail;
 mod vantage_goal;
 pub use brake::*;
-pub(super) use goal_ref::GoalRef;
 pub(super) use motion_ref::MotionRef;
 #[cfg(test)]
 pub use route::{check_legs, legs_of, Origin};

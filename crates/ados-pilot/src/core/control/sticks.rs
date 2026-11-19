@@ -102,7 +102,7 @@ impl Pilot {
             r.sh.reset(geo::clamp_len(r.sh.v, lim.v_h));
             limits |= limit::NAV_CAP;
         }
-        let shaped = r.sh.track_ab(ask.ne, lim.a_acc, lim.a_brk, lim.jerk, dt);
+        let shaped = r.sh.track(ask.ne, &lim.shape(), dt);
         if geo::dist(shaped, ask.ne) > SHAPER_REPORT_MPS {
             limits |= limit::SHAPER;
         }

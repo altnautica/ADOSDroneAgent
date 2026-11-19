@@ -20,12 +20,15 @@ mod no_rc;
 mod no_rc_caps;
 mod no_returns;
 mod overhead;
+#[path = "../../tests/pins/mod.rs"]
+mod pins;
 mod position_check;
 mod route_hold;
 mod route_sigma;
 mod rules;
 mod safety;
 mod sensors;
+mod shaper_pins;
 mod shaping;
 mod sloped_leg;
 mod stale;

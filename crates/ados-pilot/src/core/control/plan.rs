@@ -1,13 +1,14 @@
-//! Planner-driven flight: the setpoint for a skill goal or a goto, shaped
-//! at the profile's goal limits ([`super::goal_ref`]), braked the same way
+//! Planner-driven flight: a skill goal or a goto flown on the one shaped
+//! reference ([`super::MotionRef`]) at the profile's goal limits, braked as
 //! stick flight is, and held inside the geofence and the altitude limits.
 
 use ados_protocol::pilot::{AvoidMode, AvoidState, Goal, GoalKind, Owner, VelMode};
 
 mod bounds;
 
-use super::goal_ref::{
-    approach, leash, GoalRef, APPROACH_DECEL_SHARE, ASK_SMOOTH_S, SHAPER_REPORT_MPS,
+use super::motion_ref::{
+    approach, leash_within, MotionRef, APPROACH_DECEL_SHARE, ASK_SMOOTH_S, REF_LEASH_M,
+    SHAPER_REPORT_MPS,
 };
 use super::subject_guard::Subject;
 use super::{
@@ -85,7 +86,7 @@ impl Pilot {
             let hold = stale_hold.unwrap_or(pos);
             self.stale_hold = Some(hold);
             self.hold_reason = Some(HOLD_OBSTACLE_STALE.into());
-            self.goal_ref = None;
+            self.drop_goal_ref();
             if self.speed_capped(now_ms) {
                 self.cap_flown([0.0, 0.0], now_ms);
             }
@@ -117,13 +118,13 @@ impl Pilot {
                 let t_ne = inside_fence([t[0], t[1]], home, max_dist);
                 let (t_d, _) = clamp_d(t[2], 0.0, pos[2], agl, FLOOR_AGL_M, max_alt);
                 let slow = self
-                    .goal_ref
+                    .flown_goal_ref()
                     .is_none_or(|r| geo::norm(r.sh.v) < HOLD_CAPTURE_MPS);
                 if geo::dist(pos_ne, t_ne) < GOTO_ARRIVE_M
                     && (pos[2] - t_d).abs() < GOTO_ARRIVE_M
                     && slow
                 {
-                    self.goal_ref = None;
+                    self.drop_goal_ref();
                     self.brake_hold(None);
                     return;
                 }
@@ -174,12 +175,12 @@ impl Pilot {
                 Some(f) if f < hold_d => clamp_d(f, 0.0, pos[2], agl, FLOOR_AGL_M, max_alt).0,
                 _ => hold_d,
             };
-            let mut r = self.goal_ref(pos_ne, yaw, now_ms);
+            let mut r = self.goal_ref(pos, yaw, now_ms);
             let mut limits = 0;
             let v = self.fly_shaped(&mut r, [0.0, 0.0], &shape, &mut limits, now_ms);
             let yaw_cmd = r.slew_yaw(None, &shape.gl, dt);
             r.at_ms = now_ms;
-            self.goal_ref = Some(r);
+            self.motion_ref = Some(r);
             let hold = [r.p[0], r.p[1], hold_d];
             self.plan_hold = Some(hold);
             self.setpoint = Some(hold);
@@ -222,7 +223,7 @@ impl Pilot {
             }
             _ => target,
         };
-        let mut r = self.goal_ref(pos_ne, yaw, now_ms);
+        let mut r = self.goal_ref(pos, yaw, now_ms);
         if shape.capped {
             // Capped, the velocity is flown from the vehicle's own position:
             // a reference ahead of it would let the FC's position loop pull
@@ -253,7 +254,7 @@ impl Pilot {
         });
         let yaw_cmd = r.slew_yaw(want_yaw, &shape.gl, dt);
         r.at_ms = now_ms;
-        self.goal_ref = Some(r);
+        self.motion_ref = Some(r);
         // Climbing clear of the subject: the setpoint is raised to the climb
         // floor, never lowered to it, and a descending feed-forward dropped.
         let (goal_d, vd) = match (floor_d, goal.as_ref().map_or(0.0, |g| g.vd)) {
@@ -305,7 +306,7 @@ impl Pilot {
     /// that velocity.
     fn fly_shaped(
         &mut self,
-        r: &mut GoalRef,
+        r: &mut MotionRef,
         want: V2,
         s: &Shape,
         limits: &mut u16,
@@ -326,7 +327,7 @@ impl Pilot {
         }
         let (want, by) = self.soft_brake(s.pos, want, s.gl.a_h, now_ms);
         *limits |= by;
-        let mut v = r.sh.track(want, s.gl.a_h, s.gl.jerk, s.dt);
+        let mut v = r.sh.track(want, &s.gl.shape(), s.dt);
         if geo::dist(v, want) > SHAPER_REPORT_MPS {
             *limits |= limit::SHAPER;
         }
@@ -339,7 +340,7 @@ impl Pilot {
         let mut p = if s.capped {
             s.pos
         } else {
-            leash(geo::add(r.p, geo::scale(v, s.dt)), s.pos)
+            leash_within(geo::add(r.p, geo::scale(v, s.dt)), s.pos, REF_LEASH_M)
         };
         if let Some(subject) = &s.subject {
             let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
@@ -395,7 +396,7 @@ impl Pilot {
         // A shaped stop's hold point is its reference, which may lead the
         // vehicle by up to the leash: the hard stop holds where the vehicle
         // is, at the hold's altitude.
-        if self.goal_ref.take().is_some() {
+        if self.drop_goal_ref() {
             if let Some(h) = self.plan_hold.as_mut() {
                 h[0] = pos[0];
                 h[1] = pos[1];

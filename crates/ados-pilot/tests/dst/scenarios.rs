@@ -27,7 +27,7 @@ fn ok(a: &ados_protocol::pilot::ActionResult) -> bool {
 }
 
 /// Launch to `alt_m` with the FC's take-off, handed to the pilot's hold.
-fn launch_to_hold(s: &mut Sim, alt_m: f32) {
+pub fn launch_to_hold(s: &mut Sim, alt_m: f32) {
     let a = s.action("launch", Some(json!({"after": "hold", "alt_m": alt_m})));
     assert!(ok(&a), "launch: {a:?}");
     let up = s.run_until(30_000, |s| {
@@ -39,7 +39,7 @@ fn launch_to_hold(s: &mut Sim, alt_m: f32) {
 
 /// Fly the sticks `axes` for `ms`, from centred sticks (the pilot's gate),
 /// then centre them for a second.
-fn fly_sticks(s: &mut Sim, axes: [f32; 4], ms: u64) {
+pub fn fly_sticks(s: &mut Sim, axes: [f32; 4], ms: u64) {
     s.sticks = Some([0.0; 4]);
     s.run(800);
     s.sticks = Some(axes);
