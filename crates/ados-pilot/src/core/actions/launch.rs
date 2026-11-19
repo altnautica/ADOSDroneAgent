@@ -321,6 +321,7 @@ impl Pilot {
             "skill" => {
                 self.set_owner(Owner::Pilot, "launch");
                 self.engage_pilot(now_ms);
+                self.hold_launch_height(l, now_ms);
             }
             _ => {
                 if fam == Family::Plane && self.fc.vehicle_class() == VehicleClass::Fixedwing {
@@ -328,10 +329,38 @@ impl Pilot {
                 }
                 self.set_owner(Owner::Pilot, "launch");
                 self.engage_pilot(now_ms);
+                self.hold_launch_height(l, now_ms);
                 l.step = LaunchStep::Done;
             }
         }
         l.step_ms = now_ms;
+    }
+
+    /// The launch's hold keeps the height it was launched to. The take-off
+    /// step ends at 90 % of that height, and a hold at the height it ended
+    /// at stopped the climb there: a 3 m launch hovered near 2.6 m. The
+    /// height is above the steady take-off's start point, else above the
+    /// ground the height reading measures.
+    fn hold_launch_height(&mut self, l: &Launch, now_ms: u64) {
+        if self.fc.vehicle_class() == VehicleClass::Fixedwing {
+            return;
+        }
+        let Some(p) = self.fc.fresh_local(now_ms) else {
+            return;
+        };
+        let start_d = l
+            .supervised
+            .as_ref()
+            .and_then(|s| s.liftoff.as_ref())
+            .and_then(crate::liftoff::Liftoff::start)
+            .map(|s| s.d);
+        let goal_d = start_d
+            .map(|d| d - l.alt_m)
+            .or_else(|| self.agl(now_ms).map(|h| p.d - (l.alt_m - h)));
+        if let Some(d) = goal_d {
+            let yaw = self.yaw(now_ms);
+            self.mr.hold_here([p.n, p.e, d], yaw);
+        }
     }
 
     /// The "when done" action after a mission completes or a one-shot skill

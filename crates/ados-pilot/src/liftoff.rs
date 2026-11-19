@@ -13,17 +13,31 @@
 //!    steadily; the resting attitude is captured (slope-aware).
 //! 2. **Level**: with a learned trim, at half hover thrust, lean the
 //!    attitude target toward it until the rate integrators hold it.
-//! 3. **Ramp**: thrust fast to most of hover, then slowly on until lift-off,
-//!    rising only while the airframe sits level on its skids. A side that
-//!    starts to unload (the trim not known yet, or wrong) holds the thrust
-//!    and leans the attitude target toward the low side, so the rate-loop
-//!    integrator winds up against skid contact; the lean turns round when
-//!    the other side unloads while the thrust climbs (never in the bounce
-//!    after a cut, see [`FLIP_QUIET_MS`]). The airframe never pivots: a
-//!    tilt past [`BACK_DEG`] steps the thrust back, past [`HARD_DEG`] cuts
-//!    it to [`HARD_FRAC`] of hover. A tilt past [`ABORT_DEG`], or a motor
-//!    held at the top of its range, stops the launch on the ground.
-//! 4. **Climb**: level, clear of the ground, then a position target that
+//! 3. **Find**: thrust fast to most of hover, then slowly on, level, until a
+//!    side starts to unload (or, balanced, it lifts off). The thrust a side
+//!    unloaded at is the unloading thrust.
+//! 4. **Bracket**: at [`BRACKET_MARGIN`] of hover below the unloading
+//!    thrust both skids stay loaded, so the attitude target can lean the
+//!    rate-loop integrators to any value without the airframe moving. Each
+//!    edge says which side of the trim the integrator was on (a side tilted
+//!    up: too much). From a bound on one side the next value is
+//!    [`BRACKET_STEP`] past it; between bounds on both sides it is their
+//!    midpoint. After each wind the airframe settles level, then a probe
+//!    ramps the thrust until a side unloads again. Bounds closer than
+//!    [`BRACKET_TOL`] give the trim (their midpoint), on each axis that
+//!    unloaded. A probe that lifts the airframe before a side unloads has
+//!    the trim close enough: it climbs out at the commit's thrust.
+//! 5. **Commit**: with the trim wound in, the thrust steps in
+//!    [`COMMIT_RAMP_MS`] to [`COMMIT_STEP`] of hover above the unloading
+//!    thrust (less, where the busiest motor would pass
+//!    [`COMMIT_MOTOR`]), level, so the airframe leaves the ground before
+//!    a small trim error can tip it. No lift-off in [`COMMIT_WAIT_MS`], or a
+//!    tilt past [`COMMIT_TILT_DEG`], cuts the thrust and brackets again,
+//!    once. Less than [`COMMIT_MIN`] of hover of motor headroom stops the
+//!    launch: no climb margin. A tilt past [`HARD_DEG`] on the ground cuts
+//!    the thrust to [`HARD_FRAC`] of hover; past [`ABORT_DEG`], or a motor
+//!    held at the top of its range, stops the launch.
+//! 6. **Climb**: level, clear of the ground, then a position target that
 //!    starts where the airframe is and moving as it moves, climbing to the
 //!    launch height.
 //!
@@ -73,41 +87,85 @@ const LOAD_FRAC: f32 = 0.5;
 const LOAD_LEAN_DEG: f32 = 8.0;
 /// A load that has not reached its target by then ramps anyway.
 const LOAD_TIMEOUT_MS: u64 = 8000;
-/// The fast ramp: to this share of hover in [`FAST_S`]. Below it no
+/// The find ramp: fast to this share of hover in [`FAST_S`]. Below it no
 /// airframe the balance check lets fly unloads a skid.
 const K_FAST: f32 = 0.7;
 const FAST_S: f32 = 0.5;
 /// Then the thrust rises by this share of hover per second while the
-/// airframe sits level, until it lifts, up to [`THRUST_MAX`]. The hover
-/// estimate only paces the ramp: an untuned `MOT_THST_HOVER` can be well
-/// short of the airframe's, and the ramp must not park it on its skids.
+/// airframe sits level, until a side unloads or it lifts, up to
+/// [`THRUST_MAX`]. The hover estimate only paces the ramp: an untuned
+/// `MOT_THST_HOVER` can be well short of the airframe's.
 const EDGE_RATE: f32 = 0.15;
 const THRUST_MAX: f32 = 0.9;
 /// A side has started to unload: tilted this far from rest on its axis.
 pub const EDGE_DEG: f32 = 0.5;
-/// The attitude target's lean toward the low side while it does, degrees.
+/// The bracket holds the thrust this share of hover below the highest
+/// thrust a side unloaded at, so both skids are loaded while it winds.
+/// Hover here is the estimate, or the highest unloading thrust where that
+/// is higher (an untuned `MOT_THST_HOVER` reads well short).
+const BRACKET_MARGIN: f32 = 0.12;
+/// From a trim bound on one side only, the next integrator tried is this
+/// far past it; each further edge on the same side halves the step (the
+/// edges come closer to lift-off as the integrator nears the trim), down
+/// to [`BRACKET_STEP_MIN`].
+const BRACKET_STEP: f32 = 0.15;
+const BRACKET_STEP_MIN: f32 = 0.02;
+/// A tilt back under this share of [`EDGE_DEG`] has settled: the next tilt
+/// past [`EDGE_DEG`] is a new edge.
+const SETTLED_FRAC: f32 = 0.8;
+/// The commit's thrust keeps the busiest motor under this share of its
+/// range (the ground stop is [`SATURATION`]).
+const COMMIT_MOTOR: f32 = 0.92;
+/// After an edge the thrust drops and the airframe falls back onto its
+/// skids and bounces past rest: no new edge counts for this long.
+const EDGE_QUIET_MS: u64 = 1000;
+/// A side unloading while the airframe already rises this fast (m/s) is
+/// the lift-off starting, not a trim error: it commits.
+const RISING_VZ_MPS: f32 = 0.05;
+/// The trim is known once its bounds on an axis are this close; the
+/// bracket's midpoint is the trim.
+const BRACKET_TOL: f32 = 0.03;
+/// More turns of an axis's edge from one side to the other than this, or
+/// more edges in all than [`MAX_EDGES`], and the bracket gives up.
+const MAX_REVERSALS: u32 = 8;
+const MAX_EDGES: u32 = 16;
+/// The attitude target's lean while it winds the rate-loop integrator to
+/// the bracket's next value: proportional to what is left (rad per unit of
+/// integrator), at most the axis's lean, which starts at
+/// [`EDGE_LEAN_DEG`] and halves each time that axis's edge turns round.
+const WIND_K: f32 = 0.5;
 const EDGE_LEAN_DEG: f32 = 6.0;
-/// Above this share of hover the lean only acts while a side is unloading,
-/// so the airframe never leaves the ground leaning.
-const LEAN_OFF: f32 = 0.97;
-/// A tilt past this steps the thrust back by [`BACK_STEP`] of hover, once
-/// per excursion…
-pub const BACK_DEG: f32 = 1.0;
-const BACK_STEP: f32 = 0.1;
-/// …and past this cuts it to [`HARD_FRAC`] of hover.
+const LEAN_MIN_DEG: f32 = 1.0;
+/// Wound once within this of the value it winds to.
+const WIND_TOL: f32 = 0.004;
+/// A wind that has not got there by then is probed anyway.
+const WIND_TIMEOUT_MS: u64 = 8000;
+/// Level at the bracket thrust this long, back on both skids, before the
+/// probe ramps (at [`EDGE_RATE`], until a side unloads or it lifts).
+const SETTLE_MS: u64 = 500;
+/// The commit: a thrust step to this share of hover above the highest
+/// unloading thrust, in [`COMMIT_RAMP_MS`], bounded by the busiest motor
+/// reaching [`COMMIT_MOTOR`]. With less than [`COMMIT_MIN`] of hover
+/// left above the unloading thrust the launch stops: no climb margin.
+const COMMIT_STEP: f32 = 0.25;
+const COMMIT_MIN: f32 = 0.05;
+const COMMIT_RAMP_MS: u64 = 60;
+/// No lift-off this long after the commit began, or a tilt past
+/// [`COMMIT_TILT_DEG`], cuts the thrust and brackets again, once.
+const COMMIT_WAIT_MS: u64 = 800;
+const COMMIT_TILT_DEG: f32 = 3.0;
+const COMMIT_RETRIES: u32 = 1;
+/// The busiest motor's output rises by this share of its range per unit of
+/// thrust until a probe has measured it.
+const MOTOR_SLOPE: f32 = 1.0;
+/// A tilt past this cuts the thrust to [`HARD_FRAC`] of hover.
 pub const HARD_DEG: f32 = 2.5;
 const HARD_FRAC: f32 = 0.3;
-/// After a step back or a cut the airframe settles back onto its skids and
-/// overshoots the other way: that bounce is not the other side unloading.
-/// For this long after one, and while the thrust is under [`K_FAST`] of
-/// hover, a lean never turns round, so the integrator keeps the trim it has
-/// wound (turning round there unwound it and the ramp cycled on the skids).
-const FLIP_QUIET_MS: u64 = 1000;
-/// An integrator wound past this while a side still unloads: the trim is
-/// beyond what the rate loop can hold.
+/// An integrator bound past this: the trim is beyond what the rate loop
+/// can hold.
 const TRIM_MAX: f32 = 0.45;
-/// Leaning without rate-loop data for this long stops the launch: nothing
-/// bounds the integrator.
+/// Bracketing without rate-loop data for this long stops the launch:
+/// nothing tells where the integrator is.
 const NO_RATE_MS: u64 = 1000;
 /// A tilt on the skids past this from rest stops the launch. The airframe
 /// must still be able to fall back onto its skids once the motors stop: a
@@ -300,7 +358,23 @@ enum Phase {
     Level {
         since: u64,
     },
-    Ramp,
+    /// Thrust rising level until a side unloads (or it lifts).
+    Find,
+    /// The bracket: winding the integrators to their next values at the
+    /// bracket thrust, level there, then a probe ramp until a side unloads.
+    Wind {
+        since: u64,
+    },
+    Settle {
+        since: u64,
+    },
+    Probe,
+    /// The thrust step off the skids, from `from` to `to`.
+    Commit {
+        since: u64,
+        from: f32,
+        to: f32,
+    },
     Climb {
         since: u64,
     },
@@ -313,6 +387,98 @@ enum Phase {
         vz: f32,
     },
     Stopped(Stop),
+}
+
+/// What the bracket knows about the trim, per axis (roll, pitch).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Bracket {
+    /// Integrators a side unloaded at, too low (`lo`) or too high (`hi`):
+    /// the trim lies between.
+    lo: [Option<f32>; 2],
+    hi: [Option<f32>; 2],
+    /// The integrator each axis winds to next (`None`: left where it is).
+    goal: [Option<f32>; 2],
+    /// Each axis's lean cap (degrees), the side its last edge was on, and
+    /// how many edges in a row it has had on that side.
+    lean_deg: [f32; 2],
+    side: [f32; 2],
+    same: [u32; 2],
+    /// The highest thrust a side unloaded at, and the thrust it winds at.
+    t_u: f32,
+    t_b: f32,
+    /// The busiest motor's rise per unit of thrust, once a probe measured
+    /// it, and where the running probe began (thrust, busiest motor).
+    slope: Option<f32>,
+    probe_from: Option<(f32, f32)>,
+    /// A new edge counts once the tilt has settled since the last one.
+    armed: bool,
+    /// No edge counts before this time (the bounce after one).
+    quiet_until: u64,
+    /// Edges that turned an axis round, and commits that cut and bracketed
+    /// again.
+    reversals: u32,
+    commits: u32,
+}
+
+impl Default for Bracket {
+    fn default() -> Self {
+        Self {
+            lo: [None; 2],
+            hi: [None; 2],
+            goal: [None; 2],
+            lean_deg: [EDGE_LEAN_DEG; 2],
+            side: [0.0; 2],
+            same: [0; 2],
+            t_u: 0.0,
+            t_b: 0.0,
+            slope: None,
+            probe_from: None,
+            armed: true,
+            quiet_until: 0,
+            reversals: 0,
+            commits: 0,
+        }
+    }
+}
+
+impl Bracket {
+    /// The trim is known on `ax`: bounds on both sides, close enough.
+    fn converged(&self, ax: usize) -> bool {
+        matches!((self.lo[ax], self.hi[ax]), (Some(l), Some(h)) if h - l <= BRACKET_TOL)
+    }
+
+    /// Every axis that has unloaded is converged.
+    fn done(&self) -> bool {
+        let seen = |ax: usize| self.lo[ax].is_some() || self.hi[ax].is_some();
+        (0..2).any(seen) && (0..2).all(|ax| !seen(ax) || self.converged(ax))
+    }
+
+    /// The integrator `ax` winds to next: the bounds' midpoint, else a step
+    /// past the one bound. `None` past [`TRIM_MAX`].
+    fn next(&self, ax: usize) -> Option<f32> {
+        let halvings = self.same[ax].saturating_sub(2).min(8);
+        let step = (BRACKET_STEP / (1u32 << halvings) as f32).max(BRACKET_STEP_MIN);
+        let v = match (self.lo[ax], self.hi[ax]) {
+            (Some(l), Some(h)) => 0.5 * (l + h),
+            (Some(l), None) => l + step,
+            (None, Some(h)) => h - step,
+            (None, None) => return self.goal[ax],
+        };
+        let beyond = self.lo[ax].is_some_and(|l| l >= TRIM_MAX)
+            || self.hi[ax].is_some_and(|h| h <= -TRIM_MAX);
+        (!beyond).then(|| v.clamp(-TRIM_MAX, TRIM_MAX))
+    }
+
+    /// Hover for the bracket's margins: the estimate, at least the highest
+    /// unloading thrust.
+    fn hover_ref(&self, hover: f32) -> f32 {
+        hover.max(self.t_u)
+    }
+
+    /// The thrust it winds at, below the highest unloading thrust.
+    fn rebase(&mut self, hover: f32) {
+        self.t_b = (self.t_u - BRACKET_MARGIN * self.hover_ref(hover)).max(HARD_FRAC * hover);
+    }
 }
 
 /// One supervised lift-off.
@@ -329,16 +495,11 @@ pub struct Liftoff {
     target: [f32; 2],
     loading: [bool; 2],
     lean: [f32; 2],
-    /// The side each axis leans to while a side unloads on the ramp (−1, 0,
-    /// 1), how often a lean began or turned round, and since when the lean
-    /// runs without rate-loop data.
-    edge: [f32; 2],
+    /// The trim search, and how many edges it has seen.
+    bracket: Bracket,
     edges: u32,
+    /// Since when the bracket has run without rate-loop data.
     blind_since: Option<u64>,
-    /// The thrust already stepped back for this excursion, and until when
-    /// a lean may not turn round.
-    backed: bool,
-    flip_quiet_until: u64,
     rest: Option<(f32, f32)>,
     yaw: f32,
     thrust: f32,
@@ -377,11 +538,9 @@ impl Liftoff {
             loading: target.map(|v| v.abs() > 0.01),
             // The integrators start from zero after arming.
             lean: target.map(f32::signum),
-            edge: [0.0; 2],
+            bracket: Bracket::default(),
             edges: 0,
             blind_since: None,
-            backed: false,
-            flip_quiet_until: 0,
             rest: None,
             yaw: 0.0,
             thrust: SPOOL_THRUST,
@@ -432,7 +591,13 @@ impl Liftoff {
     pub fn on_ground(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Spool { .. } | Phase::Level { .. } | Phase::Ramp
+            Phase::Spool { .. }
+                | Phase::Level { .. }
+                | Phase::Find
+                | Phase::Wind { .. }
+                | Phase::Settle { .. }
+                | Phase::Probe
+                | Phase::Commit { .. }
         )
     }
 
@@ -567,7 +732,7 @@ impl Liftoff {
                     self.phase = if self.loading.iter().any(|&l| l) {
                         Phase::Level { since: now }
                     } else {
-                        Phase::Ramp
+                        Phase::Find
                     };
                 } else if now.saturating_sub(since) > SPOOL_TIMEOUT_MS {
                     self.phase = Phase::Stopped(Stop::Spool);
@@ -589,7 +754,7 @@ impl Liftoff {
                 }
                 if !self.loading.iter().any(|&l| l) || now.saturating_sub(since) > LOAD_TIMEOUT_MS {
                     self.loading = [false; 2];
-                    self.phase = Phase::Ramp;
+                    self.phase = Phase::Find;
                 }
                 let lean = LOAD_LEAN_DEG.to_radians();
                 let roll = r0
@@ -606,32 +771,121 @@ impl Liftoff {
                     };
                 Some(att_cmd(roll, pitch, self.thrust))
             }
-            Phase::Ramp => {
+            Phase::Find => {
                 if lifted {
-                    self.lifted = true;
-                    self.edge = [0.0; 2];
-                    self.outcome = Some(self.outcome_now(inp, false));
-                    self.phase = Phase::Climb { since: now };
-                    return self.step_climb(inp, rise, dt);
+                    return self.lift_off(inp, rise, dt, now);
                 }
-                if let Some(stop) = self.edge_track(inp, tilt, now) {
+                if self.edge_seen(tilt, now) {
+                    if Self::rising(inp) {
+                        return self.rising_commit(inp, now);
+                    }
+                    return self.on_edge(inp, tilt, now);
+                }
+                let fast = K_FAST * hover;
+                let rate = if self.thrust < fast {
+                    fast / FAST_S
+                } else {
+                    EDGE_RATE * hover
+                };
+                self.thrust = (self.thrust + dt * rate).min(THRUST_MAX);
+                Some(att_cmd(r0, p0, self.thrust))
+            }
+            Phase::Wind { since } => {
+                if self.edge_seen(tilt, now) {
+                    return self.on_edge(inp, tilt, now);
+                }
+                if let Some(stop) = self.blind(inp, now) {
                     self.phase = Phase::Stopped(stop);
                     return None;
                 }
-                self.ramp_thrust(dt, now);
-                let lean = EDGE_LEAN_DEG.to_radians();
-                Some(att_cmd(
-                    r0 + self.edge[0] * lean,
-                    p0 + self.edge[1] * lean,
-                    self.thrust,
-                ))
+                self.toward_bracket_thrust(dt);
+                let mut lean = [0.0f32; 2];
+                let mut wound = true;
+                if let Some(i) = inp.i {
+                    for (ax, l) in lean.iter_mut().enumerate() {
+                        if let Some(g) = self.bracket.goal[ax] {
+                            let di = g - i[ax];
+                            if di.abs() > WIND_TOL {
+                                wound = false;
+                                let cap = self.bracket.lean_deg[ax].to_radians();
+                                *l = (di / WIND_K).clamp(-cap, cap);
+                            }
+                        }
+                    }
+                } else {
+                    wound = false;
+                }
+                if wound || now.saturating_sub(since) > WIND_TIMEOUT_MS {
+                    self.phase = Phase::Settle { since: now };
+                    lean = [0.0; 2];
+                }
+                Some(att_cmd(r0 + lean[0], p0 + lean[1], self.thrust))
+            }
+            Phase::Settle { since } => {
+                if self.edge_seen(tilt, now) {
+                    return self.on_edge(inp, tilt, now);
+                }
+                if let Some(stop) = self.blind(inp, now) {
+                    self.phase = Phase::Stopped(stop);
+                    return None;
+                }
+                self.toward_bracket_thrust(dt);
+                let settled =
+                    self.tilt_deg < SETTLED_FRAC * EDGE_DEG && now >= self.bracket.quiet_until;
+                if now.saturating_sub(since) >= SETTLE_MS && settled {
+                    if self.bracket.done() {
+                        return self.start_commit(inp, now);
+                    }
+                    self.bracket.probe_from = inp.motors.map(|m| (self.thrust, m.max));
+                    self.phase = Phase::Probe;
+                }
+                Some(att_cmd(r0, p0, self.thrust))
+            }
+            Phase::Probe => {
+                if lifted {
+                    // Light enough to leave the ground before a side
+                    // unloaded: the trim is close, and the climb-out takes
+                    // the commit's thrust.
+                    let to = self.commit_thrust(inp);
+                    if self.no_climb_margin(inp, to) {
+                        return None;
+                    }
+                    self.thrust = self.thrust.max(to);
+                    return self.lift_off(inp, rise, dt, now);
+                }
+                if self.edge_seen(tilt, now) {
+                    if Self::rising(inp) {
+                        return self.rising_commit(inp, now);
+                    }
+                    return self.on_edge(inp, tilt, now);
+                }
+                if let Some(stop) = self.blind(inp, now) {
+                    self.phase = Phase::Stopped(stop);
+                    return None;
+                }
+                self.thrust = (self.thrust + dt * EDGE_RATE * hover).min(THRUST_MAX);
+                Some(att_cmd(r0, p0, self.thrust))
+            }
+            Phase::Commit { since, from, to } => {
+                if lifted {
+                    return self.lift_off(inp, rise, dt, now);
+                }
+                let k = (now.saturating_sub(since) as f32 / COMMIT_RAMP_MS as f32).min(1.0);
+                self.thrust = from + (to - from) * k;
+                if self.tilt_deg > COMMIT_TILT_DEG || now.saturating_sub(since) > COMMIT_WAIT_MS {
+                    return self.commit_failed(inp, tilt, now);
+                }
+                Some(att_cmd(r0, p0, self.thrust))
             }
             Phase::Climb { .. } | Phase::Hold { .. } => self.step_climb(inp, rise, dt),
             Phase::Stopped(_) => None,
         }
     }
 
-    /// The tilt, saturation and timeout guards on the ground.
+    /// The tilt, saturation and timeout guards on the ground. The commit
+    /// checked its motor margin before it began and runs its own limit
+    /// ([`COMMIT_WAIT_MS`]): a motor near the top while it leaves the
+    /// ground does not stop it.
     fn ground_stop(&self, lifted: bool, now: u64) -> Option<Stop> {
         if lifted {
             return None;
@@ -639,81 +893,246 @@ impl Liftoff {
         if self.rest.is_some() && self.tilt_deg > ABORT_DEG {
             return Some(Stop::Tipping);
         }
-        if self
-            .saturated_since
-            .is_some_and(|s| now.saturating_sub(s) >= SATURATION_MS)
+        let committing = matches!(self.phase, Phase::Commit { .. });
+        if !committing
+            && self
+                .saturated_since
+                .is_some_and(|s| now.saturating_sub(s) >= SATURATION_MS)
         {
             return Some(Stop::Saturated);
         }
         (now.saturating_sub(self.began_ms) > GROUND_TIMEOUT_MS).then_some(Stop::Timeout)
     }
 
-    /// A side unloading on the ramp: lean toward it so the integrator winds
-    /// up against skid contact, turning round when the other side unloads
-    /// (outside the bounce after a cut, [`FLIP_QUIET_MS`]). Near lift-off
-    /// thrust the lean only acts while a side unloads.
-    fn edge_track(&mut self, inp: &Inputs, tilt: [f32; 2], now: u64) -> Option<Stop> {
-        let quiet = now < self.flip_quiet_until || self.thrust < K_FAST * self.hover;
-        for (ax, &t) in tilt.iter().enumerate() {
-            if t.abs() > EDGE_DEG {
-                let want = -t.signum();
-                if quiet && self.edge[ax] == -want {
-                    continue;
-                }
-                if self.edge[ax] != want {
-                    self.edges += 1;
-                }
-                self.edge[ax] = want;
-            } else if self.thrust > LEAN_OFF * self.hover {
-                self.edge[ax] = 0.0;
-            }
+    /// The level attitude target at `thrust`.
+    fn level(&self, thrust: f32) -> Cmd {
+        let (roll, pitch) = self.rest.unwrap_or((0.0, 0.0));
+        Cmd::Attitude {
+            roll,
+            pitch,
+            yaw: self.yaw,
+            thrust,
         }
-        let leaning = self.edge.iter().any(|&e| e != 0.0);
-        match inp.i {
-            Some(i) => {
-                self.blind_since = None;
-                // Winding on past what the rate loop can hold.
-                if (0..2).any(|ax| self.edge[ax] != 0.0 && i[ax] * self.edge[ax] > TRIM_MAX) {
-                    return Some(Stop::NoTrim);
+    }
+
+    /// Off the skids: the outcome is taken and the climb begins.
+    fn lift_off(&mut self, inp: &Inputs, rise: f32, dt: f32, now: u64) -> Option<Cmd> {
+        self.lifted = true;
+        self.outcome = Some(self.outcome_now(inp, false));
+        self.phase = Phase::Climb { since: now };
+        self.step_climb(inp, rise, dt)
+    }
+
+    /// A side has unloaded: a new edge once the tilt settled since the last
+    /// and the bounce after it has passed.
+    fn edge_seen(&mut self, tilt: [f32; 2], now: u64) -> bool {
+        if now < self.bracket.quiet_until {
+            return false;
+        }
+        if !self.bracket.armed {
+            self.bracket.armed = self.tilt_deg < SETTLED_FRAC * EDGE_DEG;
+            return false;
+        }
+        tilt.iter().any(|t| t.abs() > EDGE_DEG)
+    }
+
+    /// The FC's climb rate says the airframe is rising.
+    fn rising(inp: &Inputs) -> bool {
+        inp.local.is_some_and(|l| l.vd < -RISING_VZ_MPS)
+    }
+
+    /// A side unloads as the airframe starts to rise: the trim is close and
+    /// the lift-off has begun, so it commits rather than dropping back.
+    fn rising_commit(&mut self, inp: &Inputs, now: u64) -> Option<Cmd> {
+        self.bracket.t_u = self.bracket.t_u.max(self.thrust);
+        self.start_commit(inp, now)
+    }
+
+    /// Without rate-loop data for [`NO_RATE_MS`] the bracket stops.
+    fn blind(&mut self, inp: &Inputs, now: u64) -> Option<Stop> {
+        if inp.i.is_some() {
+            self.blind_since = None;
+            return None;
+        }
+        let since = *self.blind_since.get_or_insert(now);
+        (now.saturating_sub(since) >= NO_RATE_MS).then_some(Stop::NoRateData)
+    }
+
+    /// The thrust back to the bracket thrust (cut past [`HARD_DEG`]).
+    fn toward_bracket_thrust(&mut self, dt: f32) {
+        let hover = self.hover;
+        let t_b = self.bracket.t_b;
+        if self.tilt_deg > HARD_DEG {
+            self.thrust = self.thrust.min(HARD_FRAC * hover);
+        } else if self.thrust > t_b {
+            self.thrust = t_b;
+        } else {
+            self.thrust = (self.thrust + dt * K_FAST * hover / FAST_S).min(t_b);
+        }
+    }
+
+    /// A side unloaded at the integrators `i`: the trim lies below an axis
+    /// tilted up (positive) and above one tilted down. Sets each bounded
+    /// axis's next integrator; `NoTrim` once a bound is past [`TRIM_MAX`].
+    fn bound(&mut self, i: [f32; 2], tilt: [f32; 2]) -> Option<Stop> {
+        let b = &mut self.bracket;
+        for ax in 0..2 {
+            let t = tilt[ax];
+            if t.abs() <= EDGE_DEG {
+                continue;
+            }
+            let (s, iv) = (t.signum(), i[ax]);
+            if s > 0.0 {
+                b.hi[ax] = Some(b.hi[ax].map_or(iv, |h| h.min(iv)));
+                if b.lo[ax].is_some_and(|l| l >= iv) {
+                    b.lo[ax] = None;
+                }
+            } else {
+                b.lo[ax] = Some(b.lo[ax].map_or(iv, |l| l.max(iv)));
+                if b.hi[ax].is_some_and(|h| h <= iv) {
+                    b.hi[ax] = None;
                 }
             }
-            None if leaning => {
-                let since = *self.blind_since.get_or_insert(now);
-                if now.saturating_sub(since) >= NO_RATE_MS {
-                    return Some(Stop::NoRateData);
+            if b.side[ax] != 0.0 && b.side[ax] != s {
+                b.lean_deg[ax] = (0.5 * b.lean_deg[ax]).max(LEAN_MIN_DEG);
+                b.reversals += 1;
+                b.same[ax] = 0;
+            }
+            b.side[ax] = s;
+            b.same[ax] += 1;
+        }
+        if b.reversals > MAX_REVERSALS {
+            return Some(Stop::NoTrim);
+        }
+        for ax in 0..2 {
+            if b.lo[ax].is_some() || b.hi[ax].is_some() {
+                match b.next(ax) {
+                    Some(g) => b.goal[ax] = Some(g),
+                    None => return Some(Stop::NoTrim),
                 }
             }
-            None => self.blind_since = None,
         }
         None
     }
 
-    /// The ramp's thrust: rising only while the airframe sits level, held
-    /// while a side unloads, stepped back past [`BACK_DEG`], cut past
-    /// [`HARD_DEG`]. A tilt past [`BACK_DEG`] keeps the [`FLIP_QUIET_MS`]
-    /// window open until that long after it settles.
-    fn ramp_thrust(&mut self, dt: f32, now: u64) {
+    /// An edge: the thrust drops back to the bracket thrust, below the
+    /// highest unloading thrust, and the integrators wind to their next
+    /// values.
+    fn on_edge(&mut self, inp: &Inputs, tilt: [f32; 2], now: u64) -> Option<Cmd> {
         let hover = self.hover;
-        let fast = K_FAST * hover;
-        if self.tilt_deg > BACK_DEG {
-            self.flip_quiet_until = now + FLIP_QUIET_MS;
+        self.bracket.armed = false;
+        self.bracket.quiet_until = now + EDGE_QUIET_MS;
+        self.edges += 1;
+        if self.edges > MAX_EDGES {
+            self.phase = Phase::Stopped(Stop::NoTrim);
+            return None;
         }
-        if self.tilt_deg > HARD_DEG {
-            self.thrust = self.thrust.min(HARD_FRAC * hover);
-        } else if self.tilt_deg > BACK_DEG {
-            if !self.backed {
-                self.thrust = (self.thrust - BACK_STEP * hover).max(HARD_FRAC * hover);
-                self.backed = true;
+        let b = &mut self.bracket;
+        if let (Some((t0, m0)), Some(m)) = (b.probe_from.take(), inp.motors) {
+            if self.thrust - t0 > 0.02 {
+                b.slope = Some(((m.max - m0) / (self.thrust - t0)).max(0.2));
             }
-        } else if self.tilt_deg <= EDGE_DEG {
-            self.backed = false;
-            let rate = if self.thrust < fast {
-                fast / FAST_S
-            } else {
-                EDGE_RATE * hover
-            };
-            self.thrust = (self.thrust + dt * rate).min(THRUST_MAX);
         }
+        b.t_u = b.t_u.max(self.thrust);
+        b.rebase(hover);
+        // Without rate-loop data nothing says where the integrator is: wind
+        // nothing and stop if it stays missing.
+        if let Some(i) = inp.i {
+            if let Some(stop) = self.bound(i, tilt) {
+                self.phase = Phase::Stopped(stop);
+                return None;
+            }
+        }
+        self.thrust = if self.tilt_deg > HARD_DEG {
+            HARD_FRAC * hover
+        } else {
+            self.bracket.t_b
+        };
+        self.phase = Phase::Wind { since: now };
+        Some(self.level(self.thrust))
+    }
+
+    /// The commit's thrust: [`COMMIT_STEP`] of hover above the highest
+    /// unloading thrust, less where the busiest motor would pass
+    /// [`COMMIT_MOTOR`].
+    fn commit_thrust(&self, inp: &Inputs) -> f32 {
+        let b = &self.bracket;
+        let slope = b.slope.unwrap_or(MOTOR_SLOPE);
+        let step_to = b.t_u + COMMIT_STEP * b.hover_ref(self.hover);
+        let headroom = inp
+            .motors
+            .map(|m| self.thrust + (COMMIT_MOTOR - m.max) / slope);
+        headroom.map_or(step_to, |h| h.min(step_to)).min(THRUST_MAX)
+    }
+
+    /// Less than [`COMMIT_MIN`] of hover between the highest unloading
+    /// thrust and the commit's thrust `to`: the launch stops, saturated (no
+    /// climb margin), with the busiest motor at the least thrust that would
+    /// have lifted.
+    fn no_climb_margin(&mut self, inp: &Inputs, to: f32) -> bool {
+        let least = self.bracket.t_u + COMMIT_MIN * self.bracket.hover_ref(self.hover);
+        if to >= least {
+            return false;
+        }
+        if let Some(m) = inp.motors {
+            let slope = self.bracket.slope.unwrap_or(MOTOR_SLOPE);
+            self.max_motor = self.max_motor.max(m.max + slope * (least - self.thrust));
+        }
+        self.phase = Phase::Stopped(Stop::Saturated);
+        self.outcome = Some(self.outcome_now(inp, true));
+        true
+    }
+
+    /// The commit: a thrust step off the skids, as far above the highest
+    /// unloading thrust as the motors allow.
+    fn start_commit(&mut self, inp: &Inputs, now: u64) -> Option<Cmd> {
+        let to = self.commit_thrust(inp);
+        if self.no_climb_margin(inp, to) {
+            return None;
+        }
+        self.phase = Phase::Commit {
+            since: now,
+            from: self.thrust,
+            to,
+        };
+        Some(self.level(self.thrust))
+    }
+
+    /// A commit that tipped or did not lift: the thrust is cut and the
+    /// bracket runs again (a tilt bounds the trim; no lift asks for more
+    /// thrust), once. A motor held at the top through it is no climb margin.
+    fn commit_failed(&mut self, inp: &Inputs, tilt: [f32; 2], now: u64) -> Option<Cmd> {
+        let hover = self.hover;
+        self.thrust = HARD_FRAC * hover;
+        if self
+            .saturated_since
+            .is_some_and(|s| now.saturating_sub(s) >= SATURATION_MS)
+        {
+            self.phase = Phase::Stopped(Stop::Saturated);
+            self.outcome = Some(self.outcome_now(inp, true));
+            return None;
+        }
+        if self.bracket.commits >= COMMIT_RETRIES {
+            self.phase = Phase::Stopped(Stop::NoTrim);
+            return None;
+        }
+        self.bracket.commits += 1;
+        self.bracket.armed = false;
+        self.bracket.quiet_until = now + EDGE_QUIET_MS;
+        let tipped = tilt.iter().any(|t| t.abs() > EDGE_DEG);
+        match inp.i {
+            Some(i) if tipped => {
+                if let Some(stop) = self.bound(i, tilt) {
+                    self.phase = Phase::Stopped(stop);
+                    return None;
+                }
+            }
+            _ => self.bracket.t_u += BRACKET_MARGIN * self.bracket.hover_ref(hover),
+        }
+        let b = &mut self.bracket;
+        b.rebase(hover);
+        self.phase = Phase::Wind { since: now };
+        Some(self.level(self.thrust))
     }
 
     /// Off the skids: level, then the position target.
@@ -803,7 +1222,6 @@ impl Liftoff {
 
     /// The surfaces' view: the status line and the longer detail.
     pub fn view(&self) -> ados_protocol::pilot::Liftoff {
-        let balancing = self.edge.iter().any(|&e| e != 0.0);
         let (phase, text, detail) = match self.phase {
             Phase::Spool { .. } => (
                 "spool",
@@ -815,8 +1233,16 @@ impl Liftoff {
                 "Setting trim",
                 "Loading this airframe's learned balance".to_string(),
             ),
-            Phase::Ramp if balancing => ("probe", "Checking balance", "Adjusting trim".to_string()),
-            Phase::Ramp => ("lift", "Lifting off", String::new()),
+            Phase::Find => ("find", "Lifting off", String::new()),
+            Phase::Wind { .. } | Phase::Probe => {
+                ("bracket", "Checking balance", "Adjusting trim".to_string())
+            }
+            Phase::Settle { .. } => (
+                "settle",
+                "Checking balance",
+                "Holding the balance it found".to_string(),
+            ),
+            Phase::Commit { .. } => ("commit", "Lifting off", String::new()),
             Phase::Climb { .. } => ("climb", "Airborne", self.climbing_to()),
             Phase::Hold { .. } => ("done", "Airborne", self.climbing_to()),
             Phase::Stopped(s) => ("stopped", STOPPED_TEXT, s.text().to_string()),

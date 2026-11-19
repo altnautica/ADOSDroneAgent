@@ -183,6 +183,73 @@ fn first_flight_finds_the_trim_on_the_skids_without_pivoting() {
 }
 
 #[test]
+fn nose35_right40_tail40_lift_level_on_their_trim_to_within_0_02() {
+    // First flight, and a learned trim 0.02 either side of the airframe's.
+    for trim in [[0.0, 0.26], [-0.29, 0.0], [0.0, -0.28]] {
+        for err in [None, Some(0.02), Some(-0.02)] {
+            let lt = err.map(|e| {
+                let off = trim.map(|t| if t == 0.0 { t } else { t + e });
+                learned(off, 0.6).expect("a trim")
+            });
+            let mut r = Run::new(Airframe::new(0.6, trim), lt);
+            r.run(40_000);
+            let case = format!("{trim:?} learned off by {err:?}");
+            assert!(r.lo.handed_over(), "{case}: {:?}", r.lo.view());
+            assert!(
+                r.ground_peak_deg <= HARD_DEG,
+                "{case}: pivoted {} on the skids",
+                r.ground_peak_deg
+            );
+            assert!(r.peak_deg < 5.0, "{case}: peak {}", r.peak_deg);
+            let i =
+                r.lo.take_outcome()
+                    .and_then(|o| o.i)
+                    .expect("the integrators");
+            for ax in 0..2 {
+                assert!((i[ax] - trim[ax]).abs() <= 0.02, "{case}: {i:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_bracket_closes_on_the_trim_and_leaves_the_ground_at_the_commit_thrust() {
+    // nose35 (first flight) under-estimating its hover: the bracket's bounds
+    // straddle the trim, and it leaves the ground at the commit's thrust,
+    // above the highest unloading thrust.
+    for est in [0.6, 0.5] {
+        let mut r = Run::new(Airframe::new(0.6, [0.0, 0.26]), None);
+        r.lo = Liftoff::new(None, est, 3.0, 0);
+        while r.now < 40_000 && !r.lo.lifted_ever() && r.lo.stopped().is_none() {
+            r.run(20);
+        }
+        assert!(r.lo.lifted_ever(), "{est}: {:?}", r.lo.view());
+        let b = r.lo.bracket;
+        let (l, h) = (
+            b.lo[1].expect("a low bound"),
+            b.hi[1].expect("a high bound"),
+        );
+        assert!(l <= 0.26 && 0.26 <= h, "{est}: {l} {h}");
+        assert!(
+            r.lo.thrust >= b.t_u + COMMIT_MIN * est,
+            "{est}: {} {}",
+            r.lo.thrust,
+            b.t_u
+        );
+        assert!(
+            b.lo[0].is_none() && b.hi[0].is_none(),
+            "roll never unloaded"
+        );
+        assert!(b.reversals <= MAX_REVERSALS, "{b:?}");
+        let i =
+            r.lo.take_outcome()
+                .and_then(|o| o.i)
+                .expect("the integrators");
+        assert!((i[1] - 0.26).abs() <= 0.02, "{est}: {i:?}");
+    }
+}
+
+#[test]
 fn a_height_estimate_creeping_up_on_the_skids_is_not_a_lift_off() {
     // On the bench (right40, tail40, nose35) the FC's height crept up while
     // the airframe rocked on its skids finding its trim, so the lift-off
@@ -228,7 +295,7 @@ fn a_motor_at_the_top_of_its_range_stops_on_the_ground() {
     assert_eq!(r.lo.stopped(), Some(Stop::Saturated), "{:?}", r.lo.view());
     assert!(!r.lo.lifted_ever());
     let o = r.lo.take_outcome().expect("saturation outcome");
-    assert!(o.saturated && o.max_motor > SATURATION);
+    assert!(o.saturated && o.max_motor > CLIMB_SATURATION, "{o:?}");
     assert_eq!(r.lo.view().phase, "stopped");
 }
 
@@ -292,12 +359,12 @@ fn tipped(now_ms: u64, deg: f32) -> Inputs {
     }
 }
 
-/// A lift-off past its spool, ramping on the ground at `now_ms`.
+/// A lift-off past its spool, finding the unloading thrust at `now_ms`.
 fn ramping(now_ms: u64) -> Liftoff {
     let mut lo = Liftoff::new(None, 0.6, 1.5, 0);
     lo.start = Some(LocalPos::default());
     lo.rest = Some((0.0, 0.0));
-    lo.phase = Phase::Ramp;
+    lo.phase = Phase::Find;
     lo.thrust = 0.5;
     lo.last_ms = now_ms;
     lo
@@ -337,80 +404,66 @@ fn a_motor_short_of_the_top_on_the_skids_is_not_a_stop() {
 }
 
 #[test]
-fn an_unloading_side_holds_the_thrust_and_leans_toward_it() {
+fn an_unloading_side_drops_to_the_bracket_thrust_and_winds_toward_the_trim() {
     let mut lo = ramping(1000);
-    let Some(Cmd::Attitude { pitch, thrust, .. }) = lo.step(&tipped(1020, 0.7)) else {
+    // Nose down at integrator 0: the trim is nose-up of 0.
+    let Some(Cmd::Attitude { thrust, .. }) = lo.step(&tipped(1020, 0.7)) else {
         panic!("an attitude target: {:?}", lo.phase);
     };
-    // Nose down: the target leans nose-up, the thrust holds.
-    assert!((pitch - EDGE_LEAN_DEG.to_radians()).abs() < 1e-4, "{pitch}");
-    assert!((thrust - 0.5).abs() < 1e-4, "{thrust}");
+    let t_b = 0.5 - BRACKET_MARGIN * 0.6;
+    assert!((thrust - t_b).abs() < 1e-4, "{thrust}");
+    assert_eq!(lo.bracket.lo[1], Some(0.0));
+    assert_eq!(lo.bracket.goal[1], Some(BRACKET_STEP));
+    assert_eq!(lo.view().phase, "bracket");
     assert_eq!(lo.view().text, "Checking balance");
-    // Level again: the lean stays until the other side unloads, the thrust
-    // rises again.
-    let Some(Cmd::Attitude { pitch, thrust, .. }) = lo.step(&tipped(1040, 0.1)) else {
+    // Back on its skids: the target leans nose-up, winding the integrator,
+    // at the bracket thrust.
+    let Some(Cmd::Attitude { pitch, thrust, .. }) = lo.step(&tipped(1040, 0.0)) else {
         panic!();
     };
-    assert!(pitch > 0.0 && thrust > 0.5, "{pitch} {thrust}");
-    lo.step(&tipped(1060, -0.7));
-    let Some(Cmd::Attitude { pitch, .. }) = lo.step(&tipped(1080, -0.7)) else {
-        panic!();
-    };
-    assert!(pitch < 0.0, "turned round: {pitch}");
-    assert_eq!(lo.edges, 2);
+    assert!(pitch > 0.0, "{pitch}");
+    assert!((thrust - t_b).abs() < 1e-4, "{thrust}");
 }
 
 #[test]
-fn a_tilt_past_the_back_off_steps_the_thrust_back_once_and_a_bigger_one_cuts_it() {
+fn the_same_tilt_and_the_bounce_after_it_are_one_edge() {
     let mut lo = ramping(1000);
-    lo.step(&tipped(1020, BACK_DEG + 0.2));
-    assert!(
-        (lo.thrust - (0.5 - BACK_STEP * 0.6)).abs() < 1e-4,
-        "{}",
-        lo.thrust
-    );
-    lo.step(&tipped(1040, BACK_DEG + 0.4));
-    assert!(
-        (lo.thrust - (0.5 - BACK_STEP * 0.6)).abs() < 1e-4,
-        "once per excursion: {}",
-        lo.thrust
-    );
-    lo.step(&tipped(1060, HARD_DEG + 0.2));
-    assert!((lo.thrust - HARD_FRAC * 0.6).abs() < 1e-4, "{}", lo.thrust);
-    assert_eq!(lo.stopped(), None);
-}
-
-#[test]
-fn the_bounce_after_a_cut_does_not_turn_the_lean_round() {
-    // A nose-heavy airframe pivots, the cut drops it back onto its skids and
-    // it overshoots nose-up. Turning the lean round there unwound the trim
-    // the integrator had wound, and the ramp cycled on the skids.
-    let pitch_of = |c: Option<Cmd>| match c {
-        Some(Cmd::Attitude { pitch, .. }) => pitch,
-        other => panic!("an attitude target: {other:?}"),
-    };
-    let mut lo = ramping(1000);
-    assert!(pitch_of(lo.step(&tipped(1020, 0.7))) > 0.0);
-    lo.step(&tipped(1040, HARD_DEG + 0.5));
-    assert!((lo.thrust - HARD_FRAC * 0.6).abs() < 1e-4, "{}", lo.thrust);
-    // The bounce: nose-up past the edge, just after the cut.
-    assert!(
-        pitch_of(lo.step(&tipped(1060, -0.8))) > 0.0,
-        "the lean held through the bounce"
-    );
+    lo.step(&tipped(1020, 0.7));
+    lo.step(&tipped(1040, 0.8));
+    lo.step(&tipped(1060, 0.7));
     assert_eq!(lo.edges, 1);
-    // Settled, the ramp climbs back; once past the quiet window and at
-    // ramp thrust, the other side unloading turns the lean round.
-    let mut now = 1060;
-    while now < 1060 + FLIP_QUIET_MS + 200 {
-        now += 20;
-        lo.step(&tipped(now, 0.0));
-    }
-    assert!(lo.thrust > K_FAST * 0.6, "{}", lo.thrust);
-    now += 20;
-    assert!(pitch_of(lo.step(&tipped(now, -0.7))) < 0.0, "turned round");
+    // Falling back onto its skids it overshoots nose-up: not an edge.
+    lo.step(&tipped(1080, 0.1));
+    lo.step(&tipped(1100, -0.7));
+    assert_eq!(lo.edges, 1);
+    assert_eq!(lo.bracket.hi[1], None, "the bounce bounds nothing");
+    // Settled, past the bounce: the next unloading is an edge.
+    let t = 1020 + EDGE_QUIET_MS;
+    lo.step(&tipped(t, 0.1));
+    lo.step(&tipped(t + 20, 0.7));
     assert_eq!(lo.edges, 2);
+}
+
+#[test]
+fn a_tilt_past_the_cut_drops_the_thrust_to_the_floor() {
+    let mut lo = ramping(1000);
+    lo.step(&tipped(1020, HARD_DEG + 0.2));
+    assert!((lo.thrust - HARD_FRAC * 0.6).abs() < 1e-4, "{}", lo.thrust);
     assert_eq!(lo.stopped(), None);
+}
+
+#[test]
+fn no_motor_headroom_above_the_unloading_thrust_stops_before_the_commit() {
+    let mut lo = ramping(1000);
+    lo.bracket.t_u = 0.6;
+    lo.bracket.lo[1] = Some(0.40);
+    lo.bracket.hi[1] = Some(0.42);
+    lo.thrust = 0.55;
+    let inp = tick(1020, LocalPos::default(), 0.88);
+    assert!(lo.start_commit(&inp, 1020).is_none());
+    assert_eq!(lo.stopped(), Some(Stop::Saturated));
+    let o = lo.take_outcome().expect("the saturation outcome");
+    assert!(o.saturated && o.max_motor > CLIMB_SATURATION, "{o:?}");
 }
 
 #[test]

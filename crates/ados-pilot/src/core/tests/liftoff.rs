@@ -86,7 +86,7 @@ fn a_launch_lifts_off_under_the_pilot_not_the_fc_take_off() {
     assert_eq!(params_set(&w, "GCS_PID_MASK"), vec![3.0]);
     run_to_phase(&mut w, "spool", 3000);
     assert!(w.armed);
-    run_to_phase(&mut w, "lift", 6000);
+    run_to_phase(&mut w, "find", 6000);
     w.run(15_000);
     assert_eq!(w.commands(MavCmd::MAV_CMD_NAV_TAKEOFF, None), 0);
     assert!(attitude_targets(&w) > 50);
@@ -98,6 +98,39 @@ fn a_launch_lifts_off_under_the_pilot_not_the_fc_take_off() {
     // Handed on to the pilot's hold; the launch finished without an error.
     assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Pilot);
     assert!(w.p.banner.is_none(), "{:?}", w.p.banner);
+}
+
+/// The hold after a launch keeps the height the launch asked for, not the
+/// height its take-off step ended at (90 % of it).
+#[test]
+fn a_launch_holds_at_its_commanded_height() {
+    // The steady take-off: the step ends near 2.7 m of a 3 m launch.
+    let mut w = world();
+    launch(&mut w);
+    run_to_phase(&mut w, "done", 30_000);
+    w.run(15_000);
+    let z = w.last_setpoint().expect("the hold's setpoint").z;
+    assert!((z + 3.0).abs() < 0.05, "holds at {z}, not -3.0");
+
+    // The FC's own take-off, handed over at 2.75 m of 3 m.
+    let mut w = World::new();
+    w.p.settings.pilot.link_loss_s = 300;
+    launch(&mut w);
+    let mut sent = 0;
+    for _ in 0..500 {
+        w.run(20);
+        sent = w.commands(MavCmd::MAV_CMD_NAV_TAKEOFF, None);
+        if sent > 0 {
+            break;
+        }
+    }
+    assert!(sent > 0, "the FC's take-off");
+    w.pos[2] = -2.75;
+    w.agl = Some(2.75);
+    w.run(1000);
+    assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Pilot);
+    let z = w.last_setpoint().expect("the hold's setpoint").z;
+    assert!((z + 3.0).abs() < 0.05, "holds at {z}, not -3.0");
 }
 
 #[test]
@@ -145,8 +178,8 @@ fn the_phases_read_in_operator_words() {
     let l = w.p.state(w.now).sequence.unwrap().liftoff.unwrap();
     assert_eq!(l.text, "Spinning up");
     assert_eq!(l.trim, "probe");
-    run_to_phase(&mut w, "lift", 6000);
-    run_to_phase(&mut w, "probe", 10_000);
+    run_to_phase(&mut w, "find", 6000);
+    run_to_phase(&mut w, "bracket", 10_000);
     assert_eq!(
         w.p.state(w.now).sequence.unwrap().liftoff.unwrap().text,
         "Checking balance"
@@ -159,8 +192,8 @@ fn the_phases_read_in_operator_words() {
 fn pause_on_the_ground_stops_and_disarms_in_every_phase() {
     for (phase, airframe) in [
         ("spool", Airframe::balanced()),
-        ("lift", Airframe::balanced()),
-        ("probe", Airframe::new(0.5, [0.0, 0.2])),
+        ("find", Airframe::balanced()),
+        ("bracket", Airframe::new(0.5, [0.0, 0.2])),
     ] {
         for action in ["pause", "land", "rth"] {
             let mut w = world().with_airframe(airframe.clone());
@@ -248,7 +281,7 @@ fn a_tip_with_no_rate_data_stops_on_the_ground() {
 fn without_confirmed_ground_contact_it_lands_instead_of_cutting_the_motors() {
     let mut w = world().with_airframe(Airframe::new(0.5, [0.0, 0.2]));
     launch(&mut w);
-    run_to_phase(&mut w, "lift", 8000);
+    run_to_phase(&mut w, "find", 8000);
     // The rangefinder reads the vehicle off the ground (a step, a lip).
     w.agl = Some(0.6);
     w.action("pause");

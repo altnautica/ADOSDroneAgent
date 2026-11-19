@@ -126,7 +126,7 @@ export interface ReadinessItem {
   msg: string;
 }
 
-export const LIFTOFF_PHASES = ["spool", "level", "probe", "lift", "climb", "done", "stopped"] as const;
+export const LIFTOFF_PHASES = ["spool", "level", "find", "bracket", "settle", "commit", "climb", "done", "stopped"] as const;
 export type LiftoffPhase = (typeof LIFTOFF_PHASES)[number];
 
 /** A steady take-off on an ArduPilot multirotor: its phase, its status

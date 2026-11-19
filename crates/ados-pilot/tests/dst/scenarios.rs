@@ -144,13 +144,12 @@ pub fn liftoff(seed: u64) -> Sim {
     );
     assert!(s.fc.armed && !s.fc.landed, "airborne");
     assert!(peak_deg < 5.0, "lifted off level: peak {peak_deg}°");
-    // The launch hands over at 90 % of its height above ground and the
-    // pilot's hold keeps the height it has then: a 3 m launch hovers near
-    // 2.6 m, not at 3 m.
+    // The launch hands over at 90 % of its height; the hold keeps the 3 m
+    // the launch asked for.
     let h = -s.fc.pos[2];
     assert!(
-        (2.5..=3.3).contains(&h) && s.fc.vel[2].abs() < 0.3,
-        "hovers at the hand-over height: {:?} {:?}",
+        (2.9..=3.1).contains(&h) && s.fc.vel[2].abs() < 0.2,
+        "hovers at the launch height: {:?} {:?}",
         s.fc.pos,
         s.fc.vel
     );
