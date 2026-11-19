@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use ados_protocol::framebus::mono_ns;
 use ados_protocol::framebus::{FrameDescriptor, ModelKind};
+use ados_protocol::paths::run_dir;
 use ados_vision_engine::backend::{select_backend, BackendPrefs};
 use ados_vision_engine::cameras::{camera_specs, needs_triggers, CameraSpec, SourceFactory};
 use ados_vision_engine::config::{DepthPlan, VisionConfig};
