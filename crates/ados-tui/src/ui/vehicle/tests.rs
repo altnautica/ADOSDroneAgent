@@ -838,7 +838,11 @@ fn an_energy_return_names_the_charge_the_way_home_needs() {
     let mut frame = pilot_frame();
     frame["low_battery_action"] = json!("rth");
     frame["battery_reserve"] = json!({"need_pct": 52, "basis": "energy", "return_s": 248});
-    land(&mut app, ResourceId::NavStatus, pilot_status(frame.clone(), 100));
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(frame.clone(), 100),
+    );
     let text = draw(&mut app, 160, 48);
     // The alerts column cuts the line after the need.
     assert!(

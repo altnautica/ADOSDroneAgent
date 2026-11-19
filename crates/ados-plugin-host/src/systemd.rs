@@ -346,7 +346,10 @@ pub(crate) fn runner_context(
             path_token("clock feed", sock)?,
         ));
         if let Some(dir) = sock.parent() {
-            bind_read_only.push(PathBuf::from(format!("-{}", path_token("clock feed dir", dir)?)));
+            bind_read_only.push(PathBuf::from(format!(
+                "-{}",
+                path_token("clock feed dir", dir)?
+            )));
         }
     }
     Ok(UnitSpec {
