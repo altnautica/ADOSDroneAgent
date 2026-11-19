@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "ados-clock"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "tempfile",
  "tracing",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "ados-crsf-codec"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "ados-display"
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "ados-display-driver"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "memmap2",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "ados-lora"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "ados-mavlink-tunnel"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "ados-net"
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "ados-offload"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "ados-positioning"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "ados-rtcm"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "ados-sdk"
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proptest",
  "serde",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "ados-swarm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
 ]
