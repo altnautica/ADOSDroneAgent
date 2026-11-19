@@ -98,7 +98,10 @@ async fn grant(
     };
     sim.send_to(&t.encode(), to).await.unwrap();
     let mut buf = [0u8; 64];
-    let n = tokio::time::timeout(wait, sim.recv(&mut buf)).await.ok()?.unwrap();
+    let n = tokio::time::timeout(wait, sim.recv(&mut buf))
+        .await
+        .ok()?
+        .unwrap();
     wire::Ack::decode(&buf[..n])
 }
 

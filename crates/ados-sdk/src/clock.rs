@@ -23,14 +23,13 @@ pub use ados_protocol::simclock::{
 static CLOCK: LazyLock<Clock> = LazyLock::new(Clock::from_env);
 
 /// The barrier registration, made on the first [`done`]: `None` off sim time.
-static PARTICIPANT: LazyLock<Option<Participant>> = LazyLock::new(|| {
-    match std::env::var_os(CLOCK_FEED_ENV) {
+static PARTICIPANT: LazyLock<Option<Participant>> =
+    LazyLock::new(|| match std::env::var_os(CLOCK_FEED_ENV) {
         Some(p) if !p.is_empty() => Some(Participant::connect(
             ados_protocol::simclock::participants_socket_beside(std::path::Path::new(&p)),
         )),
         _ => None,
-    }
-});
+    });
 
 /// The process's ADOS time, made on first use from `ADOS_CLOCK_FEED`. On a
 /// node following the simulator's clock the first call must run inside a

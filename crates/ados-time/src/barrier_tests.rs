@@ -46,7 +46,10 @@ fn a_slow_participant_holds_the_grant() {
     assert!(b.done(pilot, 20 * MS, t0).is_none(), "no tick waits yet");
     // Done before 20 ms is not done with the work due at 20 ms.
     assert!(b.tick(&tick(1, 20), sim(), t0).is_none());
-    assert!(b.done(pilot, 40 * MS, t0).is_none(), "the router still works");
+    assert!(
+        b.done(pilot, 40 * MS, t0).is_none(),
+        "the router still works"
+    );
     let later = t0 + Duration::from_millis(3);
     let (ack, _) = b.done(router, 1_000 * MS, later).unwrap();
     assert_eq!(ack.parts, 2);
@@ -95,7 +98,10 @@ fn only_running_lockstep_ticks_wait() {
     let now = Instant::now();
     b.join().unwrap();
     for flags in [0, FLAG_REALTIME, FLAG_LOCKSTEP | FLAG_PAUSED] {
-        let t = Tick { flags, ..tick(1, 20) };
+        let t = Tick {
+            flags,
+            ..tick(1, 20)
+        };
         assert!(b.tick(&t, sim(), now).is_none());
     }
     assert!(b.pending.is_none());

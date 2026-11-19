@@ -159,7 +159,12 @@ async fn next_due_follows_the_sim_interval() {
     feed.ingest(&tick(2, 45), Instant::now());
     iv.tick().await;
     assert_eq!(iv.next_due_ns(), Some(60_000_000));
-    assert_eq!(Clock::wall().interval(Duration::from_millis(5)).next_due_ns(), None);
+    assert_eq!(
+        Clock::wall()
+            .interval(Duration::from_millis(5))
+            .next_due_ns(),
+        None
+    );
 }
 
 /// One `DONE` frame's `done_ns` from `s`.
@@ -190,7 +195,11 @@ async fn a_participant_writes_its_latest_done_and_reregisters() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(read_done(&mut s).await, 40_000_000, "the latest report on connect");
+    assert_eq!(
+        read_done(&mut s).await,
+        40_000_000,
+        "the latest report on connect"
+    );
     part.done(60_000_000);
     assert_eq!(read_done(&mut s).await, 60_000_000);
     // The barrier restarts: the participant registers again with its latest report.

@@ -145,7 +145,11 @@ type Report = (u64, Option<u64>);
 
 /// Read one participant's `DONE` frames until it disconnects or sends
 /// anything else.
-async fn read_participant(id: u64, mut s: tokio::net::UnixStream, tx: mpsc::UnboundedSender<Report>) {
+async fn read_participant(
+    id: u64,
+    mut s: tokio::net::UnixStream,
+    tx: mpsc::UnboundedSender<Report>,
+) {
     let mut buf = [0u8; wire::DONE_LEN];
     while s.read_exact(&mut buf).await.is_ok() {
         match wire::Done::decode(&buf) {

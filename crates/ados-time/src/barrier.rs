@@ -83,7 +83,11 @@ impl Barrier {
         if let Some(last) = self.last.filter(|(a, to)| a.seq == tick.seq && *to == from) {
             return Some(last);
         }
-        if self.pending.as_ref().is_some_and(|p| p.tick.seq == tick.seq) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.tick.seq == tick.seq)
+        {
             return None;
         }
         self.pending = Some(Pending {
