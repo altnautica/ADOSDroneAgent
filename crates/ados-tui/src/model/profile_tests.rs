@@ -30,6 +30,28 @@ pub(crate) fn visor_routes(hub: bool, fc: bool) -> ProfileRoutes {
     }
 }
 
+#[test]
+fn the_uplink_row_says_who_holds_the_uplink() {
+    use super::profile_gs::uplink_line;
+    let tx = uplink_line(&json!({"uplink": {"state": "transmitting", "holder_name": null}}));
+    assert_eq!(tx.text(), "uplink transmitting");
+    assert_eq!(tx.0[1].1, Level::Value);
+    let standby = uplink_line(
+        &json!({"uplink": {"state": "standby", "holder_name": "Ops phone",
+        "holder_device_id": "a1b2c3d4e5f6"}}),
+    );
+    assert_eq!(standby.text(), "uplink standby (Ops phone)");
+    // A box standing by must never read as healthy-transmitting.
+    assert_eq!(standby.0[1].1, Level::Warn);
+    let unnamed = uplink_line(&json!({"uplink": {"state": "standby", "holder_name": null,
+        "holder_device_id": "a1b2c3d4e5f6"}}));
+    assert_eq!(unnamed.text(), "uplink standby (a1b2c3d4e5f6)");
+    assert_eq!(
+        uplink_line(&json!({"uplink": null})).text(),
+        "uplink not reporting"
+    );
+}
+
 pub(crate) fn lora_fixture() -> Value {
     json!({"present":true,"transport":"e22","module_band":"850-930",
      "region":{"code":"IN","name":"India","plan_id":"IN865","source":"network.regulatory.region","band_mhz":[865.0,867.0],"citation":"x"},

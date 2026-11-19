@@ -27,6 +27,7 @@ mod generation;
 mod ground_video;
 mod receive;
 mod services;
+mod uplink_tx;
 
 use ados_protocol::shutdown::Shutdown;
 use std::process::ExitCode;
@@ -260,12 +261,14 @@ async fn run_service() -> Result<()> {
     // role: gateway-preference and WFB pair-key install / unpair are operator
     // on-demand actions the native front forwards here (it has no in-process
     // Python pair manager to call). Spawned before the role dispatch so it is
-    // reachable regardless of which role loop runs below.
-    tokio::spawn(async {
+    // reachable regardless of which role loop runs below. Only the direct role
+    // transmits for a fleet, so only it may hand the uplink to a phone.
+    let direct_role = matches!(role, Role::Direct);
+    tokio::spawn(async move {
         // Honour ADOS_RUN_DIR so a redirected runtime layout (a non-root dev host
         // or a test) places the socket alongside the other run-dir sockets.
         let sock = crate::paths::run_path("groundlink-cmd.sock");
-        if let Err(e) = crate::cmdsock::serve(std::path::Path::new(&sock)).await {
+        if let Err(e) = crate::cmdsock::serve(std::path::Path::new(&sock), direct_role).await {
             tracing::warn!(error = %e, path = %sock, "groundlink command socket exited");
         }
     });

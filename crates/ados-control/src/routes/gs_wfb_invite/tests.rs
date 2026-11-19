@@ -21,6 +21,31 @@ fn material() -> InviteMaterial {
         mcs: 1,
         video_fec: (8, 12),
         aux_fec: (1, 2),
+        ground: GroundRole {
+            box_device_id: "gs-0a1b2c".into(),
+            box_name: "Field box".into(),
+            box_lan_address: Some("192.168.1.20".into()),
+            mcs_index: 1,
+            aux_tx_port: 5602,
+            tx_power_dbm: 20,
+            reg_domain: Some("US".into()),
+            dfs_allowed: false,
+            drones: vec![
+                GroundDrone {
+                    slot: 1,
+                    device_id: "drone-a1b2c3".into(),
+                    sysid: Some(1),
+                    relay_secret_hex: Some("11".repeat(32)),
+                },
+                GroundDrone {
+                    slot: 2,
+                    device_id: "drone-d4e5f6".into(),
+                    sysid: Some(2),
+                    relay_secret_hex: None,
+                },
+            ],
+            uplink_key: std::array::from_fn(|i| 0x80 + i as u8),
+        },
     }
 }
 
@@ -82,7 +107,7 @@ async fn create_approve_fetch_once_then_gone() {
     .unwrap();
     assert_eq!(plaintext, bundle_plaintext(&material()));
     let bundle: Value = serde_json::from_slice(&plaintext).unwrap();
-    assert_eq!(bundle["v"], 1);
+    assert_eq!(bundle["v"], 2);
     assert_eq!(bundle["fleet_id"], 7);
     assert_eq!(bundle["bandwidth_mhz"], 20);
     assert_eq!(
@@ -97,6 +122,26 @@ async fn create_approve_fetch_once_then_gone() {
     // The hop key is the derived HMAC key, never the raw shared key.
     assert_eq!(b64d(&bundle["hop_key_b64"]), material().hop_key.to_vec());
     assert_ne!(b64d(&bundle["hop_key_b64"]), vec![0x5Au8; 64]);
+    // The ground role: what a phone needs to stand in for this box.
+    let ground = &bundle["ground"];
+    assert_eq!(ground["box_device_id"], "gs-0a1b2c");
+    assert_eq!(ground["box_lan_address"], "192.168.1.20");
+    assert_eq!(ground["aux_tx_port"], 5602);
+    assert_eq!(ground["mcs_index"], 1);
+    assert_eq!(ground["tx_power_dbm"], 20);
+    assert_eq!(
+        ground["regulatory"],
+        json!({"domain": "US", "dfs_allowed": false})
+    );
+    assert_eq!(
+        ground["drones"][0],
+        json!({"slot": 1, "device_id": "drone-a1b2c3", "sysid": 1, "relay_secret_hex": "11".repeat(32)})
+    );
+    assert_eq!(ground["drones"][1]["relay_secret_hex"], Value::Null);
+    assert_eq!(
+        b64d(&ground["uplink_key_b64"]),
+        material().ground.uplink_key.to_vec()
+    );
 
     let resp = fetch_with(true, &mut store, id, T0 + 6);
     assert_eq!(resp.status(), StatusCode::GONE);
@@ -255,6 +300,7 @@ fn every_invite_route_is_relay_forbidden() {
         "/api/v1/ground-station/wfb/invite/0011/approve",
         "/api/v1/ground-station/wfb/invite/0011/reject",
         "/api/v1/ground-station/wfb/invite/0011",
+        "/api/v1/ground-station/uplink",
     ] {
         assert!(
             crate::auth::relay_forbidden(path),

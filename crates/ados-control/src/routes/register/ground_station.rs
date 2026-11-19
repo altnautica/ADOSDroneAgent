@@ -7,10 +7,10 @@ use http::Method;
 
 use crate::routes::table::Routes;
 use crate::routes::{
-    gs_camera_write, gs_crsf, gs_factory_reset, gs_fleet_hero, gs_input_read, gs_mesh,
-    gs_mesh_write, gs_network, gs_network_write, gs_pairing, gs_pic, gs_recording,
-    gs_recording_list, gs_relay_proxy, gs_relayed_status, gs_status, gs_tiles, gs_tunnel_config,
-    gs_ui_read, gs_ui_write, gs_wfb_invite, gs_wfb_pair, gs_wfb_write, gs_ws,
+    ground_station_uplink, gs_camera_write, gs_crsf, gs_factory_reset, gs_fleet_hero,
+    gs_input_read, gs_mesh, gs_mesh_write, gs_network, gs_network_write, gs_pairing, gs_pic,
+    gs_recording, gs_recording_list, gs_relay_proxy, gs_relayed_status, gs_status, gs_tiles,
+    gs_tunnel_config, gs_ui_read, gs_ui_write, gs_wfb_invite, gs_wfb_pair, gs_wfb_write, gs_ws,
 };
 use crate::state::AppState;
 
@@ -108,6 +108,15 @@ fn radio_and_mesh(r: Routes<AppState>) -> Routes<AppState> {
         .post(
             "/api/v1/ground-station/wfb/invite/{id}/reject",
             gs_wfb_invite::reject_invite,
+        )
+        // The uplink handover with a phone: take, give back, take back.
+        .get(
+            "/api/v1/ground-station/uplink",
+            ground_station_uplink::get_uplink,
+        )
+        .post(
+            "/api/v1/ground-station/uplink",
+            ground_station_uplink::post_uplink,
         )
         // Fleet attention: promote one drone, demote every other slot.
         .post(

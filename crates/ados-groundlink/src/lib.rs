@@ -39,6 +39,7 @@ pub mod pilot_relay;
 pub mod presence;
 pub mod receiver;
 pub mod relay;
+pub mod uplink;
 pub mod watchdog;
 pub mod wfb_rx;
 

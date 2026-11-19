@@ -106,6 +106,9 @@ pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
     "/api/wfb/pair/unpair",
     "/api/v1/ground-station/wfb/pair",
     "/api/v1/ground-station/wfb/invite",
+    // The uplink handover decides which ground radiates for the fleet; a
+    // request that crossed the radio must never move it.
+    "/api/v1/ground-station/uplink",
     "/api/mavlink/signing/disable-on-fc",
     "/api/v1/setup/reset",
     "/api/v1/setup/cloud-choice",

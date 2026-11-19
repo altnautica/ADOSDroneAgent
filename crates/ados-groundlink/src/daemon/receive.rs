@@ -213,18 +213,20 @@ pub(super) async fn receive_loop(
         );
 
         let stdout = chain.video.take_stdout();
-        let mut tx_control = chain.tx_control;
-        let mut aux_tx = chain.aux_tx;
-        // Each transmitter's per-second `PKT` stats stream, taken before the
-        // processes are parked for the generation. These MUST be drained: an
-        // unread pipe eventually blocks the transmitter in `fprintf(stdout)`,
-        // which would wedge the very lane the watchdog exists to protect.
-        let tx_control_stats = tx_control.take_stdout();
-        let aux_tx_stats = aux_tx.take_stdout();
-        // The rest of the chain (the primary's aux + control receivers and the
-        // two ground transmitters) is held for the generation's lifetime; its
-        // `Drop` killpg's each process group when this iteration ends.
-        let _primary_rest = (chain.aux, chain.control, tx_control, aux_tx);
+        // The two ground transmitters run unless the box stands by for a
+        // phone holding the uplink; the uplink state decides, and a change of
+        // it is applied inside the generation without touching a receiver.
+        let mut gen_tx = super::uplink_tx::GenTx::new(chain.tx);
+        let mut transmit = crate::uplink::uplink().subscribe_transmit();
+        let want = *transmit.borrow_and_update();
+        if !gen_tx.apply(want, &manager).await {
+            tokio::time::sleep(RETRY_INTERVAL).await;
+            continue;
+        }
+        // The rest of the chain (the primary's aux + control receivers) is
+        // held for the generation's lifetime; its `Drop` killpg's each process
+        // group when this iteration ends.
+        let _primary_rest = (chain.aux, chain.control);
         let rx_handle = DataRxHandle::new(chain.video);
 
         // Shared liveness state for this generation.
@@ -325,46 +327,6 @@ pub(super) async fn receive_loop(
             watchdog.run().await;
         });
 
-        // Transmitter liveness. Both GS transmitters were previously held only
-        // so their `Drop` would killpg them — nothing observed either one, so a
-        // `wfb_tx` that went silently dead without exiting took down HopAck and
-        // the presence beacon (`tx_control`) or the ENTIRE ground→drone uplink
-        // (`aux_tx`: arm, disarm, mode, mission upload, param writes, relay RPC,
-        // link feedback) while video RX kept decoding and every surface still
-        // read `active`. These watchers assert the delta counters off each
-        // transmitter's own `PKT` stats stream and end the generation on a
-        // stall, which respawns the whole chain. `&mut` in the select below for
-        // the same reason as the two watchdogs above: the arm that did not win
-        // must not be dropped-and-detached into the next generation.
-        //
-        // A transmitter whose stdout handle could not be taken is watched by
-        // nothing rather than reported as stalled — a missing handle is this
-        // process's own plumbing fault, and restarting the radio on it would be
-        // a fabricated verdict about the transmitter.
-        let mut tx_control_watch = tx_control_stats.map(|out| {
-            tokio::spawn(ados_radio::tx_liveness::watch_tx_liveness(
-                "tx_control",
-                out,
-                ados_radio::tx_liveness::TX_POLL_INTERVAL,
-                ados_radio::tx_liveness::TX_SILENCE_WINDOW,
-            ))
-        });
-        let mut aux_tx_watch = aux_tx_stats.map(|out| {
-            tokio::spawn(ados_radio::tx_liveness::watch_tx_liveness(
-                "aux_tx",
-                out,
-                ados_radio::tx_liveness::TX_POLL_INTERVAL,
-                ados_radio::tx_liveness::TX_SILENCE_WINDOW,
-            ))
-        });
-        if tx_control_watch.is_none() || aux_tx_watch.is_none() {
-            tracing::warn!(
-                tx_control_watched = tx_control_watch.is_some(),
-                aux_tx_watched = aux_tx_watch.is_some(),
-                "ground_tx_liveness_unwatched: a transmitter stats stream was unavailable"
-            );
-        }
-
         // Re-read the fleet registry on a slow tick and add/remove the SECONDARY
         // slots' receivers in place. Pairing a 25th drone must not interrupt the
         // other 24, so a registry change reconciles inside the generation rather
@@ -376,32 +338,47 @@ pub(super) async fn receive_loop(
         // stream and the channel acquirer's target, so a new primary has to be
         // chosen by a fresh generation.
         let reconcile = reconcile_fleet(&manager, primary_slot, &mut secondaries, &progress);
+        tokio::pin!(reconcile);
 
         // The generation ends when any of: the data RX exits, the zombie
-        // watchdog kills it, the valid-packet watchdog terminates it, either
+        // watchdog kills it, the valid-packet watchdog terminates it, a running
         // ground transmitter stops producing bytes, or the primary slot leaves
-        // the fleet.
+        // the fleet. A change of the uplink state is applied in place and the
+        // generation goes on.
         // `&mut` the watchdog handles so the arm that did NOT win is not
         // dropped-and-detached here — a dropped JoinHandle leaves the task
         // running, so the zombie + valid-packet watchdogs would pile up across
         // generations, each holding an acquirer + driving `iw` retunes against
         // the next generation's radio. They are aborted explicitly below.
-        tokio::select! {
-            _ = wait_for_exit(rx_handle.clone()) => {
-                tracing::warn!("ground_wfb_rx_exited");
+        loop {
+            tokio::select! {
+                _ = wait_for_exit(rx_handle.clone()) => {
+                    tracing::warn!("ground_wfb_rx_exited");
+                    break;
+                }
+                _ = &mut zombie_task => break,
+                _ = &mut watchdog_task => break,
+                _ = gen_tx.wait_stall() => break,
+                _ = &mut reconcile => break,
+                changed = transmit.changed() => {
+                    // The sender is the process-wide uplink; it never drops.
+                    if changed.is_err() {
+                        break;
+                    }
+                    let want = *transmit.borrow_and_update();
+                    if !gen_tx.apply(want, &manager).await {
+                        break;
+                    }
+                }
             }
-            _ = &mut zombie_task => {}
-            _ = &mut watchdog_task => {}
-            _ = wait_tx_stall(&mut tx_control_watch) => {}
-            _ = wait_tx_stall(&mut aux_tx_watch) => {}
-            _ = reconcile => {}
         }
 
         // Tear down the generation's sub-tasks before respawning. The two
         // watchdog handles are aborted alongside the fan-out / telemetry / stats
         // tasks (an already-finished task's abort is a no-op), so no generation's
         // watchdog survives into the next, mirroring the air-side abort-siblings
-        // discipline.
+        // discipline. Dropping `gen_tx` aborts the transmitter watchers and
+        // killpg's the transmitters with the generation.
         zombie_task.abort();
         watchdog_task.abort();
         fanout_task.abort();
@@ -410,13 +387,7 @@ pub(super) async fn receive_loop(
         if let Some(t) = stats_task {
             t.abort();
         }
-        // The transmitter watchers hold the read end of a pipe whose writer is
-        // about to be killpg'd with the generation; aborting them here keeps a
-        // previous generation's watcher from surviving to judge the next one's
-        // radio, exactly as for the two watchdogs above.
-        for t in [tx_control_watch, aux_tx_watch].into_iter().flatten() {
-            t.abort();
-        }
+        drop(gen_tx);
 
         tokio::time::sleep(RETRY_INTERVAL).await;
     }
@@ -431,24 +402,5 @@ pub(super) async fn wait_for_exit(rx: Arc<DataRxHandle>) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-/// One generation-completion arm per ground transmitter: resolve when its
-/// liveness watcher reports a stall.
-///
-/// A transmitter with no stats handle has no watcher, and this arm then parks
-/// forever rather than resolving. That is deliberate: the alternative — treating
-/// a missing pipe as a stall — would restart the radio on this process's own
-/// plumbing fault and report it as a transmitter failure. The other arms still
-/// end the generation, and the missing handle is logged where it happens.
-pub(super) async fn wait_tx_stall(
-    watch: &mut Option<tokio::task::JoinHandle<ados_radio::tx_liveness::TxVerdict>>,
-) {
-    match watch {
-        Some(handle) => {
-            let _ = handle.await;
-        }
-        None => std::future::pending::<()>().await,
     }
 }

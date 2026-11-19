@@ -24,12 +24,23 @@
 //!     -> {"ok":false,"error":"E_INVALID_KEY_BLOB"}     (bad blob)
 //! {"op":"unpair"}
 //!     -> {"ok":true,"paired":false,"role":"gs"}
+//! {"op":"uplink_take","holder_device_id":"...","holder_name":"...",
+//!  "phone_key":"<fingerprint>","yield_url":"http://..."}
+//!     -> {"ok":true,"state":"standby","uplink":{...}}   (both wfb_tx exited)
+//!     -> {"ok":false,"error":"E_BIND_ACTIVE","detail":"<one sentence>"}
+//! {"op":"uplink_give_back","holder_device_id":"...","phone_key":"..."}
+//!     -> {"ok":true,"state":"transmitting","uplink":{...}}
+//! {"op":"uplink_take_back","phone_confirmed":true}
+//!     -> {"ok":true,"state":"transmitting","uplink":{...}}
+//! {"op":"uplink_status"}
+//!     -> {"ok":true,"state":"standby","uplink":{...},"holder_phone_key":"...","yield_url":"..."}
 //! ```
 //!
 //! `ok:false` carries the apply-time error code so the REST layer can map it to a
 //! 4xx/5xx. A parse / encode failure yields a transport `ok:false`. The gateway
 //! preference is a stateless file+batctl operation, so the socket holds no
-//! manager instances; it dispatches each op directly.
+//! manager instances; it dispatches each op directly. The uplink ops act on the
+//! process's [`crate::uplink`] state (see `uplink_ops`).
 
 use std::path::Path;
 
@@ -38,6 +49,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::pair_state;
+
+mod uplink_ops;
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -60,15 +73,24 @@ struct Request {
 /// socket first and chmods it 0660 (root-owned; the api service runs as root on
 /// target). Each connection is one newline-terminated JSON request → one
 /// newline-terminated JSON response, then close (the radio + Wi-Fi command
-/// sockets' framing). Returns only on a bind error.
-pub async fn serve(sock_path: &Path) -> std::io::Result<()> {
+/// sockets' framing). Returns only on a bind error. `direct_role` says whether
+/// this service transmits for a fleet, which a phone's take requires.
+pub async fn serve(sock_path: &Path, direct_role: bool) -> std::io::Result<()> {
     let listener = bind_command_socket(sock_path, 0o660)?;
     tracing::info!(path = %sock_path.display(), "groundlink command socket listening");
 
-    serve_rpc(listener, MAX_REQUEST_BYTES, |req: Vec<u8>| async move {
-        let resp = dispatch(&req).await;
-        serde_json::to_vec(&resp).unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec())
-    })
+    serve_rpc(
+        listener,
+        MAX_REQUEST_BYTES,
+        move |req: Vec<u8>| async move {
+            let resp = match uplink_ops::dispatch(&req, direct_role).await {
+                Some(reply) => reply,
+                None => dispatch(&req).await,
+            };
+            serde_json::to_vec(&resp)
+                .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec())
+        },
+    )
     .await;
     Ok(())
 }

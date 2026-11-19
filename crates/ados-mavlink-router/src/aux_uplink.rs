@@ -71,6 +71,7 @@ const CONFLICT_DOC_STALE_AFTER_S: f64 = 20.0;
 pub struct AuxUplinkSender {
     tx: mpsc::Sender<Vec<u8>>,
     blocked_sysid_conflict: Arc<AtomicU64>,
+    blocked_standby: Arc<AtomicU64>,
     queue_full_dropped: Arc<AtomicU64>,
     partial_dropped: Arc<AtomicU64>,
 }
@@ -97,6 +98,11 @@ impl AuxUplinkSender {
         self.blocked_sysid_conflict.load(Ordering::Relaxed)
     }
 
+    /// Frames refused because this ground station stands by while a phone
+    /// holds the fleet's uplink (reason `uplink_standby`). Cumulative.
+    pub fn blocked_standby(&self) -> u64 {
+        self.blocked_standby.load(Ordering::Relaxed)
+    }
     /// Chunks dropped because the outbound queue was full. Cumulative.
     pub fn queue_full_dropped(&self) -> u64 {
         self.queue_full_dropped.load(Ordering::Relaxed)
@@ -115,6 +121,7 @@ impl AuxUplinkSender {
         let sender = Self {
             tx,
             blocked_sysid_conflict: Arc::new(AtomicU64::new(0)),
+            blocked_standby: Arc::new(AtomicU64::new(0)),
             queue_full_dropped: Arc::new(AtomicU64::new(0)),
             partial_dropped: Arc::new(AtomicU64::new(0)),
         };
@@ -128,24 +135,34 @@ impl AuxUplinkSender {
 /// convention — see that crate's `wfb_rx::args` for the receiving `wfb_tx`
 /// this feeds). `ados-mavlink-router` does not depend on `ados-groundlink`,
 /// so the port travels as a plain config value rather than a shared const,
-/// and the conflict set is read from the sidecar under the run dir.
+/// and the conflict set and the uplink state are read from sidecars under the
+/// run dir.
 pub fn spawn(target_port: u16) -> AuxUplinkSender {
-    let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+    let run_dir =
+        PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()));
     spawn_with(
         target_port,
-        PathBuf::from(run_dir).join("relayed-status.json"),
+        run_dir.join("relayed-status.json"),
+        run_dir.join("wfb-stats.json"),
     )
 }
 
-fn spawn_with(target_port: u16, conflict_sidecar: PathBuf) -> AuxUplinkSender {
+fn spawn_with(
+    target_port: u16,
+    conflict_sidecar: PathBuf,
+    radio_sidecar: PathBuf,
+) -> AuxUplinkSender {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(QUEUE_DEPTH);
     let blocked_sysid_conflict = Arc::new(AtomicU64::new(0));
+    let blocked_standby = Arc::new(AtomicU64::new(0));
     let partial_dropped = Arc::new(AtomicU64::new(0));
     let filter = ConflictFilter::new(conflict_sidecar, blocked_sysid_conflict.clone());
-    tokio::spawn(run(rx, target_port, filter, partial_dropped.clone()));
+    let gate = standby::StandbyGate::new(radio_sidecar, blocked_standby.clone());
+    tokio::spawn(run(rx, target_port, filter, gate, partial_dropped.clone()));
     AuxUplinkSender {
         tx,
         blocked_sysid_conflict,
+        blocked_standby,
         queue_full_dropped: Arc::new(AtomicU64::new(0)),
         partial_dropped,
     }
@@ -322,6 +339,7 @@ async fn run(
     mut rx: mpsc::Receiver<Vec<u8>>,
     target_port: u16,
     mut filter: ConflictFilter,
+    mut gate: standby::StandbyGate,
     partial_dropped: Arc<AtomicU64>,
 ) {
     let sock = match UdpSocket::bind(("127.0.0.1", 0)).await {
@@ -351,6 +369,9 @@ async fn run(
         tokio::select! {
             frame = rx.recv() => match frame {
                 Some(f) => {
+                    if !gate.admit(&f) {
+                        continue;
+                    }
                     let f = filter.admit(f);
                     if f.is_empty() {
                         continue;
@@ -381,6 +402,8 @@ async fn run(
 
 #[cfg(test)]
 mod tests;
+
+mod standby;
 
 #[cfg(test)]
 mod conflict_tests;

@@ -1,10 +1,14 @@
-//! Ground-station profile lines: radios table, GNSS summary, LoRa governor.
+//! Ground-station profile lines: uplink, radios table, GNSS summary, LoRa
+//! governor.
 
 use super::profile::{mmss, pct, ratio_level, Level, ProfileRoutes, RowLine};
 use serde_json::Value;
 
 pub(super) fn gs_lines(routes: &ProfileRoutes) -> Vec<RowLine> {
     let mut lines = Vec::new();
+    if let Some(uplink) = &routes.uplink {
+        lines.push(uplink_line(uplink));
+    }
     if let Some(radio) = &routes.radio {
         lines.extend(radio_lines(radio));
     }
@@ -15,6 +19,30 @@ pub(super) fn gs_lines(routes: &ProfileRoutes) -> Vec<RowLine> {
         lines.push(lora_line(lora));
     }
     lines
+}
+
+/// `uplink transmitting`, or `uplink standby (Ops phone)` while a phone holds
+/// the fleet's uplink and this box's transmitters are stopped. A box in
+/// standby must never read as transmitting, so it shows as a warning.
+pub(super) fn uplink_line(body: &Value) -> RowLine {
+    let mut line = RowLine::default();
+    line.push("uplink ", Level::Label);
+    let uplink = body.get("uplink").filter(|u| u.is_object());
+    match uplink.and_then(|u| u.get("state")).and_then(Value::as_str) {
+        Some("transmitting") => line.push("transmitting", Level::Value),
+        Some("standby") => {
+            let holder = uplink
+                .and_then(|u| {
+                    u.get("holder_name")
+                        .and_then(Value::as_str)
+                        .or_else(|| u.get("holder_device_id").and_then(Value::as_str))
+                })
+                .unwrap_or("a phone");
+            line.push(format!("standby ({holder})"), Level::Warn);
+        }
+        _ => line.push("not reporting", Level::Label),
+    }
+    line
 }
 
 /// One row per adapter: `wlan1  rxtx  -48 dBm  loss 0.1 %`.

@@ -86,6 +86,11 @@ pub(super) async fn run_direct(
     // and a GCS paired to the ground node transitively enrols each drone as its
     // own node. Service-wide, so the list survives receive-plane restarts.
     tokio::spawn(presence::linked_peers_persist_loop(presence_cache.clone()));
+    // The uplink's presence watcher and holder timer: idle while this box
+    // transmits; while it stands by for a phone it hears the holder on the
+    // ground link and takes the uplink back after the stale window. Bound once
+    // for the service, like the presence listener.
+    tokio::spawn(crate::uplink::watcher::run(crate::uplink::uplink()));
 
     // The auxiliary application lane's consumer. The receive chain decodes that
     // lane to a loopback port every generation, but the port is bound once for

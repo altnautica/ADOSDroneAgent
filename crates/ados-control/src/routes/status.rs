@@ -131,9 +131,10 @@ const IPC_ONLY_KEYS: [&str; 16] = [
 ///
 /// `uplink_blocked_sysid_conflict` is the ground station's count of operator
 /// frames it held because two linked aircraft share the system id they were
-/// addressed to. A ground station never decodes a HEARTBEAT of its own, so the
-/// gate would otherwise blank the one number that explains why a command did
-/// not go out.
+/// addressed to, and `uplink_blocked_standby` its count of operator frames it
+/// refused while a phone held the fleet's uplink. A ground station never
+/// decodes a HEARTBEAT of its own, so the gate would otherwise blank the one
+/// number that explains why a command did not go out.
 ///
 /// `agent_commands_unsigned_rejected_risk`, `agent_signing` and
 /// `injector_arbitration` are the router's verdicts about its own command path
@@ -146,7 +147,7 @@ const IPC_ONLY_KEYS: [&str; 16] = [
 /// own command path.
 ///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 24] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 25] = [
     "agent_commands_unsigned_rejected_risk",
     "agent_signing",
     "aux_mavlink_tee",
@@ -168,6 +169,7 @@ const AGENT_DIAGNOSTIC_KEYS: [&str; 24] = [
     "swarm",
     "swarm_emergency",
     "swarm_precedence",
+    "uplink_blocked_standby",
     "uplink_blocked_sysid_conflict",
     "video_profile",
     "visor_flight_frames_dropped",

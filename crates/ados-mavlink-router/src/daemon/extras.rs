@@ -294,6 +294,9 @@ pub(super) async fn build_extras(
             "uplink_blocked_sysid_conflict".into(),
             json!(u.blocked_sysid_conflict()),
         );
+        // Operator frames refused while a phone holds the fleet's uplink and
+        // this box's transmitters are stopped (reason `uplink_standby`).
+        extras.insert("uplink_blocked_standby".into(), json!(u.blocked_standby()));
         // Client frames the uplink dropped: queue full (the radio lane is
         // falling behind), or a trailing partial frame too large to carry.
         extras.insert(

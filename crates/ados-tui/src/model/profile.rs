@@ -50,6 +50,8 @@ pub struct ProfileRoutes {
     pub lora: Option<Value>,
     pub radio: Option<Value>,
     pub capture: Option<Value>,
+    /// The ground station's uplink (`GET /api/v1/ground-station/uplink`).
+    pub uplink: Option<Value>,
 }
 
 /// Which optional routes a profile polls.
@@ -62,6 +64,7 @@ pub struct RouteSet {
     pub lora: bool,
     pub radio: bool,
     pub capture: bool,
+    pub uplink: bool,
 }
 
 impl RouteSet {
@@ -84,6 +87,7 @@ impl RouteSet {
                 gnss: true,
                 lora: true,
                 radio: true,
+                uplink: true,
                 ..Self::default()
             },
             _ => Self::default(),

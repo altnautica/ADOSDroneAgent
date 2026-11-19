@@ -190,6 +190,8 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/v1/ground-station/ui/buttons` |  |
 | PUT | `/api/v1/ground-station/ui/oled` |  |
 | PUT | `/api/v1/ground-station/ui/screens` |  |
+| GET | `/api/v1/ground-station/uplink` |  |
+| POST | `/api/v1/ground-station/uplink` |  |
 | GET | `/api/v1/ground-station/wfb` |  |
 | PUT | `/api/v1/ground-station/wfb` |  |
 | GET | `/api/v1/ground-station/wfb/invite` |  |
@@ -272,7 +274,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-247 native routes.
+249 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

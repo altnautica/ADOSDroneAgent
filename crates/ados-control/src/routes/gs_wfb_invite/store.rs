@@ -23,6 +23,17 @@ pub(super) struct Invite {
     pub(super) state: InviteState,
     /// When the invite reached a terminal state.
     pub(super) terminal_at_ms: Option<i64>,
+    /// The address the phone reached this box on, for the ground role.
+    pub(super) box_addr: Option<String>,
+}
+
+/// A pending invite's phone, as the approval needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPhone {
+    pub phone_pub: [u8; 32],
+    pub fingerprint: String,
+    pub label: String,
+    pub box_addr: Option<String>,
 }
 
 /// Every refusal the invite routes return.
@@ -139,8 +150,27 @@ impl InviteStore {
             expires_at_ms,
             state: InviteState::Pending,
             terminal_at_ms: None,
+            box_addr: None,
         });
         Ok(body)
+    }
+
+    /// Record the address the phone reached this box on.
+    pub fn note_box_addr(&mut self, id: &str, addr: String) {
+        if let Ok(inv) = self.find(id) {
+            inv.box_addr = Some(addr);
+        }
+    }
+
+    /// The phone behind a pending invite, read before its approval.
+    pub fn pending_phone(&mut self, id: &str, now_ms: i64) -> Result<PendingPhone, InviteError> {
+        let inv = self.pending_invite(id, now_ms)?;
+        Ok(PendingPhone {
+            phone_pub: inv.phone_pub,
+            fingerprint: inv.fingerprint.clone(),
+            label: inv.label.clone(),
+            box_addr: inv.box_addr.clone(),
+        })
     }
 
     /// The pending invites, oldest first.

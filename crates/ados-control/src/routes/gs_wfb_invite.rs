@@ -1,20 +1,23 @@
-//! Ground-station phone-receiver invites: an operator-approved, sealed hand-off
-//! of the fleet's WFB receive material to a phone that listens on its own radio.
+//! Ground-station phone invites: an operator-approved, sealed hand-off of the
+//! fleet's WFB material to a phone that runs its own radio.
 //!
 //! A phone generates an X25519 keypair and posts its public half
 //! (`POST .../wfb/invite`). The invite sits pending, showing the phone's
 //! fingerprint, until an operator approves or rejects it on a ground-station
-//! surface. Approval seals the receive bundle to the phone's key under a fresh
+//! surface. Approval seals the bundle to the phone's key under a fresh
 //! ephemeral key (the mesh-invite construction from
 //! [`ados_groundlink::pairing::crypto`], context
 //! `"ados/wfb/phone-invite/v1" || invite_id`); the phone fetches it exactly once
 //! (`GET .../wfb/invite/{id}`), after which it is gone.
 //!
-//! The bundle carries the fleet's `rx.key` and the DERIVED hop HMAC key, never
-//! the raw shared key file. The phone is receive-only by design (it never
-//! transmits on the ground slot), but the material is not receive-only: wfb-ng's
-//! key pair also authenticates frames, so an approved phone is trusted by the
-//! fleet as fully as the ground station itself. Approve only a phone you own.
+//! The bundle (version 2) carries the fleet's `rx.key`, the DERIVED hop HMAC
+//! key (never the raw shared key file), the link layout, and the ground role
+//! ([`ground_role`]): relay secrets, system ids, this box's transmit
+//! parameters, and the uplink key the phone's handover requests are
+//! authenticated with. The material is not receive-only: wfb-ng's key pair
+//! also authenticates frames, so an approved phone is trusted by the fleet as
+//! fully as the ground station itself, and may take the uplink from it.
+//! Approve only a phone you own.
 //!
 //! Every route is ground-station only (404 `E_PROFILE_MISMATCH` elsewhere) and
 //! listed in [`crate::auth::RELAY_FORBIDDEN_PATHS`], so no relayed request can
@@ -39,8 +42,10 @@ use sha2::{Digest, Sha256};
 
 use ados_groundlink::pairing::{seal_to_peer, SealedToPeer};
 
+mod ground_role;
 mod store;
 
+pub use ground_role::{GroundDrone, GroundRole};
 pub use store::FetchOutcome;
 pub use store::InviteError;
 pub use store::InviteStore;
@@ -66,6 +71,9 @@ const LABEL_MAX_CHARS: usize = 64;
 /// The radio's channel width the phone receives on.
 const BANDWIDTH_MHZ: u8 = 20;
 
+/// The bundle version: 2 adds the ground role.
+pub const BUNDLE_VERSION: u8 = 2;
+
 // ---------------------------------------------------------------------------
 // Bundle material.
 // ---------------------------------------------------------------------------
@@ -85,6 +93,7 @@ pub struct InviteMaterial {
     pub mcs: u8,
     pub video_fec: (u8, u8),
     pub aux_fec: (u8, u8),
+    pub ground: GroundRole,
 }
 
 /// The sealing context for one invite.
@@ -103,7 +112,7 @@ pub fn bundle_plaintext(m: &InviteMaterial) -> Vec<u8> {
         .map(|(slot, device_id)| json!({"slot": slot, "device_id": device_id}))
         .collect();
     let body = json!({
-        "v": 1,
+        "v": BUNDLE_VERSION,
         "rx_key_b64": b64.encode(&m.rx_key),
         "hop_key_b64": b64.encode(m.hop_key),
         "fleet_id": m.fleet_id,
@@ -115,6 +124,7 @@ pub fn bundle_plaintext(m: &InviteMaterial) -> Vec<u8> {
         "video_fec": {"k": m.video_fec.0, "n": m.video_fec.1},
         "aux_fec": {"k": m.aux_fec.0, "n": m.aux_fec.1},
         "ports": {"video": 0, "control": 1, "aux_down": 2},
+        "ground": m.ground.to_json(),
     });
     serde_json::to_vec(&body).expect("a json! value always serializes")
 }
@@ -159,9 +169,13 @@ fn rx_key_path() -> PathBuf {
         .join("rx.key")
 }
 
-/// Read the live receive material: `rx.key`, the derived hop key, the fleet
-/// registry and the radio config.
-fn load_material() -> Result<InviteMaterial, MaterialError> {
+/// Read the live material: `rx.key`, the derived hop key, the fleet registry,
+/// the radio config and this box's identity. `box_lan_address` is the address
+/// the phone reached this box on; `uplink_key` is the key just issued to it.
+fn load_material(
+    box_lan_address: Option<String>,
+    uplink_key: [u8; 32],
+) -> Result<InviteMaterial, MaterialError> {
     let rx_key = std::fs::read(rx_key_path()).map_err(|_| MaterialError::NotPaired)?;
     if rx_key.len() != 64 {
         return Err(MaterialError::NotPaired);
@@ -174,6 +188,7 @@ fn load_material() -> Result<InviteMaterial, MaterialError> {
         .slots()
         .map(|s| (s.slot, s.device_id.clone()))
         .collect();
+    let agent = crate::config::PairingConfig::load().agent;
     Ok(InviteMaterial {
         rx_key,
         hop_key,
@@ -184,6 +199,18 @@ fn load_material() -> Result<InviteMaterial, MaterialError> {
         mcs: cfg.mcs_index,
         video_fec: (cfg.fec_k, cfg.fec_n),
         aux_fec: (cfg.aux_fec_k, cfg.aux_fec_n),
+        ground: GroundRole {
+            box_device_id: agent.device_id,
+            box_name: agent.name,
+            box_lan_address,
+            mcs_index: cfg.mcs_index,
+            aux_tx_port: cfg.aux_tx_port,
+            tx_power_dbm: cfg.tx_power_dbm,
+            reg_domain: cfg.reg_domain.clone(),
+            dfs_allowed: cfg.dfs_allowed,
+            drones: ground_role::drones_of(&registry),
+            uplink_key,
+        },
     })
 }
 
@@ -368,20 +395,30 @@ fn fetch_with(gs: bool, store: &mut InviteStore, id: &str, now_ms: i64) -> Respo
 }
 
 /// `POST /api/v1/ground-station/wfb/invite` →
-/// `201 {invite_id, phone_fingerprint, expires_at_ms}`.
-pub async fn post_invite(Json(req): Json<CreateInviteRequest>) -> Response {
+/// `201 {invite_id, phone_fingerprint, expires_at_ms}`. The address the phone
+/// reached this box on rides the ground-role bundle as the box's LAN address.
+pub async fn post_invite(
+    local: Option<axum::Extension<crate::serve::LocalAddr>>,
+    Json(req): Json<CreateInviteRequest>,
+) -> Response {
     let gs = is_ground_station();
     let rx_key_present = std::fs::metadata(rx_key_path())
         .map(|m| m.len() == 64)
         .unwrap_or(false);
-    create_with(
+    let invite_id = new_invite_id();
+    let mut store = STORE.lock();
+    let resp = create_with(
         gs,
-        &mut STORE.lock(),
+        &mut store,
         &req,
-        new_invite_id(),
+        invite_id.clone(),
         rx_key_present,
         now_ms(),
-    )
+    );
+    if let Some(axum::Extension(crate::serve::LocalAddr(addr))) = local {
+        store.note_box_addr(&invite_id, addr.ip().to_string());
+    }
+    resp
 }
 
 /// `GET /api/v1/ground-station/wfb/invite` → `{pending:[…]}`.
@@ -390,15 +427,45 @@ pub async fn list_invites() -> Response {
 }
 
 /// `POST /api/v1/ground-station/wfb/invite/{id}/approve`.
+///
+/// Issues the phone its uplink key and stores it against the phone's key
+/// BEFORE sealing, so a phone never holds a key this box does not know. A key
+/// stored for an approval that then fails is harmless: the next approval of
+/// the same phone replaces it.
 pub async fn approve_invite(Path(id): Path<String>) -> Response {
-    let gs = is_ground_station();
-    // Read the material before taking the lock: it touches the disk.
-    let material = if gs {
-        load_material()
-    } else {
-        Err(MaterialError::NotPaired)
+    use crate::routes::ground_station_uplink::phones;
+    if !is_ground_station() {
+        return profile_mismatch();
+    }
+    let phone = match STORE.lock().pending_phone(&id, now_ms()) {
+        Ok(p) => p,
+        Err(e) => return error_response(e),
     };
-    approve_with(gs, &mut STORE.lock(), &id, || material, now_ms())
+    let uplink_key = phones::new_uplink_key();
+    // Read the material before taking the lock again: it touches the disk.
+    let material = load_material(phone.box_addr.clone(), uplink_key);
+    if material.is_ok() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let remembered = phones::remember(
+            &phones::phones_path(),
+            phones::ApprovedPhone {
+                phone_pub_b64: b64.encode(phone.phone_pub),
+                fingerprint: phone.fingerprint,
+                label: phone.label,
+                uplink_key_b64: b64.encode(uplink_key),
+                approved_at_ms: now_ms(),
+            },
+        );
+        if let Err(e) = remembered {
+            tracing::error!(error = %e, "wfb_phone_invite_uplink_key_not_stored");
+            return nested_detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "E_UPLINK_KEY_STORE",
+                "the phone's uplink key could not be stored",
+            );
+        }
+    }
+    approve_with(true, &mut STORE.lock(), &id, || material, now_ms())
 }
 
 /// `POST /api/v1/ground-station/wfb/invite/{id}/reject`.

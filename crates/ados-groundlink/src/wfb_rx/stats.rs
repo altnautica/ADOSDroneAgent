@@ -227,6 +227,10 @@ pub fn build_gs_stats(
         // transmitter, so anything else is a peer worth noticing.
         "bandwidth_mhz": snap.bandwidth_mhz,
         "profile": "ground_station",
+        // Whether this box transmits for its fleet or stands by while a phone
+        // holds the uplink. Every box surface reads this one field; a box in
+        // standby has healthy receivers and must never read as transmitting.
+        "uplink": crate::uplink::uplink().sidecar_json(),
         "rx_silent_seconds": rx_silent_seconds,
         "rx_zombie_kills": rx_zombie_kills,
         "acquire_state": acquire_state,

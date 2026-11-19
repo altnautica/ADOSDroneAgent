@@ -159,6 +159,7 @@ fn poll_profile(client: &RestClient, setup: &Result<Value, RestError>) -> Profil
         gnss: get(set.gnss, "/api/v1/gnss"),
         lora: get(set.lora, "/api/v1/lora"),
         radio: get(set.radio, "/api/v1/radio/adapters"),
+        uplink: get(set.uplink, "/api/v1/ground-station/uplink"),
         capture: get(set.capture, CAPTURE_STATE_PATH),
     }
 }

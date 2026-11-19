@@ -89,7 +89,7 @@ pub use seams::{
     DataRxHandle, GroupChannelSetter, IwChannelSetter, RadioGroup, SharedValidCounter, SystemClock,
 };
 pub(crate) use spawn::spawn_wfb;
-pub use spawn::{PrimaryChain, SlotReceivers};
+pub use spawn::{GroundTx, PrimaryChain, SlotReceivers, TxStdout};
 pub use stats::{
     build_gs_stats, write_blocked_unpaired_sidecar, write_no_adapter_sidecar,
     write_no_injection_sidecar, write_reg_blocked_sidecar, GsAdapterInfo, GsChannelTruth,

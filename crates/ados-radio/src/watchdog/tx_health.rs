@@ -102,7 +102,9 @@ pub async fn tx_health_watchdog(
                     last_upstream_silent_log = Instant::now();
                 }
             }
-            Some(TxVerdict::Healthy) | None => {}
+            // The data plane is never stopped on purpose, so `Standby` cannot
+            // arise from this tracker; it would never be a kill either way.
+            Some(TxVerdict::Healthy) | Some(TxVerdict::Standby) | None => {}
         }
     }
 }

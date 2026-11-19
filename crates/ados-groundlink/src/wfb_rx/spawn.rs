@@ -3,13 +3,19 @@
 //! receivers. Every receiver listens on all receiving adapters; the two
 //! transmitters run on the transmit adapter.
 
+use std::time::Duration;
+
 use ados_proc::{GroupChild, Spec, StderrMode, StdoutMode};
+use tokio::process::ChildStdout;
 
 use super::args::{
     aux_rx_port, control_rx_port, data_rx_args, gs_aux_rx_args, gs_aux_tx_args, gs_rx_control_args,
     gs_tx_control_args, rx_key_path, video_rx_port,
 };
 use super::WfbRxManager;
+
+/// How long a ground transmitter gets after `SIGTERM` before `SIGKILL`.
+const TX_STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// One generation's primary receive chain: the anchor slot's three receivers
 /// plus the fleet's two single ground transmitters.
@@ -23,8 +29,86 @@ pub struct PrimaryChain {
     pub video: GroupChild,
     pub aux: GroupChild,
     pub control: GroupChild,
-    pub tx_control: GroupChild,
-    pub aux_tx: GroupChild,
+    /// The two ground transmitters, started or not as the box's uplink says.
+    pub tx: GroundTx,
+}
+
+/// The fleet's two ground transmitters: `tx_control` (`wfb_tx -p 1`, HopAck
+/// and presence) and `aux_tx` (`wfb_tx -p 3`, the whole ground→drone uplink).
+///
+/// Stopped and started on their own, without touching a receiver, so the box
+/// can stand by while a phone holds the uplink. Built with its arguments
+/// resolved, so a start after a stop respawns exactly the same processes.
+pub struct GroundTx {
+    control_args: Vec<String>,
+    aux_args: Vec<String>,
+    /// `(tx_control, aux_tx)` while running; dropping them killpg's both.
+    running: Option<(GroupChild, GroupChild)>,
+}
+
+/// Each running transmitter's per-second `PKT` stats stream.
+pub struct TxStdout {
+    pub control: Option<ChildStdout>,
+    pub aux: Option<ChildStdout>,
+}
+
+impl GroundTx {
+    pub fn new(control_args: Vec<String>, aux_args: Vec<String>) -> Self {
+        Self {
+            control_args,
+            aux_args,
+            running: None,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// Spawn both transmitters (a no-op returning no streams while they run).
+    ///
+    /// stdout PIPED, not discarded: the per-second `PKT` stats line is the only
+    /// per-transmitter proof that bytes offered to this `wfb_tx` actually
+    /// reached the radio. See [`ados_radio::tx_liveness`]. The caller MUST
+    /// drain both streams — an unread 64 KiB pipe blocks the transmitter in
+    /// `fprintf(stdout)`.
+    pub fn start(&mut self) -> std::io::Result<TxStdout> {
+        if self.running.is_some() {
+            return Ok(TxStdout {
+                control: None,
+                aux: None,
+            });
+        }
+        let mut control = spawn_wfb(
+            "wfb_tx",
+            &self.control_args,
+            StdoutMode::Piped,
+            Some("/run/ados/wfb-gs-tx-control.log"),
+        )?;
+        let mut aux = spawn_wfb(
+            "wfb_tx",
+            &self.aux_args,
+            StdoutMode::Piped,
+            Some("/run/ados/wfb-gs-aux-tx.log"),
+        )?;
+        let streams = TxStdout {
+            control: control.take_stdout(),
+            aux: aux.take_stdout(),
+        };
+        self.running = Some((control, aux));
+        Ok(streams)
+    }
+
+    /// Stop both transmitters and return only after both exited: `SIGTERM`
+    /// each group, wait up to 2 s, then `SIGKILL`. Receivers are untouched.
+    pub async fn stop(&mut self) {
+        if let Some((mut control, mut aux)) = self.running.take() {
+            tokio::join!(
+                control.terminate(TX_STOP_GRACE),
+                aux.terminate(TX_STOP_GRACE)
+            );
+        }
+    }
 }
 
 /// The receive trio for one non-primary fleet slot. Additive to the primary
@@ -79,8 +163,9 @@ impl SlotReceivers {
 }
 
 impl WfbRxManager {
-    /// Spawn the receive chain anchored on `primary_slot`, plus the two single
-    /// ground transmitters.
+    /// Spawn the receive chain anchored on `primary_slot`, and resolve the two
+    /// single ground transmitters without starting them: the generation starts
+    /// them unless the box stands by for a phone.
     ///
     /// The primary slot's video RX has its stdout piped: it is the generation's
     /// stats stream AND its liveness anchor (the channel acquirer sweeps for
@@ -102,7 +187,7 @@ impl WfbRxManager {
         let ground = ados_radio::config::link_id(fleet, ados_radio::config::SLOT_GROUND);
         let drone = ados_radio::config::link_id(fleet, primary_slot);
         let rx = &self.rx_ifaces;
-        let tx = self.interface.as_str();
+        let tx_iface = self.interface.as_str();
 
         // Data RX: stdout piped for the stats reader, in its own process group.
         let video = spawn_wfb(
@@ -131,46 +216,48 @@ impl WfbRxManager {
             StdoutMode::Null,
             Some("/run/ados/wfb-gs-aux-rx.log"),
         )?;
-        // stdout PIPED, not discarded: the per-second `PKT` stats line is the
-        // only per-transmitter proof that bytes offered to this `wfb_tx`
-        // actually reached the radio. Nothing read it before, so a silently
-        // dead transmitter took down HopAck / presence (here) or the whole
-        // uplink (below) while every surface still read `active`. See
-        // [`ados_radio::tx_liveness`]. The caller MUST drain it — an unread 64 KiB
-        // pipe blocks the transmitter in `fprintf(stdout)`.
-        let tx_control = spawn_wfb(
-            "wfb_tx",
-            &gs_tx_control_args(tx, &rx_key, self.config.mcs_index, ground),
-            StdoutMode::Piped,
-            Some("/run/ados/wfb-gs-tx-control.log"),
-        )?;
-        // Aux UPLINK. The counterpart to the receiver above, and the half that
-        // made the lane one-directional: the drone has always listened on
-        // radio_id 3, but nothing on the ground ever transmitted there, so a
-        // client's request could reach the ground station and go no further.
-        // Spawned unconditionally for the same reason as the receiver — a
-        // linked ground station must be able to answer the drone it can hear,
-        // and an idle wfb_tx with no ingress traffic costs essentially nothing.
-        let aux_tx = spawn_wfb(
-            "wfb_tx",
-            &gs_aux_tx_args(
-                tx,
+        // Aux UPLINK (`aux_tx`): the counterpart to the receiver above, and
+        // the half that made the lane one-directional before it existed: the
+        // drone has always listened on radio_id 3. `tx_control` carries HopAck
+        // and the presence beacon. Both are idle-cheap, so whenever this box
+        // holds the uplink both run.
+        let tx = GroundTx::new(
+            gs_tx_control_args(tx_iface, &rx_key, self.config.mcs_index, ground),
+            gs_aux_tx_args(
+                tx_iface,
                 &rx_key,
                 self.config.mcs_index,
                 ground,
                 self.config.aux_tx_port,
             ),
-            StdoutMode::Piped,
-            Some("/run/ados/wfb-gs-aux-tx.log"),
-        )?;
+        );
         Ok(PrimaryChain {
             slot: primary_slot,
             video,
             aux,
             control,
-            tx_control,
-            aux_tx,
+            tx,
         })
+    }
+
+    /// The standby presence watcher's receiver: `wfb_rx -p 1` on the box's
+    /// own ground `link_id`, decoding whichever ground holds the uplink onto
+    /// [`crate::uplink::watcher::watch_port`]. Run only while the box's own
+    /// transmitters are stopped.
+    pub fn spawn_uplink_watcher(&self) -> std::io::Result<GroupChild> {
+        let ground =
+            ados_radio::config::link_id(self.config.fleet_id, ados_radio::config::SLOT_GROUND);
+        spawn_wfb(
+            "wfb_rx",
+            &gs_rx_control_args(
+                &self.rx_ifaces,
+                &rx_key_path(),
+                crate::uplink::watcher::watch_port(),
+                ground,
+            ),
+            StdoutMode::Null,
+            Some("/run/ados/wfb-gs-uplink-watch.log"),
+        )
     }
 
     /// Spawn the receive trio for one NON-primary fleet slot: aux (p2) and

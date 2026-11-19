@@ -281,6 +281,9 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
             "gps_sats": Value::Null,
         },
         "link": link_view(&state.run_dir),
+        // Whether this box transmits for its fleet or stands by while a phone
+        // holds the uplink; null while the radio service is not reporting.
+        "uplink": crate::routes::ground_station_uplink::uplink_view(&state.run_dir),
         "gcs": {"clients": [], "pic_id": Value::Null},
         "network": network_view(&state).await,
         "system": system_snapshot(&state).await,
