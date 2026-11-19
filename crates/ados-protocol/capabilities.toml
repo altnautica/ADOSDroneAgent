@@ -674,6 +674,14 @@ risk = "low"
 risk_reason = "Read-only on the telemetry stream."
 
 [[gcs]]
+id = "plugin.http"
+label = "Call a companion extension's server"
+description = "Lets the plugin's GCS module call the routes of the one extension the grant names (`plugin.http.<extension id>`), on the nodes this GCS reaches, with the operator's own access. Extensions that ship as a set use it to share one workflow, such as pairing a drone with a reconstruction node."
+category = "data_network"
+risk = "medium"
+risk_reason = "Acts through another extension's API as the operator could; scoped to the extension the grant names."
+
+[[gcs]]
 id = "command.send"
 label = "Send commands to drones from the GCS"
 description = "Lets the plugin ask the GCS to send takeoff, land or return-to-launch to the drone it is bound to, or retarget that drone's follow tracker. The operator confirms every one of these in a prompt that names the drone. Arming, mode changes and every other command are refused. The same grant lets the plugin write its own per-drone configuration without a prompt."
