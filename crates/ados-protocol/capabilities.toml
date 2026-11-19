@@ -566,7 +566,7 @@ risk_reason = "Read-only node identity facts; no effect on flight, no imagery an
 enforced = true
 
 # ===========================================================================
-# GCS capabilities (26): 13 UI slots + 13 data/command/mission/cloud/bus
+# GCS capabilities (27): 13 UI slots + 14 data/command/mission/cloud/bus
 # ===========================================================================
 
 [[gcs]]
