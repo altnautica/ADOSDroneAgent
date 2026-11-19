@@ -16,6 +16,12 @@ path = "src/lib.rs"
 name = "ados-pilot"
 path = "src/main.rs"
 
+[features]
+# Test support for the in-process deterministic simulation (`tests/dst`):
+# the lift-off airframe model. Enabled for this crate's own tests through the
+# dev-dependency below; never part of the shipped binary.
+dst = []
+
 [dependencies]
 ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
@@ -33,3 +39,6 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
+# The crate itself with `dst`, so `cargo test -p ados-pilot` builds the
+# integration tests' simulation support without a feature flag.
+ados-pilot = { path = ".", features = ["dst"] }

@@ -571,6 +571,7 @@ name = "ados-pilot"
 version = "0.122.0"
 dependencies = [
  "ados-config",
+ "ados-pilot",
  "ados-protocol",
  "base64 0.23.1",
  "png 0.17.16",

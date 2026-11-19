@@ -1,5 +1,6 @@
 //! A test airframe on its skids under ArduPilot's GUIDED attitude control,
-//! for the lift-off's tests and the pilot's test world: rate-loop
+//! for the lift-off's tests, the pilot's test world and the in-process
+//! deterministic simulation (`tests/dst`, feature `dst`): rate-loop
 //! integrators that wind up against an attitude error, a centre of gravity
 //! off the thrust centre, skids that resist a tip until the thrust unloads
 //! them, motor outputs that saturate, and a climb once thrust passes hover.

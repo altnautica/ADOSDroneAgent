@@ -31,7 +31,7 @@
 //! FC reports and returns the frame to send. The pilot owns the I/O and the
 //! operator's stops (`core/actions/liftoff.rs`).
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dst"))]
 pub mod sim;
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,570 @@
+//! The simulated ArduPilot copter the pilot flies: a parameter server, the
+//! commands the pilot sends (mode, arm, take-off, mission pause and current
+//! item), GUIDED setpoints flown through a first-order velocity response,
+//! AUTO waypoints, SmartRTL and LAND returns that land and disarm, a battery
+//! that drains while armed, and the supervised lift-off flown on
+//! [`Airframe`]. Wind gusts and sensor noise come from the run's seeded
+//! [`Rng`]; nothing reads a clock or a socket.
+
+use std::collections::BTreeMap;
+
+use ados_pilot::liftoff::sim::Airframe;
+use ados_pilot::modes::copter;
+use ados_protocol::mavlink::ardupilotmega::*;
+
+use crate::rng::Rng;
+
+/// Gravity, m/s².
+const G: f32 = 9.81;
+/// The velocity loop's time constant, s.
+const VEL_TAU_S: f32 = 0.25;
+/// The position loop's pull toward a position target, 1/s.
+const POS_GAIN: f32 = 1.0;
+/// Speed limits of the simulated position controller, m/s.
+const MAX_H_MPS: f32 = 8.0;
+const MAX_UP_MPS: f32 = 2.5;
+const MAX_DOWN_MPS: f32 = 1.5;
+/// GUIDED take-off climb rate, m/s.
+const TAKEOFF_MPS: f32 = 1.5;
+/// A waypoint counts as reached this close, m.
+const WP_RADIUS_M: f32 = 1.0;
+/// A GUIDED setpoint older than this is dropped and the copter holds
+/// (ArduPilot's `GUID_TIMEOUT` stops a velocity target; position holds).
+const SETPOINT_TIMEOUT_MS: u64 = 3_000;
+/// LAND, RTL and SmartRTL disarm this long after touchdown.
+const LAND_DISARM_MS: u64 = 1_000;
+/// The rangefinder sits this far above the ground on the skids, m.
+const SKID_M: f32 = 0.1;
+
+/// Heartbeat and SYS_STATUS period.
+pub const HEARTBEAT_MS: u64 = 500;
+/// EXTENDED_SYS_STATE and GPS_RAW_INT period.
+const STATUS_MS: u64 = 100;
+
+/// The FC's parameter table: what the pilot reads to pass readiness on a
+/// GNSS copter with a SmartRTL low-battery action and a Land critical one.
+pub fn params() -> BTreeMap<String, f32> {
+    [
+        ("MAV_GCS_SYSID", 1.0),
+        ("FS_GCS_ENABLE", 4.0),
+        ("FS_GCS_TIMEOUT", 3.0),
+        ("FS_THR_ENABLE", 5.0),
+        ("GUID_TIMEOUT", 1.0),
+        ("RC_OVERRIDE_TIME", 1.0),
+        ("OA_TYPE", 0.0),
+        ("AVOID_ENABLE", 0.0),
+        ("SRTL_POINTS", 500.0),
+        ("SRTL_ACCURACY", 2.0),
+        ("GUID_OPTIONS", 0.0),
+        ("GCS_PID_MASK", 0.0),
+        ("MOT_THST_HOVER", 0.5),
+        ("MOT_PWM_MIN", 1000.0),
+        ("MOT_PWM_MAX", 2000.0),
+        ("FRAME_CLASS", 1.0),
+        ("BATT_MONITOR", 4.0),
+        ("BATT_CAPACITY", 5000.0),
+        ("BATT_LOW_VOLT", 14.0),
+        ("BATT_LOW_MAH", 0.0),
+        ("BATT_CRT_VOLT", 12.8),
+        ("BATT_CRT_MAH", 0.0),
+        ("BATT_FS_LOW_ACT", 4.0),
+        ("BATT_FS_CRT_ACT", 1.0),
+        ("EK3_SRC1_POSXY", 3.0),
+        ("LAND_SPEED", 50.0),
+        ("WPNAV_SPEED", 500.0),
+        ("RTL_ALT", 1500.0),
+        ("RTL_SPEED", 0.0),
+    ]
+    .into_iter()
+    .map(|(n, v)| (n.to_string(), v))
+    .collect()
+}
+
+/// The supervised lift-off's hand-over: the airframe model flies the
+/// attitude targets until the launch leaves its take-off step airborne.
+pub struct LiftoffRig {
+    pub af: Airframe,
+    pub engaged: bool,
+}
+
+pub struct Fc {
+    pub mode: u32,
+    pub armed: bool,
+    /// NED, metres; the ground at `d = 0`, home at the origin.
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    pub att: [f32; 3],
+    pub landed: bool,
+    pub battery_pct: f32,
+    /// Battery drain while armed, % per second.
+    pub drain_pct_s: f32,
+    pub params: BTreeMap<String, f32>,
+    pub rig: LiftoffRig,
+    /// Mission waypoints, items 1..=n (item 0 is home).
+    pub mission: Vec<[f32; 3]>,
+    pub seq: u32,
+    pub mission_paused: bool,
+    pub mission_complete: bool,
+    /// The copter makes no progress toward this item (something in the way).
+    pub blocked_seq: Option<u32>,
+    /// Gust velocity, m/s (north, east).
+    gust: [f32; 2],
+    /// Per-run gust strength, m/s.
+    gust_mps: f32,
+    sp: Option<(u64, SET_POSITION_TARGET_LOCAL_NED_DATA)>,
+    hold: [f32; 3],
+    takeoff_alt: Option<f32>,
+    landed_ms: Option<u64>,
+    /// Replies for the pilot, delivered on the next tick.
+    replies: Vec<MavMessage>,
+    hb_ms: Option<u64>,
+    status_ms: Option<u64>,
+}
+
+impl Fc {
+    pub fn new(rng: &mut Rng) -> Self {
+        Self {
+            mode: copter::LOITER,
+            armed: false,
+            pos: [0.0; 3],
+            vel: [0.0; 3],
+            att: [0.0; 3],
+            landed: true,
+            battery_pct: 95.0,
+            drain_pct_s: 0.05,
+            params: params(),
+            rig: LiftoffRig {
+                af: Airframe::balanced(),
+                engaged: false,
+            },
+            mission: Vec::new(),
+            seq: 0,
+            mission_paused: false,
+            mission_complete: false,
+            blocked_seq: None,
+            gust: [0.0; 2],
+            gust_mps: rng.range(0.05, 0.25),
+            sp: None,
+            hold: [0.0; 3],
+            takeoff_alt: None,
+            landed_ms: None,
+            replies: Vec::new(),
+            hb_ms: None,
+            status_ms: None,
+        }
+    }
+
+    fn param(&self, name: &str, default: f32) -> f32 {
+        self.params.get(name).copied().unwrap_or(default)
+    }
+
+    fn land_mps(&self) -> f32 {
+        self.param("LAND_SPEED", 50.0) / 100.0
+    }
+
+    fn wp_mps(&self) -> f32 {
+        self.param("WPNAV_SPEED", 500.0) / 100.0
+    }
+
+    fn ack(&mut self, command: MavCmd, result: MavResult) {
+        self.replies
+            .push(MavMessage::COMMAND_ACK(COMMAND_ACK_DATA { command, result }));
+    }
+
+    fn param_value(&self, name: &str) -> Option<MavMessage> {
+        let v = self.params.get(name)?;
+        let index = self.params.keys().position(|k| k == name).unwrap_or(0);
+        Some(MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+            param_value: *v,
+            param_count: self.params.len() as u16,
+            param_index: index as u16,
+            param_id: name.into(),
+            param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+        }))
+    }
+
+    /// Where the copter comes to rest braking from its velocity now: ArduPilot
+    /// holds at the stopping point, not where the brake began.
+    fn stop_point(&self) -> [f32; 3] {
+        let v = self.vel;
+        let p = self.pos;
+        [p[0] + v[0] * VEL_TAU_S, p[1] + v[1] * VEL_TAU_S, p[2] + v[2] * VEL_TAU_S]
+    }
+
+    fn set_mode(&mut self, mode: u32) {
+        if mode != self.mode {
+            self.mode = mode;
+            self.hold = self.stop_point();
+            self.sp = None;
+            if mode == copter::AUTO && self.seq == 0 && !self.mission.is_empty() {
+                self.seq = 1;
+            }
+        }
+    }
+
+    /// The FC's answer to one frame the pilot sent.
+    pub fn apply(&mut self, m: &MavMessage, now: u64) {
+        match m {
+            MavMessage::PARAM_REQUEST_READ(r) => {
+                let id = r.param_id.to_str().unwrap_or("").trim_end_matches('\0');
+                let reply = self.param_value(id).unwrap_or(
+                    MavMessage::PARAM_ERROR(PARAM_ERROR_DATA {
+                        param_index: -1,
+                        target_system: 255,
+                        target_component: 0,
+                        param_id: r.param_id,
+                        error: MavParamError::MAV_PARAM_ERROR_DOES_NOT_EXIST,
+                    }),
+                );
+                self.replies.push(reply);
+            }
+            MavMessage::PARAM_SET(s) => {
+                let id = s.param_id.to_str().unwrap_or("").trim_end_matches('\0');
+                if self.params.contains_key(id) {
+                    self.params.insert(id.to_string(), s.param_value);
+                    let reply = self.param_value(id);
+                    self.replies.extend(reply);
+                }
+            }
+            MavMessage::COMMAND_LONG(c) => self.command(c),
+            MavMessage::COMMAND_INT(c) => self.ack(c.command, MavResult::MAV_RESULT_ACCEPTED),
+            MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) if self.mode == copter::GUIDED => {
+                if self.rig.engaged {
+                    self.rig.af.goal_h = Some(-s.z);
+                }
+                self.sp = Some((now, s.clone()));
+            }
+            MavMessage::SET_ATTITUDE_TARGET(t) if self.mode == copter::GUIDED && self.armed => {
+                let q = t.q;
+                let roll = (2.0 * (q[0] * q[1] + q[2] * q[3]))
+                    .atan2(1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
+                let pitch = (2.0 * (q[0] * q[2] - q[3] * q[1])).clamp(-1.0, 1.0).asin();
+                self.rig.af.target = Some(([roll, pitch, self.att[2]], t.thrust));
+                self.rig.engaged = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn command(&mut self, c: &COMMAND_LONG_DATA) {
+        let result = match c.command {
+            MavCmd::MAV_CMD_DO_SET_MODE => {
+                self.set_mode(c.param2 as u32);
+                MavResult::MAV_RESULT_ACCEPTED
+            }
+            MavCmd::MAV_CMD_COMPONENT_ARM_DISARM => {
+                if c.param1 > 0.5 {
+                    if self.landed {
+                        self.armed = true;
+                        self.landed_ms = None;
+                        MavResult::MAV_RESULT_ACCEPTED
+                    } else {
+                        MavResult::MAV_RESULT_FAILED
+                    }
+                } else {
+                    // A plain disarm only on the ground; 21196 forces it.
+                    if self.landed || c.param2 == 21196.0 {
+                        self.disarm();
+                        MavResult::MAV_RESULT_ACCEPTED
+                    } else {
+                        MavResult::MAV_RESULT_FAILED
+                    }
+                }
+            }
+            MavCmd::MAV_CMD_NAV_TAKEOFF if self.armed && self.mode == copter::GUIDED => {
+                self.takeoff_alt = Some(c.param7);
+                self.hold = [self.pos[0], self.pos[1], -c.param7];
+                MavResult::MAV_RESULT_ACCEPTED
+            }
+            // Disarmed or not in GUIDED: ArduPilot refuses a take-off.
+            MavCmd::MAV_CMD_NAV_TAKEOFF => MavResult::MAV_RESULT_FAILED,
+            MavCmd::MAV_CMD_DO_PAUSE_CONTINUE => {
+                self.mission_paused = c.param1 < 0.5;
+                if self.mission_paused {
+                    self.hold = self.stop_point();
+                }
+                MavResult::MAV_RESULT_ACCEPTED
+            }
+            MavCmd::MAV_CMD_DO_SET_MISSION_CURRENT => {
+                let seq = c.param1 as u32;
+                if (1..=self.mission.len() as u32).contains(&seq) {
+                    self.seq = seq;
+                    self.mission_complete = false;
+                    MavResult::MAV_RESULT_ACCEPTED
+                } else {
+                    MavResult::MAV_RESULT_DENIED
+                }
+            }
+            _ => MavResult::MAV_RESULT_ACCEPTED,
+        };
+        self.ack(c.command, result);
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+        self.takeoff_alt = None;
+        self.sp = None;
+        if self.rig.engaged {
+            // Back on the skids: the FC's integrators relax to zero.
+            self.rig.af = Airframe::new(self.rig.af.hover, self.rig.af.trim);
+            self.rig.engaged = false;
+        }
+    }
+
+    /// The velocity the FC's own controller asks for in its current mode.
+    fn target_vel(&mut self, now: u64) -> [f32; 3] {
+        let toward = |from: [f32; 3], to: [f32; 3], speed: f32| -> [f32; 3] {
+            let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+            let h = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            let s = if h > 1e-3 {
+                (speed.min(h * POS_GAIN)) / h
+            } else {
+                0.0
+            };
+            [d[0] * s, d[1] * s, d[2] * POS_GAIN]
+        };
+        let hold = toward(self.pos, self.hold, MAX_H_MPS);
+        match self.mode {
+            copter::GUIDED => {
+                if let Some(alt) = self.takeoff_alt {
+                    if -self.pos[2] >= alt - 0.1 {
+                        self.takeoff_alt = None;
+                        self.hold = self.pos;
+                    } else {
+                        return [hold[0], hold[1], -TAKEOFF_MPS];
+                    }
+                }
+                match &self.sp {
+                    Some((at, s)) if now.saturating_sub(*at) <= SETPOINT_TIMEOUT_MS => {
+                        let mask = s.type_mask.bits();
+                        let mut v = [0.0; 3];
+                        if mask & 0b111_000 == 0 {
+                            v = [s.vx, s.vy, s.vz];
+                        }
+                        if mask & 0b111 == 0 {
+                            v[0] += (s.x - self.pos[0]) * POS_GAIN;
+                            v[1] += (s.y - self.pos[1]) * POS_GAIN;
+                            v[2] += (s.z - self.pos[2]) * POS_GAIN;
+                        }
+                        v
+                    }
+                    _ => hold,
+                }
+            }
+            copter::AUTO => {
+                let wp = (self.seq as usize)
+                    .checked_sub(1)
+                    .and_then(|i| self.mission.get(i))
+                    .copied();
+                match wp {
+                    Some(wp)
+                        if !self.mission_paused
+                            && !self.mission_complete
+                            && self.blocked_seq != Some(self.seq) =>
+                    {
+                        let d = [wp[0] - self.pos[0], wp[1] - self.pos[1], wp[2] - self.pos[2]];
+                        if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < WP_RADIUS_M {
+                            self.hold = wp;
+                            if self.seq as usize >= self.mission.len() {
+                                self.mission_complete = true;
+                            } else {
+                                self.seq += 1;
+                            }
+                        }
+                        toward(self.pos, wp, self.wp_mps())
+                    }
+                    // Paused, done, blocked or nothing to fly: AUTO holds.
+                    _ => hold,
+                }
+            }
+            copter::RTL | copter::SMART_RTL => {
+                let rtl_alt = self.param("RTL_ALT", 1500.0) / 100.0;
+                if self.mode == copter::RTL && -self.pos[2] < rtl_alt - 0.2 && !self.landed {
+                    return [0.0, 0.0, -MAX_UP_MPS];
+                }
+                // Straight home at the current height, then down.
+                let v = toward(self.pos, [0.0, 0.0, self.pos[2]], self.wp_mps());
+                let home_m = (self.pos[0] * self.pos[0] + self.pos[1] * self.pos[1]).sqrt();
+                let vz = if home_m > 0.5 { 0.0 } else { self.land_mps() };
+                [v[0], v[1], vz]
+            }
+            copter::LAND => [hold[0], hold[1], self.land_mps()],
+            // LOITER, BRAKE, POSHOLD and the rest: hold where the mode began.
+            _ => hold,
+        }
+    }
+
+    /// Advance one tick of `dt` seconds. `liftoff_takeoff`: the pilot's
+    /// launch is still in its take-off step.
+    pub fn step(&mut self, now: u64, dt: f32, rng: &mut Rng, liftoff_takeoff: bool) {
+        self.gust = [
+            self.gust[0] * 0.98 + rng.noise(self.gust_mps * 0.1),
+            self.gust[1] * 0.98 + rng.noise(self.gust_mps * 0.1),
+        ];
+        self.rig.af.armed = self.armed;
+        if !self.armed {
+            self.vel = [0.0; 3];
+            self.pos[2] = 0.0;
+            self.att = [0.0, 0.0, self.att[2]];
+            self.landed = true;
+            return;
+        }
+        self.battery_pct = (self.battery_pct - self.drain_pct_s * dt).max(0.0);
+        if self.rig.engaged && self.mode != copter::GUIDED {
+            // Out of GUIDED: the FC's own mode flies from here.
+            self.rig.engaged = false;
+            self.hold = self.pos;
+        }
+        if self.rig.engaged {
+            if !liftoff_takeoff && self.rig.af.airborne() {
+                // Handed on: the position controller flies from where the
+                // airframe is, at its climb rate.
+                self.rig.engaged = false;
+                self.vel = [0.0, 0.0, -self.rig.af.vz];
+                self.hold = self.pos;
+            } else {
+                for _ in 0..4 {
+                    self.rig.af.step(dt / 4.0);
+                }
+                let af = &self.rig.af;
+                self.att = [af.att[0], af.att[1], self.att[2]];
+                self.pos[2] = -af.h;
+                self.vel = [0.0, 0.0, -af.vz];
+                self.landed = !af.airborne();
+                return;
+            }
+        }
+        let want = self.target_vel(now);
+        let h = (want[0] * want[0] + want[1] * want[1]).sqrt();
+        let hs = if h > MAX_H_MPS { MAX_H_MPS / h } else { 1.0 };
+        let want = [
+            want[0] * hs,
+            want[1] * hs,
+            want[2].clamp(-MAX_UP_MPS, MAX_DOWN_MPS),
+        ];
+        let k = (dt / VEL_TAU_S).min(1.0);
+        let before = self.vel;
+        for (v, w) in self.vel.iter_mut().zip(want) {
+            *v += (w - *v) * k;
+        }
+        let acc = [(self.vel[0] - before[0]) / dt, (self.vel[1] - before[1]) / dt];
+        self.att = [(acc[1] / G).atan(), -(acc[0] / G).atan(), self.att[2]];
+        let flying = !self.landed || self.vel[2] < -0.05 || self.takeoff_alt.is_some();
+        if flying {
+            self.pos[0] += (self.vel[0] + self.gust[0]) * dt;
+            self.pos[1] += (self.vel[1] + self.gust[1]) * dt;
+            self.pos[2] += self.vel[2] * dt;
+        }
+        if self.pos[2] >= 0.0 {
+            self.pos[2] = 0.0;
+            self.vel = [0.0; 3];
+            self.landed = true;
+        } else if self.pos[2] < -0.05 {
+            self.landed = false;
+        }
+        let lands = matches!(self.mode, copter::LAND | copter::RTL | copter::SMART_RTL);
+        if self.landed && lands {
+            let since = *self.landed_ms.get_or_insert(now);
+            if now.saturating_sub(since) >= LAND_DISARM_MS {
+                self.disarm();
+                self.landed_ms = None;
+            }
+        } else {
+            self.landed_ms = None;
+        }
+    }
+
+    /// The frames the FC sends this tick: replies first, then its streams.
+    pub fn frames(&mut self, now: u64, rng: &mut Rng) -> Vec<MavMessage> {
+        let mut out = std::mem::take(&mut self.replies);
+        if self.hb_ms.is_none_or(|t| now.saturating_sub(t) >= HEARTBEAT_MS) {
+            self.hb_ms = Some(now);
+            let mut base = MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED;
+            if self.armed {
+                base |= MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED;
+            }
+            out.push(MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+                custom_mode: self.mode,
+                mavtype: MavType::MAV_TYPE_QUADROTOR,
+                autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+                base_mode: base,
+                system_status: MavState::MAV_STATE_ACTIVE,
+                mavlink_version: 3,
+            }));
+            out.push(MavMessage::SYS_STATUS(SYS_STATUS_DATA {
+                voltage_battery: ((12.8 + 4.0 * self.battery_pct / 100.0) * 1000.0) as u16,
+                battery_remaining: self.battery_pct.floor() as i8,
+                ..Default::default()
+            }));
+        }
+        if self.status_ms.is_none_or(|t| now.saturating_sub(t) >= STATUS_MS) {
+            self.status_ms = Some(now);
+            out.push(MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
+                vtol_state: MavVtolState::MAV_VTOL_STATE_UNDEFINED,
+                landed_state: if self.landed {
+                    MavLandedState::MAV_LANDED_STATE_ON_GROUND
+                } else {
+                    MavLandedState::MAV_LANDED_STATE_IN_AIR
+                },
+            }));
+            out.push(MavMessage::GPS_RAW_INT(GPS_RAW_INT_DATA {
+                fix_type: GpsFixType::GPS_FIX_TYPE_3D_FIX,
+                satellites_visible: 14,
+                ..Default::default()
+            }));
+        }
+        let pos_sd = 0.01;
+        let vel_sd = 0.02;
+        out.push(MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
+            time_boot_ms: now as u32,
+            x: self.pos[0] + rng.noise(pos_sd),
+            y: self.pos[1] + rng.noise(pos_sd),
+            z: self.pos[2] + rng.noise(pos_sd),
+            vx: self.vel[0] + rng.noise(vel_sd),
+            vy: self.vel[1] + rng.noise(vel_sd),
+            vz: self.vel[2] + rng.noise(vel_sd),
+        }));
+        out.push(MavMessage::ATTITUDE(ATTITUDE_DATA {
+            time_boot_ms: now as u32,
+            roll: self.att[0],
+            pitch: self.att[1],
+            yaw: self.att[2],
+            rollspeed: 0.0,
+            pitchspeed: 0.0,
+            yawspeed: 0.0,
+        }));
+        let agl = SKID_M - self.pos[2] + rng.noise(0.005);
+        out.push(MavMessage::DISTANCE_SENSOR(DISTANCE_SENSOR_DATA {
+            time_boot_ms: now as u32,
+            min_distance: 5,
+            max_distance: 1200,
+            current_distance: (agl.max(0.0) * 100.0).round() as u16,
+            mavtype: MavDistanceSensor::MAV_DISTANCE_SENSOR_LASER,
+            id: 0,
+            orientation: MavSensorOrientation::MAV_SENSOR_ROTATION_PITCH_270,
+            covariance: 0,
+        }));
+        if self.armed {
+            let af = &self.rig.af;
+            for (axis, i) in [
+                (PidTuningAxis::PID_TUNING_ROLL, af.i[0]),
+                (PidTuningAxis::PID_TUNING_PITCH, af.i[1]),
+            ] {
+                out.push(MavMessage::PID_TUNING(PID_TUNING_DATA {
+                    I: i,
+                    axis,
+                    ..Default::default()
+                }));
+            }
+            let o = af.motors();
+            out.push(MavMessage::SERVO_OUTPUT_RAW(SERVO_OUTPUT_RAW_DATA {
+                servo1_raw: o[0],
+                servo2_raw: o[1],
+                servo3_raw: o[2],
+                servo4_raw: o[3],
+                ..Default::default()
+            }));
+        }
+        out
+    }
+}
