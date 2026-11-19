@@ -208,7 +208,7 @@ If WebRTC via STUN/TURN fails (rare, but possible with very restrictive firewall
 
 The relay converts RTSP from the agent to fMP4-over-WebSocket, which any browser can play natively using MediaSource Extensions.
 
-**Docker image available at:** `ADOSMissionControl/tools/video-relay/`
+**Docker image available at:** `ADOSMissionControlGCS/tools/video-relay/`
 
 ```yaml
 services:

@@ -9,7 +9,7 @@
 #   - Rust:   crates/ados-protocol/src/paths.rs (the runtime path registry)
 #   - Python: src/ados/core/_contracts_generated.py
 #   - Python: src/ados/core/_paths_generated.py (the runtime path registry)
-#   - TS:     ADOSMissionControl/src/lib/plugins/contracts.generated.ts
+#   - TS:     ADOSMissionControlGCS/src/lib/plugins/contracts.generated.ts
 #
 # Three sections:
 #   [[contract]] — a versioned inter-process wire contract.

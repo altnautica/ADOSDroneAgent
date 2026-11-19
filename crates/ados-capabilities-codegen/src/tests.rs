@@ -383,12 +383,12 @@ fn gcs_mirror_manifest_pins_only_optional_targets_and_reflects_content() {
             optional: false,
         },
         Target {
-            path: mono.join("ADOSMissionControl/src/lib/plugins/contracts.generated.ts"),
+            path: mono.join("ADOSMissionControlGCS/src/lib/plugins/contracts.generated.ts"),
             content: "ts one".into(),
             optional: true,
         },
         Target {
-            path: mono.join("ADOSMissionControl/src/lib/plugins/gcs-capabilities.generated.ts"),
+            path: mono.join("ADOSMissionControlGCS/src/lib/plugins/gcs-capabilities.generated.ts"),
             content: "ts two".into(),
             optional: true,
         },
@@ -397,8 +397,8 @@ fn gcs_mirror_manifest_pins_only_optional_targets_and_reflects_content() {
 
     // Only the optional (GCS-mirror) targets are pinned; the agent-side
     // non-optional target must not appear (it is checked directly).
-    assert!(m.contains("ADOSMissionControl/src/lib/plugins/contracts.generated.ts"));
-    assert!(m.contains("ADOSMissionControl/src/lib/plugins/gcs-capabilities.generated.ts"));
+    assert!(m.contains("ADOSMissionControlGCS/src/lib/plugins/contracts.generated.ts"));
+    assert!(m.contains("ADOSMissionControlGCS/src/lib/plugins/gcs-capabilities.generated.ts"));
     assert!(
         !m.contains("capabilities.rs"),
         "non-optional target leaked into the manifest"

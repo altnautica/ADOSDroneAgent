@@ -4580,7 +4580,7 @@
       "type": "string|null"
     },
     {
-      "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
+      "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControlGCS/main/public/models/registry.json",
       "description": "Registry Url",
       "enum": null,
       "key": "vision.registry_url",

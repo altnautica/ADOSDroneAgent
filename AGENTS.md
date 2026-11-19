@@ -280,7 +280,7 @@ behavior changed.
 
 ## Related Public Projects
 
-- [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) -
+- [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControlGCS) -
   browser ground control station that can connect to this agent.
 - [ADOSExtensions](https://github.com/altnautica/ADOSExtensions) - plugin
   extensions built for the ADOS plugin system.

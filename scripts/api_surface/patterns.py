@@ -18,7 +18,7 @@ TABLE = REPO / "docs" / "api-surface.md"
 # The Android app is a multi-module Gradle build: ``app``, ``core/*`` and
 # ``feature/*`` each carry sources.
 CLIENTS = [
-    ("Mission Control", MONOREPO / "ADOSMissionControl" / "src", {".ts", ".tsx"}),
+    ("Mission Control", MONOREPO / "ADOSMissionControlGCS" / "src", {".ts", ".tsx"}),
     ("Android GCS app", MONOREPO / "ADOSAndroidGCS" / "app" / "src", {".kt", ".java"}),
     ("Android GCS core", MONOREPO / "ADOSAndroidGCS" / "core", {".kt", ".java"}),
     ("Android GCS feature", MONOREPO / "ADOSAndroidGCS" / "feature", {".kt", ".java"}),

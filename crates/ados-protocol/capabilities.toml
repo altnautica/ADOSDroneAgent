@@ -3,8 +3,8 @@
 # Codegen (`cargo run -p ados-capabilities-codegen`) emits, from this file:
 #   - Python: src/ados/plugins/_capabilities_generated.py  (agent catalog)
 #   - Rust:   crates/ados-protocol/src/capabilities.rs       (agent catalog)
-#   - TS:     ADOSMissionControl/src/lib/plugins/agent-capabilities.generated.ts (agent mirror)
-#   - TS:     ADOSMissionControl/src/lib/plugins/gcs-capabilities.generated.ts   (GCS catalog)
+#   - TS:     ADOSMissionControlGCS/src/lib/plugins/agent-capabilities.generated.ts (agent mirror)
+#   - TS:     ADOSMissionControlGCS/src/lib/plugins/gcs-capabilities.generated.ts   (GCS catalog)
 #
 # Two sections:
 #   [[agent]] — capabilities a plugin manifest may declare for the agent half.

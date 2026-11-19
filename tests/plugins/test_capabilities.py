@@ -121,7 +121,7 @@ def test_gcs_capability_count_matches_ts_catalog() -> None:
 
     ts_path = (
         Path(__file__).resolve().parents[3]
-        / "ADOSMissionControl"
+        / "ADOSMissionControlGCS"
         / "src"
         / "lib"
         / "plugins"

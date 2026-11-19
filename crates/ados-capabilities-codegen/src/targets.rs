@@ -66,7 +66,7 @@ pub(crate) fn gcs_and_local_targets(
     wfb: &WfbTables,
     contracts: &Contracts,
 ) -> Vec<Target> {
-    let gcs = monorepo.join("ADOSMissionControl");
+    let gcs = monorepo.join("ADOSMissionControlGCS");
     let gcs_plugins = gcs.join("src/lib/plugins");
     let (api_ts, heartbeat_ts) = api_type_modules(agent_repo);
     let local = |path: PathBuf, content: String| Target {

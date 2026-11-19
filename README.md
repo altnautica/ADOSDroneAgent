@@ -10,7 +10,7 @@
 <p align="center"><em>Open-source onboard agent for software-defined drones. Long-range data link. HD video. Full remote control.</em></p>
 <p align="center"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg"> <img alt="Rust + Python" src="https://img.shields.io/badge/Core-Rust%20%2B%20Python-blue.svg"> <a href="https://discord.gg/uxbvuD4d5q"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2.svg"></a></p>
 <p align="center">
-  <strong><a href="https://github.com/altnautica/ADOSMissionControl">Mission Control</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOSMissionControlGCS">Mission Control</a></strong> |
   <strong><a href="https://github.com/altnautica/ADOSDroneAgent">Drone Agent</a></strong> |
   <strong><a href="https://github.com/altnautica/ADOSAndroidGCS">Android GCS</a></strong> |
   <strong><a href="https://github.com/altnautica/ADOSExtensions">Extensions</a></strong> |
@@ -284,7 +284,7 @@ In its ground-station profile the agent drives a small front-panel screen and bu
 
 ## Set up from Mission Control
 
-Pair the agent with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) and the drone opens there as one node: the flight controller and the companion computer side by side. From that one panel you set up the FC and edit every parameter (the agent carries the MAVLink, also through a ground station's radio relay), and you configure the agent itself: services and their health, peripherals, battery, the radio link, Wi-Fi, cellular and MAVLink routing and signing, cameras and perception, swarm, cloud relay, security, and the extensions installed on the drone. Extensions add their own pages to the same panel.
+Pair the agent with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControlGCS) and the drone opens there as one node: the flight controller and the companion computer side by side. From that one panel you set up the FC and edit every parameter (the agent carries the MAVLink, also through a ground station's radio relay), and you configure the agent itself: services and their health, peripherals, battery, the radio link, Wi-Fi, cellular and MAVLink routing and signing, cameras and perception, swarm, cloud relay, security, and the extensions installed on the drone. Extensions add their own pages to the same panel.
 
 ## Smart and autonomous features
 
@@ -357,7 +357,7 @@ The agent is meant to be extended, not forked. An extension's agent half runs as
 
 ## Where it fits
 
-The Drone Agent is the onboard part of the ADOS ecosystem, and with its ground-station profile it is also the Ground Agent on the far end of the radio link. [Mission Control](https://github.com/altnautica/ADOSMissionControl) and [Android GCS](https://github.com/altnautica/ADOSAndroidGCS) reach it over the LAN or the cloud relay, [Extensions](https://github.com/altnautica/ADOSExtensions) run on it, and [ADOS MCP](https://github.com/altnautica/ADOS-MCP) gives AI clients scoped access to it.
+The Drone Agent is the onboard part of the ADOS ecosystem, and with its ground-station profile it is also the Ground Agent on the far end of the radio link. [Mission Control](https://github.com/altnautica/ADOSMissionControlGCS) and [Android GCS](https://github.com/altnautica/ADOSAndroidGCS) reach it over the LAN or the cloud relay, [Extensions](https://github.com/altnautica/ADOSExtensions) run on it, and [ADOS MCP](https://github.com/altnautica/ADOS-MCP) gives AI clients scoped access to it.
 
 ---
 
@@ -391,7 +391,7 @@ ADOS Ground Agent is the Drone Agent running its ground-station profile.
 <!-- ados-family:repos -->
 | Repo | Runs on | What it does | Link |
 |---|---|---|---|
-| ADOS Mission Control | Browser, desktop (Electron) | Ground control station: FC setup, mission planning, flight, 3D simulation, fleet | [ADOSMissionControl](https://github.com/altnautica/ADOSMissionControl) |
+| ADOS Mission Control | Browser, desktop (Electron) | Ground control station: FC setup, mission planning, flight, 3D simulation, fleet | [ADOSMissionControlGCS](https://github.com/altnautica/ADOSMissionControlGCS) |
 | ADOS Drone Agent | Companion computer on the drone, or a ground node | Onboard agent: MAVLink routing, HD video, long-range radio link, plugins, remote control | [ADOSDroneAgent](https://github.com/altnautica/ADOSDroneAgent) |
 | ADOS Android GCS | Android phones and tablets | Native ground control app for agents on the LAN, direct flight controllers and the cloud | [ADOSAndroidGCS](https://github.com/altnautica/ADOSAndroidGCS) |
 | ADOS Extensions | Drone Agent and Mission Control | First-party signed plugins, each with an agent half and a GCS half | [ADOSExtensions](https://github.com/altnautica/ADOSExtensions) |

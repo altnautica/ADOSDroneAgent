@@ -3728,7 +3728,7 @@
           "title": "Profile"
         },
         "registry_url": {
-          "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
+          "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControlGCS/main/public/models/registry.json",
           "title": "Registry Url",
           "type": "string"
         },
@@ -5024,7 +5024,7 @@
         "models_cache_max_mb": 500,
         "models_dir": "/opt/ados/models/vision",
         "profile": null,
-        "registry_url": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
+        "registry_url": "https://raw.githubusercontent.com/altnautica/ADOSMissionControlGCS/main/public/models/registry.json",
         "reid": null,
         "reid_enabled": false,
         "reid_model_id": null,

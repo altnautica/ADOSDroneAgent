@@ -90,7 +90,7 @@ class VisionConfig(BaseModel):
     confidence_threshold: float = 0.5
     models_dir: str = "/opt/ados/models/vision"
     models_cache_max_mb: int = Field(default=500, ge=0, le=U32_MAX)
-    registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
+    registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControlGCS/main/public/models/registry.json"
     # Overrides `agent.profile` for the engine; unset follows it.
     profile: str | None = None
     socket_dir: str = "/run/ados"

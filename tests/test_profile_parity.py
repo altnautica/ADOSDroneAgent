@@ -17,7 +17,7 @@ from ados.core.profile import normalize_profile
 _REPO = Path(__file__).resolve().parents[1]
 _CONTRACT = _REPO / "crates" / "ados-protocol" / "contracts.toml"
 _RUST = _REPO / "crates" / "ados-protocol" / "src" / "contracts.rs"
-_TS = _REPO.parent / "ADOSMissionControl" / "src" / "lib" / "plugins" / "contracts.generated.ts"
+_TS = _REPO.parent / "ADOSMissionControlGCS" / "src" / "lib" / "plugins" / "contracts.generated.ts"
 
 
 def _contract_profiles() -> list[str]:

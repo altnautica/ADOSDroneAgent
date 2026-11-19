@@ -241,8 +241,8 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: altnautica/ADOSMissionControl
-          path: ADOSMissionControl
+          repository: altnautica/ADOSMissionControlGCS
+          path: ADOSMissionControlGCS
 
       - name: Mirror hashes match
         run: |
@@ -290,8 +290,8 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: altnautica/ADOSMissionControl
-          path: ADOSMissionControl
+          repository: altnautica/ADOSMissionControlGCS
+          path: ADOSMissionControlGCS
 
       - uses: dtolnay/rust-toolchain@stable
 

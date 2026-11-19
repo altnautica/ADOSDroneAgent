@@ -331,7 +331,7 @@ fn main() -> ExitCode {
 
     // Self-contained drift guard for the optional GCS-mirror targets.
     //
-    // The `.generated.ts` mirrors live in the sibling ADOSMissionControl
+    // The `.generated.ts` mirrors live in the sibling ADOSMissionControlGCS
     // repo, which agent-only CI does not check out — so the loop above skips
     // them, and a change to capabilities.toml that never regenerated the mirror
     // slips through silently (exactly how contracts.generated.ts once drifted).
