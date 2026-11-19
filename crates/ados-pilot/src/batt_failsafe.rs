@@ -73,7 +73,7 @@ const ACT_CLIMBS: [f32; 3] = [2.0, 3.0, 6.0];
 /// `EK3_SRCn_POSXY` value for GPS.
 const POSXY_GPS: f32 = 3.0;
 /// `EK3_SRCn_POSXY` value for external nav.
-const POSXY_EXTERNAL_NAV: f32 = 6.0;
+pub const POSXY_EXTERNAL_NAV: f32 = 6.0;
 /// `EK3_SRCn_POSXY` values that position without GNSS: Beacon, ExternalNav.
 const POSXY_GNSS_FREE: [f32; 2] = [4.0, POSXY_EXTERNAL_NAV];
 /// ArduPilot treats a `BATT_CAPACITY` of this or less as no capacity and

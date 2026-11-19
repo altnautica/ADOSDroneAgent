@@ -139,6 +139,12 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             .flatten(),
         low_battery_countdown_land: f(d, "rth_countdown_s").is_some()
             && d.get("low_battery_action").and_then(Value::as_str) == Some("land"),
+        energy_need_pct: d
+            .get("battery_reserve")
+            .filter(|r| r.get("basis").and_then(Value::as_str) == Some("energy"))
+            .and_then(|r| r.get("need_pct"))
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
         speed_cap_mps: d
             .get("speed_cap")
             .filter(|c| c.get("reason").and_then(Value::as_str).is_some())

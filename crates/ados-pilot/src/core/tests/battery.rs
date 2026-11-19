@@ -473,3 +473,120 @@ fn a_smart_rtl_request_is_dropped_by_an_operator_motion_action() {
         }
     }
 }
+
+/// A GNSS copter with a 5000 mAh pack flown by the pilot in GUIDED at `pos`
+/// (NED, home at the origin), the FC reporting `pct` and `current_a` (no
+/// current measured when negative) every 100 ms for `ms`.
+fn energy_flight(pos: [f32; 3], pct: i8, current_a: f32, ms: u64) -> World {
+    let mut w = world(4.0, 1.0, GPS);
+    w.p.fc.params.insert("BATT_CAPACITY".into(), 5000.0);
+    w.p.settings.pilot.link_loss_s = 3600;
+    w.airborne_at(copter::GUIDED, pos);
+    w.run(100);
+    assert!(matches!(w.action("take_control"), Reply::Action(a) if a.ok));
+    report(&mut w, pct, current_a, ms);
+    w
+}
+
+fn report(w: &mut World, pct: i8, current_a: f32, ms: u64) {
+    for _ in 0..ms / 100 {
+        w.inbox.push(MavMessage::SYS_STATUS(SYS_STATUS_DATA {
+            battery_remaining: pct,
+            current_battery: if current_a < 0.0 {
+                -1
+            } else {
+                (current_a * 100.0) as i16
+            },
+            ..Default::default()
+        }));
+        w.run(100);
+    }
+}
+
+const FAR: [f32; 3] = [1000.0, 0.0, -30.0];
+
+#[test]
+fn the_energy_estimate_returns_above_the_floor_on_a_long_way_home() {
+    // 1 km out at 20 A: about 250 s home, 2.5 Ah with the margin and the
+    // critical reserve: half the pack, well above the 30 % floor.
+    let mut w = energy_flight(FAR, 45, 20.0, 11_000);
+    let s = w.p.state(w.now);
+    let r = s.battery_reserve.clone().expect("a reserve airborne");
+    assert_eq!(r.basis, "energy", "{r:?}");
+    assert!(r.need_pct > 45, "{r:?}");
+    assert!(r.return_s > 200, "{r:?}");
+    assert_eq!(s.low_battery_action.as_deref(), Some("rth"));
+    let b = s.banner.expect("a banner");
+    assert_eq!(b.text_key, "pilot.banner.low_battery_rth_energy");
+    assert_eq!(b.args["need_pct"].as_i64(), Some(i64::from(r.need_pct)));
+    report(&mut w, 45, 20.0, 10_000);
+    assert_eq!(w.mode, copter::SMART_RTL);
+    // On the ground the reserve is not published.
+    w.landed = true;
+    w.armed = false;
+    w.run(200);
+    assert!(w.p.state(w.now).battery_reserve.is_none());
+}
+
+#[test]
+fn the_estimate_waits_ten_seconds_airborne() {
+    let w = energy_flight(FAR, 45, 20.0, 8_000);
+    let s = w.p.state(w.now);
+    assert_eq!(s.battery_reserve.map(|r| r.basis).as_deref(), Some("floor"));
+    assert_eq!(s.low_battery_action, None);
+}
+
+#[test]
+fn a_short_way_home_keeps_the_floor() {
+    let w = energy_flight([5.0, 0.0, -5.0], 45, 20.0, 12_000);
+    let s = w.p.state(w.now);
+    let r = s.battery_reserve.expect("a reserve");
+    assert_eq!((r.basis.as_str(), r.need_pct), ("floor", 30), "{r:?}");
+    assert_eq!(s.low_battery_action, None);
+}
+
+#[test]
+fn no_current_measured_keeps_the_floor() {
+    let w = energy_flight(FAR, 45, -1.0, 12_000);
+    let s = w.p.state(w.now);
+    let r = s.battery_reserve.expect("a reserve");
+    assert_eq!((r.basis.as_str(), r.need_pct), ("floor", 30), "{r:?}");
+    assert_eq!(s.low_battery_action, None);
+    // The floor still acts.
+    let mut w = w;
+    report(&mut w, 29, -1.0, 1_000);
+    let s = w.p.state(w.now);
+    assert_eq!(s.low_battery_action.as_deref(), Some("rth"));
+    assert_eq!(
+        s.banner.map(|b| b.text_key).as_deref(),
+        Some("pilot.banner.low_battery_rth")
+    );
+}
+
+#[test]
+fn the_countdown_counts_in_the_time_home() {
+    let a = energy_flight(FAR, 80, 20.0, 12_000);
+    let mut b = world(4.0, 1.0, GPS);
+    b.p.settings.pilot.low_battery_countdown_s = 30;
+    b.p.fc.params.insert("BATT_CAPACITY".into(), 5000.0);
+    b.p.settings.pilot.link_loss_s = 3600;
+    b.airborne_at(copter::GUIDED, FAR);
+    report(&mut b, 80, 20.0, 12_000);
+    let ra = a.p.state(a.now).battery_reserve.expect("a").return_s;
+    let rb = b.p.state(b.now).battery_reserve.expect("b").return_s;
+    assert_eq!(rb, ra + 20, "{ra} {rb}");
+}
+
+#[test]
+fn a_cancelled_energy_return_rearms_five_percent_above_its_need() {
+    let mut w = energy_flight(FAR, 45, 20.0, 11_000);
+    let need = w.p.state(w.now).battery_reserve.expect("r").need_pct;
+    assert!(matches!(w.action("rth_cancel"), Reply::Action(a) if a.ok));
+    report(&mut w, 45, 20.0, 12_000);
+    assert_eq!(w.p.state(w.now).low_battery_action, None);
+    assert_ne!(w.mode, copter::SMART_RTL, "a cancel holds");
+    // The charge recovers past the need and 5 %: the next fall acts again.
+    report(&mut w, (need + 6) as i8, 0.0, 200);
+    report(&mut w, 45, 20.0, 1_000);
+    assert_eq!(w.p.state(w.now).low_battery_action.as_deref(), Some("rth"));
+}

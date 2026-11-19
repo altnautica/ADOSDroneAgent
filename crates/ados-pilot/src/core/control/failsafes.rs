@@ -7,6 +7,7 @@ use ados_protocol::pilot::{Owner, VehicleClass};
 use serde_json::json;
 
 use super::super::Pilot;
+use super::energy::Reserve;
 use crate::flows::banner;
 
 /// MAVLink severity of the low-battery announcement: CRITICAL.
@@ -87,6 +88,7 @@ impl Pilot {
 
     pub(super) fn low_battery(&mut self, now_ms: u64) {
         let Some(pct) = self.fc.battery_pct else {
+            self.sup.energy.reserve = None;
             return;
         };
         let p = &self.fc.params;
@@ -96,17 +98,6 @@ impl Pilot {
             _ => crate::setup::adapters::ardupilot_copter::CAPACITY_RESERVE[0].1 * 100.0,
         };
         let airborne = self.fc.armed && !self.fc.landed();
-        if !airborne || pct > low_pct + 5.0 {
-            self.rth_deadline_ms = None;
-            self.low_batt_action = None;
-            if pct > low_pct + 5.0 {
-                self.low_batt_cancelled = false;
-            }
-            return;
-        }
-        if pct > low_pct || self.low_batt_cancelled || matches!(self.owner(), Owner::FcMode) {
-            return;
-        }
         // A multirotor that may fly without GNSS lands where it is: a return
         // climbs to the RTL altitude, into the roof indoors. In a confined
         // place on external nav it returns along the flown path instead (the
@@ -115,21 +106,68 @@ impl Pilot {
             && crate::batt_failsafe::lands_on_low(self.settings.pilot.place_class, |n| {
                 self.fc.params.get(n).copied()
             });
+        let reserve = if airborne {
+            let r = self.battery_reserve(pct, low_pct, now_ms);
+            // Landing where it is needs no charge for the way home.
+            Some(if land {
+                Reserve {
+                    need_pct: low_pct,
+                    energy: false,
+                    short: false,
+                    ..r
+                }
+            } else {
+                r
+            })
+        } else {
+            self.sup.energy.clear();
+            None
+        };
+        self.sup.energy.reserve = reserve;
+        let short = reserve.is_some_and(|r| r.short);
+        // Re-armed 5 % above the level it fired at (the need shrinks on the
+        // way home).
+        let need_pct = reserve.map_or(low_pct, |r| r.need_pct);
+        let rearm_pct = self.sup.energy.latch_pct.unwrap_or(need_pct).max(need_pct) + 5.0;
+        if !airborne || (pct > rearm_pct && !short) {
+            self.rth_deadline_ms = None;
+            self.low_batt_action = None;
+            self.sup.energy.latch_pct = None;
+            if pct > rearm_pct {
+                self.low_batt_cancelled = false;
+            }
+            return;
+        }
+        if (pct > low_pct && !short)
+            || self.low_batt_cancelled
+            || matches!(self.owner(), Owner::FcMode)
+        {
+            return;
+        }
+        let basis = if short && pct > low_pct {
+            "energy"
+        } else {
+            "floor"
+        };
+        let return_s = reserve.map_or(0.0, |r| r.return_s);
         let action = if land { "land" } else { "rth" };
         self.low_batt_action = Some(action);
         let Some(deadline) = self.rth_deadline_ms else {
+            self.sup.energy.latch_pct = Some(need_pct);
             let countdown_s = self.settings.pilot.low_battery_countdown_s;
             self.rth_deadline_ms = Some(now_ms + u64::from(countdown_s) * 1000);
-            // The countdown names the action it ends in.
+            // The countdown names the action it ends in, and a return the
+            // energy estimate asked for names the charge the way home needs.
+            let key = match (land, basis) {
+                (true, _) => "pilot.banner.low_battery_land_in",
+                (false, "energy") => "pilot.banner.low_battery_rth_energy",
+                (false, _) => "pilot.banner.low_battery_rth",
+            };
             self.banner = Some(banner(
-                if land {
-                    "pilot.banner.low_battery_land_in"
-                } else {
-                    "pilot.banner.low_battery_rth"
-                },
+                key,
                 &[
                     ("pct", json!(whole_pct(pct))),
-                    ("need_pct", json!(whole_pct(low_pct))),
+                    ("need_pct", json!(whole_pct(need_pct))),
                     ("in_s", json!(countdown_s)),
                 ],
                 now_ms,
@@ -137,7 +175,9 @@ impl Pilot {
             tracing::warn!(
                 target: "ados_pilot",
                 pct,
-                need_pct = low_pct,
+                need_pct,
+                basis,
+                return_s,
                 action,
                 event = "countdown",
                 in_s = countdown_s,
@@ -158,7 +198,9 @@ impl Pilot {
         tracing::warn!(
             target: "ados_pilot",
             pct,
-            need_pct = low_pct,
+            need_pct,
+            basis,
+            return_s,
             action,
             event = "fired",
             refused = res.as_ref().err(),

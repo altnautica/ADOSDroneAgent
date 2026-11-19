@@ -80,6 +80,8 @@ pub struct Supervisor {
     pub trail: super::trail::Trail,
     /// Blocked returns resumed this flight ([`RETURN_BLOCKED_RESUMES`]).
     pub return_resumes: u32,
+    /// The current average the low-battery return's energy estimate uses.
+    pub energy: super::energy::Energy,
 }
 
 impl Pilot {

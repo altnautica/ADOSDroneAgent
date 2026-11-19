@@ -101,6 +101,11 @@ pub struct FcState {
     /// The newest FC STATUSTEXT at WARNING or worse, oldest first.
     pub statustext: VecDeque<Stamped<(u8, String)>>,
     pub battery_pct: Option<f32>,
+    /// Battery current, A (SYS_STATUS `current_battery`), `None` while the
+    /// FC measures none.
+    pub battery_current_a: Option<Stamped<f32>>,
+    /// Charge used, mAh (BATTERY_STATUS id 0 `current_consumed`).
+    pub battery_consumed_mah: Option<f32>,
     pub params: HashMap<String, f32>,
     /// How often the pilot has asked the FC for each parameter it has not
     /// had an answer for (`PARAM_REQUEST_READ`).
@@ -254,8 +259,19 @@ impl FcState {
                     self.push_statustext(s.severity as u8, text, now_ms);
                 }
             }
-            MavMessage::SYS_STATUS(s) if s.battery_remaining >= 0 => {
-                self.battery_pct = Some(f32::from(s.battery_remaining));
+            MavMessage::SYS_STATUS(s) => {
+                if s.battery_remaining >= 0 {
+                    self.battery_pct = Some(f32::from(s.battery_remaining));
+                }
+                if s.current_battery >= 0 {
+                    self.battery_current_a = Some(Stamped {
+                        v: f32::from(s.current_battery) / 100.0,
+                        at_ms: now_ms,
+                    });
+                }
+            }
+            MavMessage::BATTERY_STATUS(b) if b.id == 0 && b.current_consumed >= 0 => {
+                self.battery_consumed_mah = Some(b.current_consumed as f32);
             }
             MavMessage::GPS_RAW_INT(g) => {
                 self.gps_fix = Some(Stamped {

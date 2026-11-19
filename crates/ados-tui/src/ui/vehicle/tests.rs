@@ -833,6 +833,27 @@ fn the_alerts_name_the_pilots_low_battery_action_once_it_fired() {
 }
 
 #[test]
+fn an_energy_return_names_the_charge_the_way_home_needs() {
+    let mut app = live_app();
+    let mut frame = pilot_frame();
+    frame["low_battery_action"] = json!("rth");
+    frame["battery_reserve"] = json!({"need_pct": 52, "basis": "energy", "return_s": 248});
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame.clone(), 100));
+    let text = draw(&mut app, 160, 48);
+    // The alerts column cuts the line after the need.
+    assert!(
+        text.contains("Low battery: returning home · need 52%"),
+        "{text}"
+    );
+    // On the fixed floor the item reads as before.
+    frame["battery_reserve"] = json!({"need_pct": 30, "basis": "floor", "return_s": 40});
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("Low battery: returning home"), "{text}");
+    assert!(!text.contains("need 52%"), "{text}");
+}
+
+#[test]
 fn the_chip_reads_the_owning_skills_detail_from_its_plugin() {
     let mut app = live_app();
     land(

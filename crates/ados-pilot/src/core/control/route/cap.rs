@@ -259,7 +259,7 @@ impl Pilot {
     }
 
     /// The FC's default waypoint speed, m/s.
-    fn default_wp_speed(&self) -> Option<f32> {
+    pub(in crate::core) fn default_wp_speed(&self) -> Option<f32> {
         let p = &self.fc.params;
         p.get("WP_SPD")
             .copied()

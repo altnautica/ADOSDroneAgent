@@ -20,11 +20,13 @@
  */
 
 import {
+  parseBatteryReserve,
   parsePositionUnverified,
   parseProfileLimits,
   parseSpeedCap,
   parseStatusText,
   parseStickCommand,
+  type BatteryReserve,
   type FcStatusText,
   type PositionUnverified,
   type ProfileLimits,
@@ -42,7 +44,7 @@ import {
   type RouteCheck,
 } from "./cockpit-mission";
 
-export type { FcStatusText, PositionUnverified, ProfileLimits, SpeedCap, StickCommand } from "./pilot-fields";
+export type { BatteryReserve, FcStatusText, PositionUnverified, ProfileLimits, SpeedCap, StickCommand } from "./pilot-fields";
 export {
   decodeBase64Into,
   decodeGridCode,
@@ -227,6 +229,9 @@ export interface PilotState {
    *  or `rth`, while its countdown runs (`rthCountdownS`) and after it
    *  fired; null while none. */
   lowBatteryAction: "land" | "rth" | null;
+  /** The charge a low-battery return home needs, airborne; null on the
+   *  ground. */
+  batteryReserve: BatteryReserve | null;
   /** A horizontal speed cap the pilot applies to every setpoint it flies
    *  (`gnss-denied` while the EKF horizontal source is not GNSS,
    *  `confined-near` near the clearance limit in a confined place), or null. */
@@ -329,6 +334,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     failsafeCause: str(p.failsafe_cause),
     setupAbort: str(p.setup_abort),
     lowBatteryAction: oneOf(p.low_battery_action, ["land", "rth"] as const),
+    batteryReserve: parseBatteryReserve(p.battery_reserve),
     speedCap: parseSpeedCap(p.speed_cap),
     placeClass: oneOf(p.place_class, PLACE_CLASSES) ?? "open",
     rcReceiver: p.rc_receiver === "absent" ? "absent" : "present",

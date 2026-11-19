@@ -65,6 +65,18 @@ pub fn low_battery_text(action: Option<&str>) -> Option<String> {
     }
 }
 
+/// The low-battery item as listed: a return the estimate of the way home
+/// asked for names the charge it needs.
+fn low_battery_item(p: &Pilot) -> Option<String> {
+    match (p.low_battery_action.as_deref(), p.energy_need_pct) {
+        (Some("rth"), Some(need)) => Some(spec_text(
+            "alert.low_battery_rth_energy",
+            &[("need_pct", &need.to_string())],
+        )),
+        (action, _) => low_battery_text(action),
+    }
+}
+
 /// The pilot holds for a lost controller while armed and airborne. An
 /// unknown arm or landed state is possibly airborne.
 pub fn controller_lost(p: &Pilot) -> bool {
@@ -147,9 +159,10 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
         let text = spec_text(key, &[]);
         push(&mut out, "setup_abort", Severity::Warning, text);
     }
+    // The pilot's STATUSTEXT line folds into the item (`low_battery`).
     let low_battery = fresh.and_then(|p| low_battery_text(p.low_battery_action.as_deref()));
-    if let Some(text) = &low_battery {
-        push(&mut out, "low_battery", Severity::Critical, text.clone());
+    if let Some(text) = fresh.and_then(low_battery_item) {
+        push(&mut out, "low_battery", Severity::Critical, text);
     }
     if let Some(s) = fresh.and_then(|p| p.mission_stall.as_ref()) {
         push(

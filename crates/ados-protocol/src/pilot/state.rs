@@ -272,6 +272,31 @@ pub struct FcStatusText {
     pub age_ms: u64,
 }
 
+/// The charge a return home needs, published every tick airborne.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BatteryReserve {
+    /// The charge level the low-battery return fires at, whole %: the
+    /// energy estimate of the way home, never below the fixed floor.
+    pub need_pct: u32,
+    /// `energy` (the estimate of the way home sets `need_pct`) or `floor`
+    /// (the fixed floor does: no current measured, no capacity set, or the
+    /// way home is short).
+    pub basis: String,
+    /// Seconds the return home takes, countdown included.
+    pub return_s: u32,
+}
+
+impl BatteryReserve {
+    pub fn new(need_pct: u32, basis: impl Into<String>, return_s: u32) -> Self {
+        Self {
+            need_pct,
+            basis: basis.into(),
+            return_s,
+        }
+    }
+}
+
 /// A horizontal speed cap the pilot enforces on every setpoint it flies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -428,6 +453,10 @@ pub struct PilotState {
     /// battery recovers or the vehicle is on the ground. Omitted while none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low_battery_action: Option<String>,
+    /// The charge a low-battery return home needs, every tick airborne;
+    /// omitted on the ground.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_reserve: Option<BatteryReserve>,
     /// The FC setup engine's active step id (`autotune`, `first_hover`, …)
     /// while the owner is `tuning`; `None` otherwise.
     #[serde(default)]

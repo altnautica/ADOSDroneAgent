@@ -270,6 +270,10 @@ pub struct Pilot {
     /// While the low-battery countdown runs, whether it ends in a landing
     /// (`low_battery_action` `land`; a GNSS-free copter lands, never returns).
     pub low_battery_countdown_land: bool,
+    /// The charge level a low-battery return home needs (`battery_reserve`
+    /// `need_pct`) while the estimate of the way home sets it (`basis`
+    /// `energy`); `None` on the fixed floor or the ground.
+    pub energy_need_pct: Option<u32>,
     /// The horizontal speed cap (m/s) the pilot applies to every setpoint it
     /// flies (`speed_cap.v_h_mps`, e.g. while GNSS-denied); `None` without one.
     pub speed_cap_mps: Option<f64>,

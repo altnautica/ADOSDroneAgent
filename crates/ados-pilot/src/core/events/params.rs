@@ -41,6 +41,15 @@ const EXTRA_PARAMS: &[&str] = &[
     // (m/s), `WPNAV_SPEED` (cm/s) before it.
     "WP_SPD",
     "WPNAV_SPEED",
+    // The energy-aware low-battery return (`core::control::energy`): the
+    // critical reserve, the descent speed (`WP_SPD_DN` m/s, `WPNAV_SPEED_DN`
+    // cm/s before it), the height the landing slows at (cm) and SmartRTL's
+    // path accuracy (its loop pruning).
+    "BATT_CRT_MAH",
+    "WP_SPD_DN",
+    "WPNAV_SPEED_DN",
+    "LAND_ALT_LOW",
+    "SRTL_ACCURACY",
     // The EKF's horizontal position source per source set (3 = GPS): the
     // GNSS-denied speed cap.
     "EK3_SRC1_POSXY",
@@ -84,9 +93,14 @@ impl Pilot {
         } else {
             &[]
         };
-        // The steady take-off's and airframe health's parameters.
+        // The steady take-off's, airframe health's and the confined height
+        // source's parameters.
         let liftoff: &[&[&str]] = if ardupilot {
-            &[crate::liftoff::PARAMS, crate::airframe::PARAMS]
+            &[
+                crate::liftoff::PARAMS,
+                crate::airframe::PARAMS,
+                crate::height_source::PARAMS,
+            ]
         } else {
             &[]
         };

@@ -26,6 +26,7 @@ pub mod fc_sensor_profile;
 pub mod fixedwing;
 pub mod flows;
 pub mod geo;
+pub mod height_source;
 pub mod ipc;
 pub mod liftoff;
 pub mod link_watch;

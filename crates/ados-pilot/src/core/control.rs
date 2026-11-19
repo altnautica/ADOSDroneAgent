@@ -12,6 +12,7 @@ use crate::geo::{self, V2};
 use crate::planner;
 
 mod brake;
+mod energy;
 mod failsafes;
 mod goal_brake;
 mod goal_ref;

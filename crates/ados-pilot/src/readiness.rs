@@ -110,6 +110,8 @@ pub fn items(
         out.push(profile_item(fc, fw, mode, place, rc));
         if fw == Firmware::Ardupilot {
             out.push(crate::batt_failsafe::item_for(fc, mode, place));
+            let p = |n: &str| fc.params.get(n).copied();
+            out.extend(crate::height_source::item(fc.vehicle_class(), place, p));
         }
     }
     out.push(position_item(fc, now_ms));
