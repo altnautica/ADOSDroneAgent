@@ -46,7 +46,7 @@ pub fn ellipse_samples(s: &VantageSpec) -> Vec<V2> {
     let tr = a + c;
     let disc = ((a - c) * (a - c) / 4.0 + b * b).sqrt();
     let (l1, l2) = ((tr / 2.0 + disc).max(0.0), (tr / 2.0 - disc).max(0.0));
-    let th = 0.5 * (2.0 * b).atan2(a - c);
+    let th = 0.5 * geo::atan2(2.0 * b, a - c);
     let (r1, r2) = (s.sigma_k * l1.sqrt(), s.sigma_k * l2.sqrt());
     let (st, ct) = th.sin_cos();
     let mut out = Vec::with_capacity(9 + s.hypotheses_ne.len());

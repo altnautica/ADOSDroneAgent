@@ -30,7 +30,7 @@ pub(super) fn level_return(range: f32, theta: f32, l: Level, pos_ne: V2) -> (Hit
     // z2 is down: the ground below, the slice's top at −SLICE_HALF_M.
     let ground = l.agl.is_some_and(|agl| agl - z2 < GROUND_REJECT_M);
     let hit = Hit {
-        body_bearing: y1.atan2(x2),
+        body_bearing: geo::atan2(y1, x2),
         range_m: x2.hypot(y1),
         ne: geo::add(pos_ne, geo::body_to_ned(x2, y1, l.yaw)),
         overhead: -z2 > SLICE_HALF_M,

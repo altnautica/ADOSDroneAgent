@@ -90,7 +90,7 @@ impl Doublets {
     ) -> Demand {
         let dist = (offset_ne[0].powi(2) + offset_ne[1].powi(2)).sqrt();
         // Bearing to the centre against heading.
-        let to_center = (-offset_ne[1]).atan2(-offset_ne[0]);
+        let to_center = crate::geo::atan2(-offset_ne[1], -offset_ne[0]);
         let mut err = to_center - heading_rad;
         while err > std::f32::consts::PI {
             err -= 2.0 * std::f32::consts::PI;

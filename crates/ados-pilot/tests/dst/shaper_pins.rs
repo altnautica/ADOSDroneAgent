@@ -11,12 +11,11 @@ use crate::scenarios::{fly_sticks, launch_to_hold};
 use crate::sim::Sim;
 
 /// The pins are recorded to six decimals and the simulation replays a seed
-/// byte for byte on one machine: a pure restructuring of the pilot repeats
-/// them to the last digit. Across machines the platform's `sin`/`cos` can
-/// differ in the last bit and a closed loop carries it to about a
-/// millimetre; one centimetre (1 cm/s, 10 mrad) allows for that, far below
-/// the seeded wind and sensor noise the copter already flies in.
-const TOL: f32 = 1e-2;
+/// bit for bit on every machine (the pilot's inverse trigonometry is the
+/// pure-Rust `libm`, `ados_pilot::geo::atan2`). 1e-5 is the six-decimal
+/// rounding plus one f32 step at the largest pinned value (14 m); anything
+/// past it is a change in how the pilot flies.
+const TOL: f32 = 1e-5;
 
 const SEEDS: [u64; 3] = [1, 2, 3];
 

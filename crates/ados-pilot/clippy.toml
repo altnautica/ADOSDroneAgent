@@ -1,0 +1,7 @@
+# The platform's inverse trigonometry differs in the last bit between machines (glibc
+# 2.43 against 2.39, musl): the pilot uses the pure-Rust `libm` through `geo`.
+disallowed-methods = [
+    { path = "f32::atan2", reason = "use crate::geo::atan2: the same result on every machine" },
+    { path = "f32::asin", reason = "use crate::geo::asin: the same result on every machine" },
+    { path = "f32::acos", reason = "use crate::geo::acos: the same result on every machine" },
+]

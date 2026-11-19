@@ -27,6 +27,7 @@ ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
 ados-time = { path = "../ados-time" }
 base64 = { workspace = true }
+libm = "0.2"
 png = { workspace = true }
 rmp-serde = { workspace = true }
 rmpv = { workspace = true }

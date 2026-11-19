@@ -305,8 +305,8 @@ impl FcState {
             }
             MavMessage::ATTITUDE_TARGET(t) => {
                 let [w, x, y, z] = t.q;
-                let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
-                let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+                let roll = crate::geo::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
+                let pitch = crate::geo::asin((2.0 * (w * y - z * x)).clamp(-1.0, 1.0));
                 self.att_target = Some(([roll, pitch], now_ms));
             }
             MavMessage::NAV_CONTROLLER_OUTPUT(n) => {

@@ -307,9 +307,12 @@ impl FakeFc {
             MavMessage::SET_ATTITUDE_TARGET(t) => {
                 if let Some(af) = self.airframe.as_mut() {
                     let q = t.q;
-                    let roll = (2.0 * (q[0] * q[1] + q[2] * q[3]))
-                        .atan2(1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]));
-                    let pitch = (2.0 * (q[0] * q[2] - q[3] * q[1])).clamp(-1.0, 1.0).asin();
+                    let roll = crate::geo::atan2(
+                        2.0 * (q[0] * q[1] + q[2] * q[3]),
+                        1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]),
+                    );
+                    let pitch =
+                        crate::geo::asin((2.0 * (q[0] * q[2] - q[3] * q[1])).clamp(-1.0, 1.0));
                     af.target = Some(([roll, pitch, af.att[2]], t.thrust));
                     self.af_engaged = true;
                 }

@@ -11,13 +11,13 @@ use super::pins::Pin;
 use super::shaping::flying;
 use crate::modes::copter;
 
-/// The pins are recorded to six decimals and the shaping arithmetic is
-/// deterministic on one machine: a pure restructuring repeats them to the
-/// last digit. Across machines the platform's `sin`/`cos` can differ in the
-/// last bit, and a closed loop carries that to about a millimetre over a few
-/// seconds (1.2 mm at 4.3 s on CI). One centimetre (1 cm/s, 10 mrad) allows
-/// for that and nothing a flight would show.
-const TOL: f32 = 1e-2;
+/// The pins are recorded to six decimals and repeat bit for bit on every
+/// machine: the pilot's inverse trigonometry is the pure-Rust `libm`
+/// ([`crate::geo::atan2`]), the one platform function whose last bit moved a
+/// scan bearing across a sector edge here (glibc 2.43 against CI's 2.39).
+/// 1e-5 is the six-decimal rounding plus one f32 step at the largest pinned
+/// value (16 m); anything past it is a change in how the pilot flies.
+const TOL: f32 = 1e-5;
 
 /// The vehicle's horizontal position and velocity, and the last setpoint:
 /// its position, velocity, acceleration and heading.

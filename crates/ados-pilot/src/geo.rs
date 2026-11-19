@@ -43,7 +43,30 @@ pub fn bearing_unit(bearing: f32) -> V2 {
 
 /// Bearing in radians of a vector (0 = north, clockwise).
 pub fn bearing_of(a: V2) -> f32 {
-    a[1].atan2(a[0])
+    atan2(a[1], a[0])
+}
+
+// The inverse trigonometric functions every pilot path uses, from the
+// pure-Rust `libm`: one result on every machine. The platform's own differ
+// in the last bit: glibc 2.43 replaced `atan2f`, `asinf` and `acosf` with
+// correctly rounded versions that the CI's glibc 2.39 and the drone's musl
+// do not have. A bearing on a sector edge (a scan return at a multiple of
+// 5°) then falls in the neighbouring sector on one machine and not on
+// another, and the obstacle brake flies differently.
+
+/// `atan2(y, x)`, the same on every machine.
+pub fn atan2(y: f32, x: f32) -> f32 {
+    libm::atan2f(y, x)
+}
+
+/// `asin(x)`, the same on every machine.
+pub fn asin(x: f32) -> f32 {
+    libm::asinf(x)
+}
+
+/// `acos(x)`, the same on every machine.
+pub fn acos(x: f32) -> f32 {
+    libm::acosf(x)
 }
 
 /// Body (forward, right) to NED by heading `yaw`.

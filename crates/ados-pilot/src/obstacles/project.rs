@@ -135,7 +135,7 @@ pub fn project_camera(
             if horizontal < MIN_HORIZONTAL {
                 continue;
             }
-            let bin = ((d[1].atan2(d[0]) / BEARING_STEP_RAD).round() as i32)
+            let bin = ((crate::geo::atan2(d[1], d[0]) / BEARING_STEP_RAD).round() as i32)
                 .rem_euclid(BEARING_BINS as i32) as usize;
             let slot = &mut scratch.rays[bin];
             if slot.0 != scratch.frame {

@@ -307,7 +307,7 @@ impl Airframe {
         let (Some(l), Some(a)) = (fc.fresh_local(now_ms), fc.fresh_attitude(now_ms)) else {
             return false;
         };
-        let tilt = (a.roll.cos() * a.pitch.cos()).clamp(-1.0, 1.0).acos();
+        let tilt = crate::geo::acos((a.roll.cos() * a.pitch.cos()).clamp(-1.0, 1.0));
         let calm = |s: Option<crate::fc::Stamped<crate::fc::rates::PidAxis>>| {
             s.is_none_or(|s| s.v.desired.abs() < STEADY_RATE_DPS)
         };
