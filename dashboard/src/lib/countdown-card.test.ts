@@ -154,7 +154,7 @@ describe("a steady take-off on the countdown card", () => {
   it("shows its status line and detail while the launch runs", () => {
     const pilot = launching({
       error: null,
-      liftoff: { phase: "probe", text: "Checking balance", detail: "Adjusting trim, try 2 of 6", trim: "probe", tilt_deg: 1.2 },
+      liftoff: { phase: "bracket", text: "Checking balance", detail: "Adjusting trim, try 2 of 6", trim: "probe", tilt_deg: 1.2 },
     });
     expect(countdownCard(pilot, 0, NOW)?.liftoff).toBe("Checking balance. Adjusting trim, try 2 of 6");
     expect(render(pilot)).toContain('data-testid="countdown-liftoff"');
