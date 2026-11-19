@@ -428,6 +428,25 @@ fn a_stuck_low_rangefinder_raises_the_climb_floor_once() {
     assert!((d + FLOOR_AGL).abs() < 0.01, "setpoint d {d:.2}");
 }
 
+/// A stuck rangefinder that dithers between two readings under a vehicle
+/// climbing clear with no horizontal motion: every reading change re-takes
+/// the ground, but a re-take stays within a reading step of the first, so
+/// the floor never ratchets up with the climb.
+#[test]
+fn a_dithering_stuck_rangefinder_holds_the_climb_floor() {
+    let (mut w, id) = flying();
+    w.pos[2] = -1.5;
+    w.agl = Some(1.5);
+    let s = [w.pos[0] + 3.5, w.pos[1]];
+    for k in 0..20 {
+        fly_for(&mut w, id, 200, |_, _| follow(0.0, Some(s), -1.5));
+        w.pos[2] = setpoint(&w).1;
+        w.agl = Some(if k % 2 == 0 { 1.6 } else { 1.5 });
+    }
+    let d = setpoint(&w).1;
+    assert!((d + FLOOR_AGL).abs() < 0.1, "setpoint d {d:.2}");
+}
+
 /// Goals that arrive bunched by transport jitter (5 ms, then 95 ms apart),
 /// the tracker's 20 Hz step of a subject walking at 1.5 m/s between them,
 /// keep the brake armed: the step is judged over at least a goal period.

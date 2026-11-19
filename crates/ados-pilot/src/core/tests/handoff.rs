@@ -384,3 +384,28 @@ fn skill_and_swarm_yield_to_a_ground_station_reposition_outside_ados() {
     }
     assert_eq!(setpoints(&w), 0, "the swarm overwrote the FC's reposition");
 }
+
+/// In `fc_manual`, the FC flying RTL and then LAND on its own: Pause is
+/// always answered, ok or refused with `landed` or `failsafe`, never left
+/// without a reply.
+#[test]
+fn pause_answers_in_fc_manual_after_rth_and_land() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    assert!(ok(&w.action("control_mode:fc_manual")));
+    w.run(100);
+    for mode in [copter::RTL, copter::LAND] {
+        w.mode = mode;
+        w.run(200);
+        let r = w.action("pause");
+        assert!(
+            matches!(r, Reply::Action(_)),
+            "mode {mode}: no action reply: {r:?}"
+        );
+        assert!(
+            ok(&r) || matches!(err(&r), Some("landed" | "failsafe")),
+            "mode {mode}: {r:?}"
+        );
+        w.run(200);
+    }
+}

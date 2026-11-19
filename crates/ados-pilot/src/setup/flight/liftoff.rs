@@ -181,7 +181,8 @@ impl Supervised {
         Lift::Lifting
     }
 
-    /// Never lifted, no higher than at rest and not climbing.
+    /// Never lifted, no higher than at rest and not climbing, and the
+    /// rangefinder (when fitted) reading no more than at rest.
     fn ground_contact(&self, inp: &Inputs) -> bool {
         let Some(lo) = self.lo.as_ref() else {
             return false;
@@ -189,7 +190,14 @@ impl Supervised {
         let (Some(rest), Some(now)) = (lo.start(), inp.local) else {
             return false;
         };
-        !lo.lifted_ever() && rest.d - now.d <= GROUND_RISE_M && now.vd.abs() <= GROUND_VZ_MPS
+        let range_ok = match (lo.rest_agl(), inp.agl) {
+            (Some(r0), Some(r)) => r - r0 <= GROUND_RISE_M,
+            _ => true,
+        };
+        !lo.lifted_ever()
+            && rest.d - now.d <= GROUND_RISE_M
+            && now.vd.abs() <= GROUND_VZ_MPS
+            && range_ok
     }
 }
 
@@ -252,6 +260,6 @@ fn inputs(cx: &Cx) -> Inputs {
             }),
         i: cx.fc.loop_rates.fresh_i(now, FRESH_MS),
         motors,
-        agl: None,
+        agl: cx.fc.rangefinder_agl(now),
     }
 }

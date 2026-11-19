@@ -121,6 +121,13 @@ pub struct FakeFc {
     /// An airframe on its skids that flies SET_ATTITUDE_TARGET in GUIDED
     /// (the supervised lift-off); `None`: such targets are ignored.
     pub airframe: Option<crate::liftoff::sim::Airframe>,
+    /// A downward rangefinder this far above the ground on the skids (m),
+    /// sent as DISTANCE_SENSOR with the airframe; `None`: no rangefinder.
+    pub rangefinder_skid_m: Option<f32>,
+    /// The FC's height estimate creeps up this fast (m/s) while the armed
+    /// airframe is still on its skids.
+    pub ekf_creep_mps: f32,
+    ekf_creep_m: f32,
     /// The airframe flies the attitude and position targets (GUIDED, armed).
     af_engaged: bool,
     /// PID_TUNING was asked for with SET_MESSAGE_INTERVAL.
@@ -168,6 +175,9 @@ impl FakeFc {
             uid: 0x00C0_FFEE_1234_5678,
             uid2: None,
             airframe: None,
+            rangefinder_skid_m: None,
+            ekf_creep_mps: 0.0,
+            ekf_creep_m: 0.0,
             af_engaged: false,
             rate_streams: false,
         }

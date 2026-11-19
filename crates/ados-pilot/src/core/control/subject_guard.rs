@@ -68,6 +68,11 @@ pub const SUBJECT_CLEAR_M: f32 = 1.0;
 /// above ground reads more than this from the reading it was taken at,
 /// metres: a stuck reading never moves it, rising ground does.
 const SUBJECT_GROUND_READ_M: f32 = 0.05;
+/// The steepest ground the climb floor follows, rise per metre moved from
+/// where the climb began: a reading that dithers in place moves the floor
+/// at most [`SUBJECT_GROUND_READ_M`] from the first take, never ratcheting
+/// it away.
+const SUBJECT_TERRAIN_GRADE: f32 = 0.5;
 
 /// What the pilot keeps of the subject across ticks: the lease whose goals
 /// named it, the latest subject and its goal's arrival, its smoothed
@@ -81,7 +86,18 @@ pub struct SubjectTrack {
     vel: V2,
     named_ms: u64,
     climbing: bool,
-    ground_d: Option<(f32, f32)>,
+    ground_d: Option<GroundTake>,
+}
+
+/// The ground's down position `d` and the height-above-ground reading it was
+/// taken at, and the first take of the climb (`d0` at north, east `ne0`)
+/// that bounds every later one.
+#[derive(Debug, Clone, Copy)]
+struct GroundTake {
+    d: f32,
+    read: f32,
+    d0: f32,
+    ne0: V2,
 }
 
 /// One tick's subject: where it is, the horizontal distance kept from it
@@ -187,20 +203,40 @@ impl Pilot {
         // The ground is taken when the climb begins, and again only when the
         // height above ground reads a new value: a rangefinder stuck low then
         // raises the setpoint once, never a climb that follows the vehicle
-        // up, while rising ground still lifts the floor.
+        // up, while rising ground still lifts the floor. A re-take keeps the
+        // ground within a reading step plus the grade over the distance moved
+        // since the first take, so a reading that dithers in place cannot
+        // ratchet the floor up.
         if t.climbing {
             if let Some(a) = agl {
-                if t.ground_d
-                    .is_none_or(|(_, read)| (a - read).abs() > SUBJECT_GROUND_READ_M)
-                {
-                    t.ground_d = Some((pos[2] + a, a));
+                let pos_ne = [pos[0], pos[1]];
+                let cand = pos[2] + a;
+                match t.ground_d {
+                    None => {
+                        t.ground_d = Some(GroundTake {
+                            d: cand,
+                            read: a,
+                            d0: cand,
+                            ne0: pos_ne,
+                        });
+                    }
+                    Some(take) if (a - take.read).abs() > SUBJECT_GROUND_READ_M => {
+                        let bound = SUBJECT_GROUND_READ_M
+                            + SUBJECT_TERRAIN_GRADE * geo::dist(pos_ne, take.ne0);
+                        t.ground_d = Some(GroundTake {
+                            d: cand.clamp(take.d0 - bound, take.d0 + bound),
+                            read: a,
+                            ..take
+                        });
+                    }
+                    Some(_) => {}
                 }
             }
         }
         let vel = t.vel;
         let floor_d = t
             .ground_d
-            .map(|(g, _)| g - (SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M));
+            .map(|g| g.d - (SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M));
         let subject = Subject {
             ne,
             keep,

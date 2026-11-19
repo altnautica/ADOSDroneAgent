@@ -132,11 +132,21 @@ impl FakeFc {
             MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
                 x: self.n,
                 y: self.e,
-                z: -self.alt,
+                z: -(self.alt + self.ekf_creep_m),
                 vz: if self.af_engaged { -af.vz } else { 0.0 },
                 ..Default::default()
             }),
         ];
+        if let Some(skid) = self.rangefinder_skid_m {
+            msgs.push(MavMessage::DISTANCE_SENSOR(DISTANCE_SENSOR_DATA {
+                current_distance: ((skid + af.h) * 100.0).round() as u16,
+                min_distance: 2,
+                max_distance: 1200,
+                orientation:
+                    ados_protocol::mavlink::ardupilotmega::MavSensorOrientation::MAV_SENSOR_ROTATION_PITCH_270,
+                ..Default::default()
+            }));
+        }
         if self.armed && self.rate_streams {
             for (axis, i) in [
                 (PidTuningAxis::PID_TUNING_ROLL, af.i[0]),
@@ -180,6 +190,7 @@ impl FakeFc {
         let dt = TICK as f32 / 1000.0;
         if !self.armed {
             self.alt = 0.0;
+            self.ekf_creep_m = 0.0;
             if let Some(af) = self.airframe.as_mut() {
                 // Disarmed: back on the skids, the next take-off its own.
                 *af = crate::liftoff::sim::Airframe::new(af.hover, af.trim);
@@ -196,6 +207,9 @@ impl FakeFc {
                     af.step(0.005);
                 }
                 self.alt = af.h;
+                if af.h <= 0.0 {
+                    self.ekf_creep_m += self.ekf_creep_mps * dt;
+                }
                 return;
             }
             // Out of GUIDED: the FC's own mode flies from here.

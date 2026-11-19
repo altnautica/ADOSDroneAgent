@@ -113,6 +113,9 @@ pub struct FcState {
     /// The rate-loop integrators and motor outputs (PID_TUNING and
     /// SERVO_OUTPUT_RAW) the supervised lift-off reads.
     pub loop_rates: crate::fc::rates::Rates,
+    /// Downward rangefinder (DISTANCE_SENSOR, PITCH_270) height in metres
+    /// and when it was read, only readings inside the sensor's own range.
+    pub rangefinder: Option<(f32, u64)>,
 }
 
 impl FcState {
@@ -245,6 +248,15 @@ impl FcState {
         }
     }
 
+    /// Rangefinder height while fresh (≤ 500 ms) and under the trusted range.
+    pub fn rangefinder_agl(&self, now_ms: u64) -> Option<f32> {
+        self.rangefinder
+            .filter(|&(v, t)| {
+                now_ms.saturating_sub(t) <= 500 && v < crate::fc::AGL_RANGEFINDER_MAX_M
+            })
+            .map(|(v, _)| v)
+    }
+
     pub fn ingest(&mut self, header: &MavHeader, msg: &MavMessage, now_ms: u64) {
         match msg {
             MavMessage::HEARTBEAT(h) => {
@@ -312,6 +324,14 @@ impl FcState {
             }
             MavMessage::LOCAL_POSITION_NED(p) => {
                 self.local = Some(([p.x, p.y, p.z, p.vx, p.vy, p.vz], now_ms));
+            }
+            MavMessage::DISTANCE_SENSOR(d) => {
+                use ados_protocol::mavlink::ardupilotmega::MavSensorOrientation as O;
+                let valid = d.current_distance >= d.min_distance
+                    && d.current_distance <= d.max_distance;
+                if d.orientation == O::MAV_SENSOR_ROTATION_PITCH_270 && valid {
+                    self.rangefinder = Some((f32::from(d.current_distance) / 100.0, now_ms));
+                }
             }
             MavMessage::GLOBAL_POSITION_INT(g) => {
                 self.rel_alt_m = Some(g.relative_alt as f32 / 1000.0);

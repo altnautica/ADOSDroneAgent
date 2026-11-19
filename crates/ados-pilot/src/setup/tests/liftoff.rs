@@ -130,3 +130,37 @@ fn with_the_switch_off_the_fc_takes_off_on_its_own() {
     assert!(!s.sent_cmds(MavCmd::MAV_CMD_NAV_TAKEOFF).is_empty());
     assert_eq!(attitude_targets(&s), 0);
 }
+
+#[test]
+fn the_wizard_liftoff_reads_the_rangefinder() {
+    // The FC's height estimate creeps past the lift-off rise on the skids
+    // while the airframe rocks finding its trim; the rangefinder reads the
+    // skids still down, so the wizard must not take that for a lift-off and
+    // hand a grounded airframe to the position controller.
+    let mut s = lift_ready(Airframe::new(0.6, [0.0, 0.2]));
+    s.fc.rangefinder_skid_m = Some(0.1);
+    s.fc.ekf_creep_mps = 0.05;
+    start_hover(&mut s);
+    let positions = |s: &Sim| {
+        s.fc.sent
+            .iter()
+            .filter(|m| matches!(m, MavMessage::SET_POSITION_TARGET_LOCAL_NED(_)))
+            .count()
+    };
+    let before = positions(&s);
+    let mut handed_at: Option<f32> = None;
+    let end = s.now + 60_000;
+    while s.fc.alt < 2.7 {
+        assert!(s.now < end, "never reached the hover height");
+        s.run(20);
+        if handed_at.is_none() && positions(&s) > before {
+            handed_at = Some(s.fc.airframe.as_ref().unwrap().h);
+        }
+    }
+    let h = handed_at.expect("handed over to the position controller");
+    assert!(h > 0.0, "handed over on the skids");
+    assert!(
+        s.sent_cmds(MavCmd::MAV_CMD_NAV_TAKEOFF).is_empty(),
+        "the FC's own take-off was never asked for"
+    );
+}
