@@ -45,6 +45,11 @@ pub struct LinkCtx {
     pub packets_lost: Option<i64>,
     /// 60-sample RSSI trend for the sparkline surfaces (`None` marks a gap).
     pub rssi_history: Vec<Option<f64>>,
+    /// The phone holding the fleet's uplink while this box stands by and only
+    /// receives (status `uplink.state` of `standby`): its name, else its
+    /// device id. `None` while the box transmits or the radio service is not
+    /// reporting; a status surface never guesses standby.
+    pub standby_holder: Option<String>,
 }
 
 impl LinkCtx {
@@ -58,7 +63,18 @@ impl LinkCtx {
     pub fn bitrate_mbps(&self) -> Option<f64> {
         self.bitrate_kbps.map(|kbps| kbps / 1000.0)
     }
+
+    /// `STANDBY <holder>` while a phone holds the uplink, the holder cut to
+    /// [`STANDBY_HOLDER_CHARS`] so it fits a 128 px OLED line.
+    pub fn standby_label(&self) -> Option<String> {
+        let holder = self.standby_holder.as_deref()?;
+        let short: String = holder.chars().take(STANDBY_HOLDER_CHARS).collect();
+        Some(format!("STANDBY {short}"))
+    }
 }
+
+/// The longest holder name the standby label carries.
+pub const STANDBY_HOLDER_CHARS: usize = 12;
 
 /// The `link.state` the agent reports once the radio snapshot has aged past its
 /// freshness window.

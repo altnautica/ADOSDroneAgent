@@ -145,6 +145,7 @@ pub enum Command {
     BtScan,
     Approve,
     Reject,
+    TakeBack,
     // a mission stall
     StallSkip,
     StallReturn,
@@ -325,6 +326,7 @@ pub const BINDINGS: &[Binding] = &[
     b(Page(P::Ground), ch('s'), C::BtScan, "s", Some("bt scan"), "Scan for Bluetooth devices"),
     b(Page(P::Ground), ch('a'), C::Approve, "a", Some("approve"), "Approve the invite"),
     b(Page(P::Ground), ch('x'), C::Reject, "x", None, "Reject the invite"),
+    b(Page(P::Ground), ch('T'), C::TakeBack, "T", Some("take back"), "Take the radio uplink back from a phone"),
     b(Page(P::Ground), kp(K::Enter), C::Activate, "Enter", Some("select"), "Set primary / pair"),
     // --- mission stall (Vehicle tab, while a fresh stall shows) ----------
     b(Page(P::Stall), ch('s'), C::StallSkip, "s", Some("skip wp"), "Skip the stalled waypoint"),

@@ -59,6 +59,37 @@ fn topology_is_read_from_the_link_block_and_never_assumed() {
     assert_eq!(ctx.link.topology.as_deref(), Some("powered_hub"));
 }
 
+/// The status `uplink` block is the radio uplink handover: standby names the
+/// phone holding it, and nothing else reads as standby. It is never mistaken
+/// for the cellular modem block.
+#[test]
+fn the_uplink_block_names_the_phone_holding_the_uplink() {
+    let mut src = source();
+    let standby = json!({"uplink": {"state": "standby", "holder_device_id": "a1b2c3d4e5f60718",
+                                    "holder_name": "Ops phone", "since_ms": 1,
+                                    "watcher": {"last_beacon_ms": 2}}});
+    let ctx = src.compose(Some(&standby), None, None);
+    assert_eq!(ctx.link.standby_holder.as_deref(), Some("Ops phone"));
+    assert_eq!(
+        ctx.link.standby_label().as_deref(),
+        Some("STANDBY Ops phone")
+    );
+    assert!(!ctx.uplink.modem_present);
+
+    let unnamed = json!({"uplink": {"state": "standby", "holder_device_id": "a1b2c3d4e5f60718"}});
+    let ctx = src.compose(Some(&unnamed), None, None);
+    assert_eq!(ctx.link.standby_holder.as_deref(), Some("a1b2c3d4e5f60718"));
+
+    for status in [
+        json!({"uplink": {"state": "transmitting"}}),
+        json!({"uplink": null}),
+        json!({}),
+    ] {
+        let ctx = src.compose(Some(&status), None, None);
+        assert_eq!(ctx.link.standby_holder, None, "{status}");
+    }
+}
+
 #[test]
 fn status_block_maps_link_role_mesh_and_system() {
     let mut src = source();

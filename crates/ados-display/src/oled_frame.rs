@@ -43,9 +43,13 @@ pub fn link_line(ctx: &PageContext) -> String {
     }
 }
 
-/// Format the fourth line: pairing window > role > ready.
+/// Format the fourth line: `STANDBY <holder>` while a phone holds the uplink
+/// (the box only receives, so that outranks everything), then the pairing
+/// window, the role, ready.
 pub fn status_line(ctx: &PageContext) -> String {
-    if ctx.pairing.window_active {
+    if let Some(standby) = ctx.link.standby_label() {
+        standby
+    } else if ctx.pairing.window_active {
         let secs = ctx.pairing.window_remaining_seconds.unwrap_or(0.0) as i64;
         format!("PAIRING {secs}s")
     } else if let Some(role) = ctx.role.current.as_deref() {
@@ -248,6 +252,16 @@ mod tests {
         ctx.pairing.window_active = true;
         ctx.pairing.window_remaining_seconds = Some(42.0);
         assert_eq!(status_line(&ctx), "PAIRING 42s");
+    }
+
+    #[test]
+    fn a_box_in_standby_says_so_and_who_holds_the_uplink() {
+        let mut ctx = ctx_with_host("gs");
+        ctx.pairing.window_active = true;
+        ctx.link.standby_holder = Some("Pilot tablet 7 (field)".to_string());
+        assert_eq!(status_line(&ctx), "STANDBY Pilot tablet");
+        ctx.link.standby_holder = None;
+        assert!(status_line(&ctx).starts_with("PAIRING"));
     }
 
     fn gs_ctx(adapters: usize) -> PageContext {

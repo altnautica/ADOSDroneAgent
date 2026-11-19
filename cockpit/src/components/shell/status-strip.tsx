@@ -28,6 +28,7 @@ import { CHROME } from "@/lib/cockpit-layout";
 import { useStatusStore } from "@/stores/status-store";
 import { fmtChannel, fmtDbm, fmtMbps, fmtPct, fmtTemp, DASH } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct } from "@/lib/format-status";
+import { uplinkView } from "@/shared/api/uplink-handover";
 import { linkDiagView, type LinkDiagView } from "@/lib/link-diag";
 import type { GsStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -138,6 +139,8 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
   const temp = status?.system?.temp_c ?? null;
   const recording = status?.recording === true || status?.video?.recording === true;
   const tempClass = temp == null ? undefined : temp >= 80 ? "text-err" : temp >= 70 ? "text-warn" : undefined;
+  const uplinkState = uplinkView(status?.uplink);
+  const standby = uplinkState?.state === "standby" ? uplinkState : null;
 
   return (
     <div className="flex items-center gap-[0.9rem]">
@@ -145,6 +148,15 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
         <span className="inline-flex items-center gap-[0.28rem] text-err">
           <span className="h-[0.5rem] w-[0.5rem] animate-pulse rounded-full bg-err" aria-hidden />
           <span className="text-[0.75rem] font-medium">{t("cockpit.shell.strip.rec")}</span>
+        </span>
+      ) : null}
+      {standby ? (
+        // A phone holds the uplink: this box only receives, so the kiosk must
+        // not read as the screen that flies the drone.
+        <span className="inline-flex items-center gap-[0.28rem] rounded-full bg-warn/15 px-[0.42rem] py-[0.08rem] text-warn">
+          <span className="text-[0.75rem] font-medium">
+            {t("wfb.uplink.stripStandby", { holder: standby.holder ?? t("wfb.uplink.aPhone") })}
+          </span>
         </span>
       ) : null}
       {role ? (

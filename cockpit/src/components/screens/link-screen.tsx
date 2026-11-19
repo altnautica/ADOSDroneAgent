@@ -21,6 +21,7 @@ import { useTranslation } from "react-i18next";
 import "@/shared/i18n";
 import { linkKeyStatusView } from "@/shared/link-key-status";
 import { useProfile } from "@/shared/use-profile";
+import { UplinkHandoverSection } from "./uplink-handover-section";
 
 interface WfbStatus {
   state?: string;
@@ -198,6 +199,7 @@ export function LinkScreen() {
         <EmptyNote>{t("common.loading")}</EmptyNote>
       ) : (
         <div className="flex flex-col gap-[0.15rem]">
+          {isGroundStation ? <UplinkHandoverSection /> : null}
           <SectionHeader>{t("cockpit.link.diagnosis")}</SectionHeader>
           {diag ? (
             <Row

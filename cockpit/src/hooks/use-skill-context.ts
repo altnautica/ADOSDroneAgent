@@ -16,6 +16,7 @@ import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore, type NavStreamState } from "@/stores/nav-stream-store";
 import { useStatusStore } from "@/stores/status-store";
+import { uplinkHeldReason, uplinkView } from "@/shared/api/uplink-handover";
 
 export const RELAYED_LINK_REASON = "Commands go through the drone's link";
 
@@ -31,16 +32,22 @@ interface ContextInputs {
   pending: SkillContext["pending"];
   fc: FcView;
   now: number;
+  /** Why commands are refused while a phone holds this ground station's
+   *  uplink (`uplinkHeldReason`), else null. */
+  uplinkHeld: string | null;
 }
 
 function buildContext(i: ContextInputs): SkillContext {
   const p = i.pilot;
+  // A box in standby only receives: nothing it would send reaches the fleet,
+  // so no command or pilot route is offered, and the reason says who holds it.
+  const held = i.uplinkHeld !== null;
   return {
-    fcConnected: i.fcConnected,
+    fcConnected: i.fcConnected && !held,
     live: i.live,
     armed: i.armed,
     lastArmed: i.lastArmed,
-    linkReason: !i.fcConnected && i.relayed ? RELAYED_LINK_REASON : undefined,
+    linkReason: i.uplinkHeld ?? (!i.fcConnected && i.relayed ? RELAYED_LINK_REASON : undefined),
     pilot: p
       ? {
           // Unknown stays unknown: the gate reads it as possibly airborne.
@@ -51,7 +58,7 @@ function buildContext(i: ContextInputs): SkillContext {
           fresh: i.now - p.at < PILOT_FRESH_MS,
         }
       : null,
-    pilotLinkOpen: i.pilotLinkOpen,
+    pilotLinkOpen: i.pilotLinkOpen && !held,
     reported: i.reported,
     pending: i.pending,
     fc: i.fc,
@@ -75,11 +82,13 @@ export function skillContextNow(): SkillContext {
     pending: ext.pending,
     fc: { mode: flight.telemetry?.mode ?? null, systemStatus: flight.telemetry?.system_status ?? null },
     now: Date.now(),
+    uplinkHeld: uplinkHeldReason(uplinkView(useStatusStore.getState().status?.uplink)),
   });
 }
 
 export function useSkillContext(): SkillContext {
   const fcConnected = useStatusStore((s) => s.status?.fc_connected === true);
+  const uplinkHeld = useStatusStore((s) => uplinkHeldReason(uplinkView(s.status?.uplink)));
   const flight = useFlightStore(
     useShallow((s) => ({
       live: s.live,
@@ -96,5 +105,5 @@ export function useSkillContext(): SkillContext {
   // Freshness (the pilot's 2 s, a plugin's 3 s) ages with the clock.
   const now = useNow(1000);
   const { mode, systemStatus, ...rest } = flight;
-  return buildContext({ fcConnected, ...rest, pilot, pilotLinkOpen, reported, pending, fc: { mode, systemStatus }, now });
+  return buildContext({ fcConnected, ...rest, pilot, pilotLinkOpen, reported, pending, fc: { mode, systemStatus }, now, uplinkHeld });
 }

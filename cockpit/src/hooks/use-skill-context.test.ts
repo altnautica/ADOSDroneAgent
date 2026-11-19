@@ -6,10 +6,13 @@ import { specText } from "@/shared/hud/spec-text";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
+import { useStatusStore } from "@/stores/status-store";
+import type { GsStatus } from "@/lib/types";
 
 afterEach(() => {
   useFlightStore.setState({ telemetry: null, live: false });
   useNavStreamStore.setState({ pilot: null });
+  useStatusStore.setState({ status: null });
   vi.useRealTimers();
 });
 
@@ -37,5 +40,28 @@ describe("the skill context's pilot freshness", () => {
     expect(skillContextNow().pilot?.fresh).toBe(true);
     useNavStreamStore.setState({ pilot: { data, at: 100_000 - 2000 } });
     expect(skillContextNow().pilot?.fresh).toBe(false);
+  });
+});
+
+describe("the skill context on a ground station in standby", () => {
+  it("offers no command while a phone holds the uplink, and says who holds it", () => {
+    useFlightStore.setState({ telemetry: { mode: "AUTO", system_status: 4, armed: true }, live: true });
+    useStatusStore.setState({
+      status: {
+        fc_connected: true,
+        uplink: { state: "standby", holder_device_id: "a1b2c3d4e5f60718", holder_name: "Pilot phone", since_ms: 1, watcher: { last_beacon_ms: 2 } },
+      } as GsStatus,
+    });
+    const ctx = skillContextNow();
+    expect(ctx.fcConnected).toBe(false);
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.rth!, ctx)).toEqual({ enabled: false, reason: "Uplink held by Pilot phone" });
+  });
+
+  it("commands again once the box transmits", () => {
+    useFlightStore.setState({ telemetry: { mode: "AUTO", system_status: 4, armed: true }, live: true });
+    useStatusStore.setState({
+      status: { fc_connected: true, uplink: { state: "transmitting", watcher: { last_beacon_ms: null } } } as GsStatus,
+    });
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.rth!, skillContextNow())).toEqual({ enabled: true });
   });
 });

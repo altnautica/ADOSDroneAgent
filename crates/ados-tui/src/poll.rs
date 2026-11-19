@@ -52,6 +52,8 @@ pub enum ResourceId {
     Gamepads,
     BtPaired,
     Invites,
+    /// The radio uplink handover (`GET /api/v1/ground-station/uplink`).
+    Uplink,
     GsDisplay,
     VideoConfig,
     VideoCameras,

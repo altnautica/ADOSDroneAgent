@@ -9,6 +9,7 @@ import { LoraPanel } from "@/components/panels/lora-panel";
 import { MeshPanel } from "@/components/panels/mesh-panel";
 import { SourcesPanel } from "@/components/panels/sources-panel";
 import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
+import { UplinkHandoverPanel } from "@/components/panels/uplink-handover-panel";
 
 interface ShellProps {
   title: string;
@@ -36,6 +37,7 @@ export function ReceiveRoute() {
       blurb={t("app.pages.receiveBlurb")}
     >
       <WfbRxPanel />
+      <UplinkHandoverPanel />
     </PageShell>
   );
 }

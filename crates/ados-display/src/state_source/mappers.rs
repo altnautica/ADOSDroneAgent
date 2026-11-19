@@ -84,7 +84,22 @@ pub(super) fn link_ctx(v: Option<&Value>) -> LinkCtx {
         packets_received: i64_field(v, "packets_received"),
         packets_lost: i64_field(v, "packets_lost"),
         rssi_history: Vec::new(),
+        standby_holder: None,
     }
+}
+
+/// The holder of the fleet's uplink from the status `uplink` block, only
+/// while that block says `standby`.
+pub(super) fn standby_holder(v: Option<&Value>) -> Option<String> {
+    let v = v?;
+    if string_field(v, "state").as_deref() != Some("standby") {
+        return None;
+    }
+    Some(
+        string_field(v, "holder_name")
+            .or_else(|| string_field(v, "holder_device_id"))
+            .unwrap_or_else(|| "phone".to_string()),
+    )
 }
 
 pub(super) fn drone_ctx(v: Option<&Value>) -> DroneCtx {

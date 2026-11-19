@@ -454,6 +454,25 @@
       "cold_start": "waiting for key (cold start)",
       "key_unavailable": "key unavailable"
     },
+    "uplink": {
+      "title": "Uplink",
+      "transmitting": "Uplink: transmitting",
+      "standby": "Uplink: standby — held by {{holder}}",
+      "standbySince": "Uplink: standby — held by {{holder}} since {{since}}",
+      "unknown": "Uplink: unknown",
+      "unknownHint": "The radio service is not reporting, so which ground transmits to the fleet is not known.",
+      "standbyHint": "{{holder}} transmits to the fleet. This ground station only receives, and refuses commands from its own controls until it takes the uplink back.",
+      "lastHeard": "Phone last heard",
+      "notHeard": "not heard yet",
+      "aPhone": "a phone",
+      "stripStandby": "Standby · {{holder}} transmits",
+      "takeBack": "Take back",
+      "holdToTakeBack": "Hold to take back",
+      "confirmTitle": "Take the uplink back?",
+      "confirmBody": "{{holder}} is told to stop transmitting, then this ground station transmits to the fleet again. It takes the uplink back even if the phone does not answer.",
+      "takenBack": "This ground station transmits to the fleet again.",
+      "takeBackFailed": "The ground station did not take the uplink back."
+    },
     "state": {
       "connecting": "connecting",
       "error": "error",

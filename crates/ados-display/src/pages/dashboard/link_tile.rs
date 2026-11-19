@@ -168,10 +168,15 @@ pub(super) fn draw_radio_link_tile(
     );
     text(canvas, &fec_font, &lost_str, bx + 114, fec_y, lost_color);
 
-    // Brownout warning pill — only when on host-VBUS and TX is past the safe
-    // envelope. Plain ASCII label for reliable rendering on the panel pipeline.
-    if brownout_risk(link) {
-        let label = "BROWNOUT RISK";
+    // The warning pill. `STANDBY <holder>` while a phone holds the uplink:
+    // the box only receives, and its readings above are receive-side only.
+    // Else the brownout warning, only on host-VBUS with TX past the safe
+    // envelope (moot in standby, where the box does not transmit). Plain
+    // ASCII labels for reliable rendering on the panel pipeline.
+    let pill = link
+        .standby_label()
+        .or_else(|| brownout_risk(link).then(|| "BROWNOUT RISK".to_string()));
+    if let Some(label) = pill.as_deref() {
         let pill_font = LoadedFont::new(FontFace::SansBold, 10);
         let (pill_text_w, pill_text_h) = pill_font.text_size(label);
         let pill_h = pill_text_h as i32 + 4;

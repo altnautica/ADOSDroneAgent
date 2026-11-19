@@ -54,6 +54,7 @@ pub fn connected_context() -> PageContext {
             packets_received: Some(1_482_910),
             packets_lost: Some(1_204),
             rssi_history: wave(-58.0, 6.0),
+            standby_holder: None,
         },
         drone: DroneCtx {
             device_id: Some("ados-58c27faf".to_string()),

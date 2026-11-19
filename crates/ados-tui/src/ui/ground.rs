@@ -1,5 +1,6 @@
 //! Tab 2 on a ground station, Ground: GNSS receivers and the RTK base,
-//! gamepads, Bluetooth, phone receiver invites, and the display.
+//! gamepads, Bluetooth, phone receiver invites, taking the radio uplink back
+//! from a phone, and the display.
 
 use std::time::Duration;
 
@@ -15,7 +16,10 @@ use crate::poll::{ResourceId, Sub};
 use crate::toast::ToastKind;
 use crate::worker::{Purpose, Reply, Request, Route};
 
+mod actions;
 mod view;
+
+use actions::valid_accuracy;
 
 const ROUTE: Route = Route::tab(TabId::Vehicle);
 /// A Bluetooth scan blocks for its duration plus up to four 5 s
@@ -189,81 +193,6 @@ impl GroundTab {
             Pane::Invites => self.approve(core),
         }
     }
-
-    fn approve(&mut self, core: &mut Core) {
-        let Some(inv) = self.invite(core) else {
-            core.toast(ToastKind::Info, "No pending invite");
-            return;
-        };
-        let body = vec![
-            format!("Label: {}", text(&inv, "label")),
-            format!("Phone fingerprint: {}", text(&inv, "phone_fingerprint")),
-            "Check the fingerprint matches the phone before approving.".into(),
-        ];
-        let ret = Ret::new(ROUTE, "approve").with(json!({ "id": text(&inv, "invite_id") }));
-        core.open(Overlay::confirm(ret, "Approve the phone receiver?", body));
-    }
-
-    fn reject(&mut self, core: &mut Core) {
-        let Some(inv) = self.invite(core) else {
-            core.toast(ToastKind::Info, "No pending invite");
-            return;
-        };
-        let id = text(&inv, "invite_id").to_string();
-        core.submit(Request::new(
-            "POST",
-            format!("/api/v1/ground-station/wfb/invite/{}/reject", seg(&id)),
-            ROUTE,
-            Purpose::Generic {
-                ok_toast: "Invite rejected".into(),
-            },
-        ));
-    }
-
-    fn survey_in(&mut self, core: &mut Core) {
-        let base = core.value(&ResourceId::Gnss).and_then(|g| g.get("base"));
-        let dur = base
-            .and_then(|b| b.get("min_dur_s"))
-            .and_then(Value::as_u64)
-            .unwrap_or(300);
-        let mut input = Overlay::input(
-            Ret::new(ROUTE, "survey_dur"),
-            "Start survey-in",
-            "Minimum duration (s)",
-            &dur.to_string(),
-        );
-        input.validate = Some(valid_duration);
-        core.open(Overlay::Input(input));
-    }
-
-    fn base_request(core: &mut Core, body: Value, ok: &str) {
-        core.submit(
-            Request::new(
-                "PUT",
-                "/api/v1/gnss/base",
-                ROUTE,
-                Purpose::Page {
-                    tag: "base",
-                    data: json!({ "ok": ok }),
-                },
-            )
-            .body(body),
-        );
-    }
-}
-
-fn valid_duration(s: &str) -> Result<(), String> {
-    match s.trim().parse::<u32>() {
-        Ok(n) if n >= 1 => Ok(()),
-        _ => Err("A whole number of seconds, 1 or more".into()),
-    }
-}
-
-fn valid_accuracy(s: &str) -> Result<(), String> {
-    match s.trim().parse::<f64>() {
-        Ok(v) if v.is_finite() && v > 0.0 => Ok(()),
-        _ => Err("A distance in metres, above 0".into()),
-    }
 }
 
 impl Tab for GroundTab {
@@ -293,6 +222,7 @@ impl Tab for GroundTab {
                 "/api/v1/ground-station/wfb/invite",
                 2000,
             ),
+            Sub::every_ms(ResourceId::Uplink, actions::UPLINK_PATH, 2000),
             Sub::once(ResourceId::GsDisplay, "/api/v1/ground-station/display"),
         ]
     }
@@ -336,6 +266,7 @@ impl Tab for GroundTab {
             }
             Command::Approve => self.approve(core),
             Command::Reject => self.reject(core),
+            Command::TakeBack => self.take_back(core),
             _ => return false,
         }
         core.dirty = true;
@@ -372,6 +303,7 @@ impl Tab for GroundTab {
             ("base_off", OverlayResult::Confirmed) => {
                 Self::base_request(core, json!({"mode": "off"}), "Base off");
             }
+            ("take_back", OverlayResult::Confirmed) => Self::submit_take_back(core),
             ("approve", OverlayResult::Confirmed) => {
                 let id = ret
                     .data
@@ -397,6 +329,18 @@ impl Tab for GroundTab {
                 core.fetch_now(ResourceId::Invites)
             }
             Purpose::Generic { .. } => core.fetch_now(ResourceId::Gamepads),
+            Purpose::Page {
+                tag: "take_back", ..
+            } => {
+                match &reply.result {
+                    Ok(_) => core.toast(
+                        ToastKind::Success,
+                        "This ground station transmits to the fleet again",
+                    ),
+                    Err(e) => core.toast_error("Take back", e),
+                }
+                core.fetch_now(ResourceId::Uplink);
+            }
             Purpose::Page { tag: "base", data } => {
                 match &reply.result {
                     Ok(_) => core.toast(
@@ -484,7 +428,13 @@ impl Tab for GroundTab {
         view::render(self, f, area, core, out);
     }
 
-    fn context_line(&self, _core: &Core) -> Option<String> {
+    fn context_line(&self, core: &Core) -> Option<String> {
+        // While a phone holds the uplink the box only receives; say so first.
+        if let Some(holder) = actions::uplink_holder(core) {
+            return Some(format!(
+                "Uplink held by {holder}: this box only receives · T takes it back"
+            ));
+        }
         Some(
             match self.pane {
                 Pane::Gamepads => "Enter makes the selected gamepad the primary flight input",

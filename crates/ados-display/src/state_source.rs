@@ -272,6 +272,7 @@ impl StateSource {
 
         if let Some(s) = status {
             ctx.link = link_ctx(get(s, "link"));
+            ctx.link.standby_holder = standby_holder(get(s, "uplink"));
             ctx.drone = drone_ctx(get(s, "drone").or_else(|| get(s, "paired_drone")));
             ctx.paired_drone = paired_drone_ctx(get(s, "paired_drone"));
             ctx.fc = fc_ctx(get(s, "fc"));
@@ -280,7 +281,9 @@ impl StateSource {
             ctx.role = role_ctx(get(s, "role"));
             ctx.mesh = mesh_ctx(get(s, "mesh"));
             ctx.network = network_ctx(get(s, "network"));
-            ctx.uplink = uplink_ctx(get(s, "uplink").or_else(|| get(s, "modem")));
+            // The status `uplink` block is the radio uplink handover (read
+            // above); the cellular modem is `modem`.
+            ctx.uplink = uplink_ctx(get(s, "modem"));
             ctx.system = system_ctx(get(s, "system"));
             ctx.video = video_ctx(get(s, "video"));
         }

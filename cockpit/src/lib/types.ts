@@ -3,6 +3,8 @@
 // panel can never disagree with the on-board TFT/OLED. Fields the agent may
 // send as null are typed nullable; unknown extras are tolerated.
 
+import type { UplinkWire } from "@/shared/api/uplink-handover";
+
 /** The WFB radio link view (the `link` block of the GS status composite). */
 export interface LinkView {
   rssi_dbm: number | null;
@@ -117,6 +119,10 @@ export interface GsStatus {
   };
   role: RoleBlock;
   mesh: MeshView;
+  /** Which ground transmits to the fleet (ground station only): this box, or
+   *  a phone holding the uplink. Null while the radio service is not
+   *  reporting; absent on a drone and on older agents. */
+  uplink?: UplinkWire | null;
 }
 
 /** One concurrent video leg from `/api/status/full` `video.streams[]`. */
