@@ -46,7 +46,7 @@ fn both_fc_profiles_fetch_the_swarm_bus() {
         .find(|b| b.service == "ados-swarmbus")
         .expect("ados-swarmbus must be in the catalog");
     assert_eq!(bus.gate, Gate::BestEffort);
-    // The path the unit's ConditionPathExists + ExecStart name, or the unit
+    // The path the unit's ConditionFileIsExecutable + ExecStart name, or the unit
     // silently never starts.
     assert_eq!(bus.dest, "/opt/ados/bin/ados-swarmbus");
     assert_eq!(bus.asset_name("aarch64"), "ados-swarmbus-aarch64");
@@ -102,7 +102,7 @@ fn workstation_class_profiles_fetch_the_cores() {
 
 /// Extensions target every node profile, so every profile runs the plugin
 /// host. The shipped unit is enable-linked everywhere; a profile that did not
-/// fetch the binary left it inactive behind its `ConditionPathExists`.
+/// fetch the binary left it inactive behind its `ConditionFileIsExecutable`.
 #[test]
 fn every_profile_fetches_the_plugin_host() {
     for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {

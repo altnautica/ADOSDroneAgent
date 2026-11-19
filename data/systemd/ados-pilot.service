@@ -7,7 +7,7 @@ After=ados-mavlink.service
 PartOf=ados-supervisor.service
 # The binary ships with the release assets; a node without it skips the
 # unit instead of restarting it forever, and the router keeps flying as before.
-ConditionPathExists=/opt/ados/bin/ados-pilot
+ConditionFileIsExecutable=/opt/ados/bin/ados-pilot
 StartLimitIntervalSec=0
 
 [Service]

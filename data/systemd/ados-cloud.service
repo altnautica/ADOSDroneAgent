@@ -5,7 +5,7 @@ PartOf=ados-supervisor.service
 # Skip cleanly when the binary was not fetched for this profile rather than
 # crash-looping "binary missing"; the installer's health gate is the loud
 # failure for a binary that SHOULD be present.
-ConditionPathExists=/opt/ados/bin/ados-cloud
+ConditionFileIsExecutable=/opt/ados/bin/ados-cloud
 StartLimitIntervalSec=0
 
 [Service]
@@ -13,7 +13,7 @@ StartLimitIntervalSec=0
 # observable per unit (the slice sets MemoryAccounting=yes).
 Slice=ados.slice
 Type=simple
-# The native cloud relay is the only implementation. ConditionPathExists above
+# The native cloud relay is the only implementation. ConditionFileIsExecutable above
 # keeps the unit inactive when the binary is absent. Cloud relay still defaults
 # to local mode; this service is the secondary, opt-in remote path.
 ExecStart=/opt/ados/bin/ados-cloud

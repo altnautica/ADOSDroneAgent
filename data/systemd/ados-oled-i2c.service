@@ -14,7 +14,7 @@ After=ados-control.service
 # and exits cleanly (rc 0) if no OLED acknowledges, so a rig with no panel wired
 # never churns.
 ConditionPathExists=/dev/i2c-1
-ConditionPathExists=/opt/ados/bin/ados-oled-i2c
+ConditionFileIsExecutable=/opt/ados/bin/ados-oled-i2c
 StartLimitIntervalSec=0
 
 [Service]

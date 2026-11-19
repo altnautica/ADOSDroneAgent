@@ -7,7 +7,7 @@ After=ados-mavlink.service
 PartOf=ados-supervisor.service
 StartLimitIntervalSec=0
 # A box whose binary has not landed yet stays inactive rather than looping.
-ConditionPathExists=/opt/ados/bin/ados-control
+ConditionFileIsExecutable=/opt/ados/bin/ados-control
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.

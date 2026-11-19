@@ -266,7 +266,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // The decentralized swarm state bus. Fetched on both FC-bearing profiles,
     // matching its supervisor gate: a drone broadcasts its beacon and a ground
     // station listens so the operator's fleet view is local-first. Best-effort
-    // rather than Hard: the unit `ConditionPathExists`-gates on the binary, so a
+    // rather than Hard: the unit `ConditionFileIsExecutable`-gates on the binary, so a
     // fetch miss leaves single-drone operation entirely intact — the bus adds fleet
     // awareness and onboard separation input, and neither is on the C2 path.
     //
@@ -275,7 +275,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // display exceptions, and the swarm bus is none of them. That claim mattered,
     // because for a long time nothing published this binary at all, so
     // every install on both profiles 404'd here and continued degraded in
-    // silence — the unit's ConditionPathExists skipped it, the socket was never
+    // silence — the unit's binary condition skipped it, the socket was never
     // bound, and the swarm control loop suppressed every tick as stale
     // neighbours. Fleet awareness and onboard separation were simply absent.
     // If this is ever demoted or the publish job is removed, the absence has to

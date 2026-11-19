@@ -6,7 +6,7 @@ PartOf=ados-supervisor.service
 # restart-looping: with Restart=always and no start limit below, a missing
 # ExecStart target would exit 203/EXEC every few seconds forever. Condition*
 # directives are only honoured in [Unit]; systemd ignores them anywhere else.
-ConditionPathExists=/opt/ados/bin/ados-plugin-host
+ConditionFileIsExecutable=/opt/ados/bin/ados-plugin-host
 StartLimitIntervalSec=0
 
 [Service]

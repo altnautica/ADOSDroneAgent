@@ -70,7 +70,7 @@ fn plugin_host_unit_runs_the_native_binary_directly() {
     // a bare `contains` here would pass with the directive in [Service],
     // where systemd ignores it.
     assert!(
-        body.contains("ConditionPathExists=/opt/ados/bin/ados-plugin-host"),
+        body.contains("ConditionFileIsExecutable=/opt/ados/bin/ados-plugin-host"),
         "{body}"
     );
     assert!(body.contains("WantedBy=ados-supervisor.service"), "{body}");
@@ -482,4 +482,35 @@ fn every_strict_sandbox_path_exists_before_its_unit_starts() {
         "these units fail namespace setup when the path is absent:\n{}",
         problems.join("\n")
     );
+}
+
+#[test]
+fn swarmbus_unit_gates_on_an_executable_binary() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/systemd/ados-swarmbus.service");
+    let body = std::fs::read_to_string(path).unwrap();
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    assert!(
+        lines.contains(&"ConditionFileIsExecutable=/opt/ados/bin/ados-swarmbus"),
+        "a present but non-executable binary must skip the unit, not exit 203/EXEC"
+    );
+}
+
+/// A binary gate is `ConditionFileIsExecutable=`: `ConditionPathExists=` passes
+/// a truncated or non-executable download and the unit loops on 203/EXEC.
+#[test]
+fn no_unit_gates_on_a_binary_with_path_exists() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("data/systemd is readable") {
+        let path = entry.unwrap().path();
+        let body = std::fs::read_to_string(&path).unwrap();
+        if body
+            .lines()
+            .any(|l| l.trim().starts_with("ConditionPathExists=/opt/ados/bin/"))
+        {
+            offenders.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    assert!(offenders.is_empty(), "binary gated by path: {offenders:?}");
 }
