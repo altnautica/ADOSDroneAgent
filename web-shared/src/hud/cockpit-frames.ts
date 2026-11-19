@@ -43,6 +43,7 @@ import {
   type PlaceClass,
   type RouteCheck,
 } from "./cockpit-mission";
+import { parseSimClock, type SimClock } from "./sim-clock";
 
 export type { BatteryReserve, FcStatusText, PositionUnverified, ProfileLimits, SpeedCap, StickCommand } from "./pilot-fields";
 export {
@@ -256,6 +257,9 @@ export interface PilotState {
   /** The limits that cut the asked velocity since the previous frame
    *  (`command.limits`, first bound first); empty while it flies none. */
   commandLimits: string[];
+  /** The simulator's clock while the pilot follows one (the "SIM ×N"
+   *  badge); null on wall time and from an older agent. */
+  simClock: SimClock | null;
 }
 
 const AVOID_STATES: readonly AvoidState[] = ["clear", "detour", "blocked", "off", "stale", "unavailable"];
@@ -343,6 +347,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     positionUnverified: parsePositionUnverified(p.position_unverified),
     profileLimits: parseProfileLimits(p.profile_limits),
     stick: parseStickCommand(p.stick),
+    simClock: parseSimClock(p.clock),
     commandLimits: Array.isArray(obj(p.command)?.limits)
       ? (obj(p.command)!.limits as unknown[]).filter((l): l is string => typeof l === "string")
       : [],

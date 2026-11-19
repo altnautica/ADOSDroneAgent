@@ -66,6 +66,7 @@ async fn ingest_socket_accepts_frames_and_writer_inserts_them() {
             mavlink_socket: dir.path().join("mavlink.sock"),
             sidecar_root: dir.path().to_path_buf(),
         },
+        config: dir.path().join("config.yaml"),
     };
     let socket_path = paths.ingest_socket.clone();
     let db_path = paths.db.clone();

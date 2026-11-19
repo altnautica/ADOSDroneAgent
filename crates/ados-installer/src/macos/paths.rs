@@ -99,6 +99,8 @@ impl Paths {
             run_dir: self.run.clone(),
             data_root: self.ados_home.join("plugin-data"),
             device_id_file: self.device_id_file.clone(),
+            // A workstation never follows a simulator's clock.
+            clock_feed: None,
         }
     }
 

@@ -24,7 +24,18 @@ async fn main() {
         avoid = ?settings.pilot.avoid,
         "pilot_service_starting"
     );
-    let daemon = Daemon::new(settings, path);
+    // ADOS time: the simulator's feed on a node configured for
+    // `simulation.clock: sim`, wall otherwise.
+    let gate = ados_config::simulation::read_gate(&path);
+    let clock = match ados_time::from_config(&gate, ados_time::FeedPeer::Pilot) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "pilot_sim_clock_bind_failed");
+            std::process::exit(1);
+        }
+    };
+    let mut daemon = Daemon::new(settings, path);
+    daemon.clock = clock;
     let setup = ados_pilot::setup::service::start(&daemon);
     let run = daemon.run(Some(setup));
     tokio::select! {

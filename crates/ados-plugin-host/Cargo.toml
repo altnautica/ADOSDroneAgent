@@ -34,6 +34,8 @@ ados-hid = { path = "../ados-hid" }
 # payloads against, resolved from the same config and profile.conf every
 # daemon reads.
 ados-config = { path = "../ados-config" }
+# ADOS time: the sim-clock relay plugins follow (`ADOS_CLOCK_FEED`).
+ados-time = { path = "../ados-time" }
 # `node.info` reads each node fact through the reader its owning crate
 # publishes: the HAL board sidecar's, and the video pipeline's camera-state
 # sidecar and primary-stream config resolution. Reading them here rather than

@@ -21,6 +21,8 @@ path = "src/main.rs"
 # The shared loud-fail config reader. The store reads exactly one key
 # (`logging.store.enabled`) to decide whether it runs at all.
 ados-config = { path = "../ados-config" }
+# ADOS time: rows are stamped with sim time on a node following the simulator.
+ados-time = { path = "../ados-time" }
 # Global allocator. The long-running daemon serves a constant stream of
 # short-lived read-only SQLite connections off the blocking pool and a steady
 # ingest + hardware-sample churn; the system allocator answers that pattern by

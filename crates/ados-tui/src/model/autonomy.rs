@@ -215,6 +215,9 @@ pub struct Pilot {
     pub skill_ref: Option<(String, String)>,
     pub control_mode: Option<String>,
     pub profile: Option<String>,
+    /// "SIM ×N" while the pilot follows a simulator's clock; `None` on wall
+    /// time.
+    pub sim_clock: Option<String>,
     pub avoid: Option<String>,
     pub avoid_state: Option<String>,
     pub hold_reason: Option<String>,

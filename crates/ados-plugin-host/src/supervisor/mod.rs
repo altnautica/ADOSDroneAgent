@@ -170,6 +170,9 @@ pub struct Paths {
     /// This node's device id, which places a plugin's per-drone data dir
     /// (`ADOS_DEVICE_ID_PATH`).
     pub device_id_file: PathBuf,
+    /// The sim-clock relay plugins follow (`ADOS_CLOCK_FEED`), on a node
+    /// whose config sets `simulation.clock: sim`; `None` on wall time.
+    pub clock_feed: Option<PathBuf>,
 }
 
 impl Paths {
@@ -199,6 +202,10 @@ impl Paths {
             run_dir: env_path("ADOS_RUN_DIR", DEFAULT_RUN_DIR),
             data_root: env_path("ADOS_PLUGIN_DATA_DIR_ROOT", PLUGIN_DATA_DIR),
             device_id_file: ados_protocol::identity::device_id_path(),
+            clock_feed: ados_time::plugin_feed(&ados_config::simulation::read_gate(
+                std::path::Path::new(ados_config::log_store::CONFIG_YAML),
+            ))
+            .map(|_| ados_time::relay_socket(&env_path("ADOS_RUN_DIR", DEFAULT_RUN_DIR))),
         }
     }
 }

@@ -163,6 +163,7 @@ agent:
             run_dir: dir.path().join("run"),
             data_root: dir.path().join("plugin-data"),
             device_id_file: dir.path().join("device-id"),
+            clock_feed: None,
         };
         std::fs::create_dir_all(dir.path().join("state")).unwrap();
         std::fs::write(

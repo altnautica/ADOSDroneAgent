@@ -238,3 +238,13 @@ fn the_ar_kind_carries_the_next_waypoints_eta_while_fresh() {
 fn tones_cover_the_health_words() {
     assert_eq!(health_tone("degraded"), Tone::Caution);
 }
+
+#[test]
+fn a_pilot_on_a_sim_clock_carries_its_badge() {
+    let label = |c: serde_json::Value| pilot_kind::sim_clock_label(&c);
+    assert_eq!(label(json!({"source": "wall"})), None);
+    assert_eq!(label(json!({"source": "sim", "speed": 3.0})).as_deref(), Some("SIM ×3"));
+    assert_eq!(label(json!({"source": "sim", "speed": 0.5})).as_deref(), Some("SIM ×0.5"));
+    assert_eq!(label(json!({"source": "sim", "speed": 0.0})).as_deref(), Some("SIM ×max"));
+    assert_eq!(label(json!({"source": "sim"})).as_deref(), Some("SIM"));
+}

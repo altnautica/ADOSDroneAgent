@@ -6,7 +6,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ados_protocol::pilot::{self, ControlMode, Owner};
 use tokio::sync::{broadcast, mpsc};
@@ -25,12 +25,13 @@ pub const DIR_ENV: &str = "ADOS_FC_SETUP_DIR";
 struct Inner {
     engine: Mutex<Engine>,
     subscribers: Mutex<Vec<mpsc::Sender<Vec<u8>>>>,
-    start: Instant,
+    /// ADOS time, the pilot core's clock.
+    clock: ados_time::Clock,
 }
 
 impl Inner {
     fn now(&self) -> u64 {
-        self.start.elapsed().as_millis() as u64
+        self.clock.now_ms()
     }
 }
 
@@ -52,7 +53,7 @@ pub fn start(daemon: &Daemon) -> Arc<dyn SetupHandler> {
     let inner = Arc::new(Inner {
         engine: Mutex::new(Engine::new(dir, epoch_ms())),
         subscribers: Mutex::new(Vec::new()),
-        start: Instant::now(),
+        clock: daemon.clock.clone(),
     });
     let frames = daemon.fc_link.frames.subscribe();
     let version_frames = daemon.fc_link.version_frames.subscribe();
@@ -69,8 +70,7 @@ async fn run(
     tx: mpsc::Sender<ados_protocol::mavlink::ardupilotmega::MavMessage>,
     handle: PilotHandle,
 ) {
-    let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut tick = inner.clock.interval(Duration::from_millis(TICK_MS));
     let mut needed: Option<Option<String>> = None;
     let mut step_sent: Option<Option<&'static str>> = None;
     let mut abort_sent: Option<Option<String>> = None;

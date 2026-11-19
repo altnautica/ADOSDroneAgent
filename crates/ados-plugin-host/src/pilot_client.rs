@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use ados_protocol::pilot;
+use ados_protocol::simclock::Clock;
 use rmpv::Value;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -45,8 +46,8 @@ struct Leases {
     holder: HashMap<u64, String>,
     /// Plugins that asked for `flight.sticks`.
     sticks: HashSet<String>,
-    /// plugin id → (implicit lease id, last setpoint).
-    legacy: HashMap<String, (u64, Instant)>,
+    /// plugin id → (implicit lease id, ADOS ms of the last setpoint).
+    legacy: HashMap<String, (u64, u64)>,
 }
 
 #[derive(Default)]
@@ -63,6 +64,8 @@ pub struct PilotClient {
     /// Serialises `lease.acquire` round trips (the pilot answers in order).
     acquire: tokio::sync::Mutex<()>,
     bus: Arc<EventBus>,
+    /// ADOS time: a legacy lease idles out on it.
+    clock: Clock,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -94,8 +97,9 @@ pub fn lease_id_of(args: &Value) -> Option<u64> {
 }
 
 impl PilotClient {
-    /// Connect (and keep reconnecting) to `path`; events go out on `bus`.
-    pub fn spawn(path: PathBuf, bus: Arc<EventBus>) -> Arc<Self> {
+    /// Connect (and keep reconnecting) to `path`; events go out on `bus`;
+    /// legacy setpoints idle out on `clock` (the node's ADOS time).
+    pub fn spawn(path: PathBuf, bus: Arc<EventBus>, clock: Clock) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(256);
         let me = Arc::new(Self {
             tx,
@@ -103,6 +107,7 @@ impl PilotClient {
             link: Mutex::new(Link::default()),
             acquire: tokio::sync::Mutex::new(()),
             bus,
+            clock,
         });
         tokio::spawn(Arc::clone(&me).run(path, rx));
         tokio::spawn(Arc::clone(&me).legacy_reaper());
@@ -254,7 +259,7 @@ impl PilotClient {
         };
         lock(&self.leases)
             .legacy
-            .insert(plugin_id.to_owned(), (id, Instant::now()));
+            .insert(plugin_id.to_owned(), (id, self.clock.now_ms()));
         self.send(
             "goal",
             &map(vec![("lease_id", Value::from(id)), ("goal", goal)]),
@@ -262,15 +267,16 @@ impl PilotClient {
     }
 
     async fn legacy_reaper(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let mut tick = self.clock.interval(Duration::from_millis(250));
+        let idle_ms = LEGACY_IDLE.as_millis() as u64;
         loop {
-            tick.tick().await;
+            let now = tick.tick().await;
             let stale: Vec<(String, u64)> = {
                 let mut l = lock(&self.leases);
                 let stale: Vec<_> = l
                     .legacy
                     .iter()
-                    .filter(|(_, (_, t))| t.elapsed() >= LEGACY_IDLE)
+                    .filter(|(_, (_, t))| now.saturating_sub(*t) >= idle_ms)
                     .map(|(p, (id, _))| (p.clone(), *id))
                     .collect();
                 for (p, id) in &stale {

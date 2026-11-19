@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod clock;
 pub mod client;
 pub mod context;
 pub mod drivers;
@@ -13,6 +14,7 @@ pub mod vision;
 /// The `reason` codes of a refused request are in
 /// [`ados_protocol::camera_control::reason`].
 pub use ados_protocol::camera_control::{CameraControlRequest, CameraControlResult};
+pub use clock::clock;
 pub use client::{
     ClientError, EventCallback, OffloadAdvertisement, PluginIpcClient, ToolHandler, WhepAnswer,
 };

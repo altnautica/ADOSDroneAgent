@@ -3062,6 +3062,36 @@
     "SimulationConfig": {
       "description": "Whether this node is running against a simulator.\n\nSet by whoever wires the node to a simulated flight controller and camera.\nThe status routes report it as ``sim`` so a ground station can mark the node\nas simulated. Off unless set explicitly.",
       "properties": {
+        "clock": {
+          "default": "wall",
+          "enum": [
+            "wall",
+            "sim"
+          ],
+          "title": "Clock",
+          "type": "string"
+        },
+        "clock_feed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clock Feed"
+        },
+        "clock_mode": {
+          "default": "follow",
+          "enum": [
+            "follow",
+            "lockstep"
+          ],
+          "title": "Clock Mode",
+          "type": "string"
+        },
         "enabled": {
           "default": false,
           "title": "Enabled",
@@ -4823,6 +4853,9 @@
     "simulation": {
       "$ref": "#/$defs/SimulationConfig",
       "default": {
+        "clock": "wall",
+        "clock_feed": null,
+        "clock_mode": "follow",
         "enabled": false
       }
     },

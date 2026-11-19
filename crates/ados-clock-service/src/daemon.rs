@@ -133,6 +133,17 @@ async fn run_async() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG));
     let sim_floor = crate::config::sim_floor(&config);
     tracing::info!(?sim_floor, "clock_sim_latency_floor");
+    // On a node following the simulator's clock: the relay plugins follow
+    // (`ADOS_CLOCK_FEED`), fed by the simulator on `clock_feed` + 2.
+    let gate = ados_config::simulation::read_gate(&config);
+    if let Some(listen) = ados_time::plugin_feed(&gate) {
+        tokio::spawn(async move {
+            let socket = ados_time::relay_socket(&ados_protocol::paths::run_dir());
+            if let Err(e) = ados_time::relay(listen, socket).await {
+                tracing::error!(error = %e, %listen, "simclock_relay_failed");
+            }
+        });
+    }
     let (mut tap, stats) = crate::spawn_bus(&socket)?;
     let mut engine = Engine::new(Some(ChronySink::new(CHRONY_SOCK)), sim_floor);
     let mut out = Outputs {

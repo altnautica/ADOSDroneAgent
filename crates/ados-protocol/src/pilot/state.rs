@@ -491,4 +491,8 @@ pub struct PilotState {
     /// vehicle; omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stick: Option<StickCommand>,
+    /// The clock the pilot runs on, stamped by the runtime on every state
+    /// message; omitted only by producers that do not stamp it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<super::ClockStamp>,
 }

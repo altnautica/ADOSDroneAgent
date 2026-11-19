@@ -1,0 +1,18 @@
+[package]
+name = "ados-time"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADOS time for the agent's services: a service's clock from the node config, the per-service sim-clock feed ports, and the local relay plugins follow."
+
+[dependencies]
+ados-config = { path = "../ados-config" }
+ados-protocol = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

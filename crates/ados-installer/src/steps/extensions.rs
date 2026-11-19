@@ -534,6 +534,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             run_dir: dir.join("run"),
             data_root: dir.join("plugin-data"),
             device_id_file: dir.join("device-id"),
+            clock_feed: None,
         }
     }
 

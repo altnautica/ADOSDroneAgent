@@ -78,7 +78,7 @@ async fn acquire_goal_and_holder_only_events() {
     let mut rx = fake_pilot(path.clone(), true).await;
     let bus = Arc::new(EventBus::new());
     let mut events = bus.subscribe();
-    let client = PilotClient::spawn(path, Arc::clone(&bus));
+    let client = PilotClient::spawn(path, Arc::clone(&bus), Clock::wall());
     ready(&client).await;
 
     let reply = client
@@ -122,7 +122,7 @@ async fn stopping_a_plugin_releases_its_lease() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pilot.sock");
     let mut rx = fake_pilot(path.clone(), true).await;
-    let client = PilotClient::spawn(path, Arc::new(EventBus::new()));
+    let client = PilotClient::spawn(path, Arc::new(EventBus::new()), Clock::wall());
     ready(&client).await;
     client.acquire("p", "s", "motion").await;
     next_non_sub(&mut rx).await;
@@ -138,7 +138,7 @@ async fn legacy_setpoints_take_and_return_an_implicit_lease() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pilot.sock");
     let mut rx = fake_pilot(path.clone(), true).await;
-    let client = PilotClient::spawn(path, Arc::new(EventBus::new()));
+    let client = PilotClient::spawn(path, Arc::new(EventBus::new()), Clock::wall());
     ready(&client).await;
     assert!(client.legacy_goal("old.plugin", goal()).await);
     match next_non_sub(&mut rx).await {
@@ -161,12 +161,16 @@ async fn busy_pilot_and_absent_pilot_are_reported() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pilot.sock");
     let _rx = fake_pilot(path.clone(), false).await;
-    let client = PilotClient::spawn(path, Arc::new(EventBus::new()));
+    let client = PilotClient::spawn(path, Arc::new(EventBus::new()), Clock::wall());
     ready(&client).await;
     let r = client.acquire("p", "s", "motion").await;
     assert_eq!(get(&r, "err").and_then(Value::as_str), Some("busy"));
 
-    let absent = PilotClient::spawn(dir.path().join("none.sock"), Arc::new(EventBus::new()));
+    let absent = PilotClient::spawn(
+        dir.path().join("none.sock"),
+        Arc::new(EventBus::new()),
+        Clock::wall(),
+    );
     let r = absent.acquire("p", "s", "motion").await;
     assert_eq!(
         get(&r, "err").and_then(Value::as_str),
@@ -189,7 +193,7 @@ async fn goal_status_reaches_only_the_holder() {
     let _rx = fake_pilot(path.clone(), true).await;
     let bus = Arc::new(EventBus::new());
     let mut events = bus.subscribe();
-    let client = PilotClient::spawn(path, Arc::clone(&bus));
+    let client = PilotClient::spawn(path, Arc::clone(&bus), Clock::wall());
     ready(&client).await;
     let reply = client
         .acquire("com.example.follow", "follow-me", "motion")

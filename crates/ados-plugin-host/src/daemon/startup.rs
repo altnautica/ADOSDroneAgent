@@ -129,9 +129,15 @@ pub(super) async fn build_host(
     // The ADOS pilot's motion lease. The link just retries while no pilot
     // runs (a ground station, or a drone with the daemon stopped), and every
     // lease method then answers `pilot_unavailable`.
+    // Its legacy-setpoint idle runs on ADOS time: the plugin relay on a node
+    // following the simulator's clock, as the plugins themselves do.
+    let gate = ados_config::simulation::read_gate(std::path::Path::new(
+        ados_config::log_store::CONFIG_YAML,
+    ));
     host = host.with_pilot(crate::pilot_client::PilotClient::spawn(
         run_dir.join(ados_protocol::paths::PILOT_SOCK),
         Arc::clone(bus),
+        ados_time::relay_clock(&gate, &run_dir),
     ));
 
     // Injector arbitration (default off). When armed, the MAVLink + MSP links

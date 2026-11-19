@@ -336,6 +336,19 @@ pub(crate) fn runner_context(
         ));
         bind_read_write.push(http_dir);
     }
+    let mut bind_read_only = vec![socket_dir];
+    if let Some(sock) = &paths.clock_feed {
+        // The relay's own directory, bound read-only (a Unix socket on a
+        // read-only mount still connects); `-` skips it when the relay has
+        // not made it yet, and the plugin's clock then reads stale.
+        env.push((
+            ados_protocol::simclock::CLOCK_FEED_ENV.to_string(),
+            path_token("clock feed", sock)?,
+        ));
+        if let Some(dir) = sock.parent() {
+            bind_read_only.push(PathBuf::from(format!("-{}", path_token("clock feed dir", dir)?)));
+        }
+    }
     Ok(UnitSpec {
         description: String::new(),
         argv: Vec::new(),
@@ -343,7 +356,7 @@ pub(crate) fn runner_context(
         env,
         user: plugin_user_for(&manifest.id),
         credential: Some(credential),
-        bind_read_only: vec![socket_dir],
+        bind_read_only,
         bind_read_write,
         exec_paths: exec_paths_for(manifest, paths)?,
         guard_loader: Some(guard_loader),
@@ -665,6 +678,22 @@ WantedBy=ados-supervisor.service
     }
 
     #[test]
+    fn a_sim_clock_node_hands_plugins_the_relay() {
+        let mut paths = crate::supervisor::tests_support::fhs_paths();
+        paths.clock_feed = Some(PathBuf::from("/run/ados/simclock/relay.sock"));
+        let unit = render(&subprocess_manifest(), &paths, &BTreeSet::new(), false);
+        assert!(unit.contains("Environment=ADOS_CLOCK_FEED=/run/ados/simclock/relay.sock"));
+        assert!(unit.contains("BindReadOnlyPaths=-/run/ados/simclock\n"));
+        let wall = render(
+            &subprocess_manifest(),
+            &crate::supervisor::tests_support::fhs_paths(),
+            &BTreeSet::new(),
+            false,
+        );
+        assert!(!wall.contains("ADOS_CLOCK_FEED"));
+    }
+
+    #[test]
     fn the_layout_follows_the_paths_it_is_built_against() {
         // A per-user install (the macOS workstation) moves every host path;
         // nothing in the unit may still point at the FHS layout.
@@ -682,6 +711,7 @@ WantedBy=ados-supervisor.service
             run_dir: root.join("run"),
             data_root: root.join("plugin-data"),
             device_id_file: root.join("device-id"),
+            clock_feed: None,
         };
         let unit = render(&subprocess_manifest(), &paths, &BTreeSet::new(), false);
         assert!(unit.contains(

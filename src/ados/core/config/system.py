@@ -147,6 +147,13 @@ class SimulationConfig(BaseModel):
     """
 
     enabled: bool = False
+    # Which clock the agent's control loops run on: `wall` (default) or `sim`,
+    # the World Engine sim-clock feed (`simclock.v1`). `sim` needs `enabled`.
+    clock: Literal["wall", "sim"] = "wall"
+    # UDP `host:port` the agent listens on for the sim-clock feed.
+    clock_feed: str | None = None
+    # `follow` runs on the broadcast time; `lockstep` also acknowledges each grant.
+    clock_mode: Literal["follow", "lockstep"] = "follow"
 
 
 class LoggingConfig(BaseModel):

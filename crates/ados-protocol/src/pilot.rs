@@ -11,6 +11,7 @@
 //! surface's mode mapping and deadzone already applied): pitch + is forward,
 //! thr + is climb, yaw + is clockwise, roll + is right.
 
+mod clock;
 mod command;
 mod obstacles;
 mod rc;
@@ -20,6 +21,7 @@ mod state;
 mod stick;
 mod wire;
 
+pub use clock::*;
 pub use command::*;
 pub use obstacles::*;
 pub use rc::*;

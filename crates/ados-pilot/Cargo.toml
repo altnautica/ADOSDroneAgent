@@ -25,6 +25,7 @@ dst = []
 [dependencies]
 ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
+ados-time = { path = "../ados-time" }
 base64 = { workspace = true }
 png = { workspace = true }
 rmp-serde = { workspace = true }

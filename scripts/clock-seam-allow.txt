@@ -1,0 +1,11 @@
+# Files on ADOS time and the wall-clock uses they keep (check-clock-seam.py).
+#   seam  <path>
+#   allow <path> <pattern> -- <reason>
+
+seam crates/ados-pilot/src/runtime.rs
+seam crates/ados-pilot/src/setup/service.rs
+seam crates/ados-plugin-host/src/pilot_client.rs
+
+allow crates/ados-pilot/src/runtime.rs tokio::time::sleep( -- the MAVLink socket reconnect backoff is real time
+allow crates/ados-plugin-host/src/pilot_client.rs Instant::now() -- pilot link liveness (ALIVE) is real time
+allow crates/ados-plugin-host/src/pilot_client.rs tokio::time::sleep( -- pilot socket reconnect backoff is real time

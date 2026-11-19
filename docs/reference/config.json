@@ -2928,6 +2928,42 @@
       "type": "string"
     },
     {
+      "default": "wall",
+      "description": "Clock",
+      "enum": [
+        "wall",
+        "sim"
+      ],
+      "key": "simulation.clock",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Clock Feed",
+      "enum": null,
+      "key": "simulation.clock_feed",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "follow",
+      "description": "Clock Mode",
+      "enum": [
+        "follow",
+        "lockstep"
+      ],
+      "key": "simulation.clock_mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": false,
       "description": "Enabled",
       "enum": null,

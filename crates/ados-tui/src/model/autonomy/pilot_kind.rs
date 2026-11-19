@@ -72,6 +72,7 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         }),
         control_mode: one_of(d, "control_mode", &["ados", "fc_manual", "elrs"]),
         profile: one_of(d, "profile", &["cine", "normal", "sport"]),
+        sim_clock: d.get("clock").and_then(sim_clock_label),
         avoid: one_of(d, "avoid", &["brake", "bypass", "off"]),
         avoid_state: one_of(
             d,
@@ -253,5 +254,26 @@ fn mission_stall(v: &Value) -> Option<MissionStall> {
         skip_in_s: f(v, "skip_in_s"),
         return_in_s: f(v, "return_in_s"),
         window_s: f(v, "window_s"),
+    })
+}
+
+/// The pilot frame's `clock` as the "SIM ×N" badge (as the web surfaces
+/// write it): `None` on wall time. Speed 0 is a simulator running as fast as
+/// it can.
+pub(crate) fn sim_clock_label(c: &Value) -> Option<String> {
+    if c.get("source").and_then(Value::as_str) != Some("sim") {
+        return None;
+    }
+    Some(match c.get("speed").and_then(Value::as_f64) {
+        None => "SIM".into(),
+        Some(s) if s <= 0.0 => "SIM ×max".into(),
+        Some(s) => {
+            let n = (s * 10.0).round() / 10.0;
+            if n.fract() == 0.0 {
+                format!("SIM ×{n:.0}")
+            } else {
+                format!("SIM ×{n:.1}")
+            }
+        }
     })
 }

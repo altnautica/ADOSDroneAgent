@@ -334,6 +334,8 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         p.profile
             .as_ref()
             .map(|pr| spec_text(&format!("pilot.profile.{pr}"), &[])),
+        // A run on a simulator's clock never reads as real time.
+        p.sim_clock.clone(),
     ]
     .into_iter()
     .flatten()

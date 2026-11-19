@@ -19,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 ados-clock = { workspace = true }
 ados-config = { path = "../ados-config" }
+# The plugin sim-clock relay (`ADOS_CLOCK_FEED`) on a simulated node.
+ados-time = { path = "../ados-time" }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { workspace = true, features = ["tracing-layer"] }

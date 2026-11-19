@@ -595,3 +595,46 @@ fn mark_synced_ack_returns_while_ingest_flows() {
     assert_eq!(n, total, "every ingested frame still landed");
     db::integrity_check(&ro).unwrap();
 }
+
+#[test]
+fn rows_carry_sim_ns_on_a_sim_clock() {
+    let (_dir, path) = temp_db();
+    let (tx, rx) = mpsc::channel::<IngestFrame>(8);
+    let mut writer = Writer::new(
+        &path,
+        rx,
+        WriterConfig::hermetic(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    let feed = ados_time::SimFeed::new();
+    let tick = ados_time::wire::Tick {
+        flags: 0,
+        seq: 1,
+        sim_ns: 42_000_000,
+        grant_ns: 0,
+        speed: 1.0,
+    };
+    assert!(feed.ingest(&tick, std::time::Instant::now()));
+    writer.set_clock(ados_time::Clock::Sim(feed));
+    let handle = std::thread::spawn(move || writer.run().unwrap());
+    tx.blocking_send(IngestFrame::Log(LogFrame::new(1, "src", Level::Info, "m")))
+        .unwrap();
+    tx.blocking_send(IngestFrame::Telemetry(TelemetryFrame::new(
+        2, "cpu.load", 0.5,
+    )))
+    .unwrap();
+    drop(tx);
+    handle.join().unwrap();
+
+    let ro = db::open_readonly(&path).unwrap();
+    for sql in ["SELECT fields FROM logs", "SELECT tags FROM metrics"] {
+        let blob: Vec<u8> = ro.query_row(sql, [], |r| r.get(0)).unwrap();
+        let map: std::collections::BTreeMap<String, MpVal> = rmp_serde::from_slice(&blob).unwrap();
+        assert_eq!(
+            map.get("sim_ns"),
+            Some(&MpVal::from(42_000_000u64)),
+            "{sql}"
+        );
+    }
+}

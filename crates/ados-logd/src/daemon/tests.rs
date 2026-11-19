@@ -25,6 +25,7 @@ fn temp_paths(dir: &Path) -> DaemonPaths {
             mavlink_socket: dir.join("mavlink.sock"),
             sidecar_root: dir.to_path_buf(),
         },
+        config: dir.join("config.yaml"),
     }
 }
 

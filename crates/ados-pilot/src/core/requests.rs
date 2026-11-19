@@ -14,6 +14,18 @@ impl Pilot {
     /// `sid`, [`ados_protocol::pilot::surface_sid`]).
     pub fn on_request_from(&mut self, req: Request, sid: Option<&str>, now_ms: u64) -> Reply {
         match req {
+            Request::Input(i) if self.sim_speed.is_some_and(|s| (s - 1.0).abs() > 1e-3) => {
+                // An accelerated (or unpaced) simulation: no operator flies
+                // it. The link stays heard, so refusing is not a link loss.
+                self.failsafe.on_surface(now_ms);
+                self.failsafe.instances.heard(sid, &i.src, now_ms);
+                Reply::Action(ActionResult {
+                    name: "input".into(),
+                    id: None,
+                    ok: false,
+                    err: Some("sim_speed".into()),
+                })
+            }
             Request::Input(i) => {
                 // Every frame from an operator instance keeps its own
                 // link-loss watch alive.

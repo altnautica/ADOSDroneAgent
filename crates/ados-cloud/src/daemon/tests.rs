@@ -52,6 +52,7 @@ fn supervisor() -> (tempfile::TempDir, SharedSupervisor) {
         run_dir: dir.join("run"),
         data_root: dir.join("plugin-data"),
         device_id_file: dir.join("device-id"),
+        clock_feed: None,
     };
     let sup = Arc::new(Mutex::new(PluginSupervisor::new(
         paths, false, None, "1.0.0",
@@ -90,6 +91,7 @@ fn live_cloud_supervisor_enforces_signing() {
         run_dir: dir.join("run"),
         data_root: dir.join("plugin-data"),
         device_id_file: dir.join("device-id"),
+        clock_feed: None,
     };
     let sup = PluginSupervisor::production(paths, None, env!("CARGO_PKG_VERSION"))
         .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());

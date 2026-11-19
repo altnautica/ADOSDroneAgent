@@ -43,6 +43,7 @@ import { severityClasses } from "@/shared/format";
 import { BATTERY_FAILSAFE_FIX_KEY, BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
 import { AIRFRAME_RESET_ACTION, AIRFRAME_RESET_KEY } from "@/shared/hud/liftoff";
 import { refusalText } from "@/shared/hud/refusal";
+import { simClockLabel } from "@/shared/hud/sim-clock";
 import { specText } from "@/shared/hud/spec-text";
 import { placeMargins } from "@/shared/place-class";
 import { rerunStep } from "@/shared/setup-wizard/client";
@@ -210,6 +211,15 @@ function VehicleStatus() {
     <div className="flex flex-col gap-1 text-xs" data-testid="vehicle-status">
       {card ? <CountdownCard card={card} send={sendPilotAction} /> : null}
       {place ? <PlaceCard card={place} send={sendPilotAction} /> : null}
+      {fresh.pilot?.simClock ? (
+        // A run on a simulator's clock never reads as real time.
+        <span
+          data-testid="sim-clock"
+          className="self-start rounded border border-warn px-1.5 font-semibold tabular-nums text-warn"
+        >
+          {simClockLabel(fresh.pilot.simClock)}
+        </span>
+      ) : null}
       <details className="group">
         <summary
           className={cn(

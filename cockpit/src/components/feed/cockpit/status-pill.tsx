@@ -16,6 +16,7 @@ import { preflightChecks } from "@/shared/hud/preflight";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
 import { pillAlerts, pillSummary, severityTextColor, type PillAlert } from "@/shared/hud/status-pill";
+import { simClockLabel } from "@/shared/hud/sim-clock";
 import { useFlightStore } from "@/stores/flight-store";
 import { useStatusPillStore } from "@/stores/status-pill-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -93,6 +94,16 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
           <span className="min-w-0 truncate">{summary.text}</span>
         )}
       </button>
+      {pilot?.simClock ? (
+        // A run on a simulator's clock never reads as real time.
+        <span
+          data-zone="sim_clock"
+          className="shrink-0 rounded-[var(--fs-radius-sm)] border px-[6px] text-[11px] font-semibold tabular-nums"
+          style={{ color: severityColor("warning"), borderColor: severityColor("warning") }}
+        >
+          {simClockLabel(pilot.simClock)}
+        </span>
+      ) : null}
       {rect ? (
         <AlertList rect={rect} alerts={summary.alerts} ack={ack} onClose={() => setRect(null)} />
       ) : null}

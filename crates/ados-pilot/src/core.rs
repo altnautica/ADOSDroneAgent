@@ -204,6 +204,10 @@ pub struct Pilot {
     pub setup_abort: Option<String>,
     /// Wall-clock epoch ms at monotonic 0, for published absolute times.
     pub epoch_offset_ms: u64,
+    /// The simulator's pacing speed while the pilot runs on its clock
+    /// (`None` on wall time). Operator sticks are refused at any speed but
+    /// 1×: a human flies in real time.
+    pub sim_speed: Option<f64>,
     /// Sticks handed to the setup engine while the owner is `Tuning`.
     pub tuning_axes: [f32; 4],
     out: Vec<Out>,
@@ -275,6 +279,7 @@ impl Pilot {
             setup_step: None,
             setup_abort: None,
             epoch_offset_ms: 0,
+            sim_speed: None,
             tuning_axes: [0.0; 4],
             out: Vec::new(),
         }

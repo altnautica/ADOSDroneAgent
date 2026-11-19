@@ -81,6 +81,8 @@ pub struct DaemonPaths {
     /// The seams the taps read: the state and frame sockets and the sidecar
     /// directory. Injectable so a test points them at a tempdir.
     pub taps: TapPaths,
+    /// The agent config, read for `simulation.clock`.
+    pub config: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -93,6 +95,7 @@ impl Default for DaemonPaths {
             pairing_path: PathBuf::from(crate::query::auth::DEFAULT_PAIRING_PATH),
             hw_root: PathBuf::from(crate::hw::DEFAULT_ROOT),
             taps: TapPaths::default(),
+            config: PathBuf::from(ados_config::log_store::CONFIG_YAML),
         }
     }
 }
@@ -126,13 +129,19 @@ where
 
     // Build the writer on the daemon thread (so an open error surfaces here),
     // then move it onto its own dedicated OS thread to run the blocking loop.
-    let writer = Writer::new(
+    let mut writer = Writer::new(
         &paths.db,
         ingest_rx,
         WriterConfig::default(),
         Arc::clone(&stop),
     )
     .context("open writer connection")?;
+    // On a node following the simulator's clock, rows carry the sim time.
+    let gate = ados_config::simulation::read_gate(&paths.config);
+    writer.set_clock(
+        ados_time::from_config(&gate, ados_time::FeedPeer::Logd)
+            .context("bind the sim-clock feed")?,
+    );
     let boot_session = writer.boot_session();
     // The broadcast handle is the seam the live tail subscribes to; held so the
     // channel stays open for the daemon's lifetime, and cloned into the query

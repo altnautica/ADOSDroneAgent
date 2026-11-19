@@ -50,6 +50,7 @@ fn plugin_paths(root: &Path) -> Paths {
         run_dir: root.join("run"),
         data_root: root.join("plugin-data"),
         device_id_file: root.join("device-id"),
+        clock_feed: None,
     }
 }
 

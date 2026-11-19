@@ -51,6 +51,7 @@ dependencies = [
  "ados-config",
  "ados-protocol",
  "ados-sensorbus",
+ "ados-time",
  "anyhow",
  "nix 0.29.0",
  "prost",
@@ -427,6 +428,7 @@ version = "0.123.1"
 dependencies = [
  "ados-config",
  "ados-protocol",
+ "ados-time",
  "anyhow",
  "async-stream",
  "axum",
@@ -573,6 +575,7 @@ dependencies = [
  "ados-config",
  "ados-pilot",
  "ados-protocol",
+ "ados-time",
  "base64 0.23.1",
  "png 0.17.16",
  "rmp-serde",
@@ -594,6 +597,7 @@ dependencies = [
  "ados-hal-probe",
  "ados-hid",
  "ados-protocol",
+ "ados-time",
  "ados-video",
  "anyhow",
  "base64 0.23.1",
@@ -841,6 +845,16 @@ dependencies = [
  "ratatui",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ados-time"
+version = "0.123.1"
+dependencies = [
+ "ados-config",
+ "ados-protocol",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -36,6 +36,7 @@ fn state_in(root: &std::path::Path) -> AppState {
         run_dir: root.join("run"),
         data_root: root.join("plugin-data"),
         device_id_file: root.join("device-id"),
+        clock_feed: None,
     };
     let backend = Arc::new(RecordingBackend::default());
     let factory_paths = paths.clone();

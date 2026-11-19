@@ -78,6 +78,8 @@ tracing-subscriber = { workspace = true, optional = true }
 [dev-dependencies]
 # Temp directories for the pairing-posture file-reader tests.
 tempfile = "3"
+# Paused-clock tests of the sim-clock timers (`simclock`).
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = []

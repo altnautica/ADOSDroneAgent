@@ -15,7 +15,7 @@ use ados_protocol::logd::IngestFrame;
 use crate::retention;
 
 use super::config::WriterError;
-use super::encode::{insert_frame, now_us};
+use super::encode::{insert_frame, now_us, stamp_sim_ns};
 use super::session::{close_session, open_session, session_transition, SessionTransition};
 use super::Writer;
 
@@ -39,6 +39,9 @@ impl Writer {
         // before any attempt, so a retry stores the same flags: a second pass over
         // an already-redacted frame would report that nothing changed.
         let redacted: Vec<bool> = batch.iter_mut().map(|frame| frame.redact()).collect();
+        if let Some(ns) = self.clock.sim_ns() {
+            batch.iter_mut().for_each(|frame| stamp_sim_ns(frame, ns));
+        }
         let persisted = match self.persist_batch(batch, &redacted) {
             Err(e) if retention::is_disk_full(&e) => {
                 self.emergency_reclaim(&e)?;

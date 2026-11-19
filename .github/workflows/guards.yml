@@ -360,6 +360,25 @@ jobs:
       - name: Rust sizes are within the ratchet
         run: python scripts/check-rust-size.py
 
+  clock-seam:
+    name: Code on ADOS time keeps off the wall clock
+    runs-on: ubuntu-latest
+    steps:
+      # The files listed in scripts/clock-seam-allow.txt run on ADOS time (the
+      # simulator's clock when a node follows it); a wall-clock read or timer
+      # added to one would run at 1x under a sim at Nx.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Check catches a planted wall-clock read
+        run: python scripts/check-clock-seam.py --self-test
+
+      - name: Files on ADOS time keep off the wall clock
+        run: python scripts/check-clock-seam.py
+
   ts-size:
     name: Web app sources stay within the size ratchet
     runs-on: ubuntu-latest

@@ -17,6 +17,7 @@ pub(crate) fn fhs_paths() -> Paths {
         run_dir: PathBuf::from(DEFAULT_RUN_DIR),
         data_root: PathBuf::from(PLUGIN_DATA_DIR),
         device_id_file: PathBuf::from(ados_protocol::identity::DEVICE_ID_FILE),
+        clock_feed: None,
     }
 }
 
@@ -35,5 +36,6 @@ pub(crate) fn paths_in(dir: &Path) -> Paths {
         run_dir: dir.join("run"),
         data_root: dir.join("plugin-data"),
         device_id_file: dir.join("device-id"),
+        clock_feed: None,
     }
 }

@@ -193,6 +193,9 @@ pub struct Writer {
     /// How many full-disk emergency evictions this writer has run. Each one is
     /// a commit that hit `SQLITE_FULL` and was retried after freeing space.
     pub(super) emergency_evictions: u64,
+    /// ADOS time. On sim, every log, metric and event row is stamped with the
+    /// sim time it was persisted at (`sim_ns` in its fields, tags or detail).
+    pub(super) clock: ados_time::Clock,
 }
 
 impl Writer {
@@ -244,6 +247,7 @@ impl Writer {
             session_start_at: now,
             clock_stepped: false,
             emergency_evictions: 0,
+            clock: ados_time::Clock::wall(),
         })
     }
 
@@ -278,6 +282,11 @@ impl Writer {
     /// The boot session id opened at start.
     pub fn boot_session(&self) -> i64 {
         self.boot_session
+    }
+
+    /// Stamp rows with sim time from `clock` (a no-op on wall).
+    pub fn set_clock(&mut self, clock: ados_time::Clock) {
+        self.clock = clock;
     }
 
     /// The store path this writer owns (for the shutdown checkpoint log line).

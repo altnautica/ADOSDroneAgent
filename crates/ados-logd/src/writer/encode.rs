@@ -74,6 +74,20 @@ pub(crate) fn insert_frame(
     Ok(())
 }
 
+/// Stamp a log, metric or event with the sim time it is persisted at, as
+/// `sim_ns` in its fields, tags or detail. A producer's own `sim_ns` wins;
+/// hardware snapshots are not stamped.
+pub(crate) fn stamp_sim_ns(frame: &mut IngestFrame, sim_ns: u64) {
+    let map = match frame {
+        IngestFrame::Log(l) => &mut l.fields,
+        IngestFrame::Telemetry(t) => &mut t.tags,
+        IngestFrame::Event(e) => &mut e.detail,
+        IngestFrame::Hw(_) => return,
+    };
+    map.entry("sim_ns".to_owned())
+        .or_insert(rmpv::Value::from(sim_ns));
+}
+
 /// Encode an open fields/tags/detail map to a msgpack blob, or `NULL` when empty
 /// so an absent map does not waste a row's blob column.
 pub(crate) fn encode_map(map: &ados_protocol::logd::Fields) -> Option<Vec<u8>> {

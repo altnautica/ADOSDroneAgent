@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ados_protocol::mavlink::{self, ardupilotmega::MavMessage, MavHeader};
 use ados_protocol::mavlink_socket;
@@ -156,6 +156,8 @@ pub struct Daemon {
     status_tx: watch::Sender<SetupView>,
     settings: Settings,
     config_path: PathBuf,
+    /// ADOS time (wall, or the simulator's feed): the core's tick and stamps.
+    pub clock: ados_time::Clock,
 }
 
 impl Daemon {
@@ -186,6 +188,7 @@ impl Daemon {
             status_tx,
             settings,
             config_path,
+            clock: ados_time::Clock::wall(),
         }
     }
 
@@ -220,6 +223,7 @@ impl Daemon {
         let mut pilot = Pilot::new(self.settings);
         pilot.epoch_offset_ms = epoch_ms();
         let core = Core {
+            clock: self.clock,
             pilot,
             fc_tx: self.fc_link.tx.clone(),
             frames: self.fc_link.frames.subscribe(),
@@ -248,6 +252,8 @@ struct Core {
     status_tx: watch::Sender<SetupView>,
     /// Requests whose reply waits on the FC, by their [`Reply::Deferred`] token.
     deferred: HashMap<u64, oneshot::Sender<Reply>>,
+    /// ADOS time, stamped on every state frame.
+    clock: ados_time::Clock,
 }
 
 impl Core {
@@ -257,20 +263,21 @@ impl Core {
         mut feed_rx: mpsc::Receiver<(String, serde_json::Value)>,
         mut cmd_rx: mpsc::Receiver<CoreCmd>,
     ) {
-        let start = Instant::now();
-        let now = || start.elapsed().as_millis() as u64;
-        let mut tick = tokio::time::interval(Duration::from_millis(crate::core::TICK_MS));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let clock = self.clock.clone();
+        let now = || clock.now_ms();
+        let mut tick = clock.interval(Duration::from_millis(crate::core::TICK_MS));
         let mut state_ms = 0u64;
         loop {
             tokio::select! {
                 _ = tick.tick() => {
                     let t = now();
+                    self.pilot.sim_speed = clock.speed();
                     self.pilot.tick(t);
                     let _ = self.axes_tx.send(self.pilot.tuning_axes);
                     if t.saturating_sub(state_ms) >= STATE_PERIOD_MS {
                         state_ms = t;
-                        let s = self.pilot.state(t);
+                        let mut s = self.pilot.state(t);
+                        s.clock = Some(clock_stamp(&self.clock));
                         let view = SetupView {
                             readiness: s.readiness.clone(),
                             link_lost: self.pilot.link_lost(t),
@@ -473,6 +480,11 @@ async fn mavlink_link(
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// The state frame's clock stamp: `wall`, or the sim time, lag and speed.
+fn clock_stamp(c: &ados_time::Clock) -> ados_protocol::pilot::ClockStamp {
+    ados_protocol::pilot::ClockStamp::new(c.source(), c.sim_ns(), c.lag_ms(), c.speed())
 }
 
 fn epoch_ms() -> u64 {

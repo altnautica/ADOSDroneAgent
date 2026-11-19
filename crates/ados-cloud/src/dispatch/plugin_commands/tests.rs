@@ -22,6 +22,7 @@ fn paths_in(dir: &Path) -> Paths {
         run_dir: dir.join("run"),
         data_root: dir.join("plugin-data"),
         device_id_file: dir.join("device-id"),
+        clock_feed: None,
     }
 }
 
