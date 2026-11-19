@@ -5,7 +5,7 @@
     {
       "id": "com.altnautica.mavlink-gimbal-v2",
       "name": "ADOS MAVLink Gimbal v2 Controller",
-      "version": "1.4.1",
+      "version": "1.5.4",
       "description": "MAVLink Gimbal v2 control: manual sliders, ROI lock-on-target, and an 'Aim at this target' action that keeps the gimbal on a vision-locked detection.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/mavlink-gimbal-v2",
@@ -13,41 +13,27 @@
       "risk": "medium",
       "category": "drivers",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.4.1/com.altnautica.mavlink-gimbal-v2-1.4.1.signed.adosplug",
-      "archive_sha256": "4b69e36a369877bc7d3e1d0dac6283decfd5adcabc24c86b70d884005e5b58ee"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.5.4/com.altnautica.mavlink-gimbal-v2-1.5.4.signed.adosplug",
+      "archive_sha256": "5385b9694d5049e6cb1d697688016181ce96ddcdada80fb9c67c1767e0547315"
     },
     {
       "id": "com.altnautica.follow-me",
       "name": "ADOS Follow-Me",
-      "version": "0.2.10",
-      "description": "Lock onto an operator-designated subject and fly a fixed-distance standoff follow from the companion. A flight Skill in the cockpit Skill Bar, a click-a-target Follow action, and a per-drone settings tab.",
+      "version": "0.5.2",
+      "description": "Lock onto an operator-designated subject and follow it at a distance and an angle (behind, side or lead) or orbit it, flown by the agent's pilot with obstacle avoidance. A flight Skill in the cockpit skill picker, a click-a-target Follow action, and a per-drone settings tab.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/follow-me",
       "license": "GPL-3.0-or-later",
       "risk": "high",
       "category": "ai",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/follow-me-v0.2.10/com.altnautica.follow-me-0.2.10.signed.adosplug",
-      "archive_sha256": "3d3748e2a98e0e86625796ebd9a751c24d3725eb0bf850815cef121f1e5b0246"
-    },
-    {
-      "id": "com.altnautica.world-engine",
-      "name": "ADOS World Engine",
-      "version": "1.0.1",
-      "description": "3D world model from drone flights, reconstructed on a LAN compute node, plus perception offload for drones without an NPU.",
-      "author": "Altnautica",
-      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/world-engine",
-      "license": "GPL-3.0-or-later",
-      "risk": "high",
-      "category": "ai",
-      "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/world-engine-v1.0.1/com.altnautica.world-engine-1.0.1.signed.adosplug",
-      "archive_sha256": "847a4b32318ae2720711469b114ef6cd61241f130571ca081556ee28c3aeec8c"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/follow-me-v0.5.2/com.altnautica.follow-me-0.5.2.signed.adosplug",
+      "archive_sha256": "44fc691661b6adc4f0209d8a39df3da60d9c05051deebe6a962051cc53560f62"
     },
     {
       "id": "com.altnautica.siyi-pod",
       "name": "ADOS SIYI Optical Pod",
-      "version": "0.5.1",
+      "version": "0.6.4",
       "description": "Native driver for the SIYI optical-pod line (A2 mini, A8 mini, ZR10, ZR30, ZT6, ZT30) with per-model capability negotiation: gimbal, zoom, focus, photo/record, thermal palette and gain, and a laser rangefinder with subject geolocation.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/siyi-pod",
@@ -55,22 +41,50 @@
       "risk": "high",
       "category": "drivers",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/siyi-pod-v0.5.1/com.altnautica.siyi-pod-0.5.1.signed.adosplug",
-      "archive_sha256": "9b7db80439c07304008a97838350d6031166ee1e42407ef86f36ebc436b49e6c"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/siyi-pod-v0.6.4/com.altnautica.siyi-pod-0.6.4.signed.adosplug",
+      "archive_sha256": "555e7c5216eb9f7f91ae29d1fc391f3cb2b368e80be4b65a2a8e71ed283d473a"
     },
     {
-      "id": "com.altnautica.vision-nav",
-      "name": "ADOS Vision Navigation",
-      "version": "0.5.0",
-      "description": "GPS-denied navigation. Optical flow from a downward camera. Supports ArduPilot, PX4, and iNav 7.0+ on USB UVC or CSI cameras.",
+      "id": "com.altnautica.capture",
+      "name": "ADOS Capture",
+      "version": "1.0.0",
+      "description": "Record capture sessions on a drone or Visor and hand them to a reconstruction node.",
       "author": "Altnautica",
-      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/vision-nav",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/capture",
       "license": "GPL-3.0-or-later",
       "risk": "high",
       "category": "ai",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/vision-nav-v0.5.0/com.altnautica.vision-nav-0.5.0.signed.adosplug",
-      "archive_sha256": "bcafb98403631d320e808d434ff6741df63e4613d3cd140b3396111a2a0517ff"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/capture-v1.0.0/com.altnautica.capture-1.0.0.signed.adosplug",
+      "archive_sha256": "fe93351022955601d135a9857d31e77e95c736ae96423db8a8ff517c7f3c0b87"
+    },
+    {
+      "id": "com.altnautica.navigation",
+      "name": "ADOS Navigation",
+      "version": "1.0.0",
+      "description": "GNSS-denied navigation: optical flow, LiDAR SLAM and VIO poses, a live occupancy map, and the external-navigation bridge to the flight controller.",
+      "author": "Altnautica",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/navigation",
+      "license": "GPL-3.0-or-later",
+      "risk": "high",
+      "category": "ai",
+      "halves": ["agent", "gcs"],
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/navigation-v1.0.0/com.altnautica.navigation-1.0.0.signed.adosplug",
+      "archive_sha256": "c9ae359bbd01e1bf0bf7fe902b1ded556175d70c445c1eb106d7d27fda993056"
+    },
+    {
+      "id": "com.altnautica.reconstruct",
+      "name": "ADOS Reconstruct",
+      "version": "1.0.0",
+      "description": "Reconstruct captured sessions on a LAN compute node, and offload perception for drones without an accelerator.",
+      "author": "Altnautica",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/reconstruct",
+      "license": "GPL-3.0-or-later",
+      "risk": "high",
+      "category": "ai",
+      "halves": ["agent", "gcs"],
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/reconstruct-v1.0.0/com.altnautica.reconstruct-1.0.0.signed.adosplug",
+      "archive_sha256": "b80e4a771066ace1994d5d84437f02def2516f9a29b86d1a787bd692090b2a83"
     }
   ]
 }
