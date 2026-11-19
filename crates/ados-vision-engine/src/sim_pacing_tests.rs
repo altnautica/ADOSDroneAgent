@@ -106,7 +106,7 @@ fn held_batches_come_due_in_release_order() {
 }
 
 #[test]
-fn a_lane_reports_half_a_period_past_its_next_frame_and_never_past_a_held_batch() {
+fn a_lane_reports_half_a_period_past_its_delivered_next_frame_and_never_past_a_held_batch() {
     let mut p = Pacing::default();
     p.frame("a", 1_000 * MS);
     p.free("a");
@@ -118,23 +118,142 @@ fn a_lane_reports_half_a_period_past_its_next_frame_and_never_past_a_held_batch(
         "a frame in inference holds the lane"
     );
     p.free("a");
-    assert_eq!(p.done_target("a"), Some(1_250 * MS));
+    // The next frame (1200) reaches the engine once 1300 is rendered.
+    assert_eq!(p.done_target("a"), Some(1_350 * MS));
     // A held batch of this camera releases before then: the lane stops there.
     p.hold(1_200 * MS, batch("a", Some(1_100)));
     p.hold(1_150 * MS, batch("b", Some(1_000)));
     assert_eq!(p.done_target("a"), Some(1_200 * MS));
     p.due(1_200 * MS);
-    assert_eq!(p.done_target("a"), Some(1_250 * MS));
+    assert_eq!(p.done_target("a"), Some(1_350 * MS));
     // Two frames taken, one finished: still busy.
     p.frame("a", 1_200 * MS);
     p.frame("a", 1_300 * MS);
     p.free("a");
     assert_eq!(p.done_target("a"), None);
     p.free("a");
-    assert_eq!(p.done_target("a"), Some(1_450 * MS));
+    assert_eq!(p.done_target("a"), Some(1_550 * MS));
     p.lost("a");
     assert_eq!(p.done_target("a"), None, "a lost source leaves the barrier");
 }
+
+/// Drive a rendered lockstep run through the agent's own barrier
+/// ([`ados_time::barrier::Barrier`]) with one camera of period `period_ns`
+/// reporting `target`, World Engine granting `grant_ns` at a time: the run
+/// holds at a boundary until the barrier acknowledges it, draws a frame on
+/// the step past its sim time (a frame at the boundary it holds at is not
+/// drawn yet), and the source hands frame k on only once frame k+1 is drawn.
+/// Returns the sim time the run reached, ns (it stops at `until_ns` or where
+/// the barrier stalls).
+fn barrier_run(
+    period_ns: u64,
+    grant_ns: u64,
+    until_ns: u64,
+    target: impl Fn(&Pacing) -> Option<u64>,
+) -> u64 {
+    let mut b = ados_time::barrier::Barrier::default();
+    let from: std::net::SocketAddr = "127.0.0.1:14650".parse().unwrap();
+    let now = Instant::now();
+    let mut p = Pacing::default();
+    let (mut sim, mut delivered, mut seq) = (0u64, 0u64, 0u32);
+    let mut id = None;
+    while sim < until_ns {
+        while (delivered + 1) * period_ns < sim {
+            p.frame("a", delivered * period_ns);
+            p.free("a");
+            delivered += 1;
+        }
+        if let Some(done) = target(&p) {
+            let id = *id.get_or_insert_with(|| b.join().unwrap());
+            b.done(id, done, now);
+        }
+        seq += 1;
+        let tick = wire::Tick {
+            flags: wire::FLAG_LOCKSTEP,
+            seq,
+            sim_ns: sim,
+            grant_ns: sim + grant_ns,
+            speed: 0.0,
+        };
+        // Nothing else moves while the run holds: no ACK is a deadlock.
+        let Some((ack, _)) = b.tick(&tick, from, now) else {
+            return sim;
+        };
+        sim = ack.done_ns;
+    }
+    sim
+}
+
+/// The barrier keeps advancing against a one-frame-late source for any
+/// grant: the run holds only at a boundary at or past the lane's target,
+/// which is past the frame that releases the next one.
+#[test]
+fn the_barrier_keeps_advancing_with_a_one_frame_late_source_for_any_grant() {
+    const UNTIL: u64 = 20_000 * MS;
+    for (fps, grant_ms) in [(30, 20), (60, 20), (30, 1), (30, 50), (10, 20), (60, 100)] {
+        let period = 1_000 * MS / fps;
+        let reached = barrier_run(period, grant_ms * MS, UNTIL, |p| p.done_target("a"));
+        assert!(
+            reached >= UNTIL,
+            "{fps} fps, grant {grant_ms} ms: stalled at {} ms",
+            reached / MS
+        );
+    }
+}
+
+/// The target before the source's delay was counted (half a period past the
+/// next frame's own time) deadlocks the same runs.
+#[test]
+fn half_a_period_past_the_next_frame_deadlocks_a_one_frame_late_source() {
+    for (fps, grant_ms) in [(30, 20), (60, 20)] {
+        let period = 1_000 * MS / fps;
+        let reached = barrier_run(period, grant_ms * MS, 20_000 * MS, |p| {
+            p.done_target("a").map(|d| d - period)
+        });
+        assert!(
+            reached < 20_000 * MS,
+            "{fps} fps, grant {grant_ms} ms: expected a stall, ran to the end"
+        );
+    }
+}
+
+#[test]
+fn a_lane_whose_expected_frame_never_comes_leaves_the_barrier() {
+    let mut p = Pacing::default();
+    p.frame("a", 1_000 * MS);
+    p.free("a");
+    p.frame("a", 1_100 * MS);
+    p.free("a");
+    // Frame 1200 is expected once 1300 is rendered: not overdue before then.
+    assert!(p.overdue(1_300 * MS, 0).is_empty());
+    assert!(p.overdue(1_300 * MS, 5_000).is_empty(), "not yet past");
+    assert!(
+        p.overdue(1_320 * MS, 10_000).is_empty(),
+        "the silence starts"
+    );
+    assert!(p
+        .overdue(1_320 * MS, 10_000 + LANE_SILENCE_MS - 1)
+        .is_empty());
+    // A frame in time clears it.
+    p.frame("a", 1_200 * MS);
+    p.free("a");
+    assert!(p.overdue(1_320 * MS, 10_000 + LANE_SILENCE_MS).is_empty());
+    assert!(p.overdue(1_420 * MS, 20_000).is_empty());
+    // A busy lane is in inference, not silent.
+    p.frame("a", 1_300 * MS);
+    assert!(p.overdue(1_600 * MS, 30_000).is_empty());
+    assert!(p.overdue(1_600 * MS, 40_000).is_empty());
+    p.free("a");
+    assert!(p.overdue(1_600 * MS, 50_000).is_empty());
+    assert_eq!(
+        p.overdue(1_600 * MS, 50_000 + LANE_SILENCE_MS),
+        vec!["a".to_owned()]
+    );
+    assert_eq!(p.done_target("a"), None, "it left the barrier");
+}
+
+// Under World Engine's default participant timeout (2 s).
+const _: () = assert!(LANE_SILENCE_MS < 2_000);
 
 #[tokio::test]
 async fn a_result_is_released_at_its_frame_sim_time_plus_the_modelled_latency() {
@@ -203,7 +322,7 @@ async fn in_lockstep_a_camera_holds_the_barrier_per_frame_and_per_held_result() 
         "a host-clock frame takes no lane"
     );
     // The second frame: its batch is held to 1200 ms, before the next frame
-    // is due (1100 + 100 + 50): the camera registers and reports 1200.
+    // is due (1100 + 200 + 50): the camera registers and reports 1200.
     feed.ingest(&tick(2, 1_100), at);
     assert!(p.frame("cam_fl", &desc(Some(1_100))));
     p.publish(batch("cam_fl", Some(1_100)));
@@ -217,7 +336,7 @@ async fn in_lockstep_a_camera_holds_the_barrier_per_frame_and_per_held_result() 
     // waits for its next frame.
     feed.ingest(&tick(3, 1_200), at);
     assert_eq!(recv(&mut rx).await.unwrap().ts_sensor_ms, Some(1_100));
-    assert_eq!(read_done(&mut s).await, 1_250 * MS);
+    assert_eq!(read_done(&mut s).await, 1_350 * MS);
     // A lost source leaves the barrier: the connection closes.
     p.lost("cam_fl");
     let mut b = [0u8; 1];
@@ -225,5 +344,63 @@ async fn in_lockstep_a_camera_holds_the_barrier_per_frame_and_per_held_result() 
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn a_report_after_the_lane_was_lost_registers_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join(ados_time::PARTICIPANTS_SOCKET);
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+    let (tx, _rx) = broadcast::channel(8);
+    let p = SimPacing::new(Clock::Sim(SimFeed::new()), Some(100), Some(sock), tx);
+    assert!(p.frame("cam_fl", &desc(Some(1_000))));
+    p.free("cam_fl");
+    assert!(p.frame("cam_fl", &desc(Some(1_100))));
+    p.lost("cam_fl");
+    // The frame in flight finishes after its source was lost.
+    p.free("cam_fl");
+    p.report("cam_fl");
+    assert!(
+        p.parts_lock().is_empty(),
+        "a lost lane stays out of the barrier"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "nothing connected"
+    );
+}
+
+#[tokio::test]
+async fn a_silent_lockstep_lane_is_dropped_by_the_watchdog() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join(ados_time::PARTICIPANTS_SOCKET);
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+    let feed = SimFeed::new();
+    let (tx, _rx) = broadcast::channel(8);
+    let p = SimPacing::new(Clock::Sim(feed.clone()), Some(100), Some(sock), tx);
+    let at = Instant::now();
+    feed.ingest(&tick(1, 1_000), at);
+    assert!(p.frame("cam_fl", &desc(Some(1_000))));
+    p.free("cam_fl");
+    assert!(p.frame("cam_fl", &desc(Some(1_100))));
+    p.free("cam_fl");
+    let (mut s, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_done(&mut s).await, 1_350 * MS);
+    // The simulator passed 1300 and frame 1200 never comes.
+    feed.ingest(&tick(2, 1_320), Instant::now());
+    let mut b = [0u8; 1];
+    let n = tokio::time::timeout(
+        Duration::from_millis(LANE_SILENCE_MS + 1_500),
+        s.read(&mut b),
+    )
+    .await
+    .expect("the lane left the barrier within the silence bound")
+    .unwrap();
     assert_eq!(n, 0);
 }
