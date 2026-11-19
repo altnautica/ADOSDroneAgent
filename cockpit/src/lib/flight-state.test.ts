@@ -42,6 +42,7 @@ const base: ChipFacts = {
   stickInputAgeMs: null,
   minClearanceM: null,
   marginM: null,
+  commandLimits: [],
   ageMs: 100,
 };
 

@@ -26,6 +26,24 @@ describe("hold reasons", () => {
   });
 });
 
+describe("command limits", () => {
+  it("words every labelled command.limits code the same in both files", () => {
+    const labels: Record<string, string> = flightState.command_limit_labels;
+    expect(Object.keys(labels).sort()).toEqual(
+      ["clearance", "geofence", "hard_stop", "obstacle", "obstacle_closing", "push", "seen_space", "subject"],
+    );
+    for (const [code, text] of Object.entries(labels)) {
+      expect(S[`pilot.command_limit.${code}`], `setup-strings.json pilot.command_limit.${code}`).toBe(text);
+    }
+  });
+
+  it("colours a hard stop as blocked and the rest as avoiding", () => {
+    const c = flightState.secondary.command_limit;
+    expect(c.colors.hard_stop).toBe("blocked");
+    expect(c.color).toBe("avoiding");
+  });
+});
+
 describe("tips", () => {
   it("has a text for every tip and for the shared buttons", () => {
     for (const t of tips.tips) expect(S[`tips.${t.id}`], `tips.${t.id}`).toBeTruthy();

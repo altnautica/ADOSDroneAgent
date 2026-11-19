@@ -299,6 +299,9 @@ pub struct Pilot {
     /// The operator's sticks on the latest stick tick, while they own the
     /// vehicle.
     pub stick: Option<ados_protocol::pilot::StickCommand>,
+    /// The limits that cut the asked velocity since the previous frame
+    /// (`command.limits`, first bound first); empty while it flies none.
+    pub command_limits: Vec<String>,
     /// The kind's age when read; `None` when the route did not say.
     pub age_ms: Option<u64>,
     pub stale: bool,

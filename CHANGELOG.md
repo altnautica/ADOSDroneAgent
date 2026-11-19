@@ -8,6 +8,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The flight-state chip on the cockpit, the agent dashboard and the TUI says which limit cut the commanded speed while a skill, a goto or the sticks fly, from the pilot's `command.limits`: "Stopped: obstacle", "Slowed: obstacle", "Slowed: obstacle closing", "Slowed: sensor range", "Slowed: tight space", "Pushing off obstacle", "Keeping distance from subject" or "Slowed: geofence" (the obstacle lines stay hidden while the chip already reads Blocked). The cockpit spec carries the words (`command_limit_labels`, `pilot.command_limit.*`); the cockpit and dashboard bundles are rebuilt.
 - A declared plugin service may list `udp_listen_ports` (1024-65535, at
   most eight): with `network.listen` granted its unit gets
   `SocketBindAllow=udp:<port>` for each, so a network LiDAR's UDP data

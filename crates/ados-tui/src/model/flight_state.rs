@@ -22,7 +22,7 @@ mod secondary;
 mod words;
 
 pub use secondary::chip_secondary;
-use secondary::{Clearance, InputAge, Keyed, SpeedPart};
+use secondary::{Clearance, CommandLimit, InputAge, Keyed, SpeedPart};
 use words::{fill, word_label};
 
 /// The spec file, byte for byte.
@@ -94,6 +94,7 @@ struct Secondary {
     input_age: InputAge,
     h_speed: SpeedPart,
     v_speed: SpeedPart,
+    command_limit: CommandLimit,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +115,7 @@ struct Spec {
     secondary: Secondary,
     hold_reason_labels: BTreeMap<String, String>,
     position_unverified_labels: BTreeMap<String, String>,
+    command_limit_labels: BTreeMap<String, String>,
     stale_after_ms: u64,
     mode_sheet: ModeSheet,
 }
@@ -195,6 +197,8 @@ pub struct ChipFacts {
     /// The nearest obstacle (m) and the margin the pilot keeps (m).
     pub min_clearance_m: Option<f64>,
     pub margin_m: Option<f64>,
+    /// The pilot's `command.limits` codes, first bound first.
+    pub command_limits: Vec<String>,
     /// Age of the pilot state in ms.
     pub age_ms: u64,
 }
@@ -426,6 +430,7 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
             .map(|l| f64::from(l.margin_m))
             .filter(|m| *m > 0.0)
             .or_else(|| p.route_check.as_ref().and_then(|r| r.margin_m)),
+        command_limits: p.command_limits.clone(),
         age_ms,
         owner,
     })

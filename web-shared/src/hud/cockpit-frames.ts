@@ -248,6 +248,9 @@ export interface PilotState {
   /** The operator's sticks on the latest stick tick, while they own the
    *  vehicle; else null. */
   stick: StickCommand | null;
+  /** The limits that cut the asked velocity since the previous frame
+   *  (`command.limits`, first bound first); empty while it flies none. */
+  commandLimits: string[];
 }
 
 const AVOID_STATES: readonly AvoidState[] = ["clear", "detour", "blocked", "off", "stale", "unavailable"];
@@ -334,6 +337,9 @@ export function parsePilotState(raw: unknown): PilotState | null {
     positionUnverified: parsePositionUnverified(p.position_unverified),
     profileLimits: parseProfileLimits(p.profile_limits),
     stick: parseStickCommand(p.stick),
+    commandLimits: Array.isArray(obj(p.command)?.limits)
+      ? (obj(p.command)!.limits as unknown[]).filter((l): l is string => typeof l === "string")
+      : [],
   };
 }
 

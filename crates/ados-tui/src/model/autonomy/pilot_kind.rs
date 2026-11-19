@@ -188,6 +188,17 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         stick: d
             .get("stick")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        command_limits: d
+            .get("command")
+            .and_then(|c| c.get("limits"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         age_ms,
         stale,
     }

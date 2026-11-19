@@ -1,8 +1,8 @@
 //! The chip's secondary line, in the spec's order, as `flight-state.ts`
 //! builds it: FC failsafe, the obstacle clearance, a late stick input, the
-//! pilot's speed cap, a mission the pilot holds paused, hold reason,
-//! avoidance state, control mode, then the horizontal and vertical speed
-//! while the sticks fly.
+//! pilot's speed cap, the limit that cut the commanded speed, a mission the
+//! pilot holds paused, hold reason, avoidance state, control mode, then the
+//! horizontal and vertical speed while the sticks fly.
 
 use serde::Deserialize;
 
@@ -13,6 +13,36 @@ use super::{
 };
 use crate::model::route_check::speed_cap_line;
 use crate::model::spec_text::spec_text;
+
+/// The limit that cut the commanded speed: the first `command.limits` code
+/// not in `skip`, while one of `owners` flies.
+#[derive(Debug, Deserialize)]
+pub(super) struct CommandLimit {
+    owners: Vec<String>,
+    skip: Vec<String>,
+    suppress_while_blocked: Vec<String>,
+    color: String,
+    #[serde(default)]
+    colors: std::collections::BTreeMap<String, String>,
+}
+
+/// The `command.limits` code the chip shows, as `commandLimitCode` in
+/// `flight-state.ts` picks it: none with no label, and none of the
+/// `suppress_while_blocked` codes while avoidance reports blocked.
+fn command_limit_code(f: &ChipFacts) -> Option<&str> {
+    let c = &SPEC.secondary.command_limit;
+    if !c.owners.contains(&f.owner) {
+        return None;
+    }
+    let code = f.command_limits.iter().find(|l| !c.skip.contains(l))?;
+    if !SPEC.command_limit_labels.contains_key(code) {
+        return None;
+    }
+    if f.avoid_state.as_deref() == Some("blocked") && c.suppress_while_blocked.contains(code) {
+        return None;
+    }
+    Some(code)
+}
 
 /// A part worded by a spec string (`setup-strings.json`).
 #[derive(Debug, Deserialize)]
@@ -94,6 +124,15 @@ pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
                         text: own
                             .unwrap_or_else(|| sec.speed_cap.text.replace("{v}", &cap_text(v))),
                         color: sec.speed_cap.color.clone(),
+                    });
+                }
+            }
+            "command_limit" => {
+                if let Some(code) = command_limit_code(f) {
+                    let c = &sec.command_limit;
+                    out.push(ChipLine {
+                        text: SPEC.command_limit_labels[code].clone(),
+                        color: c.colors.get(code).unwrap_or(&c.color).clone(),
                     });
                 }
             }
