@@ -9,7 +9,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 
-## [0.123.0] - 2026-11-20
+## [0.123.1] - 2026-11-20
 
 ### Added
 
@@ -36,6 +36,10 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Ground-role invites are version 2: besides the radio keys they carry what a phone needs to stand in for the box (relay secrets, system ids, transmit settings, regulatory domain, the box's identity and LAN address, and the handover key).
 
 ### Changed
+
+- The bundled plugin catalog lists Capture, Reconstruct and Navigation
+  1.0.0 and Follow-Me 0.5.2 at their published releases; Vision Navigation
+  is replaced by Navigation.
 
 - The pilot, the cockpit, the dashboard and the TUI read Navigation's
   state from the shared topic `plugin.navigation.state` instead of
