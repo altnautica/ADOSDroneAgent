@@ -32,6 +32,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `ados-clock` can bind the sim-clock feed. Its unit allowed only Unix sockets, so on a sim-clock node the plugin relay failed at start (`Address family not supported by protocol`) and plugins never got the simulator's time; inet sockets are now allowed, and only the relay opens one.
+
 - The sticks' yaw rate and speed cap tell the truth. ArduCopter's GUIDED turns the heading target the pilot sends no faster than `ATC_RATE_WPY_MAX` (60 °/s by default; `ATC_SLEW_YAW` on older firmware) and `ATC_RATE_Y_MAX` when set, so Normal and Sport asked 90 and 150 °/s and turned at 60. The pilot now reads both and holds the profile's yaw rate to them. With avoidance on, the pilot frame's `command.v_cap_mps` is the speed the seen-space brake holds the sticks to (about 5.3 m/s on a 12 m planar lidar), not the profile's 7 or 10 m/s.
 
 - A launch holds at the height it was asked for. The take-off step ends at 90 % of the launch height, and the pilot's hold kept the height it had then, so a 3 m launch hovered near 2.6 m; the hold now takes the launch height above the steady take-off's start point (above the ground the height reading measures, for the FC's own take-off).
