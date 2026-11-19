@@ -8,6 +8,8 @@ unmaintained = "workspace"
 yanked = "warn"
 # Every exception is a decision: name the advisory and why it does not apply.
 ignore = [
+    { id = "RUSTSEC-2026-0545", reason = "aes-crypto feature not enabled (features = [\"deflate\"]); no encrypted entry is ever read" },
+    { id = "RUSTSEC-2026-0548", reason = "ZipStreamReader and read_zipfile_from_stream are never called; archives are read only through ZipArchive by_index on the central directory" },
     # quick-xml is a build dependency of mavlink-bindgen only: the mavlink
     # crate's build script parses the MAVLink dialect XML definitions bundled
     # inside that crate, once, at compile time. No shipped binary links

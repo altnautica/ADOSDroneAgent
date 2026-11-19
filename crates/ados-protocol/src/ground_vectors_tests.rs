@@ -154,9 +154,12 @@ fn ground_vectors_rpc_requests() {
     }
 }
 
+/// One response vector: name, HTTP status, body, headers.
+type ResponseCase = (&'static str, u16, Vec<u8>, Vec<(String, String)>);
+
 #[test]
 fn ground_vectors_rpc_responses() {
-    let cases: [(&str, u16, Vec<u8>, Vec<(String, String)>); 3] = [
+    let cases: [ResponseCase; 3] = [
         ("small", 200, br#"{"ok":true}"#.to_vec(), vec![]),
         ("empty", 204, Vec::new(), vec![]),
         (
