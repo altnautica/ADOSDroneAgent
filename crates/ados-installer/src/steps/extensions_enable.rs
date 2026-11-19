@@ -11,13 +11,15 @@ use ados_plugin_host::PluginSupervisor;
 use super::ATTEMPTS;
 
 /// Grant every required permission `plugin_id` does not hold yet, then enable
-/// it. A grant is retried up to [`ATTEMPTS`] times; a `network.outbound` grant
-/// waits for the loopback guard before each try. Returns the permissions this
-/// call granted.
+/// it when `enable` is set (an install that must stay off records its grants
+/// only). A grant is retried up to [`ATTEMPTS`] times; a `network.outbound`
+/// grant waits for the loopback guard before each try. Returns the permissions
+/// this call granted.
 pub(super) fn grant_required_and_enable(
     supervisor: &mut PluginSupervisor,
     plugin_id: &str,
     guard_wait: Duration,
+    enable: bool,
 ) -> Result<Vec<String>, String> {
     let required = required_permissions(supervisor, plugin_id)?;
     let held: BTreeSet<String> = supervisor
@@ -57,9 +59,11 @@ pub(super) fn grant_required_and_enable(
         }
         granted.push(permission.clone());
     }
-    supervisor
-        .enable(plugin_id)
-        .map_err(|e| not_enabled(plugin_id, &format!("enable failed: {e}")))?;
+    if enable {
+        supervisor
+            .enable(plugin_id)
+            .map_err(|e| not_enabled(plugin_id, &format!("enable failed: {e}")))?;
+    }
     Ok(granted)
 }
 

@@ -199,25 +199,35 @@ pub(super) fn install_extensions(
         retire::report(r);
         match r {
             Retirement::Replaced {
-                retired, successor, ..
+                retired,
+                successors,
+                ..
             } => {
-                println!("  extensions: {retired} replaced by {successor}")
+                let successors = successors.join(" and ");
+                println!("  extensions: {retired} replaced by {successors}")
             }
             Retirement::Kept {
                 retired,
-                successor,
+                successors,
                 reason,
             } => {
-                println!("  extensions: {retired} kept until {successor} can install: {reason}")
+                let successors = successors.join(" and ");
+                println!(
+                    "  extensions: {retired} kept until {successors} can install ({reason}); \
+                     re-run the installer"
+                )
             }
             Retirement::NotRemoved {
                 retired,
-                successor,
+                successors,
                 reason,
-            } => println!(
-                "  extensions: {successor} is in but {retired} could not be removed ({reason}); \
-                 re-run the installer"
-            ),
+            } => {
+                let successors = successors.join(" and ");
+                println!(
+                    "  extensions: {successors} in but {retired} could not be removed \
+                     ({reason}); re-run the installer"
+                )
+            }
         }
     }
     match done.reconstruct {

@@ -70,10 +70,11 @@ def is_known_agent_capability(cap: str) -> bool:
     return cap in AGENT_CAPABILITIES
 
 
-# GCS capabilities the bridge scopes with a topic suffix: a plugin declares
-# and is granted `telemetry.subscribe.<topic>` (for example
-# `telemetry.subscribe.gimbal`), which the GCS resolves to the base entry.
-_PER_STREAM_GCS_BASES = ("telemetry.subscribe",)
+# GCS capabilities the bridge scopes with a suffix: a plugin declares and is
+# granted `telemetry.subscribe.<topic>` (for example
+# `telemetry.subscribe.gimbal`) or `plugin.http.<extension id>`, which the
+# GCS resolves to the base entry.
+_PER_STREAM_GCS_BASES = ("telemetry.subscribe", "plugin.http")
 
 
 def is_known_gcs_capability(cap: str) -> bool:

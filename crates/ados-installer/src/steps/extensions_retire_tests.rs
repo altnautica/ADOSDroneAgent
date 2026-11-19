@@ -55,14 +55,22 @@ fn supervisor(dir: &Path) -> PluginSupervisor {
         .with_profile("drone")
 }
 
+/// Install `id` from a local archive on `sup`, granted, and switched on when
+/// `on` is set.
+fn install_local(sup: &mut PluginSupervisor, dir: &Path, id: &str, on: bool) {
+    let staged = dir.join(format!("{id}.adosplug"));
+    std::fs::write(&staged, archive(id)).unwrap();
+    sup.install_archive(&staged).unwrap();
+    sup.grant_permission(id, "hardware.spi").unwrap();
+    if on {
+        sup.enable(id).unwrap();
+    }
+}
+
 /// A drone with vision-nav installed and running.
 fn with_vision_nav(dir: &Path) -> PluginSupervisor {
     let mut sup = supervisor(dir);
-    let staged = dir.join("vision-nav.adosplug");
-    std::fs::write(&staged, archive(VISION_NAV_ID)).unwrap();
-    sup.install_archive(&staged).unwrap();
-    sup.grant_permission(VISION_NAV_ID, "hardware.spi").unwrap();
-    sup.enable(VISION_NAV_ID).unwrap();
+    install_local(&mut sup, dir, VISION_NAV_ID, true);
     sup
 }
 
@@ -74,21 +82,136 @@ fn catalog(url: &str, sha: &str) -> String {
     .to_string()
 }
 
+/// A catalog and download source publishing Navigation only.
+fn navigation_only() -> (String, StaticDownloadSource) {
+    let body = archive(NAVIGATION_ID);
+    let sha = hex::encode(Sha256::digest(&body));
+    (
+        catalog(URL, &sha),
+        StaticDownloadSource::default().with(URL, body),
+    )
+}
+
+fn is_on(sup: &PluginSupervisor, id: &str) -> bool {
+    matches!(
+        sup.find_install(id).map(|i| i.status),
+        Some(PluginStatus::Enabled | PluginStatus::Running)
+    )
+}
+
 #[test]
-fn each_retired_extension_names_its_successor_by_profile() {
-    assert_eq!(successor(VISION_NAV_ID, "drone"), Some(NAVIGATION_ID));
-    assert_eq!(successor(VISION_NAV_ID, "visor"), Some(NAVIGATION_ID));
-    assert_eq!(successor(WORLD_ENGINE_ID, "drone"), Some(CAPTURE_ID));
+fn each_retired_extension_names_its_successors_by_profile() {
+    assert_eq!(successors(VISION_NAV_ID, "drone"), [NAVIGATION_ID]);
+    assert_eq!(successors(VISION_NAV_ID, "visor"), [NAVIGATION_ID]);
     assert_eq!(
-        successor(WORLD_ENGINE_ID, "ground-station"),
-        Some(CAPTURE_ID)
+        successors(WORLD_ENGINE_ID, "drone"),
+        [NAVIGATION_ID, CAPTURE_ID]
     );
     assert_eq!(
-        successor(WORLD_ENGINE_ID, "workstation"),
-        Some(RECONSTRUCT_ID)
+        successors(WORLD_ENGINE_ID, "visor"),
+        [NAVIGATION_ID, CAPTURE_ID]
     );
-    assert_eq!(successor(WORLD_ENGINE_ID, "compute"), Some(RECONSTRUCT_ID));
-    assert_eq!(successor("com.altnautica.follow-me", "drone"), None);
+    assert_eq!(successors(WORLD_ENGINE_ID, "ground_station"), [CAPTURE_ID]);
+    assert_eq!(successors(WORLD_ENGINE_ID, "workstation"), [RECONSTRUCT_ID]);
+    assert_eq!(successors(WORLD_ENGINE_ID, "compute"), [RECONSTRUCT_ID]);
+    assert!(successors("com.altnautica.follow-me", "drone").is_empty());
+}
+
+#[test]
+fn a_disabled_retired_extension_hands_over_to_a_successor_that_stays_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sup = supervisor(dir.path());
+    install_local(&mut sup, dir.path(), VISION_NAV_ID, false);
+    let (catalog, source) = navigation_only();
+
+    let done = retire_all(&mut sup, &catalog, &source, Duration::ZERO, Duration::ZERO);
+    assert!(
+        matches!(
+            &done[..],
+            [Retirement::Replaced {
+                retired: VISION_NAV_ID,
+                ..
+            }]
+        ),
+        "{done:?}"
+    );
+    sup.discover().unwrap();
+    assert!(sup.find_install(VISION_NAV_ID).is_none());
+    let nav = sup.find_install(NAVIGATION_ID).unwrap();
+    assert_eq!(
+        nav.status,
+        PluginStatus::Installed,
+        "installed but not enabled"
+    );
+    assert!(
+        nav.permissions
+            .get("hardware.spi")
+            .is_some_and(|g| g.granted),
+        "the required grant is recorded"
+    );
+}
+
+#[test]
+fn world_engine_stays_off_when_navigation_installs_but_capture_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sup = supervisor(dir.path());
+    install_local(&mut sup, dir.path(), VISION_NAV_ID, true);
+    install_local(&mut sup, dir.path(), WORLD_ENGINE_ID, true);
+    let (catalog, source) = navigation_only();
+
+    let done = retire_all(&mut sup, &catalog, &source, Duration::ZERO, Duration::ZERO);
+    assert!(
+        matches!(
+            &done[..],
+            [
+                Retirement::Replaced {
+                    retired: VISION_NAV_ID,
+                    ..
+                },
+                Retirement::Kept {
+                    retired: WORLD_ENGINE_ID,
+                    ..
+                },
+            ]
+        ),
+        "{done:?}"
+    );
+    sup.discover().unwrap();
+    assert!(is_on(&sup, NAVIGATION_ID));
+    assert!(
+        !is_on(&sup, WORLD_ENGINE_ID),
+        "world-engine never runs beside Navigation"
+    );
+    assert!(sup.find_install(WORLD_ENGINE_ID).is_some());
+    assert!(sup.find_install(VISION_NAV_ID).is_none());
+    assert!(report(&done[1]), "the kept world-engine is reported");
+}
+
+#[test]
+fn world_engine_comes_back_on_when_none_of_its_successors_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sup = supervisor(dir.path());
+    install_local(&mut sup, dir.path(), WORLD_ENGINE_ID, true);
+
+    let done = retire_all(
+        &mut sup,
+        r#"{"schema_version":1,"plugins":[]}"#,
+        &StaticDownloadSource::default(),
+        Duration::ZERO,
+        Duration::ZERO,
+    );
+    assert!(
+        matches!(
+            &done[..],
+            [Retirement::Kept {
+                retired: WORLD_ENGINE_ID,
+                ..
+            }]
+        ),
+        "{done:?}"
+    );
+    sup.discover().unwrap();
+    assert!(is_on(&sup, WORLD_ENGINE_ID));
 }
 
 #[test]
@@ -114,9 +237,9 @@ fn the_successor_replaces_the_retired_extension_and_its_data_stays() {
             &done[..],
             [Retirement::Replaced {
                 retired: VISION_NAV_ID,
-                successor: NAVIGATION_ID,
+                successors,
                 ..
-            }]
+            }] if *successors == [NAVIGATION_ID]
         ),
         "{done:?}"
     );
@@ -165,8 +288,8 @@ fn with_no_release_yet_the_retired_extension_keeps_running() {
     );
     assert!(sup.find_install(NAVIGATION_ID).is_none());
     assert!(
-        !report(&done[0]),
-        "an unpublished successor is not a failure"
+        report(&done[0]),
+        "a kept retired extension is reported to the operator"
     );
 }
 

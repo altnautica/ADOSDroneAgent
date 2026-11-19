@@ -14,6 +14,7 @@ from ados.plugins.capabilities import (
     CAPABILITY_CATALOG,
     ENFORCED_AGENT_CAPABILITIES,
     is_known_agent_capability,
+    is_known_gcs_capability,
 )
 
 NEW_AGENT_CAPS = (
@@ -152,3 +153,9 @@ def test_gcs_capability_count_matches_ts_catalog() -> None:
         "cloud.read",
     ):
         assert required in entries, f"GCS catalog missing {required!r}"
+
+
+def test_plugin_http_is_scoped_per_extension() -> None:
+    assert is_known_gcs_capability("plugin.http.com.altnautica.reconstruct")
+    assert is_known_gcs_capability("telemetry.subscribe.gimbal")
+    assert not is_known_gcs_capability("plugin.http.")

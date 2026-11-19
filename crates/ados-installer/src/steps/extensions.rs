@@ -228,10 +228,8 @@ pub fn install_node_extensions(
         .map_err(|_| "the install thread panicked".to_string())
 }
 
-/// Install `plugin_id` from `catalog_json` through `supervisor`: finish an
-/// installed plugin that was never switched on, leave any other installed one
-/// alone, report an unpublished one, else download (allowlist + sha256 pin,
-/// retried), install, grant the manifest's required permissions, enable.
+/// Install `plugin_id` from `catalog_json` through `supervisor` and switch it
+/// on: [`install_extension`] with `enable` set.
 pub fn install_from_catalog(
     supervisor: &mut PluginSupervisor,
     plugin_id: &str,
@@ -239,6 +237,32 @@ pub fn install_from_catalog(
     source: &dyn DownloadSource,
     guard_wait: Duration,
     retry_delay: Duration,
+) -> Result<ExtensionOutcome, String> {
+    install_extension(
+        supervisor,
+        plugin_id,
+        catalog_json,
+        source,
+        guard_wait,
+        retry_delay,
+        true,
+    )
+}
+
+/// Install `plugin_id` from `catalog_json` through `supervisor`: finish an
+/// installed plugin that was never switched on, leave any other installed one
+/// alone, report an unpublished one, else download (allowlist + sha256 pin,
+/// retried), install, grant the manifest's required permissions and, when
+/// `enable` is set, enable it. With `enable` unset the plugin stays installed
+/// but off, its grants recorded.
+pub fn install_extension(
+    supervisor: &mut PluginSupervisor,
+    plugin_id: &str,
+    catalog_json: &str,
+    source: &dyn DownloadSource,
+    guard_wait: Duration,
+    retry_delay: Duration,
+    enable: bool,
 ) -> Result<ExtensionOutcome, String> {
     supervisor
         .discover()
@@ -250,7 +274,7 @@ pub fn install_from_catalog(
         if existing.status != PluginStatus::Installed {
             return Ok(ExtensionOutcome::AlreadyInstalled { version });
         }
-        let granted = grant_required_and_enable(supervisor, plugin_id, guard_wait)?;
+        let granted = grant_required_and_enable(supervisor, plugin_id, guard_wait, enable)?;
         return Ok(ExtensionOutcome::Finished { version, granted });
     }
 
@@ -292,7 +316,7 @@ pub fn install_from_catalog(
         .map_err(|e| format!("install refused: {e}"))?;
     drop(staging_dir);
 
-    let granted = grant_required_and_enable(supervisor, plugin_id, guard_wait)?;
+    let granted = grant_required_and_enable(supervisor, plugin_id, guard_wait, enable)?;
     Ok(ExtensionOutcome::Installed {
         version: installed.version,
         granted,
@@ -431,13 +455,15 @@ impl Step for Extensions {
             Ok(d) => d,
             Err(e) => return step_outcome(Err(e)),
         };
-        // Every retirement is logged; one that left both generations
-        // installed needs a re-run.
+        // Every retirement is logged. One that left a retired extension
+        // installed (its successors not all in, or it would not uninstall)
+        // keeps a generation this agent no longer reads: the optional step
+        // fails, so the install finishes degraded and names it.
         let reports: Vec<bool> = done.retired.iter().map(retire::report).collect();
         if reports.contains(&true) {
             return StepOutcome::Failed(
-                "a retired extension could not be removed after its successor installed; \
-                 re-run the installer"
+                "a retired extension is still installed because not all of its successors \
+                 installed or it could not be removed; re-run the installer"
                     .into(),
             );
         }
