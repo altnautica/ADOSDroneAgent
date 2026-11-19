@@ -12,11 +12,12 @@ use super::shaping::flying;
 use crate::modes::copter;
 
 /// The pins are recorded to six decimals and the shaping arithmetic is
-/// deterministic: a pure restructuring repeats them to the last digit. One
-/// millimetre (and 1 mm/s, 1 mrad) leaves room for a reordered
-/// floating-point sum and nothing a flight would show: the FC's position
-/// loop alone moves the vehicle more than that each tick.
-const TOL: f32 = 1e-3;
+/// deterministic on one machine: a pure restructuring repeats them to the
+/// last digit. Across machines the platform's `sin`/`cos` can differ in the
+/// last bit, and a closed loop carries that to about a millimetre over a few
+/// seconds (1.2 mm at 4.3 s on CI). One centimetre (1 cm/s, 10 mrad) allows
+/// for that and nothing a flight would show.
+const TOL: f32 = 1e-2;
 
 /// The vehicle's horizontal position and velocity, and the last setpoint:
 /// its position, velocity, acceleration and heading.

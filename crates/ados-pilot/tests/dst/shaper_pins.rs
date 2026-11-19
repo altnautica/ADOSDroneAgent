@@ -11,11 +11,12 @@ use crate::scenarios::{fly_sticks, launch_to_hold};
 use crate::sim::Sim;
 
 /// The pins are recorded to six decimals and the simulation replays a seed
-/// byte for byte: a pure restructuring of the pilot repeats them to the
-/// last digit. One millimetre (1 mm/s, 1 mrad) leaves room for a reordered
-/// floating-point sum, far below the seeded wind and sensor noise the
-/// copter already flies in.
-const TOL: f32 = 1e-3;
+/// byte for byte on one machine: a pure restructuring of the pilot repeats
+/// them to the last digit. Across machines the platform's `sin`/`cos` can
+/// differ in the last bit and a closed loop carries it to about a
+/// millimetre; one centimetre (1 cm/s, 10 mrad) allows for that, far below
+/// the seeded wind and sensor noise the copter already flies in.
+const TOL: f32 = 1e-2;
 
 const SEEDS: [u64; 3] = [1, 2, 3];
 
