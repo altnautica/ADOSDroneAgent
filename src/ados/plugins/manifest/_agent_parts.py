@@ -155,8 +155,10 @@ class ServiceSpec(_StrictModel):
     * ``restart`` — systemd restart policy for the unit.
     * ``profiles`` — node profiles the service runs on. ``None`` ⇒ every
       profile the plugin targets; an empty list is refused.
-    * ``listen_ports`` — TCP/UDP ports the service binds (1024-65535, at
-      most four, unique). Declaring any requires the ``network.listen`` and
+    * ``listen_ports`` — TCP ports the service binds (1024-65535, at
+      most four, unique); ``udp_listen_ports`` — UDP ports it binds
+      (1024-65535, at most eight, unique). Declaring any requires the
+      ``network.listen`` and
       ``network.outbound`` capabilities.
     * ``slice`` — cgroup slice the unit runs in. Always the shared plugin
       slice; any other value is refused, so a plugin cannot move its own
@@ -175,6 +177,9 @@ class ServiceSpec(_StrictModel):
     profiles: list[Profile] | None = None
     listen_ports: list[Annotated[int, Field(ge=1024, le=65535)]] = Field(
         default_factory=list, max_length=4
+    )
+    udp_listen_ports: list[Annotated[int, Field(ge=1024, le=65535)]] = Field(
+        default_factory=list, max_length=8
     )
 
     @field_validator("name")
@@ -204,11 +209,11 @@ class ServiceSpec(_StrictModel):
         _require_non_empty_profiles(v, "service profiles")
         return v
 
-    @field_validator("listen_ports")
+    @field_validator("listen_ports", "udp_listen_ports")
     @classmethod
     def _validate_listen_ports(cls, v: list[int]) -> list[int]:
         if len(set(v)) != len(v):
-            raise ManifestError(f"service listen_ports {v} contains a duplicate port")
+            raise ManifestError(f"service ports {v} contain a duplicate port")
         return v
 
     @field_validator("slice")

@@ -267,14 +267,16 @@ pub fn sandbox_enforced_caps() -> BTreeSet<&'static str> {
 /// re-rendering an unchanged grant set produces a byte-identical unit and the
 /// supervisors can skip the restart. `loopback_guard_active` is the verdict of
 /// [`crate::loopback_guard`]; without it a `network.outbound` grant renders the
-/// no-grant socket policy. `listen_ports` are the TCP ports the unit's process
-/// declares it serves (a declared service's `listen_ports`; empty for the main
-/// unit, which never listens): with `network.listen` granted each one gets a
-/// `SocketBindAllow=`, and every unit denies every other bind.
+/// no-grant socket policy. `tcp_ports` and `udp_ports` are the ports the
+/// unit's process declares it serves (a declared service's `listen_ports` and
+/// `udp_listen_ports`; empty for the main unit, which never listens): with
+/// `network.listen` granted each one gets a `SocketBindAllow=`, and every unit
+/// denies every other bind.
 pub fn sandbox_directives(
     granted: &BTreeSet<String>,
     loopback_guard_active: bool,
-    listen_ports: &[u16],
+    tcp_ports: &[u16],
+    udp_ports: &[u16],
 ) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
@@ -349,8 +351,11 @@ pub fn sandbox_directives(
     // granted `network.listen`, and then only the ports it declared. A listener
     // also needs the inet families above, which only `network.outbound` opens.
     if granted.contains(NETWORK_LISTEN_CAP) {
-        for port in listen_ports {
+        for port in tcp_ports {
             lines.push(format!("SocketBindAllow=tcp:{port}"));
+        }
+        for port in udp_ports {
+            lines.push(format!("SocketBindAllow=udp:{port}"));
         }
     }
     lines.push("SocketBindDeny=any".to_string());
@@ -472,7 +477,7 @@ mod tests {
 
     #[test]
     fn no_grant_gives_private_dev_and_no_outbound_sockets() {
-        let lines = sandbox_directives(&caps(&[]), true, &[]);
+        let lines = sandbox_directives(&caps(&[]), true, &[], &[]);
         assert!(lines.contains(&"PrivateDevices=yes".to_string()));
         assert!(lines.contains(&"RestrictAddressFamilies=AF_UNIX".to_string()));
         assert!(lines.contains(&"IPAddressDeny=any".to_string()));
@@ -481,7 +486,7 @@ mod tests {
 
     #[test]
     fn granting_i2c_does_not_also_open_the_camera() {
-        let lines = sandbox_directives(&caps(&["hardware.i2c"]), true, &[]);
+        let lines = sandbox_directives(&caps(&["hardware.i2c"]), true, &[], &[]);
         assert!(lines.contains(&"DevicePolicy=closed".to_string()));
         assert!(lines.contains(&"DeviceAllow=char-i2c rw".to_string()));
         assert!(!lines
@@ -493,7 +498,7 @@ mod tests {
 
     #[test]
     fn network_grant_opens_the_inet_families_when_the_loopback_guard_is_active() {
-        let lines = sandbox_directives(&caps(&["network.outbound"]), true, &[]);
+        let lines = sandbox_directives(&caps(&["network.outbound"]), true, &[], &[]);
         assert!(lines
             .contains(&"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string()));
         // No systemd address filter: it would also cut ingress to the plugin's
@@ -504,16 +509,16 @@ mod tests {
 
     #[test]
     fn network_grant_without_the_loopback_guard_keeps_the_no_grant_socket_policy() {
-        let lines = sandbox_directives(&caps(&["network.outbound"]), false, &[]);
+        let lines = sandbox_directives(&caps(&["network.outbound"]), false, &[], &[]);
         assert!(lines.contains(&"RestrictAddressFamilies=AF_UNIX".to_string()));
         assert!(lines.contains(&"IPAddressDeny=any".to_string()));
-        assert_eq!(lines, sandbox_directives(&caps(&[]), false, &[]));
+        assert_eq!(lines, sandbox_directives(&caps(&[]), false, &[], &[]));
     }
 
     #[test]
     fn filesystem_grant_moves_the_data_roots_from_inaccessible_to_writable() {
-        let without = sandbox_directives(&caps(&[]), true, &[]);
-        let with = sandbox_directives(&caps(&["filesystem.host"]), true, &[]);
+        let without = sandbox_directives(&caps(&[]), true, &[], &[]);
+        let with = sandbox_directives(&caps(&["filesystem.host"]), true, &[], &[]);
         let rw_without = without
             .iter()
             .find(|l| l.starts_with("ReadWritePaths="))
@@ -558,7 +563,7 @@ mod tests {
 
     #[test]
     fn the_agent_run_dir_is_hidden_whatever_is_granted() {
-        let none = sandbox_directives(&caps(&[]), true, &[]);
+        let none = sandbox_directives(&caps(&[]), true, &[], &[]);
         let tail = &none[none.len() - NO_GRANT_FILESYSTEM.len()..];
         assert_eq!(tail, NO_GRANT_FILESYSTEM);
 
@@ -575,7 +580,7 @@ mod tests {
         let everything: Vec<&str> = sandbox_enforced_caps().into_iter().collect();
         for (granted, lines) in [
             (false, none.clone()),
-            (true, sandbox_directives(&caps(&everything), true, &[])),
+            (true, sandbox_directives(&caps(&everything), true, &[], &[])),
         ] {
             assert!(lines.contains(&"TemporaryFileSystem=/run/ados:ro".to_string()));
             for line in &lines {
@@ -599,6 +604,7 @@ mod tests {
             &caps(&["hardware.usb.uvc", "hardware.camera.csi"]),
             true,
             &[],
+            &[],
         );
         let count = lines
             .iter()
@@ -610,19 +616,19 @@ mod tests {
 
     #[test]
     fn the_same_grant_set_renders_identically() {
-        let a = sandbox_directives(&caps(&["hardware.i2c", "network.outbound"]), true, &[]);
-        let b = sandbox_directives(&caps(&["network.outbound", "hardware.i2c"]), true, &[]);
+        let a = sandbox_directives(&caps(&["hardware.i2c", "network.outbound"]), true, &[], &[]);
+        let b = sandbox_directives(&caps(&["network.outbound", "hardware.i2c"]), true, &[], &[]);
         assert_eq!(a, b);
     }
 
     #[test]
     fn only_a_granted_listener_may_bind_and_only_its_declared_ports() {
         // Every unit denies every inet bind.
-        let none = sandbox_directives(&caps(&[]), true, &[8092]);
+        let none = sandbox_directives(&caps(&[]), true, &[8092], &[]);
         assert!(none.contains(&"SocketBindDeny=any".to_string()));
         assert!(!none.iter().any(|l| l.starts_with("SocketBindAllow=")));
         // Declared ports without the grant stay closed.
-        let declared_only = sandbox_directives(&caps(&["network.outbound"]), true, &[8092]);
+        let declared_only = sandbox_directives(&caps(&["network.outbound"]), true, &[8092], &[]);
         assert!(!declared_only
             .iter()
             .any(|l| l.starts_with("SocketBindAllow=")));
@@ -631,6 +637,7 @@ mod tests {
             &caps(&["network.outbound", "network.listen"]),
             true,
             &[8092, 8093],
+            &[],
         );
         let allows: Vec<&str> = granted
             .iter()
@@ -644,14 +651,42 @@ mod tests {
         assert!(granted.contains(&"SocketBindDeny=any".to_string()));
         // A unit with nothing to listen on gains nothing from the grant.
         assert_eq!(
-            sandbox_directives(&caps(&["network.listen"]), true, &[]),
-            sandbox_directives(&caps(&[]), true, &[])
+            sandbox_directives(&caps(&["network.listen"]), true, &[], &[]),
+            sandbox_directives(&caps(&[]), true, &[], &[])
         );
     }
 
     #[test]
+    fn udp_listen_ports_render_socket_bind_allow_udp() {
+        let lines = sandbox_directives(
+            &caps(&["network.outbound", "network.listen"]),
+            true,
+            &[8092],
+            &[56101, 56201],
+        );
+        let socket: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.starts_with("SocketBind"))
+            .map(String::as_str)
+            .collect();
+        // UDP allows follow the TCP ones and precede the deny.
+        assert_eq!(
+            socket,
+            [
+                "SocketBindAllow=tcp:8092",
+                "SocketBindAllow=udp:56101",
+                "SocketBindAllow=udp:56201",
+                "SocketBindDeny=any",
+            ]
+        );
+        // Without the grant the UDP ports stay closed too.
+        let closed = sandbox_directives(&caps(&["network.outbound"]), true, &[], &[56101]);
+        assert!(!closed.iter().any(|l| l.starts_with("SocketBindAllow=")));
+    }
+
+    #[test]
     fn the_gpu_grant_opens_the_accelerator_nodes_and_their_groups() {
-        let lines = sandbox_directives(&caps(&["hardware.gpu"]), true, &[]);
+        let lines = sandbox_directives(&caps(&["hardware.gpu"]), true, &[], &[]);
         assert!(lines.contains(&"DevicePolicy=closed".to_string()));
         for rule in [
             "DeviceAllow=char-drm rw",
@@ -665,7 +700,7 @@ mod tests {
         }
         assert!(lines.contains(&"SupplementaryGroups=video render".to_string()));
         // A CSI grant shares the DRM node but not the accelerator groups.
-        let csi = sandbox_directives(&caps(&["hardware.camera.csi"]), true, &[]);
+        let csi = sandbox_directives(&caps(&["hardware.camera.csi"]), true, &[], &[]);
         assert!(!csi.iter().any(|l| l.starts_with("SupplementaryGroups=")));
         assert!(!csi
             .iter()
@@ -684,7 +719,7 @@ mod tests {
 
     #[test]
     fn the_uart_grant_skips_the_consoles_reaches_the_pi_uart_and_masks_the_fc_port() {
-        let lines = sandbox_directives(&caps(&["hardware.uart"]), true, &[]);
+        let lines = sandbox_directives(&caps(&["hardware.uart"]), true, &[], &[]);
         assert!(lines.contains(&"DeviceAllow=char-ttyAMA rw".to_string()));
         assert!(lines.contains(&"DeviceAllow=char-ttyS rw".to_string()));
         assert!(!lines.contains(&"DeviceAllow=char-tty rw".to_string()));
@@ -708,15 +743,15 @@ mod tests {
     #[test]
     fn uart_grant_adds_dialout() {
         let dialout = "SupplementaryGroups=dialout".to_string();
-        assert!(sandbox_directives(&caps(&["hardware.uart"]), true, &[]).contains(&dialout));
-        assert!(!sandbox_directives(&caps(&["hardware.i2c"]), true, &[]).contains(&dialout));
+        assert!(sandbox_directives(&caps(&["hardware.uart"]), true, &[], &[]).contains(&dialout));
+        assert!(!sandbox_directives(&caps(&["hardware.i2c"]), true, &[], &[]).contains(&dialout));
     }
 
     #[test]
     fn only_a_frame_read_grant_joins_the_ring_readers_group() {
         let readers = "SupplementaryGroups=ados-vision-readers".to_string();
-        assert!(sandbox_directives(&caps(&["vision.frame.read"]), true, &[]).contains(&readers));
-        assert!(!sandbox_directives(&caps(&["hardware.gpu"]), true, &[]).contains(&readers));
+        assert!(sandbox_directives(&caps(&["vision.frame.read"]), true, &[], &[]).contains(&readers));
+        assert!(!sandbox_directives(&caps(&["hardware.gpu"]), true, &[], &[]).contains(&readers));
     }
 
     /// The bus socket and the clock sidecar are bound as their directory: the
@@ -724,9 +759,9 @@ mod tests {
     /// a single-file bind would pin the inode present at unit start.
     #[test]
     fn the_sensor_grant_binds_the_sensing_dir_and_joins_the_sensors_group() {
-        let none = sandbox_directives(&caps(&[]), true, &[]);
+        let none = sandbox_directives(&caps(&[]), true, &[], &[]);
         assert!(!none.iter().any(|l| l.contains(SENSOR_STREAM_DIR)));
-        let lines = sandbox_directives(&caps(&[SENSOR_STREAM_READ_CAP]), true, &[]);
+        let lines = sandbox_directives(&caps(&[SENSOR_STREAM_READ_CAP]), true, &[], &[]);
         let tmpfs = lines
             .iter()
             .position(|l| l == "TemporaryFileSystem=/run/ados:ro")
@@ -766,7 +801,7 @@ mod tests {
             .map(|c| c.id)
             .collect();
         for cap in every.iter().copied() {
-            let lines = sandbox_directives(&caps(&[cap]), true, &[]);
+            let lines = sandbox_directives(&caps(&[cap]), true, &[], &[]);
             assert!(
                 !lines
                     .iter()
@@ -774,7 +809,7 @@ mod tests {
                 "{cap}"
             );
         }
-        let all = sandbox_directives(&caps(&every), true, &[]);
+        let all = sandbox_directives(&caps(&every), true, &[], &[]);
         assert!(!all
             .iter()
             .any(|l| l.contains(ados_protocol::ipc::OPERATOR_GROUP)));
@@ -782,7 +817,7 @@ mod tests {
 
     #[test]
     fn the_capture_grant_binds_the_marker_dir_sidecar_dir_and_root() {
-        let lines = sandbox_directives(&caps(&[CAPTURE_STORAGE_WRITE_CAP]), true, &[]);
+        let lines = sandbox_directives(&caps(&[CAPTURE_STORAGE_WRITE_CAP]), true, &[], &[]);
         assert!(lines.contains(&"BindReadOnlyPaths=-/run/ados/capture-storage".to_string()));
         assert!(!lines.iter().any(|l| l.contains("capture-storage.json")));
         let sidecar = ados_protocol::paths::sidecar("capture-storage").unwrap();

@@ -8,6 +8,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A declared plugin service may list `udp_listen_ports` (1024-65535, at
+  most eight): with `network.listen` granted its unit gets
+  `SocketBindAllow=udp:<port>` for each, so a network LiDAR's UDP data
+  ports bind under the plugin sandbox. It needs `network.listen` and
+  `network.outbound` declared, like `listen_ports`.
+
 - A ground station installed on a personal computer (a laptop or a desktop somebody also uses) runs only the radio, pairing, video and control services. The install detects the host kind (a desktop session plus an x86_64 machine, a laptop chassis or a battery), persists it in `/etc/ados/host.conf`, and skips every step that would take the machine over: the sleep masks and the logind drop-in, the Wi-Fi join and MAC pin, the access point and uplink daemons, the console and HDMI kiosk, the I2C and PPS overlays, the GPU and NPU provisioning, the hardware watchdog, the package-daemon masking and the automatic reboot. `--host appliance|personal` overrides the detection. An appliance behaves exactly as before.
 - The control front and the ground media server answer only `127.0.0.1` on a personal computer until the operator turns on `host.share_on_lan` in Mission Control or the agent dashboard, which restarts both. `_ados._tcp` is not advertised while the front is loopback-only.
 - Mission Control: a "Use this computer as ground station" action that probes `127.0.0.1:8080`, pairs, and says how to install an agent when nothing answers; a "This computer" settings page carrying the share toggle in place of the access-point, uplink and display pages; and a loopback transport that reaches a local agent from the hosted secure page (no mixed-content block, no server-side proxy, and the browser's private-network grant declared per request).

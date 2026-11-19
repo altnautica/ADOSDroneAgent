@@ -304,7 +304,9 @@ class AgentBlock(_StrictModel):
         """A service that binds a port needs ``network.listen``, and also
         ``network.outbound``: only that grant opens the inet socket
         families a listener needs."""
-        if not any(svc.listen_ports for svc in self.contributes.services):
+        if not any(
+            svc.listen_ports or svc.udp_listen_ports for svc in self.contributes.services
+        ):
             return self
         declared = {p.id for p in self.permissions}
         missing = [
@@ -312,7 +314,7 @@ class AgentBlock(_StrictModel):
         ]
         if missing:
             raise ManifestError(
-                "a service declares listen_ports but agent.permissions is missing "
+                "a service declares listen_ports or udp_listen_ports but agent.permissions is missing "
                 + ", ".join(missing)
             )
         return self

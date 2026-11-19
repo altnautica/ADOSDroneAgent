@@ -48,6 +48,9 @@ const LOOPBACK_HOST: &str = "127.0.0.1";
 /// Most TCP ports one service may declare.
 pub const MAX_LISTEN_PORTS: usize = 4;
 
+/// Most UDP ports one service may declare.
+pub const MAX_UDP_LISTEN_PORTS: usize = 8;
+
 /// One declared service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSpec {
@@ -59,6 +62,8 @@ pub struct ServiceSpec {
     pub profiles: Option<Vec<String>>,
     /// TCP ports the service serves, opened by the `network.listen` grant.
     pub listen_ports: Vec<u16>,
+    /// UDP ports the service binds, opened by the same `network.listen` grant.
+    pub udp_listen_ports: Vec<u16>,
 }
 
 impl ServiceSpec {
@@ -100,6 +105,8 @@ enum RawService {
         profiles: Option<Vec<String>>,
         #[serde(default)]
         listen_ports: Vec<u16>,
+        #[serde(default)]
+        udp_listen_ports: Vec<u16>,
     },
 }
 
@@ -212,8 +219,12 @@ pub fn build_service_spec(
     spec.log_path = service_log_path_for(&paths.log_dir, &manifest.id, &service.name);
     spec.restart = service.restart.clone();
     spec.resources = agent.resources_for(profile).clone();
-    spec.sandbox_directives =
-        sandbox_directives(granted, loopback_guard_active, &service.listen_ports);
+    spec.sandbox_directives = sandbox_directives(
+        granted,
+        loopback_guard_active,
+        &service.listen_ports,
+        &service.udp_listen_ports,
+    );
     spec.sandbox_directives
         .extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
     spec.sandbox_directives

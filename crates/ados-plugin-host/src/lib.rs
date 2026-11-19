@@ -263,10 +263,10 @@ mod capability_enforcement_guard {
         // every sandbox-enforced capability, granting it must produce different
         // unit text. A cap that renders identically granted and ungranted is
         // decorative again, with a guard test vouching for it.
-        let none = super::sandbox::sandbox_directives(&BTreeSet::new(), true, &[8092]);
+        let none = super::sandbox::sandbox_directives(&BTreeSet::new(), true, &[8092], &[]);
         for cap in SANDBOX_ENFORCED_CAPS {
             let one: BTreeSet<String> = std::iter::once(cap.to_string()).collect();
-            let with = super::sandbox::sandbox_directives(&one, true, &[8092]);
+            let with = super::sandbox::sandbox_directives(&one, true, &[8092], &[]);
             assert_ne!(
                 none, with,
                 "{cap} is declared sandbox-enforced but changes nothing in the unit"

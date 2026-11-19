@@ -142,6 +142,42 @@ fn listen_ports_without_the_listen_and_network_permissions_are_refused() {
 }
 
 #[test]
+fn udp_listen_ports_without_listen_grant_refused() {
+    let udp = |perms: &str| {
+        listener(perms).replace(
+            "listen_ports: [8092]",
+            "udp_listen_ports: [56101, 56201]",
+        )
+    };
+    for perms in ["", "network.listen", "network.outbound"] {
+        let m = PluginManifest::from_yaml_text(&udp(perms)).unwrap();
+        let err = declared_services(&m).unwrap_err();
+        assert!(err.0.contains("declares udp_listen_ports"), "{perms:?}: {}", err.0);
+    }
+    let m = PluginManifest::from_yaml_text(&udp("network.listen, network.outbound")).unwrap();
+    let s = &declared_services(&m).unwrap()[0];
+    assert_eq!(s.udp_listen_ports, vec![56101, 56201]);
+    assert!(s.listen_ports.is_empty());
+    let granted = render(&m, &["network.outbound", "network.listen"]);
+    assert!(
+        granted.contains("SocketBindAllow=udp:56101\nSocketBindAllow=udp:56201\nSocketBindDeny=any"),
+        "{granted}"
+    );
+    let ungranted = render(&m, &["network.outbound"]);
+    assert!(!ungranted.contains("SocketBindAllow="));
+    let nine = listener("network.listen, network.outbound").replace(
+        "listen_ports: [8092]",
+        "udp_listen_ports: [2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009]",
+    );
+    let err = declared_services(&PluginManifest::from_yaml_text(&nine).unwrap()).unwrap_err();
+    assert!(err.0.contains("at most 8 udp_listen_ports"), "{}", err.0);
+    let dup = listener("network.listen, network.outbound")
+        .replace("listen_ports: [8092]", "udp_listen_ports: [56101, 56101]");
+    let err = declared_services(&PluginManifest::from_yaml_text(&dup).unwrap()).unwrap_err();
+    assert!(err.0.contains("appears twice"), "{}", err.0);
+}
+
+#[test]
 fn an_http_probe_reads_the_status_code() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

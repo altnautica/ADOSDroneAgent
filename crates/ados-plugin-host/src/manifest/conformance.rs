@@ -79,6 +79,7 @@ const SERVICE: &[&str] = &[
     "slice",
     "profiles",
     "listen_ports",
+    "udp_listen_ports",
 ];
 const MAVLINK_COMPONENT: &[&str] = &["component_id", "component_kind", "sub_id"];
 const COMPONENT_KINDS: &[&str] = &[

@@ -505,6 +505,21 @@ def test_listen_ports_bounds(ports: list[int]) -> None:
         PluginManifest.from_yaml_text(_yaml(raw))
 
 
+def test_udp_listen_ports_bounds_and_capabilities() -> None:
+    raw = _good_manifest_dict()
+    svc = {"name": "lidar", "command": "/bin/lidar", "udp_listen_ports": [56101, 56201]}
+    raw["agent"]["contributes"] = {"services": [svc]}
+    raw["agent"]["permissions"] = ["network.outbound"]
+    with pytest.raises(ManifestError, match="network.listen"):
+        PluginManifest.from_yaml_text(_yaml(raw))
+    raw["agent"]["permissions"] = ["network.listen", "network.outbound"]
+    PluginManifest.from_yaml_text(_yaml(raw))
+    for ports in ([53], [56101, 56101], list(range(2000, 2009))):
+        svc["udp_listen_ports"] = ports
+        with pytest.raises(ManifestError):
+            PluginManifest.from_yaml_text(_yaml(raw))
+
+
 def test_service_profiles_normalised_and_empty_refused() -> None:
     raw = _good_manifest_dict()
     raw["agent"]["contributes"] = {

@@ -231,7 +231,7 @@ pub fn build_unit_spec(
     spec.resources = agent.resources_for(profile).clone();
     // The capability-backed half of the sandbox: these lines change with the
     // operator's grants, which is why a grant or revoke re-renders the unit.
-    spec.sandbox_directives = sandbox_directives(granted, loopback_guard_active, &[]);
+    spec.sandbox_directives = sandbox_directives(granted, loopback_guard_active, &[], &[]);
     spec.sandbox_directives
         .extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
     spec.sandbox_directives

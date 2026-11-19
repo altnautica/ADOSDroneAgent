@@ -15,7 +15,7 @@ pub fn probe_spec(
 ) -> Result<ProbeSpec, SupervisorError> {
     let working_dir = paths.install_dir.join(&manifest.id);
     path_token("install dir", &working_dir)?;
-    let mut directives = sandbox_directives(granted, loopback_guard_active, &[]);
+    let mut directives = sandbox_directives(granted, loopback_guard_active, &[], &[]);
     directives.extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
     directives.extend(capture_root_bind(granted, capture_root().as_deref()));
     Ok(ProbeSpec {

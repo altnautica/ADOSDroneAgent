@@ -8,8 +8,9 @@ use super::*;
 ///
 /// Beyond the shape, a declared service is refused when its command names a
 /// `bin:` entry the manifest's `binaries` does not have, when it names an
-/// unknown profile, or when it declares listen ports outside 1024..=65535,
-/// more than [`MAX_LISTEN_PORTS`], twice, or without the plugin declaring both
+/// unknown profile, or when it declares TCP or UDP listen ports outside
+/// 1024..=65535, more than [`MAX_LISTEN_PORTS`] TCP or
+/// [`MAX_UDP_LISTEN_PORTS`] UDP, twice, or without the plugin declaring both
 /// `network.listen` (the bind grant) and `network.outbound` (the inet socket
 /// families a listener needs).
 pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, SupervisorError> {
@@ -35,7 +36,7 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
     let declared = manifest.declared_permissions();
     raw.into_iter()
         .map(|r| {
-            let (name, command, ready_check, restart, slice, profiles, listen_ports) = match r {
+            let (name, command, ready_check, restart, slice, profiles, listen_ports, udp_listen_ports) = match r {
                 RawService::Bare(s) => (
                     s.clone(),
                     s,
@@ -43,6 +44,7 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
                     default_restart(),
                     default_slice(),
                     None,
+                    Vec::new(),
                     Vec::new(),
                 ),
                 RawService::Full {
@@ -53,6 +55,7 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
                     slice,
                     profiles,
                     listen_ports,
+                    udp_listen_ports,
                 } => (
                     name,
                     command,
@@ -61,6 +64,7 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
                     slice,
                     profiles,
                     listen_ports,
+                    udp_listen_ports,
                 ),
             };
             validate_name(&name)?;
@@ -90,7 +94,14 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
             let profiles = profiles
                 .map(|list| normalize_service_profiles(&name, list))
                 .transpose()?;
-            validate_listen_ports(&name, &listen_ports, &declared)?;
+            validate_listen_ports(&name, &listen_ports, MAX_LISTEN_PORTS, "listen_ports", &declared)?;
+            validate_listen_ports(
+                &name,
+                &udp_listen_ports,
+                MAX_UDP_LISTEN_PORTS,
+                "udp_listen_ports",
+                &declared,
+            )?;
             let ready_check = ready_check
                 .as_deref()
                 .map(parse_ready_check)
@@ -105,6 +116,7 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
                 restart,
                 profiles,
                 listen_ports,
+                udp_listen_ports,
             })
         })
         .collect()
@@ -133,29 +145,34 @@ pub(super) fn normalize_service_profiles(
     Ok(out)
 }
 
+/// Validate one service's `label` port list (`listen_ports` for TCP,
+/// `udp_listen_ports` for UDP): 1024..=65535, no duplicates, at most `max`,
+/// and both `network.listen` and `network.outbound` declared.
 pub(super) fn validate_listen_ports(
     name: &str,
     ports: &[u16],
+    max: usize,
+    label: &str,
     declared: &BTreeSet<String>,
 ) -> Result<(), SupervisorError> {
     if ports.is_empty() {
         return Ok(());
     }
-    if ports.len() > MAX_LISTEN_PORTS {
+    if ports.len() > max {
         return Err(SupervisorError(format!(
-            "service {name}: at most {MAX_LISTEN_PORTS} listen_ports"
+            "service {name}: at most {max} {label}"
         )));
     }
     let mut seen: BTreeSet<u16> = BTreeSet::new();
     for port in ports {
         if *port < 1024 {
             return Err(SupervisorError(format!(
-                "service {name}: listen port {port} is outside 1024..=65535"
+                "service {name}: {label} port {port} is outside 1024..=65535"
             )));
         }
         if !seen.insert(*port) {
             return Err(SupervisorError(format!(
-                "service {name}: listen port {port} appears twice"
+                "service {name}: {label} port {port} appears twice"
             )));
         }
     }
@@ -165,7 +182,7 @@ pub(super) fn validate_listen_ports(
         .collect();
     if !missing.is_empty() {
         return Err(SupervisorError(format!(
-            "service {name}: declares listen_ports but the plugin does not declare {}; a \
+            "service {name}: declares {label} but the plugin does not declare {}; a \
              listener needs network.listen to bind and network.outbound for the inet socket \
              families",
             missing.join(" and ")
