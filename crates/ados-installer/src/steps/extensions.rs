@@ -201,27 +201,14 @@ pub fn install_node_extensions(
                     .with_board_tier(board_tier)
                     .with_ungrantable_caps(RealHost::ungrantable_caps());
             let source = HttpDownloadSource::new();
-            let retired = retire::retire_all(
+            retire::retire_then_install(
                 &mut supervisor,
                 CATALOG_JSON,
                 &source,
                 target.guard_wait,
                 target.retry_delay,
-            );
-            let reconstruct = reconstruct.then(|| {
-                install_from_catalog(
-                    &mut supervisor,
-                    RECONSTRUCT_ID,
-                    CATALOG_JSON,
-                    &source,
-                    target.guard_wait,
-                    target.retry_delay,
-                )
-            });
-            NodeExtensions {
-                retired,
                 reconstruct,
-            }
+            )
         })
         .map_err(|e| format!("could not start the install thread: {e}"))?
         .join()

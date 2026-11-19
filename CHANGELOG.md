@@ -65,6 +65,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - A Python manifest check knows `plugin.http.<extension id>` as a GCS capability, as Mission Control does.
 - The units that skip when their binary is missing (`ados-cloud`, `ados-control`, `ados-input`, `ados-oled-i2c`, `ados-pic`, `ados-pilot`, `ados-plugin-host`, `ados-swarmbus`, `ados-vision`) now gate on `ConditionFileIsExecutable=`, so a binary that is present but not executable also skips the unit instead of failing with 203/EXEC on every restart.
 - The cloud heartbeat reports `videoState` and `videoWhepUrl` every tick from the same video verdict `/api/status/full` gives (now in `ados-video`'s `status_verdict`), so a cloud-relayed node no longer shows no video state while its camera streams. The never-set `videoWhepPort` and `mavlinkWsPort` heartbeat fields are removed.
+- On a workstation or compute node whose World Engine extension was off, the installer left its successor Reconstruct off as intended, but the default-on Reconstruct install that followed switched it on. That install now leaves a successor the retirement left off as it is, on Linux and macOS.
 
 ## [0.118.0] - 2026-11-17
 

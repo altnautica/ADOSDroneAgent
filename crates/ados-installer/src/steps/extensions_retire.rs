@@ -80,6 +80,16 @@ struct Found {
     on: bool,
 }
 
+/// What [`retire_all`] did: one [`Retirement`] per retired extension found,
+/// and the successors it installed but left off on purpose (every retired
+/// extension they replace was off), which a later default-on install must not
+/// switch on.
+#[derive(Debug, Default)]
+pub struct RetireAll {
+    pub retirements: Vec<Retirement>,
+    pub left_off: Vec<&'static str>,
+}
+
 /// Retire every extension this agent replaced that is installed here.
 pub fn retire_all(
     supervisor: &mut PluginSupervisor,
@@ -87,9 +97,9 @@ pub fn retire_all(
     source: &dyn DownloadSource,
     guard_wait: Duration,
     retry_delay: Duration,
-) -> Vec<Retirement> {
+) -> RetireAll {
     if supervisor.discover().is_err() {
-        return Vec::new();
+        return RetireAll::default();
     }
     let profile = supervisor.profile().to_string();
     let found: Vec<Found> = RETIRED
@@ -105,7 +115,7 @@ pub fn retire_all(
         })
         .collect();
     if found.is_empty() {
-        return Vec::new();
+        return RetireAll::default();
     }
 
     // Stop every retired extension before any successor installs. One that
@@ -120,7 +130,7 @@ pub fn retire_all(
                 switch_back_on(supervisor, earlier.retired);
             }
             let reason = format!("{} could not be stopped for the swap: {e}", f.retired);
-            return found
+            let retirements = found
                 .iter()
                 .map(|g| Retirement::Kept {
                     retired: g.retired,
@@ -128,12 +138,17 @@ pub fn retire_all(
                     reason: reason.clone(),
                 })
                 .collect();
+            return RetireAll {
+                retirements,
+                left_off: Vec::new(),
+            };
         }
     }
 
     // Install each successor once, switched on only when a retired extension
     // it replaces was on.
     let mut installed: Vec<(&'static str, Result<ExtensionOutcome, String>)> = Vec::new();
+    let mut left_off = Vec::new();
     for f in &found {
         for &successor in f.successors {
             if installed.iter().any(|(id, _)| *id == successor) {
@@ -154,14 +169,50 @@ pub fn retire_all(
                 Ok(ExtensionOutcome::Unavailable(reason)) => Err(reason),
                 other => other,
             };
+            if !enable && result.is_ok() {
+                left_off.push(successor);
+            }
             installed.push((successor, result));
         }
     }
 
-    found
+    let retirements = found
         .iter()
         .map(|f| settle(supervisor, f, &installed))
-        .collect()
+        .collect();
+    RetireAll {
+        retirements,
+        left_off,
+    }
+}
+
+/// Retire every replaced extension, then, when `reconstruct` is set, install
+/// Reconstruct switched on, except when the retirement just installed it and
+/// left it off on purpose (the World Engine extension it replaces was off).
+pub fn retire_then_install(
+    supervisor: &mut PluginSupervisor,
+    catalog_json: &str,
+    source: &dyn DownloadSource,
+    guard_wait: Duration,
+    retry_delay: Duration,
+    reconstruct: bool,
+) -> super::NodeExtensions {
+    let done = retire_all(supervisor, catalog_json, source, guard_wait, retry_delay);
+    let reconstruct = reconstruct.then(|| {
+        install_extension(
+            supervisor,
+            RECONSTRUCT_ID,
+            catalog_json,
+            source,
+            guard_wait,
+            retry_delay,
+            !done.left_off.contains(&RECONSTRUCT_ID),
+        )
+    });
+    super::NodeExtensions {
+        retired: done.retirements,
+        reconstruct,
+    }
 }
 
 /// Finish one retirement from the successors' install results.

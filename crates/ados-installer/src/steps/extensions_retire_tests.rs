@@ -33,7 +33,7 @@ fn paths_in(dir: &Path) -> Paths {
 fn archive(id: &str) -> Vec<u8> {
     let manifest = format!(
         "id: {id}\nversion: 1.0.0\nrisk: low\ncompatibility:\n  ados_version: \">=0.1.0,<99.0.0\"\n\
-agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [drone]\n  permissions:\n    - hardware.spi\n"
+agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [drone, workstation]\n  permissions:\n    - hardware.spi\n"
     );
     let mut buf = Vec::new();
     {
@@ -99,6 +99,86 @@ fn is_on(sup: &PluginSupervisor, id: &str) -> bool {
     )
 }
 
+/// [`retire_all`]'s retirements alone.
+fn retirements(
+    sup: &mut PluginSupervisor,
+    catalog: &str,
+    source: &dyn DownloadSource,
+    guard_wait: Duration,
+    retry_delay: Duration,
+) -> Vec<Retirement> {
+    retire_all(sup, catalog, source, guard_wait, retry_delay).retirements
+}
+
+/// A workstation with world-engine installed, switched on when `on` is set,
+/// and a catalog publishing Reconstruct.
+fn workstation_with_world_engine(
+    dir: &Path,
+    on: bool,
+) -> (PluginSupervisor, String, StaticDownloadSource) {
+    let mut sup = supervisor(dir).with_profile("workstation");
+    install_local(&mut sup, dir, WORLD_ENGINE_ID, on);
+    let url = "https://github.com/altnautica/ADOSExtensions/releases/download/x/rec.adosplug";
+    let body = archive(RECONSTRUCT_ID);
+    let catalog = serde_json::json!({
+        "schema_version": 1,
+        "plugins": [{ "id": RECONSTRUCT_ID, "version": "1.0.0", "download_url": url,
+                      "archive_sha256": hex::encode(Sha256::digest(&body)) }],
+    })
+    .to_string();
+    (
+        sup,
+        catalog,
+        StaticDownloadSource::default().with(url, body),
+    )
+}
+
+#[test]
+fn the_default_on_reconstruct_install_keeps_a_successor_left_off_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut sup, catalog, source) = workstation_with_world_engine(dir.path(), false);
+    let done = retire_then_install(
+        &mut sup,
+        &catalog,
+        &source,
+        Duration::ZERO,
+        Duration::ZERO,
+        true,
+    );
+    assert!(
+        matches!(
+            &done.retired[..],
+            [Retirement::Replaced {
+                retired: WORLD_ENGINE_ID,
+                ..
+            }]
+        ),
+        "{:?}",
+        done.retired
+    );
+    assert!(
+        done.reconstruct.as_ref().is_some_and(|r| r.is_ok()),
+        "{:?}",
+        done.reconstruct
+    );
+    sup.discover().unwrap();
+    assert!(sup.find_install(RECONSTRUCT_ID).is_some());
+    assert!(
+        !is_on(&sup, RECONSTRUCT_ID),
+        "world-engine was off, so its successor stays off"
+    );
+}
+
+#[test]
+fn the_default_on_reconstruct_install_switches_on_a_successor_of_a_running_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut sup, catalog, source) = workstation_with_world_engine(dir.path(), true);
+    let left = retire_all(&mut sup, &catalog, &source, Duration::ZERO, Duration::ZERO).left_off;
+    assert!(left.is_empty(), "{left:?}");
+    sup.discover().unwrap();
+    assert!(is_on(&sup, RECONSTRUCT_ID));
+}
+
 #[test]
 fn each_retired_extension_names_its_successors_by_profile() {
     assert_eq!(successors(VISION_NAV_ID, "drone"), [NAVIGATION_ID]);
@@ -124,7 +204,7 @@ fn a_disabled_retired_extension_hands_over_to_a_successor_that_stays_off() {
     install_local(&mut sup, dir.path(), VISION_NAV_ID, false);
     let (catalog, source) = navigation_only();
 
-    let done = retire_all(&mut sup, &catalog, &source, Duration::ZERO, Duration::ZERO);
+    let done = retirements(&mut sup, &catalog, &source, Duration::ZERO, Duration::ZERO);
     assert!(
         matches!(
             &done[..],
@@ -159,7 +239,7 @@ fn world_engine_stays_off_when_navigation_installs_but_capture_does_not() {
     install_local(&mut sup, dir.path(), WORLD_ENGINE_ID, true);
     let (catalog, source) = navigation_only();
 
-    let done = retire_all(&mut sup, &catalog, &source, Duration::ZERO, Duration::ZERO);
+    let done = retirements(&mut sup, &catalog, &source, Duration::ZERO, Duration::ZERO);
     assert!(
         matches!(
             &done[..],
@@ -193,7 +273,7 @@ fn world_engine_comes_back_on_when_none_of_its_successors_install() {
     let mut sup = supervisor(dir.path());
     install_local(&mut sup, dir.path(), WORLD_ENGINE_ID, true);
 
-    let done = retire_all(
+    let done = retirements(
         &mut sup,
         r#"{"schema_version":1,"plugins":[]}"#,
         &StaticDownloadSource::default(),
@@ -225,7 +305,7 @@ fn the_successor_replaces_the_retired_extension_and_its_data_stays() {
     let sha = hex::encode(Sha256::digest(&body));
     let source = StaticDownloadSource::default().with(URL, body);
 
-    let done = retire_all(
+    let done = retirements(
         &mut sup,
         &catalog(URL, &sha),
         &source,
@@ -262,7 +342,7 @@ fn the_successor_replaces_the_retired_extension_and_its_data_stays() {
 fn with_no_release_yet_the_retired_extension_keeps_running() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = with_vision_nav(dir.path());
-    let done = retire_all(
+    let done = retirements(
         &mut sup,
         r#"{"schema_version":1,"plugins":[]}"#,
         &StaticDownloadSource::default(),
@@ -316,7 +396,7 @@ fn a_disabled_retired_extension_stays_off_when_it_is_kept() {
 fn a_node_without_retired_extensions_is_left_alone() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = supervisor(dir.path());
-    let done = retire_all(
+    let done = retirements(
         &mut sup,
         &catalog("", ""),
         &StaticDownloadSource::default(),
