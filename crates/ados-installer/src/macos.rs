@@ -167,7 +167,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     // 5. Prove every daemon came up (not just that the control port answers).
     let report = health_poll(uid);
 
-    // 5b. The World Engine extension, on a node that came up.
+    // 5b. The Reconstruct extension, on a node that came up.
     install_extensions(args, &paths, &profile, &agent_version, &runner, &report);
 
     // 6. Record the outcome so the control surface can serve the real version and

@@ -209,9 +209,9 @@ fn a_pinch_a_few_millimetres_under_the_clearance_never_reads_feasible() {
     let wall = map_payload(-6.4, 32.0, -9.6, 9.6, &|n, e| {
         (12.0..18.0).contains(&n) && (0.55..0.6).contains(&e)
     });
-    w.p.on_feed("plugin.world-engine.occupancy", &wall, w.now);
+    w.p.on_feed(crate::events::TOPIC_OCCUPANCY, &wall, w.now);
     let pose = json!({"pose": {"t": [w.pos[0], w.pos[1] - 0.024, w.pos[2]]}, "sigma_xy_m": 0.02});
-    w.p.on_feed("plugin.world-engine.pose", &pose, w.now);
+    w.p.on_feed(crate::events::TOPIC_POSE, &pose, w.now);
     route(&mut w, "loaded", 0, &LINE);
     w.run(200);
     let r = w.action_args("launch", json!({"after": "mission"}));
@@ -296,7 +296,7 @@ fn a_stale_pose_keeps_its_sigma_and_never_lowers_the_clearance() {
     map(&mut w, &area(&|_, _| false));
     // σ 0.1 m: the 3σ term (0.3 m) is above its 0.1 m floor.
     let pose = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": 0.1});
-    w.p.on_feed("plugin.world-engine.pose", &pose, w.now);
+    w.p.on_feed(crate::events::TOPIC_POSE, &pose, w.now);
     route(&mut w, "loaded", 0, &LINE);
     w.run(200);
     let rc = w.p.state(w.now).route_check.unwrap();

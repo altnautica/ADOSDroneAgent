@@ -2,7 +2,7 @@
 //! `sensor-health.json`: the flight controller's optical flow and downward
 //! range (from the pilot's `sensors`), the lidar (its scan rate and driver
 //! health from `sensors.lidar`, the nearest return from the scan or the nav
-//! kind, and the rate vision-nav sends obstacle distances at, labelled as
+//! kind, and the rate Navigation sends obstacle distances at, labelled as
 //! such), and each camera's state from `/api/v1/sensors` `health.cameras`.
 
 use ratatui::text::{Line, Span};

@@ -107,7 +107,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(start::Start),
         Box::new(health::Health),
         // After health, so the plugin host (its sockets and its loopback guard)
-        // and the control surface are up before the World Engine extension is
+        // and the control surface are up before the Reconstruct extension is
         // installed and enabled against them.
         Box::new(extensions::Extensions),
         // Late in the run (it needs only deps), so a large download does not

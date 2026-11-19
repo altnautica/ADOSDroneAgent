@@ -21,12 +21,12 @@ const BORE_CLEARANCE_M: f64 = 0.740;
 /// A pose at the vehicle with `sigma`.
 fn pose(w: &mut World, sigma: f64) {
     let p = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": sigma});
-    w.p.on_feed("plugin.world-engine.pose", &p, w.now);
+    w.p.on_feed(crate::events::TOPIC_POSE, &p, w.now);
 }
 
 /// One occupancy payload, then 1 s of poses at `sigma` (the tiles' 1 Hz).
 fn payload_then(w: &mut World, map: &Value, sigma: f64) {
-    w.p.on_feed("plugin.world-engine.occupancy", map, w.now);
+    w.p.on_feed(crate::events::TOPIC_OCCUPANCY, map, w.now);
     for _ in 0..10 {
         pose(w, sigma);
         w.run(100);
@@ -128,7 +128,7 @@ fn a_map_with_no_sigma_before_it_needs_the_whole_sigma() {
     confined(&mut w);
     on_pad(&mut w);
     route(&mut w, "loaded", 0, &LINE);
-    w.p.on_feed("plugin.world-engine.occupancy", &area(&bore), w.now);
+    w.p.on_feed(crate::events::TOPIC_OCCUPANCY, &area(&bore), w.now);
     for s in [0.05, 0.1, 0.1] {
         for _ in 0..10 {
             pose(&mut w, s);
@@ -207,17 +207,17 @@ fn a_broken_pose_never_reads_as_a_small_relative_sigma() {
     let lost = |w: &mut World| {
         let p = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": 1.73,
                        "health": "lost"});
-        w.p.on_feed("plugin.world-engine.pose", &p, w.now);
+        w.p.on_feed(crate::events::TOPIC_POSE, &p, w.now);
     };
     let mut w = pad(0.05);
     for _ in 0..4 {
-        w.p.on_feed("plugin.world-engine.occupancy", &area(&|_, _| false), w.now);
+        w.p.on_feed(crate::events::TOPIC_OCCUPANCY, &area(&|_, _| false), w.now);
         for _ in 0..10 {
             lost(&mut w);
             w.run(100);
         }
     }
-    w.p.on_feed("plugin.world-engine.occupancy", &area(&bore), w.now);
+    w.p.on_feed(crate::events::TOPIC_OCCUPANCY, &area(&bore), w.now);
     for _ in 0..12 {
         lost(&mut w);
         w.run(100);
@@ -276,11 +276,11 @@ fn from_a_pose_break_no_obstacle_reads_with_a_small_relative_sigma() {
     for (i, (s, health)) in BREAK.into_iter().chain(after).enumerate() {
         if i % 10 == 2 {
             let occ: &dyn Fn(f32, f32) -> bool = if i == 22 { &bore } else { &|_, _| false };
-            w.p.on_feed("plugin.world-engine.occupancy", &area(occ), w.now);
+            w.p.on_feed(crate::events::TOPIC_OCCUPANCY, &area(occ), w.now);
         }
         let p = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": s,
                        "health": health});
-        w.p.on_feed("plugin.world-engine.pose", &p, w.now);
+        w.p.on_feed(crate::events::TOPIC_POSE, &p, w.now);
         w.run(100);
         let rc = check(&w);
         if let Some(pinch) = rc.pinch.clone() {

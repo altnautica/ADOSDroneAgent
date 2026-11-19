@@ -8,7 +8,7 @@
 // moving to look → searching → re-acquired → holding for the operator, every
 // 4 s, on the demo detection stream's track 12. Throughout, the vehicle
 // circles the origin in the local frame with
-// a matching SLAM pose and a planar scan of a 6 m room; vision-nav reports
+// a matching SLAM pose and a planar scan of a 6 m room; Navigation reports
 // external nav; the map status climbs. Loaded only when `isDemoMode()`.
 
 import { isRecoveryPhase, type FollowPhase } from "@/shared/hud/nav-types";
@@ -197,17 +197,14 @@ class MockNavStream {
     store.ingest({
       kind: "map",
       data: {
-        sessionId: "demo",
         placement: "hybrid",
         memoryUsedMb: Math.min(700, 120 + t * 4),
         memoryBudgetMb: 614,
         voxelM: t > 120 ? 0.2 : 0.1,
-        keyframesDropped: Math.floor(t / 30),
         sweepPoints: Math.floor(t * 1200),
         areaM2: Math.min(144, t),
-        navPose: "always",
-        upload: { state: "queued", bytesDone: 0, bytesTotal: 0 },
-        stream: { state: "off", bytesPerS: 0 },
+        poseProvider: "lidar_planar",
+        imuFeed: { state: "ok", reason: null, rateHz: 50 },
       },
     });
   }

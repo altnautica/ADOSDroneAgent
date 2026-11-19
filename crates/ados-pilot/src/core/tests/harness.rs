@@ -279,7 +279,7 @@ impl World {
         if self.lidar && due {
             let scan = serde_json::json!({"frame": "body_frd", "angle_start_rad": 0.0,
                 "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": self.scan_ranges});
-            self.p.on_feed("plugin.world-engine.scan", &scan, self.now);
+            self.p.on_feed(crate::events::TOPIC_SCAN, &scan, self.now);
         }
     }
 

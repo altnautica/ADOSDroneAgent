@@ -632,7 +632,7 @@ fn a_goto_arrival_hold_inside_the_margin_moves_back_out() {
     let feed = |w: &mut World, ms: u64| {
         let end = w.now + ms;
         while w.now < end {
-            w.p.on_feed("plugin.world-engine.scan", &scan, w.now);
+            w.p.on_feed(crate::events::TOPIC_SCAN, &scan, w.now);
             w.run(20);
         }
     };
@@ -704,7 +704,7 @@ fn replayed_column_approach_never_allows_more_than_it_can_stop_from() {
     assert!((b.v[0] - 2.0).abs() < 1e-3, "{:?}", b.v);
 }
 
-/// A planar scan of a wall `d` ahead (vehicle yaw 0), as world-engine sends it.
+/// A planar scan of a wall `d` ahead (vehicle yaw 0), as Navigation sends it.
 pub(super) fn wall_scan(d: f32) -> Value {
     let ranges: Vec<f32> = (0..360)
         .map(|i| {
@@ -741,7 +741,7 @@ fn stick_with_scan(w: &mut World, axes: [f32; 4], scan: &Value, ms: u64) {
     let end = w.now + ms;
     while w.now < end {
         w.input(axes);
-        w.p.on_feed("plugin.world-engine.scan", scan, w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, scan, w.now);
         w.run(20);
     }
 }
@@ -749,7 +749,7 @@ fn stick_with_scan(w: &mut World, axes: [f32; 4], scan: &Value, ms: u64) {
 fn scan_for(w: &mut World, scan: &Value, ms: u64) {
     let end = w.now + ms;
     while w.now < end {
-        w.p.on_feed("plugin.world-engine.scan", scan, w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, scan, w.now);
         w.run(20);
     }
 }
@@ -832,7 +832,7 @@ fn a_pushing_goto_hold_keeps_its_altitude() {
     });
     let scan = wall_scan(0.8);
     for _ in 0..150 {
-        w.p.on_feed("plugin.world-engine.scan", &scan, w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &scan, w.now);
         w.run(20);
         // Sinking 0.1 m/s while the push moves it off the wall.
         w.pos[2] += 0.1 * 0.02;
@@ -957,7 +957,7 @@ fn a_blocked_goto_keeps_its_goal_and_way_on_the_frame() {
     });
     let end = w.now + 1500;
     while w.now < end {
-        w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(4.0), w.now);
         w.run(20);
     }
     let s = w.p.state(w.now);
@@ -1060,7 +1060,7 @@ fn replayed_follow_approach_never_asks_more_than_it_can_stop_from() {
         w.feed();
         let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                           "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
-        w.p.on_feed("plugin.world-engine.scan", &scan, w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &scan, w.now);
         w.req(Request::Goal {
             lease_id: id,
             goal: follow_goal([goal[0], goal[1], goal[2]], [gv[0], gv[1]]),
@@ -1125,7 +1125,7 @@ fn goal_brake_keeps_open_goals_and_caps_them_to_seen_space() {
     let mut ask_max = 0.0f32;
     let end = w.now + 6000;
     while w.now < end {
-        w.p.on_feed("plugin.world-engine.scan", &empty, w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &empty, w.now);
         fly_to(&mut w, [30.0, 0.0], 100);
         let ask = fc_ask(&w, [w.pos[0], w.pos[1]]);
         let seen = stop_cap(crate::obstacles::SCAN_HORIZON_M, 0.0, 3.0, 1.5);

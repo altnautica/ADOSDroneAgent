@@ -3,19 +3,18 @@
 
 use super::hub::NavKind;
 
-/// The plugin that owns the pose, scan, lidar, occupancy and map-status topics.
-pub const WORLD_ENGINE_ID: &str = "com.altnautica.world-engine";
-/// The plugin that publishes `nav.state`.
-pub const VISION_NAV_ID: &str = "com.altnautica.vision-nav";
+/// The plugin that owns the pose, scan, lidar, occupancy, map-status and
+/// `nav.state` topics.
+pub const NAVIGATION_ID: &str = "com.altnautica.navigation";
 /// The plugin that publishes `follow.state` and the follow events.
 pub const FOLLOW_ME_ID: &str = "com.altnautica.follow-me";
 
-pub const TOPIC_POSE: &str = "plugin.world-engine.pose";
-pub const TOPIC_SCAN: &str = "plugin.world-engine.scan";
+pub const TOPIC_POSE: &str = "plugin.navigation.pose";
+pub const TOPIC_SCAN: &str = "plugin.navigation.scan";
 /// The lidar driver's 1 Hz status (device, connected, health).
-pub const TOPIC_LIDAR: &str = "plugin.world-engine.lidar";
-pub const TOPIC_OCCUPANCY: &str = "plugin.world-engine.occupancy";
-pub const TOPIC_MAP_STATUS: &str = "plugin.world-engine.map_status";
+pub const TOPIC_LIDAR: &str = "plugin.navigation.lidar";
+pub const TOPIC_OCCUPANCY: &str = "plugin.navigation.occupancy";
+pub const TOPIC_MAP_STATUS: &str = "plugin.navigation.map_status";
 pub const TOPIC_NAV_STATE: &str = "nav.state";
 pub const TOPIC_FOLLOW_STATE: &str = "follow.state";
 pub const TOPIC_FOLLOW_REACQUIRED: &str = "follow.reacquired";
@@ -53,10 +52,8 @@ pub enum Routed {
 /// operator's display.
 pub fn route(topic: &str, publisher: &str) -> Routed {
     let owner = match topic {
-        TOPIC_POSE | TOPIC_SCAN | TOPIC_LIDAR | TOPIC_OCCUPANCY | TOPIC_MAP_STATUS => {
-            WORLD_ENGINE_ID
-        }
-        TOPIC_NAV_STATE => VISION_NAV_ID,
+        TOPIC_POSE | TOPIC_SCAN | TOPIC_LIDAR | TOPIC_OCCUPANCY | TOPIC_MAP_STATUS
+        | TOPIC_NAV_STATE => NAVIGATION_ID,
         TOPIC_FOLLOW_STATE | TOPIC_FOLLOW_REACQUIRED | TOPIC_FOLLOW_LOST | TOPIC_FOLLOW_STOPPED => {
             FOLLOW_ME_ID
         }

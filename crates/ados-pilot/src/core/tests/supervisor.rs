@@ -354,7 +354,7 @@ fn the_return_is_smart_rtl_and_lands_when_the_fc_refuses_it() {
 fn scan_for(w: &mut World, scan: &Value, ms: u64) {
     let end = w.now + ms;
     while w.now < end {
-        w.p.on_feed("plugin.world-engine.scan", scan, w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, scan, w.now);
         w.run(20);
     }
 }

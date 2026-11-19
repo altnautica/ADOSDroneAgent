@@ -54,7 +54,7 @@ export const SCREEN_TABLE: readonly ScreenMeta[] = [
     profiles: ["workstation", "compute"],
   },
   {
-    // The visor's home (HOME_BY_PROFILE.visor): the world-engine capture session.
+    // The visor's home (HOME_BY_PROFILE.visor): the Capture extension's session.
     id: "capture",
     labelKey: "nav.capture",
     icon: ScanLine,

@@ -7,9 +7,8 @@
 
 use super::*;
 
-/// The world-engine capture state route, reached through the plugin proxy.
-pub const CAPTURE_STATE_PATH: &str =
-    "/api/plugins/com.altnautica.world-engine/x/atlas/capture/state";
+/// The Capture extension's state route, reached through the plugin proxy.
+pub const CAPTURE_STATE_PATH: &str = "/api/plugins/com.altnautica.capture/x/capture/state";
 
 /// Colour class of one segment of a profile row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

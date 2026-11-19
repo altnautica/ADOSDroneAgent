@@ -1,4 +1,4 @@
-//! The plugin event export client: the World Engine scan, live occupancy and
+//! The plugin event export client: Navigation's scan, live occupancy and
 //! pose topics feed the obstacle model; its lidar status feeds sensor health.
 
 use std::path::{Path, PathBuf};
@@ -8,15 +8,27 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// Navigation's planar scan (body FRD).
+pub const TOPIC_SCAN: &str = "plugin.navigation.scan";
+/// Navigation's LiDAR link status.
+pub const TOPIC_LIDAR: &str = "plugin.navigation.lidar";
+/// Navigation's live-map status.
+pub const TOPIC_MAP_STATUS: &str = "plugin.navigation.map_status";
+/// Navigation's live occupancy tiles.
+pub const TOPIC_OCCUPANCY: &str = "plugin.navigation.occupancy";
+/// Navigation's pose.
+pub const TOPIC_POSE: &str = "plugin.navigation.pose";
+/// Navigation's active EKF source set: the GNSS-denied speed cap.
+pub const TOPIC_NAV_STATE: &str = "nav.state";
+
 /// Topics the pilot reads.
 pub const TOPICS: &[&str] = &[
-    "plugin.world-engine.scan",
-    "plugin.world-engine.lidar",
-    "plugin.world-engine.map_status",
-    "plugin.world-engine.occupancy",
-    "plugin.world-engine.pose",
-    // vision-nav's active EKF source set: the GNSS-denied speed cap.
-    "nav.state",
+    TOPIC_SCAN,
+    TOPIC_LIDAR,
+    TOPIC_MAP_STATUS,
+    TOPIC_OCCUPANCY,
+    TOPIC_POSE,
+    TOPIC_NAV_STATE,
 ];
 
 /// The export socket (`ADOS_PLUGIN_HOST_DIR`-aware, like the control front).

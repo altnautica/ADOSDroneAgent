@@ -51,10 +51,9 @@ ARCHIVE_SUFFIX = ".signed.adosplug"
 # reading; it stays out until it is publishable.
 EXCLUDED = {"thermal-camera-flir-lepton-usb"}
 
-# The oldest release of an extension the catalog may pin. Vision-nav releases
-# before 0.5.0 ignore the operator's configuration, so an install of one is
-# worse than no entry; until 0.5.0 is published the catalog omits vision-nav.
-MIN_VERSIONS = {"vision-nav": "0.5.0"}
+# The oldest release of an extension the catalog may pin, for an extension whose
+# earlier releases must never be installed. None today.
+MIN_VERSIONS: dict[str, str] = {}
 
 # Catalog category of an extension, used when a new entry is added. Manifests
 # carry no category field.
@@ -62,8 +61,9 @@ CATEGORIES = {
     "com.altnautica.mavlink-gimbal-v2": "drivers",
     "com.altnautica.siyi-pod": "drivers",
     "com.altnautica.follow-me": "ai",
-    "com.altnautica.vision-nav": "ai",
-    "com.altnautica.world-engine": "ai",
+    "com.altnautica.navigation": "ai",
+    "com.altnautica.capture": "ai",
+    "com.altnautica.reconstruct": "ai",
 }
 
 # Field order of a catalog entry, as the agent and the installer read it.

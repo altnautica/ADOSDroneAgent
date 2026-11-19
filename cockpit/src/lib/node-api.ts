@@ -1,4 +1,4 @@
-// The compute node's job API, read through the agent: the World Engine
+// The compute node's job API, read through the agent: the Reconstruct
 // extension serves it on its plugin socket on a workstation or compute node,
 // and the agent forwards `/api/plugins/<id>/x/<rest>` there. Every reply is
 // coerced defensively; a field the node does not send reads null, never a
@@ -6,8 +6,8 @@
 
 import { apiFetch } from "@/shared/api-fetch";
 
-export const WORLD_ENGINE_ID = "com.altnautica.world-engine";
-const BASE = `/api/plugins/${WORLD_ENGINE_ID}/x/api/compute`;
+export const RECONSTRUCT_ID = "com.altnautica.reconstruct";
+const BASE = `/api/plugins/${RECONSTRUCT_ID}/x/api/compute`;
 
 export interface NodeStatus {
   role: string | null;

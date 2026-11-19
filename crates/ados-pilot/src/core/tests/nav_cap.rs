@@ -16,12 +16,16 @@ fn ext_nav_world() -> World {
     w
 }
 
-/// vision-nav reports source set 2 (external nav) active.
+/// Navigation reports source set 2 (external nav) active.
 fn ext_nav(w: &mut World) {
-    w.p.on_feed("nav.state", &json!({"active_set": 2, "gps_fix": 0}), w.now);
+    w.p.on_feed(
+        crate::events::TOPIC_NAV_STATE,
+        &json!({"active_set": 2, "gps_fix": 0}),
+        w.now,
+    );
 }
 
-/// Run `ms` with vision-nav reporting external nav every 500 ms.
+/// Run `ms` with Navigation reporting external nav every 500 ms.
 fn run_ext_nav(w: &mut World, ms: u64) {
     for _ in 0..ms / 500 {
         ext_nav(w);
@@ -108,7 +112,11 @@ fn capped_goal_velocity_changes_no_faster_than_the_accel_cap() {
 #[test]
 fn gps_source_is_not_capped() {
     let mut w = ext_nav_world();
-    w.p.on_feed("nav.state", &json!({"active_set": 1, "gps_fix": 3}), w.now);
+    w.p.on_feed(
+        crate::events::TOPIC_NAV_STATE,
+        &json!({"active_set": 1, "gps_fix": 3}),
+        w.now,
+    );
     assert!(w.p.nav_cap(w.now).is_none());
     assert!(w.p.state(w.now).speed_cap.is_none());
 }
@@ -122,7 +130,7 @@ fn a_stale_nav_state_keeps_the_last_reported_set() {
     // feeds does not lift the cap.
     assert!(w.p.nav_cap(w.now).is_some());
     w.p.on_feed(
-        "nav.state",
+        crate::events::TOPIC_NAV_STATE,
         &json!({"active_set": null, "gps_fix": 3}),
         w.now,
     );
@@ -130,7 +138,11 @@ fn a_stale_nav_state_keeps_the_last_reported_set() {
         w.p.nav_cap(w.now).is_some(),
         "no set named: the last one holds"
     );
-    w.p.on_feed("nav.state", &json!({"active_set": 1, "gps_fix": 3}), w.now);
+    w.p.on_feed(
+        crate::events::TOPIC_NAV_STATE,
+        &json!({"active_set": 1, "gps_fix": 3}),
+        w.now,
+    );
     assert!(w.p.nav_cap(w.now).is_none(), "set 1 is GPS");
 }
 
@@ -156,7 +168,11 @@ fn a_gps_source_set_without_a_fresh_3d_fix_is_capped() {
 #[test]
 fn an_unknown_source_set_is_capped() {
     let mut w = ext_nav_world();
-    w.p.on_feed("nav.state", &json!({"active_set": 7, "gps_fix": 3}), w.now);
+    w.p.on_feed(
+        crate::events::TOPIC_NAV_STATE,
+        &json!({"active_set": 7, "gps_fix": 3}),
+        w.now,
+    );
     assert!(w.p.nav_cap(w.now).is_some());
 }
 
@@ -230,7 +246,7 @@ fn a_capped_goal_obeys_the_obstacle_brake_at_once() {
     // A wall 3 m ahead and a goal 1.4 m ahead: the plan stays clear, and the
     // brake allows about 1.1 m/s at 2 m/s inside the 1.5 m margin.
     w.p.on_feed(
-        "plugin.world-engine.scan",
+        crate::events::TOPIC_SCAN,
         &super::safety::wall_scan(3.0),
         w.now,
     );
@@ -392,7 +408,7 @@ fn a_vantage_goal_is_held_to_the_cap() {
         ));
         w.req(Request::Goal { lease_id: id, goal });
         for _ in 0..10 {
-            w.p.on_feed("plugin.world-engine.scan", &scan, w.now);
+            w.p.on_feed(crate::events::TOPIC_SCAN, &scan, w.now);
             w.run(20);
         }
     }

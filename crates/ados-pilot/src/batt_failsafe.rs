@@ -113,7 +113,7 @@ pub fn spec(key: &str) -> &'static str {
 /// position from something other than GPS (external nav, optical flow
 /// alone, none), or any source set (1–3) positions from a beacon or
 /// external nav. The FC's battery action is fixed while the source set may
-/// switch in flight (vision-nav moves to its external-nav set when GPS
+/// switch in flight (Navigation moves to its external-nav set when GPS
 /// fails), so every set the vehicle may fly counts, not the active one.
 /// The setup wizard and this item read the same rule.
 pub fn gnss_free(p: impl Fn(&str) -> Option<f32>) -> bool {

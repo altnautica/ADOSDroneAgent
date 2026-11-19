@@ -182,7 +182,7 @@ impl RangeTrack {
     }
 }
 
-/// The capture service's `plugin.world-engine.lidar` report.
+/// The capture service's `plugin.navigation.lidar` report.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LidarStatus {
     pub connected: bool,

@@ -32,7 +32,7 @@ ados-hal-probe = { workspace = true }
 # `~/Library/LaunchAgents`, shared with the supervisor's runtime
 # `LaunchdManager` that then manages those jobs.
 ados-protocol = { workspace = true }
-# The plugin lifecycle controller. The World Engine extension step installs
+# The plugin lifecycle controller. The Reconstruct extension step installs
 # the first-party extension through the same `PluginSupervisor` (signature
 # verify, compatibility gates, unit render) and the same allowlisted,
 # sha-pinned download (`ados_plugin_host::download`) the native REST routes

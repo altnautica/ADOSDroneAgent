@@ -69,7 +69,7 @@ pub(super) fn post(n: f32) -> impl Fn(f32, f32) -> bool {
 /// The pose that places the map (map = local) with σ 0.02 m.
 pub(super) fn seen(w: &mut World) {
     let p = json!({"pose": {"t": [w.pos[0], w.pos[1], w.pos[2]]}, "sigma_xy_m": 0.02});
-    w.p.on_feed("plugin.world-engine.pose", &p, w.now);
+    w.p.on_feed(crate::events::TOPIC_POSE, &p, w.now);
 }
 
 /// Run `ms` with the pose arriving every 100 ms.
@@ -81,7 +81,7 @@ pub(super) fn run_seen(w: &mut World, ms: u64) {
 }
 
 pub(super) fn map(w: &mut World, payload: &Value) {
-    w.p.on_feed("plugin.world-engine.occupancy", payload, w.now);
+    w.p.on_feed(crate::events::TOPIC_OCCUPANCY, payload, w.now);
     seen(w);
 }
 

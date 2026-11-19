@@ -1,7 +1,7 @@
 //! The ranging the depth fit and the landing-zone search use: the planar
 //! LiDAR scan, the downward rangefinder and the vehicle attitude.
 //!
-//! - The scan is the world-engine extension's `plugin.world-engine.scan`
+//! - The scan is the Navigation extension's `plugin.navigation.scan`
 //!   topic (body FRD, one nearest horizontal range per bin, clockwise from the
 //!   nose), read off the plugin host's event export socket. Only events the
 //!   host stamped as published by that extension are taken.
@@ -32,8 +32,8 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 /// The topic the planar scan arrives on, and the only publisher trusted for it.
-pub const SCAN_TOPIC: &str = "plugin.world-engine.scan";
-pub const SCAN_PUBLISHER: &str = "com.altnautica.world-engine";
+pub const SCAN_TOPIC: &str = "plugin.navigation.scan";
+pub const SCAN_PUBLISHER: &str = "com.altnautica.navigation";
 
 /// A value older than this is not used, milliseconds.
 pub const MAX_AGE_MS: u64 = 500;
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_world_engine_body_frame_scan_is_taken() {
+    fn only_the_navigation_body_frame_scan_is_taken() {
         let feed = RangeFeed::default();
         assert!(!feed.apply_event_line(&line(SCAN_TOPIC, "com.example.spoof", "body_frd"), 0));
         assert!(!feed.apply_event_line(&line(SCAN_TOPIC, SCAN_PUBLISHER, "map_ned"), 0));

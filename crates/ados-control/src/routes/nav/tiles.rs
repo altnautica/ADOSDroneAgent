@@ -1,7 +1,7 @@
 //! The live occupancy tile store behind `GET /api/v1/map/live`.
 //!
-//! The world-engine extension publishes only the tiles that changed each
-//! second (`plugin.world-engine.occupancy`, `kind: "live"`). This store keeps
+//! The Navigation extension publishes only the tiles that changed each
+//! second (`plugin.navigation.occupancy`, `kind: "live"`). This store keeps
 //! the latest PNG per tile and the producer seq it last changed at, so a client
 //! catches up with `?since=<seq>` instead of replaying the stream.
 

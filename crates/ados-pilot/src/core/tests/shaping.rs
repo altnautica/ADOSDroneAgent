@@ -262,7 +262,7 @@ fn a_goal_slowed_by_the_soft_brake_reports_it() {
     let t0 = w.now;
     while w.now < t0 + 8_000 {
         if (w.now - t0).is_multiple_of(100) {
-            w.p.on_feed("plugin.world-engine.scan", &empty, w.now);
+            w.p.on_feed(crate::events::TOPIC_SCAN, &empty, w.now);
             w.req(Request::Goal {
                 lease_id: id,
                 goal: follow(30.0, 0.0),

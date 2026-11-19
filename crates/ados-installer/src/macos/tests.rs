@@ -183,7 +183,7 @@ fn env_pins_the_control_port_and_home_rooted_paths() {
 }
 
 /// The daemons resolve their plugin layout from the plist environment
-/// (`Paths::from_env`); the installer's own World Engine step drives
+/// (`Paths::from_env`); the installer's own Reconstruct step drives
 /// `plugin_paths` directly. A misspelled variable would leave a daemon on a
 /// root-owned Linux default while the installer wrote the per-user tree.
 #[test]
@@ -234,7 +234,7 @@ fn the_plist_environment_resolves_to_the_layout_the_installer_drives() {
 fn plugin_agents_are_found_by_label_and_never_confused_with_the_host() {
     let dir = tempfile::tempdir().unwrap();
     for name in [
-        "co.ados.plugin.com-altnautica-world-engine.plist",
+        "co.ados.plugin.com-altnautica-reconstruct.plist",
         "co.ados.plugin.com-example-x.plist",
         // The core plugin host daemon, not a plugin.
         "co.ados.plugin-host.plist",
@@ -246,7 +246,7 @@ fn plugin_agents_are_found_by_label_and_never_confused_with_the_host() {
     assert_eq!(
         plugin_agent_labels(dir.path()),
         vec![
-            "co.ados.plugin.com-altnautica-world-engine".to_string(),
+            "co.ados.plugin.com-altnautica-reconstruct".to_string(),
             "co.ados.plugin.com-example-x".to_string(),
         ]
     );

@@ -158,7 +158,7 @@ video:
   # camera (optical-flow or VIO mono) lands on one of the four USB ports.
   #
   # The optional ``cameras`` block below maps each physical port to a
-  # mount orientation. The vision-nav wizard reads this to default the
+  # mount orientation. The Navigation wizard reads this to default the
   # camera-orientation picker; without it the wizard falls back to
   # ``auto`` and asks the operator to confirm. ``forward`` suits
   # indoor / corridor / inspection flight; ``downward`` suits

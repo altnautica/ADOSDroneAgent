@@ -79,7 +79,7 @@ pub enum ResourceId {
     ModemStatus,
     ModemConfig,
     DisplayOptions,
-    /// The world-engine capture state (visor).
+    /// The Capture extension's state (visor).
     CaptureState,
     /// `GET /api/logs` (the poll fallback when the stream is down).
     LogsPoll,

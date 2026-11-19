@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::cli::Args;
 use crate::steps::extensions::{
-    install_world_engine, world_engine_default, ExtensionOutcome, NodeTarget, DOWNLOAD_RETRY_DELAY,
+    install_reconstruct, reconstruct_default, ExtensionOutcome, NodeTarget, DOWNLOAD_RETRY_DELAY,
     MANUAL_INSTALL,
 };
 
@@ -145,7 +145,7 @@ pub(super) fn resolve_plugin_runner(paths: &Paths) -> PathBuf {
     fallback
 }
 
-/// Install the World Engine extension when the operator (`--world-engine`) or
+/// Install the Reconstruct extension when the operator (`--reconstruct`) or
 /// the profile default asked for it: the same controller, bundled catalog and
 /// sha256 pin as the Linux `extensions` step. Runs only on a node that came up,
 /// since the extension's agent half talks to the plugin host. Best-effort: an
@@ -160,21 +160,21 @@ pub(super) fn install_extensions(
     report: &HealthReport,
 ) {
     if !args
-        .world_engine
-        .unwrap_or_else(|| world_engine_default(profile))
+        .reconstruct
+        .unwrap_or_else(|| reconstruct_default(profile))
     {
-        println!("  extensions: World Engine not selected");
+        println!("  extensions: Reconstruct not selected");
         return;
     }
     if !report.up {
         println!(
-            "  extensions: World Engine skipped because the node did not come up; install it \
+            "  extensions: Reconstruct skipped because the node did not come up; install it \
              later with `{MANUAL_INSTALL}`"
         );
         return;
     }
-    println!("  extensions: installing the World Engine …");
-    let result = install_world_engine(NodeTarget {
+    println!("  extensions: installing Reconstruct …");
+    let result = install_reconstruct(NodeTarget {
         paths: paths.plugin_paths(runner),
         profile: ados_config::normalize_profile(Some(profile)),
         agent_version: agent_version.to_string(),
@@ -187,18 +187,18 @@ pub(super) fn install_extensions(
     });
     match result {
         Ok(ExtensionOutcome::Installed { version, .. }) => {
-            println!("  extensions: World Engine {version} installed and enabled")
+            println!("  extensions: Reconstruct {version} installed and enabled")
         }
         Ok(ExtensionOutcome::AlreadyInstalled { version }) => println!(
-            "  extensions: World Engine {version} already installed; plugin auto-update keeps \
+            "  extensions: Reconstruct {version} already installed; plugin auto-update keeps \
              it current"
         ),
         Ok(ExtensionOutcome::Finished { version, .. }) => println!(
-            "  extensions: World Engine {version} was installed but off; required permissions \
+            "  extensions: Reconstruct {version} was installed but off; required permissions \
              granted and enabled"
         ),
         Ok(ExtensionOutcome::Unavailable(reason)) | Err(reason) => println!(
-            "  extensions: World Engine not installed: {reason}. Install it later with \
+            "  extensions: Reconstruct not installed: {reason}. Install it later with \
              `{MANUAL_INSTALL}`"
         ),
     }

@@ -487,7 +487,7 @@ fn ados_profile_sets_land_on_a_copter_without_gnss() {
     assert_eq!(apply_profile(p), (1.0, 1.0));
 }
 
-/// GPS on the boot set, external nav on a later set (vision-nav switches to
+/// GPS on the boot set, external nav on a later set (Navigation switches to
 /// it in flight): the wizard writes Land, the value the readiness item
 /// accepts for that vehicle, so Fix settles the item.
 #[test]

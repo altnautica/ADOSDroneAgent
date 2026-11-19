@@ -1,11 +1,11 @@
-// The Map panel's rows from the world-engine `map_status` frame: compute
+// The Map panel's rows from Navigation's `map_status` frame: compute
 // placement, mapping memory used against its budget, the live voxel size,
-// dropped keyframes, sweep-cloud points, mapped area and the upload or live
-// stream progress. Every row carries a text value (never colour alone) and a
-// tone; an absent field reads as a dash, never a made-up zero.
+// sweep-cloud points, mapped area, the pose provider and the FC IMU feed.
+// Every row carries a text value (never colour alone) and a tone; an absent
+// field reads as a dash, never a made-up zero.
 
 import { specText } from "@/shared/hud/spec-text";
-import type { MapPlacement, MapStatus, StreamState, UploadState } from "@/shared/hud/nav-types";
+import type { ImuFeed, MapPlacement, MapStatus, PoseProvider } from "@/shared/hud/nav-types";
 
 /** `map_status` older than this is shown as stale. */
 export const MAP_STATUS_FRESH_MS = 5000;
@@ -16,19 +16,18 @@ export const MEMORY_CRIT_FRACTION = 0.95;
 export type MapRowTone = "normal" | "good" | "warn" | "crit" | "muted";
 
 export interface MapRow {
-  id: "placement" | "memory" | "voxel" | "keyframes" | "points" | "area" | "session" | "upload" | "stream";
+  id: "placement" | "memory" | "voxel" | "points" | "area" | "pose" | "imu";
   label: string;
   value: string;
   tone: MapRowTone;
-  /** 0–1 for rows drawn with a bar (memory, upload). */
+  /** 0–1 for rows drawn with a bar (memory). */
   fraction?: number;
 }
 
 const DASH = "—";
 
 const placementWord = (p: MapPlacement): string => specText(`map.status.placement.${p}`);
-const uploadWord = (u: UploadState): string => specText(`map.status.upload.${u}`);
-const streamWord = (st: StreamState): string => specText(`map.status.stream.${st}`);
+const providerWord = (p: PoseProvider): string => specText(`map.status.pose_provider.${p}`);
 
 /** `1.2 M`, `48.5 k`, `950`. */
 export function compactCount(n: number): string {
@@ -53,31 +52,11 @@ function memoryRow(used: number | null, budget: number | null): MapRow {
   };
 }
 
-function uploadRow(upload: MapStatus["upload"]): MapRow | null {
-  if (!upload) return null;
-  const word = uploadWord(upload.state);
-  const tone: MapRowTone = upload.state === "failed" ? "crit" : upload.state === "done" ? "good" : "normal";
-  if (upload.bytesTotal > 0 && upload.state !== "idle") {
-    const fraction = Math.min(1, upload.bytesDone / upload.bytesTotal);
-    return {
-      id: "upload",
-      label: specText("map.status.upload"),
-      value: `${word} ${Math.round(fraction * 100)} % · ${(upload.bytesDone / 1e6).toFixed(1)} / ${(upload.bytesTotal / 1e6).toFixed(1)} MB`,
-      tone,
-      fraction,
-    };
-  }
-  return { id: "upload", label: specText("map.status.upload"), value: word, tone };
-}
-
-function streamRow(stream: MapStatus["stream"]): MapRow | null {
-  if (!stream) return null;
-  const word = streamWord(stream.state);
-  const tone: MapRowTone = stream.state === "live" ? "good" : stream.state === "degraded" ? "warn" : "normal";
-  const rate = stream.state === "live" || stream.state === "degraded"
-    ? ` · ${((stream.bytesPerS * 8) / 1e6).toFixed(1)} Mbit/s`
-    : "";
-  return { id: "stream", label: specText("map.status.live_stream"), value: `${word}${rate}`, tone };
+function imuRow(feed: ImuFeed): MapRow {
+  const word = specText(`map.status.imu_feed.${feed.state}`);
+  const tone: MapRowTone = feed.state === "lost" ? "crit" : feed.state === "degraded" ? "warn" : "good";
+  const rate = feed.rateHz !== null ? ` · ${Math.round(feed.rateHz)} Hz` : "";
+  return { id: "imu", label: specText("map.status.imu_feed"), value: `${word}${rate}`, tone };
 }
 
 export function mapStatusRows(s: MapStatus): MapRow[] {
@@ -96,12 +75,6 @@ export function mapStatusRows(s: MapStatus): MapRow[] {
       tone: s.voxelM === null ? "muted" : "normal",
     },
     {
-      id: "keyframes",
-      label: specText("map.status.keyframes_dropped"),
-      value: s.keyframesDropped !== null ? String(s.keyframesDropped) : DASH,
-      tone: s.keyframesDropped === null ? "muted" : s.keyframesDropped > 0 ? "warn" : "normal",
-    },
-    {
       id: "points",
       label: specText("map.status.sweep_points"),
       value: s.sweepPoints !== null ? compactCount(s.sweepPoints) : DASH,
@@ -113,11 +86,13 @@ export function mapStatusRows(s: MapStatus): MapRow[] {
       value: s.areaM2 !== null ? `${Math.round(s.areaM2).toLocaleString("en-US")} m²` : DASH,
       tone: s.areaM2 === null ? "muted" : "normal",
     },
-    { id: "session", label: specText("map.status.session"), value: s.sessionId ?? DASH, tone: s.sessionId ? "normal" : "muted" },
+    {
+      id: "pose",
+      label: specText("map.status.pose_provider"),
+      value: s.poseProvider ? providerWord(s.poseProvider) : DASH,
+      tone: s.poseProvider ? "normal" : "muted",
+    },
   ];
-  const up = uploadRow(s.upload);
-  if (up) rows.push(up);
-  const st = streamRow(s.stream);
-  if (st) rows.push(st);
+  if (s.imuFeed) rows.push(imuRow(s.imuFeed));
   return rows;
 }

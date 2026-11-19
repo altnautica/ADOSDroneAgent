@@ -6,11 +6,11 @@
 //! too, so the USB id alone cannot tell the LiDAR from a flight controller. A
 //! port is the LiDAR when:
 //!
-//! * it is the serial device the capture service drives: the World Engine
-//!   plugin's `atlas.lidar` config, `rplidar.device`, when that is a path; or
+//! * it is the serial device Navigation's lidar-slam service drives: the
+//!   `navigation.lidar` config's `rplidar.device`, when that is a path; or
 //! * that device is `auto` (or unset), the rig (`rig.json`) declares a sensor
 //!   of kind `lidar`, the port is a CP2102, and it is either held exclusively
-//!   by another process (the capture service) or answers the RPLIDAR
+//!   by another process (the lidar-slam service) or answers the RPLIDAR
 //!   `GET_INFO` request ([`probe_rplidar`]).
 //!
 //! A CP2102 identified neither way stays a flight-controller candidate.
@@ -27,10 +27,10 @@ mod tests;
 
 /// The CP2102 USB-UART bridge an RPLIDAR enumerates behind.
 pub const LIDAR_USB_ID: (u16, u16) = (0x10C4, 0xEA60);
-/// The plugin whose capture service drives the LiDAR.
-pub const LIDAR_PLUGIN_ID: &str = "com.altnautica.world-engine";
+/// The plugin whose lidar-slam service drives the LiDAR.
+pub const LIDAR_PLUGIN_ID: &str = "com.altnautica.navigation";
 /// Its config key holding the LiDAR driver settings.
-pub const LIDAR_CONFIG_KEY: &str = "atlas.lidar";
+pub const LIDAR_CONFIG_KEY: &str = "navigation.lidar";
 /// The device value that selects USB discovery (also the default).
 const AUTO: &str = "auto";
 /// Prefix of a network (simulated) LiDAR device, never a serial port.
@@ -66,7 +66,7 @@ impl LidarPort {
     }
 
     /// The rule from the configured `rplidar.device` (`None` = unset, which
-    /// the capture service reads as `auto`) and whether the rig declares a
+    /// the lidar-slam service reads as `auto`) and whether the rig declares a
     /// LiDAR. An empty device runs no driver, but a declared LiDAR is still
     /// on the bus, so it reads like `auto`.
     pub fn from_parts(device: Option<&str>, rig_declares_lidar: bool) -> Self {
@@ -187,7 +187,7 @@ fn decode_value(encoded: &str) -> Option<rmpv::Value> {
     rmpv::decode::read_value(&mut bytes.as_slice()).ok()
 }
 
-/// `value.rplidar.device` of an `atlas.lidar` map.
+/// `value.rplidar.device` of a `navigation.lidar` map.
 fn rplidar_device(value: &rmpv::Value) -> Option<String> {
     let field = |v: &rmpv::Value, name: &str| -> Option<rmpv::Value> {
         v.as_map()?

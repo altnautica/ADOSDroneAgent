@@ -84,7 +84,7 @@ pub(crate) fn request_line() -> Vec<u8> {
 }
 
 /// Apply one exported event line to the hub. A line that is not a well-formed
-/// event of this wire version is skipped. vision-nav's `nav.state` gains the
+/// event of this wire version is skipped. Navigation's `nav.state` gains the
 /// pose age from its state sidecar in `sidecar_dir`.
 pub(crate) fn apply_line(hub: &NavHub, sidecar_dir: &Path, line: &[u8]) {
     let Ok(event) = serde_json::from_slice::<Value>(line) else {
@@ -187,7 +187,7 @@ async fn run_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::nav::{FOLLOW_ME_ID, WORLD_ENGINE_ID};
+    use crate::routes::nav::{FOLLOW_ME_ID, NAVIGATION_ID};
     use tokio::io::AsyncBufReadExt;
 
     #[test]
@@ -213,13 +213,13 @@ mod tests {
         assert_eq!(hub.status_body()["follow"], Value::Null);
     }
 
-    /// The `nav` kind carries vision-nav's pose age from its state sidecar,
+    /// The `nav` kind carries Navigation's pose age from its state sidecar,
     /// `null` without one; the other kinds stay verbatim.
     #[test]
     fn nav_state_gains_the_pose_age() {
         let hub = NavHub::new();
         let dir = tempfile::tempdir().unwrap();
-        let line = br#"{"v":1,"topic":"nav.state","publisher":"com.altnautica.vision-nav","ts_ms":1,"payload":{"mode":"external_nav"}}"#;
+        let line = br#"{"v":1,"topic":"nav.state","publisher":"com.altnautica.navigation","ts_ms":1,"payload":{"mode":"external_nav"}}"#;
         apply_line(&hub, dir.path(), line);
         let nav = &hub.status_body()["nav"]["data"];
         assert_eq!(nav["mode"], "external_nav");
@@ -233,7 +233,7 @@ mod tests {
         let sidecar = json!({"telemetry.navigation": {"ts_ms": written_ms,
             "payload": {"poseAgeMs": 118.0}}});
         std::fs::write(
-            dir.path().join("com.altnautica.vision-nav-state.json"),
+            dir.path().join("com.altnautica.navigation-state.json"),
             sidecar.to_string(),
         )
         .unwrap();
@@ -271,7 +271,7 @@ mod tests {
                 .write_all(b"{\"v\":1,\"ok\":true}\n")
                 .await
                 .unwrap();
-            let event = json!({"v": 1, "topic": "plugin.world-engine.pose", "publisher": WORLD_ENGINE_ID,
+            let event = json!({"v": 1, "topic": "plugin.navigation.pose", "publisher": NAVIGATION_ID,
                 "ts_ms": 5, "payload": {"health": "good"}});
             write_half
                 .write_all(format!("{event}\n").as_bytes())

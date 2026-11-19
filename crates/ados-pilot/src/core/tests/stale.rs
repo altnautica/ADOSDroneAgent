@@ -424,7 +424,7 @@ fn a_lidar_seen_then_silent_holds_as_stale_not_unavailable() {
 fn a_lidar_the_capture_service_reports_is_expected_before_its_first_scan() {
     let mut w = no_lidar();
     w.p.on_feed(
-        "plugin.world-engine.lidar",
+        crate::events::TOPIC_LIDAR,
         &json!({"v": 1, "device": "/dev/ttyUSB0", "connected": true, "health": "good",
                 "health_code": 0, "rate_hz": 0.0, "scans": 0, "dropped_scans": 0, "reconnects": 0}),
         w.now,

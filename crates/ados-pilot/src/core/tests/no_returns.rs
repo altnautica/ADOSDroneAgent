@@ -179,7 +179,7 @@ fn one_stray_return_in_open_air_is_not_a_surface() {
     let stray = serde_json::json!({"frame": "body_frd", "angle_start_rad": 0.0,
         "angle_increment_rad": std::f32::consts::TAU / 360.0,
         "ranges_m": surface_behind(1.5)});
-    w.p.on_feed("plugin.world-engine.scan", &stray, w.now);
+    w.p.on_feed(crate::events::TOPIC_SCAN, &stray, w.now);
     w.run(1500);
     assert_eq!(lidar_state(&w), "no_returns");
     assert_eq!(avoid_state(&w), "clear");

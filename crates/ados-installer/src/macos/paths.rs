@@ -81,7 +81,7 @@ impl Paths {
     /// The plugin lifecycle layout (`ados_plugin_host::Paths`), every entry
     /// under the per-user home. The single source for both the `ADOS_PLUGIN_*`
     /// environment the daemons read ([`build_env`]) and the controller the
-    /// installer's own World Engine step drives, so the two cannot disagree.
+    /// installer's own Reconstruct step drives, so the two cannot disagree.
     /// Plugin LaunchAgents land beside the core ones in `~/Library/LaunchAgents`.
     pub(super) fn plugin_paths(&self, runner: &Path) -> ados_plugin_host::Paths {
         ados_plugin_host::Paths {

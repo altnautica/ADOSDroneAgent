@@ -9,7 +9,7 @@ use serde_json::Value;
 use super::{tiles, Obstacles};
 
 impl Obstacles {
-    /// Ingest a `plugin.world-engine.occupancy` payload (changed tiles only).
+    /// Ingest a `plugin.navigation.occupancy` payload (changed tiles only).
     pub fn ingest_occupancy(&mut self, payload: &Value) {
         let res = payload
             .get("res_m")

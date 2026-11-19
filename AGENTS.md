@@ -93,9 +93,10 @@ library crates (see "Published crates" below). The flight-critical path:
 - Plugin host: `crates/ados-plugin-host/`
 - Vision engine: `crates/ados-vision-engine/`; the tracker, YOLO decoding
   and re-identification are `crates/ados-vision/`
-- Perception offload tier decision: `crates/ados-offload/`. The World Engine
-  (world model, compute node, offload sessions) is the
-  `com.altnautica.world-engine` extension, not core.
+- Perception offload tier decision: `crates/ados-offload/`. Capture
+  (`com.altnautica.capture`), Reconstruct (`com.altnautica.reconstruct`: the
+  compute node and offload sessions) and Navigation
+  (`com.altnautica.navigation`: pose, LiDAR, live map) are extensions, not core.
 - Swarm: `crates/ados-swarm/` (published control laws), `crates/ados-swarmbus/`; the onboard control loop lives in `crates/ados-mavlink-router/src/connection/swarm_setpoint/`
 - Peripherals: `crates/ados-crsf/` (codec in `crates/ados-crsf-codec/`),
   `crates/ados-display/` (OLED and framebuffer output in

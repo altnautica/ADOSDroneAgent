@@ -1,5 +1,5 @@
 //! Extensions: seed the plugin revocation list, then install the first-party
-//! World Engine extension (`com.altnautica.world-engine`) on a node whose
+//! Reconstruct extension (`com.altnautica.reconstruct`) on a node whose
 //! operator asked for it. Optional, and after `health`, so it runs against a
 //! node whose plugin host, control surface and loopback guard are already up.
 //!
@@ -8,9 +8,9 @@
 //! existing list (merged from the registry, or edited by the operator) is
 //! never overwritten.
 //!
-//! The toggle is [`crate::ctx::Ctx::install_world_engine`]: the
-//! `--world-engine` / `--no-world-engine` flag or the wizard's checkbox, else
-//! the profile default ([`world_engine_default`]). When it is on, the step:
+//! The toggle is [`crate::ctx::Ctx::install_reconstruct`]: the
+//! `--reconstruct` / `--no-reconstruct` flag or the wizard's checkbox, else
+//! the profile default ([`reconstruct_default`]). When it is on, the step:
 //!
 //! 1. finishes an extension that is already installed but was never switched
 //!    on (an earlier run hit a guard or grant failure): it grants the missing
@@ -49,11 +49,15 @@ use serde::Deserialize;
 use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
 
-/// The World Engine extension's plugin id.
-pub const WORLD_ENGINE_ID: &str = "com.altnautica.world-engine";
+/// The Reconstruct extension's plugin id.
+pub const RECONSTRUCT_ID: &str = "com.altnautica.reconstruct";
 
 /// The command an operator runs to install the extension by hand.
-pub const MANUAL_INSTALL: &str = "ados plugin install com.altnautica.world-engine";
+pub const MANUAL_INSTALL: &str = "ados plugin install com.altnautica.reconstruct";
+
+/// The single archive Capture and Reconstruct replaced. A node that still has
+/// it gets it removed before Reconstruct installs; its data directory is kept.
+const RETIRED_ID: &str = "com.altnautica.world-engine";
 
 /// The bundled first-party catalog, embedded so the installer reads the exact
 /// document the agent it installs will serve.
@@ -106,10 +110,10 @@ pub fn seed_revocation_list(source: Option<&Path>, target: &Path) -> Result<bool
     Ok(true)
 }
 
-/// Whether a profile installs the World Engine when no flag or wizard answer
+/// Whether a profile installs Reconstruct when no flag or wizard answer
 /// says otherwise: on for the workstation-class nodes that run its heavy half,
 /// off for an aircraft, a ground station or a visor (an operator opts those in).
-pub fn world_engine_default(profile: &str) -> bool {
+pub fn reconstruct_default(profile: &str) -> bool {
     matches!(profile, "workstation" | "compute")
 }
 
@@ -169,12 +173,12 @@ pub struct NodeTarget {
     pub retry_delay: Duration,
 }
 
-/// Install the World Engine on this node. Runs on its own OS thread: the
+/// Install Reconstruct on this node. Runs on its own OS thread: the
 /// installer drives its steps from inside the async entry point, and the
 /// blocking HTTPS client must not be built or dropped on a runtime thread.
-pub fn install_world_engine(target: NodeTarget) -> Result<ExtensionOutcome, String> {
+pub fn install_reconstruct(target: NodeTarget) -> Result<ExtensionOutcome, String> {
     std::thread::Builder::new()
-        .name("world-engine-install".to_string())
+        .name("reconstruct-install".to_string())
         .spawn(move || {
             let (board_id, board_tier) = PluginSupervisor::board_identity(&target.board_sidecar);
             let mut supervisor =
@@ -182,9 +186,10 @@ pub fn install_world_engine(target: NodeTarget) -> Result<ExtensionOutcome, Stri
                     .with_profile(target.profile)
                     .with_board_tier(board_tier)
                     .with_ungrantable_caps(RealHost::ungrantable_caps());
+            remove_retired(&mut supervisor);
             install_from_catalog(
                 &mut supervisor,
-                WORLD_ENGINE_ID,
+                RECONSTRUCT_ID,
                 CATALOG_JSON,
                 &HttpDownloadSource::new(),
                 target.guard_wait,
@@ -194,6 +199,23 @@ pub fn install_world_engine(target: NodeTarget) -> Result<ExtensionOutcome, Stri
         .map_err(|e| format!("could not start the install thread: {e}"))?
         .join()
         .map_err(|_| "the install thread panicked".to_string())?
+}
+
+/// Remove the retired archive when it is installed. A failure is logged and
+/// does not stop the Reconstruct install.
+fn remove_retired(supervisor: &mut PluginSupervisor) {
+    if supervisor.discover().is_err() || supervisor.find_install(RETIRED_ID).is_none() {
+        return;
+    }
+    match supervisor.remove(RETIRED_ID, true) {
+        Ok(_) => tracing::info!(
+            plugin = RETIRED_ID,
+            "removed the retired extension; Capture and Reconstruct replace it"
+        ),
+        Err(e) => {
+            tracing::warn!(plugin = RETIRED_ID, error = %e, "the retired extension could not be removed")
+        }
+    }
 }
 
 /// Install `plugin_id` from `catalog_json` through `supervisor`: finish an
@@ -394,40 +416,40 @@ fn step_outcome(result: Result<ExtensionOutcome, String>) -> StepOutcome {
     match result {
         Ok(ExtensionOutcome::Installed { version, granted }) => {
             tracing::info!(
-                plugin = WORLD_ENGINE_ID,
+                plugin = RECONSTRUCT_ID,
                 %version,
                 granted = ?granted,
-                "World Engine extension installed and enabled"
+                "Reconstruct extension installed and enabled"
             );
             StepOutcome::Ok
         }
         Ok(ExtensionOutcome::AlreadyInstalled { version }) => {
             tracing::info!(
-                plugin = WORLD_ENGINE_ID,
+                plugin = RECONSTRUCT_ID,
                 %version,
-                "World Engine extension already installed; left for plugin auto-update"
+                "Reconstruct extension already installed; left for plugin auto-update"
             );
             StepOutcome::Skipped
         }
         Ok(ExtensionOutcome::Finished { version, granted }) => {
             tracing::info!(
-                plugin = WORLD_ENGINE_ID,
+                plugin = RECONSTRUCT_ID,
                 %version,
                 granted = ?granted,
-                "World Engine extension finished: required permissions granted and enabled"
+                "Reconstruct extension finished: required permissions granted and enabled"
             );
             StepOutcome::Ok
         }
         Ok(ExtensionOutcome::Unavailable(reason)) => {
             tracing::warn!(
-                plugin = WORLD_ENGINE_ID,
-                "World Engine extension not installed: {reason}. Install it later with \
+                plugin = RECONSTRUCT_ID,
+                "Reconstruct extension not installed: {reason}. Install it later with \
                  `{MANUAL_INSTALL}`"
             );
             StepOutcome::Skipped
         }
         Err(reason) => StepOutcome::Failed(format!(
-            "World Engine extension not installed: {reason}. Install it later with \
+            "Reconstruct extension not installed: {reason}. Install it later with \
              `{MANUAL_INSTALL}`"
         )),
     }
@@ -461,8 +483,8 @@ impl Step for Extensions {
             Ok(false) => {}
             Err(e) => tracing::warn!(error = %e, "plugin revocation list not seeded"),
         }
-        if !ctx.install_world_engine {
-            tracing::info!(profile = %ctx.profile, "World Engine extension not selected");
+        if !ctx.install_reconstruct {
+            tracing::info!(profile = %ctx.profile, "Reconstruct extension not selected");
             return StepOutcome::Skipped;
         }
         let Some(agent_version) = crate::env::installed_agent_version() else {
@@ -474,9 +496,9 @@ impl Step for Extensions {
         };
         ctx.progress.activity(
             self.id(),
-            "installing the World Engine extension".to_string(),
+            "installing the Reconstruct extension".to_string(),
         );
-        step_outcome(install_world_engine(NodeTarget {
+        step_outcome(install_reconstruct(NodeTarget {
             paths: Paths::from_env(),
             profile: ados_config::normalize_profile(Some(&ctx.profile)),
             agent_version,
@@ -538,7 +560,7 @@ mod tests {
     const URL: &str =
         "https://github.com/altnautica/ADOSExtensions/releases/download/x/we.adosplug";
 
-    const MANIFEST: &str = "id: com.altnautica.world-engine\n\
+    const MANIFEST: &str = "id: com.altnautica.reconstruct\n\
 version: 1.0.0\n\
 risk: high\n\
 compatibility:\n  ados_version: \">=0.1.0,<99.0.0\"\n\
@@ -588,7 +610,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         serde_json::json!({
             "schema_version": 1,
             "plugins": [{
-                "id": WORLD_ENGINE_ID,
+                "id": RECONSTRUCT_ID,
                 "version": "1.0.0",
                 "download_url": url,
                 "archive_sha256": sha,
@@ -599,11 +621,11 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
 
     #[test]
     fn profile_default_is_on_only_for_workstation_class_nodes() {
-        assert!(world_engine_default("workstation"));
-        assert!(world_engine_default("compute"));
-        assert!(!world_engine_default("drone"));
-        assert!(!world_engine_default("ground_station"));
-        assert!(!world_engine_default("visor"));
+        assert!(reconstruct_default("workstation"));
+        assert!(reconstruct_default("compute"));
+        assert!(!reconstruct_default("drone"));
+        assert!(!reconstruct_default("ground_station"));
+        assert!(!reconstruct_default("visor"));
     }
 
     /// The bundled catalog gains its entry only when the extension is released,
@@ -614,7 +636,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         let mut sup = supervisor(dir.path());
         let outcome = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             r#"{"schema_version":1,"plugins":[]}"#,
             &StaticDownloadSource::default(),
             Duration::ZERO,
@@ -626,7 +648,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             "{outcome:?}"
         );
         assert_eq!(step_outcome(Ok(outcome)), StepOutcome::Skipped);
-        assert!(sup.find_install(WORLD_ENGINE_ID).is_none());
+        assert!(sup.find_install(RECONSTRUCT_ID).is_none());
     }
 
     #[test]
@@ -635,7 +657,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         let mut sup = supervisor(dir.path());
         let outcome = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             &catalog_with("", ""),
             &StaticDownloadSource::default(),
             Duration::ZERO,
@@ -667,7 +689,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
 
         let outcome = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             &catalog_with(URL, &sha),
             &source,
             Duration::ZERO,
@@ -681,7 +703,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
                 granted: vec!["hardware.spi".to_string()],
             }
         );
-        let install = sup.find_install(WORLD_ENGINE_ID).expect("installed");
+        let install = sup.find_install(RECONSTRUCT_ID).expect("installed");
         assert!(
             matches!(
                 install.status,
@@ -703,7 +725,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         // downloading anything.
         let again = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             &catalog_with(URL, &sha),
             &StaticDownloadSource::default(),
             Duration::ZERO,
@@ -729,13 +751,13 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         std::fs::write(&staged, archive()).unwrap();
         sup.install_archive(&staged).unwrap();
         assert_eq!(
-            sup.find_install(WORLD_ENGINE_ID).unwrap().status,
+            sup.find_install(RECONSTRUCT_ID).unwrap().status,
             PluginStatus::Installed
         );
 
         let outcome = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             &catalog_with(URL, &"00".repeat(32)),
             &StaticDownloadSource::default(),
             Duration::ZERO,
@@ -749,7 +771,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
                 granted: vec!["hardware.spi".to_string()],
             }
         );
-        let install = sup.find_install(WORLD_ENGINE_ID).unwrap();
+        let install = sup.find_install(RECONSTRUCT_ID).unwrap();
         assert!(install.permissions["hardware.spi"].granted);
         assert!(matches!(
             install.status,
@@ -757,10 +779,10 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         ));
         assert_eq!(step_outcome(Ok(outcome)), StepOutcome::Ok);
 
-        sup.disable(WORLD_ENGINE_ID).unwrap();
+        sup.disable(RECONSTRUCT_ID).unwrap();
         let again = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             &catalog_with(URL, &"00".repeat(32)),
             &StaticDownloadSource::default(),
             Duration::ZERO,
@@ -774,7 +796,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             }
         );
         assert_eq!(
-            sup.find_install(WORLD_ENGINE_ID).unwrap().status,
+            sup.find_install(RECONSTRUCT_ID).unwrap().status,
             PluginStatus::Disabled
         );
     }
@@ -786,14 +808,14 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         let source = StaticDownloadSource::default().with(URL, archive());
         let err = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             &catalog_with(URL, &"00".repeat(32)),
             &source,
             Duration::ZERO,
             Duration::ZERO,
         )
         .unwrap_err();
-        assert!(sup.find_install(WORLD_ENGINE_ID).is_none());
+        assert!(sup.find_install(RECONSTRUCT_ID).is_none());
         match step_outcome(Err(err)) {
             StepOutcome::Failed(msg) => assert!(msg.contains(MANUAL_INSTALL), "{msg}"),
             other => panic!("a failed install must degrade, got {other:?}"),
@@ -808,7 +830,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         let source = StaticDownloadSource::default().with(URL, archive());
         let err = install_from_catalog(
             &mut sup,
-            WORLD_ENGINE_ID,
+            RECONSTRUCT_ID,
             &catalog_with(URL, ""),
             &source,
             Duration::ZERO,
@@ -816,13 +838,13 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         )
         .unwrap_err();
         assert!(err.contains("archive_sha256"), "{err}");
-        assert!(sup.find_install(WORLD_ENGINE_ID).is_none());
+        assert!(sup.find_install(RECONSTRUCT_ID).is_none());
     }
 
     #[test]
     fn the_step_skips_when_the_toggle_is_off() {
         let mut ctx = Ctx::for_test(crate::checkpoint::Checkpoint::new());
-        ctx.install_world_engine = false;
+        ctx.install_reconstruct = false;
         assert_eq!(Extensions.run(&mut ctx), StepOutcome::Skipped);
     }
 }

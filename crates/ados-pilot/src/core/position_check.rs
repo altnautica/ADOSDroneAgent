@@ -1,7 +1,7 @@
 //! Whether the EKF's horizontal position can be trusted.
 //!
 //! Two sources say it cannot:
-//! - vision-nav's `nav.state` reports the external position degraded or lost
+//! - Navigation's `nav.state` reports the external position degraded or lost
 //!   while the active EKF source set takes its horizontal position from it;
 //! - the FC's own optical flow (rate × range) and the EKF's velocity disagree
 //!   by more than [`TRIP_M`] over [`WINDOW_MS`]. A frozen external position
@@ -32,7 +32,7 @@ pub const CLEAR_M: f32 = 0.75;
 const MAX_STEP_MS: u64 = 200;
 /// A flow check whose last flow is older than this no longer speaks.
 const FLOW_STALE_MS: u64 = 1_000;
-/// A `nav.state` older than this no longer speaks for vision-nav.
+/// A `nav.state` older than this no longer speaks for Navigation.
 pub const EXTNAV_STALE_MS: u64 = 3_000;
 /// `EK3_SRCn_POSXY` value for external navigation.
 const POSXY_EXTNAV: f32 = 6.0;
@@ -63,7 +63,7 @@ pub const EXTNAV_SETTLE_ID: &str = "extnav_settle";
 /// settled at once passed 2.4 s after it.
 pub const EXTNAV_SETTLE_MS: u64 = 2000;
 
-/// vision-nav `health_reason`s that make a `degraded` external position
+/// Navigation `health_reason`s that make a `degraded` external position
 /// unverified. A `degraded` without one of these (a corridor flown on good
 /// flow, a lidar or VIO still initialising) is still flown.
 const UNVERIFYING_DEGRADED_REASONS: [&str; 4] = [
@@ -147,11 +147,11 @@ impl FlowCheck {
     }
 }
 
-/// vision-nav's last `nav.state`, as far as the position check reads it.
+/// Navigation's last `nav.state`, as far as the position check reads it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExtNav {
     pub mode: String,
-    /// `good`, `degraded` or `lost`; `None` while vision-nav named none.
+    /// `good`, `degraded` or `lost`; `None` while Navigation named none.
     pub health: Option<String>,
     pub reason: Option<String>,
     pub at_ms: u64,
@@ -223,7 +223,7 @@ impl Pilot {
     }
 
     /// Whether the active EKF source set takes its horizontal position from
-    /// external navigation: its `EK3_SRCn_POSXY`, or vision-nav's mode while
+    /// external navigation: its `EK3_SRCn_POSXY`, or Navigation's mode while
     /// that parameter is unread.
     fn on_extnav(&self, nav: &ExtNav) -> bool {
         if !(1..=3).contains(&self.nav_set) {
@@ -248,8 +248,8 @@ impl Pilot {
             .as_ref()
             .filter(|n| now_ms.saturating_sub(n.at_ms) <= EXTNAV_STALE_MS);
         let Some(nav) = fresh else {
-            // A source set known to take its position from vision-nav, with
-            // vision-nav gone silent: nobody vouches for that position.
+            // A source set known to take its position from Navigation, with
+            // Navigation gone silent: nobody vouches for that position.
             let extnav_set = self
                 .posxy_param()
                 .is_some_and(|v| (v - POSXY_EXTNAV).abs() < 0.5);
@@ -363,7 +363,7 @@ fn with_detail(base: &str, p: &PositionUnverified) -> String {
     }
 }
 
-/// The shared spec's operator text for a vision-nav reason
+/// The shared spec's operator text for a Navigation reason
 /// (`flight-state.json` `position_unverified_labels`), else the key in words.
 fn detail_label(key: &str) -> String {
     static LABELS: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {

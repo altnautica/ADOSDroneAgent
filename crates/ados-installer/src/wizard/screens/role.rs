@@ -5,7 +5,7 @@ use ados_term::tty::Tty;
 use ados_term::widgets::{checklist, select_list, CheckItem, Choice, Flow};
 
 use crate::cli::Args;
-use crate::steps::extensions::world_engine_default;
+use crate::steps::extensions::reconstruct_default;
 use crate::wizard::widgets::{ack_card, Ack, BoardItem, ItemState, Spin};
 use crate::wizard::{catalog, hw, widgets, WizardExtras};
 
@@ -51,12 +51,12 @@ pub(super) fn profile_stage(tty: &mut Tty, theme: &Theme, args: &mut Args) -> Na
     }
 }
 
-/// Record the chosen profile. A CHANGE of profile drops the World Engine
+/// Record the chosen profile. A CHANGE of profile drops Reconstruct
 /// answer so the features screen offers the new profile's default; the first
-/// pick keeps a `--world-engine` / `--no-world-engine` the operator passed.
+/// pick keeps a `--reconstruct` / `--no-reconstruct` the operator passed.
 pub(super) fn set_profile(args: &mut Args, chosen: &str) {
     if args.profile.as_deref().is_some_and(|p| p != chosen) {
-        args.world_engine = None;
+        args.reconstruct = None;
     }
     args.profile = Some(chosen.to_string());
 }
@@ -181,7 +181,7 @@ pub(super) fn components_stage(
     // long-range radio (default on, but OPTIONAL — a Wi-Fi-indoor or a future
     // LoRa build can turn it off); a workstation has no long-range radio and no
     // onboard camera/display, so it is offered the internet-reach option. Every
-    // profile is offered the World Engine extension, on by default where its
+    // profile is offered the Reconstruct extension, on by default where its
     // heavy half runs (workstation / compute). A workstation never installs the
     // RTL driver; for drone/ground the radio item's result below decides
     // `no_rtl_driver`.
@@ -232,7 +232,7 @@ pub(super) fn components_stage(
         checked: false,
         locked: false,
     });
-    items.push(world_engine_item(args, &profile));
+    items.push(reconstruct_item(args, &profile));
 
     match checklist(
         tty,
@@ -252,7 +252,7 @@ pub(super) fn components_stage(
                         args.display = Some(if it.checked { "auto" } else { "none" }.to_string())
                     }
                     "cloud" => extras.cloud_from_anywhere = it.checked,
-                    WORLD_ENGINE_ITEM => args.world_engine = Some(it.checked),
+                    RECONSTRUCT_ITEM => args.reconstruct = Some(it.checked),
                     _ => {}
                 }
             }
@@ -263,19 +263,19 @@ pub(super) fn components_stage(
     }
 }
 
-/// The checklist id of the World Engine feature row.
-const WORLD_ENGINE_ITEM: &str = "world_engine";
+/// The checklist id of the Reconstruct feature row.
+const RECONSTRUCT_ITEM: &str = "reconstruct";
 
-/// The World Engine feature row: pre-set to the operator's answer so far (a
+/// The Reconstruct feature row: pre-set to the operator's answer so far (a
 /// flag, or an earlier pass through this screen), else the profile default.
-pub(super) fn world_engine_item(args: &Args, profile: &str) -> CheckItem {
+pub(super) fn reconstruct_item(args: &Args, profile: &str) -> CheckItem {
     CheckItem {
-        id: WORLD_ENGINE_ITEM.into(),
-        label: "World Engine (3D world model + compute offload)".into(),
+        id: RECONSTRUCT_ITEM.into(),
+        label: "Reconstruct (reconstruction and perception offload)".into(),
         benefit: "3D capture and reconstruction, plus perception offload.".into(),
         checked: args
-            .world_engine
-            .unwrap_or_else(|| world_engine_default(profile)),
+            .reconstruct
+            .unwrap_or_else(|| reconstruct_default(profile)),
         locked: false,
     }
 }

@@ -1,6 +1,6 @@
-//! The scanning lidar as the hub sees it: when each `plugin.world-engine.scan`
+//! The scanning lidar as the hub sees it: when each `plugin.navigation.scan`
 //! arrived (for the measured scan rate and the last scan's age) and the latest
-//! `plugin.world-engine.lidar` driver status.
+//! `plugin.navigation.lidar` driver status.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ pub const SCAN_RATE_WINDOW: Duration = Duration::from_secs(2);
 /// publishes at 1 Hz).
 pub const STATUS_FRESH: Duration = Duration::from_secs(3);
 
-/// The driver's `plugin.world-engine.lidar` report.
+/// The driver's `plugin.navigation.lidar` report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LidarStatus {
     pub device: Option<String>,
@@ -57,7 +57,7 @@ pub struct LidarView {
 /// A scan bin at or under this range returned nothing (the pilot's rule).
 pub const MIN_RETURN_M: f64 = 0.05;
 
-/// The bins of a `plugin.world-engine.scan` payload that returned a surface.
+/// The bins of a `plugin.navigation.scan` payload that returned a surface.
 pub fn scan_returns(payload: &Value) -> usize {
     payload
         .get("ranges_m")

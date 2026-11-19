@@ -30,11 +30,11 @@ jobs: {}
 """
 
 VN_RELEASE_YML = """\
-name: vision-nav-release
+name: navigation-release
 on:
   push:
     tags:
-      - "vision-nav-v*"
+      - "navigation-v*"
 jobs: {}
 """
 
@@ -50,8 +50,8 @@ MANIFESTS = {
         "license: GPL-3.0-or-later\nrisk: high\nagent: {runtime: python}\n"
         "gcs: {entrypoint: x.js}\n",
     },
-    "vision-nav": {
-        "0.4.1": 'id: com.altnautica.vision-nav\nname: VN\nversion: "0.4.1"\n'
+    "navigation": {
+        "0.4.1": 'id: com.altnautica.navigation\nname: VN\nversion: "0.4.1"\n'
         "description: Old.\nrisk: high\nagent: {}\ngcs: {}\n",
     },
 }
@@ -88,11 +88,11 @@ def releases() -> list[dict[str, Any]]:
         ),
         # Old tag scheme and a release below the floor: never pinned.
         release(
-            "extensions/vision-nav-v0.2.8",
-            asset("com.altnautica.vision-nav-0.2.8.signed.adosplug", SHA_C),
+            "extensions/navigation-v0.2.8",
+            asset("com.altnautica.navigation-0.2.8.signed.adosplug", SHA_C),
         ),
         release(
-            "vision-nav-v0.4.1", asset("com.altnautica.vision-nav-0.4.1.signed.adosplug", SHA_C)
+            "navigation-v0.4.1", asset("com.altnautica.navigation-0.4.1.signed.adosplug", SHA_C)
         ),
     ]
 
@@ -107,7 +107,7 @@ class FakeSource:
         }
 
     def release_workflows(self) -> dict[str, str]:
-        return {"release.yml": RELEASE_YML, "vision-nav-release.yml": VN_RELEASE_YML}
+        return {"release.yml": RELEASE_YML, "navigation-release.yml": VN_RELEASE_YML}
 
     def releases(self) -> list[dict[str, Any]]:
         return self._releases
@@ -145,20 +145,20 @@ def catalog() -> dict[str, Any]:
                 "download_url": "old",
                 "archive_sha256": SHA_C,
             },
-            {"id": "com.altnautica.vision-nav", "name": "VN", "version": "0.2.8"},
+            {"id": "com.altnautica.navigation", "name": "VN", "version": "0.2.8"},
         ],
     }
 
 
 @pytest.fixture(autouse=True)
 def _floor(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sync_mod, "MIN_VERSIONS", {"vision-nav": "0.5.0"})
+    monkeypatch.setattr(sync_mod, "MIN_VERSIONS", {"navigation": "0.5.0"})
     monkeypatch.setattr(sync_mod, "CATEGORIES", {POD: "drivers"})
 
 
 def test_allowlist_reads_tag_patterns_from_every_release_workflow() -> None:
     wf = FakeSource().release_workflows()
-    assert sync_mod.allowlist(wf) == ["gimbal", "pod", "vision-nav"]
+    assert sync_mod.allowlist(wf) == ["navigation", "gimbal", "pod"]
 
 
 def test_allowlist_rejects_a_pattern_it_cannot_map() -> None:
@@ -176,8 +176,8 @@ def test_latest_release_skips_drafts_prereleases_and_other_schemes() -> None:
 
 
 def test_latest_release_honours_the_floor() -> None:
-    assert sync_mod.latest_release(releases(), "vision-nav", "0.5.0") is None
-    assert sync_mod.latest_release(releases(), "vision-nav")[1] == "0.4.1"
+    assert sync_mod.latest_release(releases(), "navigation", "0.5.0") is None
+    assert sync_mod.latest_release(releases(), "navigation")[1] == "0.4.1"
 
 
 def test_sha_comes_from_digest_or_sidecar_and_they_must_agree() -> None:
@@ -224,15 +224,16 @@ def test_sync_pins_keeps_curated_fields_adds_and_drops() -> None:
     assert out["schema_version"] == 1 and out["source"] == "first-party-bundled"
     joined = "\n".join(notes)
     assert "thermal-flir-lepton-usb: removed" in joined
-    assert "com.altnautica.vision-nav: removed" in joined
-    assert "vision-nav: no published release >= 0.5.0" in joined
+    assert "com.altnautica.navigation: removed" in joined
+    assert "navigation: no published release >= 0.5.0" in joined
 
 
-def test_sync_is_idempotent() -> None:
+def test_sync_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sync_mod, "MIN_VERSIONS", {"navigation": "0.5.0"})
     once, _ = sync_mod.sync(catalog(), FakeSource())
     twice, notes = sync_mod.sync(json.loads(json.dumps(once)), FakeSource())
     assert twice == once
-    assert notes == ["vision-nav: no published release >= 0.5.0"]
+    assert notes == ["navigation: no published release >= 0.5.0"]
 
 
 def test_manifest_version_must_match_the_tag() -> None:

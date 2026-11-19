@@ -126,7 +126,7 @@ pub struct ExposureInfo {
     pub mode: Option<String>,
 }
 
-/// World-engine capture state as the pages read it.
+/// The Capture extension's state as the pages read it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CaptureInfo {
     pub state: Option<String>,

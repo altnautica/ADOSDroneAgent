@@ -303,7 +303,7 @@ fn entrypoints_that_escape_or_inject_are_rejected() {
     for entrypoint in [
         "agent/py/thermal.py",
         "agent/bin/com.example.rustplug",
-        "bin/vision-nav",
+        "bin/navigation",
         "gcs/plugin.bundle.js",
         "pkg.mod:Class",
         "altnautica_thermal_camera.plugin:ThermalUsbPlugin",

@@ -105,7 +105,7 @@ describe("small map and HUD controls", () => {
 });
 
 describe("the nav-source popover", () => {
-  it("names the pose age while vision-nav reports one", () => {
+  it("names the pose age while Navigation reports one", () => {
     expect(extNavLine({ extnavHealth: "good", odomRateHz: 30, poseAgeMs: 42.4 })).toBe(`GOOD · 30.0 Hz · ${specText("nav_source.pose_age", { ms: 42 })}`);
     expect(extNavLine({ extnavHealth: "good", odomRateHz: null, poseAgeMs: null })).toBe("GOOD");
     expect(extNavLine(null)).toBe("—");

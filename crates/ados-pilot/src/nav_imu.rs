@@ -1,8 +1,8 @@
 //! The flight controller's IMU feeding the lidar planar pose, from the World
-//! Engine `plugin.world-engine.map_status` topic (`imu_feed`), and its two
+//! Engine `plugin.navigation.map_status` topic (`imu_feed`), and its two
 //! readiness items: `nav_imu`, the FC IMU feed itself, and `nav_heading`, the
 //! lidar map's heading state the same field carries while the feed measures.
-//! Both hold a pilot-flown launch only while vision-nav flies external
+//! Both hold a pilot-flown launch only while Navigation flies external
 //! navigation from that pose (its `nav.state` mode).
 
 use ados_protocol::pilot::{ControlMode, Readiness, Severity};
@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::sensor_spec::spec;
 
-/// vision-nav's `nav.state` mode while the flight controller fuses the lidar
+/// Navigation's `nav.state` mode while the flight controller fuses the lidar
 /// pose as external navigation.
 const EXTERNAL_NAV: &str = "external_nav";
 
@@ -37,8 +37,8 @@ pub struct ImuFeed {
 #[derive(Debug, Clone, Default)]
 pub struct NavImuTrack {
     last: Option<(ImuFeed, u64)>,
-    /// Whether vision-nav's last `nav.state` named [`EXTERNAL_NAV`]; false
-    /// before any (nothing fuses the lidar pose without vision-nav).
+    /// Whether Navigation's last `nav.state` named [`EXTERNAL_NAV`]; false
+    /// before any (nothing fuses the lidar pose without Navigation).
     external_nav: bool,
 }
 
@@ -53,7 +53,7 @@ impl NavImuTrack {
             .map(|f| (f, now_ms));
     }
 
-    /// Fold a vision-nav `nav.state` report in. A report naming no mode
+    /// Fold a Navigation `nav.state` report in. A report naming no mode
     /// keeps the last one.
     pub fn on_nav_state(&mut self, payload: &serde_json::Value) {
         if let Some(mode) = payload.get("mode").and_then(serde_json::Value::as_str) {
@@ -130,7 +130,7 @@ mod tests {
         imu
     }
 
-    /// A track whose pose vision-nav flies on.
+    /// A track whose pose Navigation flies on.
     fn flown() -> NavImuTrack {
         let mut t = NavImuTrack::default();
         t.on_nav_state(&json!({"mode": "external_nav", "active_set": 1}));
@@ -256,7 +256,7 @@ mod tests {
         assert!(heading.is_some());
     }
 
-    /// The lidar pose holds a launch only while vision-nav flies external
+    /// The lidar pose holds a launch only while Navigation flies external
     /// navigation from it; a report without a mode keeps the last one.
     #[test]
     fn blocks_only_while_the_pose_is_flown_on() {

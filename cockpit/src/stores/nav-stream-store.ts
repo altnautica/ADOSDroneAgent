@@ -1,5 +1,5 @@
 // The live navigation feed this node's Feed reads: the latest frame of each
-// nav-stream kind (follow state, vision-nav state, SLAM pose, planar scan,
+// nav-stream kind (follow state, Navigation state, SLAM pose, planar scan,
 // map status) with the epoch-ms time it arrived, the latest discrete follow
 // event, the live occupancy grid with its poll time, the SLAM trail, and the
 // operator's designated target. Written by `lib/nav-stream` (or the demo

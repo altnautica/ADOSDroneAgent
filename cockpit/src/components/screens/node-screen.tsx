@@ -1,8 +1,8 @@
-// Node — the home of a workstation or compute node: the World Engine compute
+// Node — the home of a workstation or compute node: the reconstruction
 // service's status (role, queue, workers, cluster), its jobs with their
 // products, and the live perception-offload sessions it serves to drones. All
 // of it is read from the extension's job API through the agent
-// (`/api/plugins/com.altnautica.world-engine/x/api/compute/*`); a node that
+// (`/api/plugins/com.altnautica.reconstruct/x/api/compute/*`); a node that
 // does not run the service shows that plainly instead of an error.
 
 import { useCallback, useState } from "react";

@@ -102,7 +102,7 @@ fn extnav_world() -> World {
 
 fn nav_state(w: &mut World, health: &str, reason: Option<&str>) {
     w.p.on_feed(
-        "nav.state",
+        crate::events::TOPIC_NAV_STATE,
         &json!({"mode": "external_nav", "active_set": 1, "extnav_health": health,
                 "health_reason": reason, "gps_fix": 0}),
         w.now,
@@ -132,7 +132,7 @@ fn a_lost_external_position_is_unverified_with_its_reason() {
     assert!(w.p.state(w.now).position_unverified.is_none());
 }
 
-/// The readiness line words vision-nav's reason with the shared spec's label,
+/// The readiness line words Navigation's reason with the shared spec's label,
 /// never the raw key.
 #[test]
 fn the_readiness_line_words_heading_and_imu_reasons() {
@@ -240,7 +240,7 @@ fn accepted(r: &super::super::Reply) -> bool {
     matches!(r, super::super::Reply::Action(a) if a.ok)
 }
 
-/// A mine corridor flown on good flow: vision-nav reads `degraded` (the
+/// A mine corridor flown on good flow: Navigation reads `degraded` (the
 /// scan cannot see the free axis) with no reason. The flow covers it, so the
 /// skill keeps flying and a goto is taken.
 #[test]
@@ -267,7 +267,7 @@ fn a_degraded_corridor_pose_with_no_reason_is_still_flown() {
     assert!(position_check_msg(&w).is_none());
 }
 
-/// vision-nav going silent after a lost report does not clear the state on
+/// Navigation going silent after a lost report does not clear the state on
 /// an external-nav source set: stale counts as unknown.
 #[test]
 fn a_stale_nav_report_keeps_the_position_unverified() {
@@ -286,7 +286,7 @@ fn a_stale_nav_report_keeps_the_position_unverified() {
     nav_state(&mut w, "good", None);
     assert!(w.p.state(w.now).position_unverified.is_none());
 
-    // On a GPS source set vision-nav's silence says nothing of the position.
+    // On a GPS source set Navigation's silence says nothing of the position.
     let mut w = World::new();
     w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 3.0);
     w.airborne(copter::GUIDED);

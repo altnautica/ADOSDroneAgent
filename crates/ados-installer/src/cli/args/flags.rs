@@ -62,14 +62,14 @@ pub const FLAGS: &[FlagSpec] = &[
         "Skip the RTL8812EU WFB radio driver build",
     ),
     flag(
-        "--world-engine",
-        "Install the World Engine extension (3D world model + compute\n\
-         offload). Default: on for workstation and compute, off for drone\n\
+        "--reconstruct",
+        "Install the Reconstruct extension (reconstruction and\n\
+         perception offload). Default: on for workstation and compute, off for drone\n\
          and ground station. An installed extension is left alone; plugin\n\
-         auto-update keeps it current. The last of --world-engine and\n\
-         --no-world-engine wins.",
+         auto-update keeps it current. The last of --reconstruct and\n\
+         --no-reconstruct wins.",
     ),
-    flag("--no-world-engine", "Skip the World Engine extension"),
+    flag("--no-reconstruct", "Skip the Reconstruct extension"),
     flag(
         "--no-reboot",
         "Do not perform the single automatic reboot when provisioning needs\n\
@@ -239,8 +239,8 @@ impl Args {
             "--no-color" => self.no_color = true,
             "--ascii" => self.ascii = true,
             "--no-rtl-driver" => self.no_rtl_driver = true,
-            "--world-engine" => self.world_engine = Some(true),
-            "--no-world-engine" => self.world_engine = Some(false),
+            "--reconstruct" => self.reconstruct = Some(true),
+            "--no-reconstruct" => self.reconstruct = Some(false),
             "--no-reboot" => self.no_reboot = true,
             "--yes" => self.yes = true,
             "--non-interactive" => self.non_interactive = true,

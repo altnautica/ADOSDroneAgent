@@ -210,7 +210,7 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
     }
     if let Some(nav) = &a.nav {
         let health = nav.extnav_health.as_deref().unwrap_or("unknown");
-        // The pilot's own verdict first, else vision-nav's reason on a
+        // The pilot's own verdict first, else Navigation's reason on a
         // degraded or lost pose: a crit word, never a calm "degraded".
         let unverified = a
             .pilot

@@ -1,5 +1,5 @@
 // What the EKF navigates on, resolved from the telemetry poll, the EKF source
-// sets and vision-nav's fresh `nav.state`: read by the nav-source chip and by
+// sets and Navigation's fresh `nav.state`: read by the nav-source chip and by
 // the status pill (whose shared rules raise a degraded source).
 
 import { useEffect } from "react";
@@ -13,10 +13,10 @@ import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore, type Stamped } from "@/stores/nav-stream-store";
 import { useStatusStore } from "@/stores/status-store";
 
-/** vision-nav's report counts while younger than this; from this age it is stale. */
+/** Navigation's report counts while younger than this; from this age it is stale. */
 export const NAV_STATE_FRESH_MS = 2000;
 
-/** vision-nav's report while it counts, else null. */
+/** Navigation's report while it counts, else null. */
 export function freshNavState(nav: Stamped<NavState> | null, nowMs: number): NavState | null {
   return nav && nowMs - nav.at < NAV_STATE_FRESH_MS ? nav.data : null;
 }

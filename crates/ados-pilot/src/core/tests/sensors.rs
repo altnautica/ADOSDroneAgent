@@ -71,13 +71,13 @@ fn the_lidar_reports_through_scans_and_its_status_topic() {
     let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                       "angle_increment_rad": 0.1, "ranges_m": [4.0]});
     w.p.on_feed(
-        "plugin.world-engine.lidar",
+        crate::events::TOPIC_LIDAR,
         &json!({"v": 1, "device": "/dev/ttyUSB0", "connected": true, "health": "good",
                 "health_code": 0, "rate_hz": 10.0, "scans": 0, "dropped_scans": 0, "reconnects": 0}),
         w.now,
     );
     for _ in 0..25 {
-        w.p.on_feed("plugin.world-engine.scan", &scan, w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &scan, w.now);
         w.run(100);
     }
     let s = w.p.state(w.now).sensors.unwrap();
@@ -131,7 +131,7 @@ fn in_flight_flow_warning_appears_after_the_hold_only_airborne() {
 }
 
 /// The FC IMU feeding the lidar pose blocks a pilot-flown launch while
-/// vision-nav flies external navigation from that pose.
+/// Navigation flies external navigation from that pose.
 #[test]
 fn the_imu_feed_of_the_lidar_pose_is_a_readiness_item() {
     use ados_protocol::pilot::Severity;
@@ -145,25 +145,25 @@ fn the_imu_feed_of_the_lidar_pose_is_a_readiness_item() {
     };
     assert_eq!(item(&w), None);
     w.p.on_feed(
-        "plugin.world-engine.map_status",
+        crate::events::TOPIC_MAP_STATUS,
         &json!({"imu_feed": {"state": "degraded", "reason": "starved", "rate_hz": 12.0}}),
         w.now,
     );
     assert_eq!(item(&w), Some((false, Severity::Warn)), "no nav.state yet");
     w.p.on_feed(
-        "nav.state",
+        crate::events::TOPIC_NAV_STATE,
         &json!({"mode": "external_nav", "active_set": 1}),
         w.now,
     );
     assert_eq!(item(&w), Some((false, Severity::Block)));
     w.p.on_feed(
-        "plugin.world-engine.map_status",
+        crate::events::TOPIC_MAP_STATUS,
         &json!({"imu_feed": {"state": "ok", "reason": null, "rate_hz": 100.0}}),
         w.now,
     );
     assert_eq!(item(&w).map(|i| i.0), Some(true));
     w.p.on_feed(
-        "plugin.world-engine.map_status",
+        crate::events::TOPIC_MAP_STATUS,
         &json!({"imu_feed": null}),
         w.now,
     );
@@ -185,13 +185,13 @@ fn nav_items(w: &World) -> NavItems {
 
 fn map_status_north_unknown(w: &mut World) {
     w.p.on_feed(
-        "plugin.world-engine.map_status",
+        crate::events::TOPIC_MAP_STATUS,
         &json!({"imu_feed": {"state": "lost", "reason": "north_unknown", "rate_hz": 100.0}}),
         w.now,
     );
 }
 
-/// A GNSS flight with vision-nav's external navigation off: the lidar map's
+/// A GNSS flight with Navigation's external navigation off: the lidar map's
 /// north is unknown (its pose is lost), the FC IMU feeding it runs at
 /// 100 Hz. The FC IMU is healthy, and a heading state of a pose nothing
 /// fuses holds nothing.
@@ -200,7 +200,7 @@ fn a_gnss_launch_is_not_held_by_the_lidar_map_heading() {
     use ados_protocol::pilot::Severity;
     let mut w = World::new();
     w.p.on_feed(
-        "nav.state",
+        crate::events::TOPIC_NAV_STATE,
         &json!({"mode": "off", "active_set": null, "gps_fix": 6}),
         w.now,
     );
@@ -219,14 +219,14 @@ fn a_gnss_launch_is_not_held_by_the_lidar_map_heading() {
     );
 }
 
-/// With vision-nav flying external navigation from the lidar pose, the
+/// With Navigation flying external navigation from the lidar pose, the
 /// same unknown north blocks under its own item, never as the FC IMU.
 #[test]
 fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
     use ados_protocol::pilot::Severity;
     let mut w = World::new();
     w.p.on_feed(
-        "nav.state",
+        crate::events::TOPIC_NAV_STATE,
         &json!({"mode": "external_nav", "active_set": 1}),
         w.now,
     );
@@ -236,13 +236,17 @@ fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
     let heading = heading.expect("the map heading is reported");
     assert!(!heading.0 && heading.1 == Severity::Block, "{heading:?}");
     // A report without a mode keeps the last one.
-    w.p.on_feed("nav.state", &json!({"active_set": 2}), w.now);
+    w.p.on_feed(
+        crate::events::TOPIC_NAV_STATE,
+        &json!({"active_set": 2}),
+        w.now,
+    );
     assert_eq!(
         nav_items(&w)[1].as_ref().map(|i| i.1),
         Some(Severity::Block)
     );
     w.p.on_feed(
-        "plugin.world-engine.map_status",
+        crate::events::TOPIC_MAP_STATUS,
         &json!({"imu_feed": {"state": "ok", "reason": null, "rate_hz": 100.0}}),
         w.now,
     );
@@ -254,14 +258,14 @@ fn with_external_nav_the_lidar_map_heading_blocks_as_its_own_item() {
     );
 }
 
-/// vision-nav gone silent after external navigation: its last mode stands,
+/// Navigation gone silent after external navigation: its last mode stands,
 /// so the lidar pose items keep blocking.
 #[test]
-fn a_silent_vision_nav_keeps_external_nav_blocking() {
+fn a_silent_navigation_keeps_external_nav_blocking() {
     use ados_protocol::pilot::Severity;
     let mut w = World::new();
     w.p.on_feed(
-        "nav.state",
+        crate::events::TOPIC_NAV_STATE,
         &json!({"mode": "external_nav", "active_set": 1}),
         w.now,
     );

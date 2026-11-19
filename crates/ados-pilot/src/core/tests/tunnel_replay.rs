@@ -123,7 +123,7 @@ fn replay(name: &str, mode: u32, target: Option<(u32, [f64; 3])>) -> (World, Opt
                 }
                 1 => {
                     w.p.on_feed(
-                        "plugin.world-engine.scan",
+                        crate::events::TOPIC_SCAN,
                         &scan_payload(&scans[i_scan]),
                         now,
                     );
@@ -131,14 +131,14 @@ fn replay(name: &str, mode: u32, target: Option<(u32, [f64; 3])>) -> (World, Opt
                 }
                 2 => {
                     w.p.on_feed(
-                        "plugin.world-engine.pose",
+                        crate::events::TOPIC_POSE,
                         &pose_payload(&poses[i_pose]),
                         now,
                     );
                     i_pose += 1;
                 }
                 _ => {
-                    w.p.on_feed("plugin.world-engine.occupancy", &occ[i_occ][1], now);
+                    w.p.on_feed(crate::events::TOPIC_OCCUPANCY, &occ[i_occ][1], now);
                     i_occ += 1;
                 }
             }

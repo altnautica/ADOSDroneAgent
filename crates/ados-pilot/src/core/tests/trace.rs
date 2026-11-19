@@ -77,7 +77,7 @@ fn fly_goal(w: &mut World, id: u64, ms: u64, scan: Option<&Value>, goal: impl Fn
         });
         for _ in 0..5 {
             if let Some(s) = scan {
-                w.p.on_feed("plugin.world-engine.scan", s, w.now);
+                w.p.on_feed(crate::events::TOPIC_SCAN, s, w.now);
             }
             w.run(20);
         }
@@ -167,7 +167,7 @@ fn a_blocked_goto_publishes_a_hold() {
     });
     let end = w.now + 1500;
     while w.now < end {
-        w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(4.0), w.now);
         w.run(20);
     }
     let v = frame(&w);
@@ -203,7 +203,7 @@ fn a_blocked_follow_keeps_what_it_asked() {
             goal: follow_goal([20.0, 0.0, -5.0], [3.0, 0.0]),
         });
         for _ in 0..10 {
-            w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+            w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(4.0), w.now);
             w.run(20);
         }
     }
@@ -240,8 +240,12 @@ fn the_nav_cap_is_named_when_it_binds() {
         let id = w.lease();
         let t0 = w.now;
         while w.now < t0 + 5000 {
-            // vision-nav reports source set 2 (external nav) active.
-            w.p.on_feed("nav.state", &json!({"active_set": 2, "gps_fix": 0}), w.now);
+            // Navigation reports source set 2 (external nav) active.
+            w.p.on_feed(
+                crate::events::TOPIC_NAV_STATE,
+                &json!({"active_set": 2, "gps_fix": 0}),
+                w.now,
+            );
             fly_goal(&mut w, id, 100, None, |_| {
                 follow_goal([8.0, 0.0, -5.0], [ff, 0.0])
             });
@@ -294,13 +298,13 @@ fn a_short_hold_reaches_the_next_frame() {
         w.run(20);
     }
     // One tick with a wall inside the hard-stop distance, then open space.
-    w.p.on_feed("plugin.world-engine.scan", &wall_scan(0.8), w.now);
+    w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(0.8), w.now);
     w.run(20);
     assert!(
         frame(&w)["hold_reason"].is_string(),
         "the wall did not hold"
     );
-    w.p.on_feed("plugin.world-engine.scan", &open_scan(), w.now);
+    w.p.on_feed(crate::events::TOPIC_SCAN, &open_scan(), w.now);
     w.run(60);
     let v = frame(&w);
     assert!(v["hold_reason"].is_null(), "still holding: {v}");

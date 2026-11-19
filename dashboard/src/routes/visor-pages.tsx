@@ -1,4 +1,4 @@
-// Capture and sensor pages. `/capture` drives the world-engine extension's
+// Capture and sensor pages. `/capture` drives the Capture extension's
 // capture session (visor); `/sensors` shows the sensor streams on a visor or
 // a drone.
 

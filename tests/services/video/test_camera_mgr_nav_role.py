@@ -40,10 +40,10 @@ def test_exclusive_claim_happy_path() -> None:
     cam = _cam()
     mgr.set_cameras([cam])
 
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
 
     assert mgr.get_by_role(CameraRole.NAV) is cam
-    assert mgr.claimed_by(cam.device_path) == "com.example.vision-nav"
+    assert mgr.claimed_by(cam.device_path) == "com.example.navigation"
 
 
 def test_exclusive_claim_idempotent_same_plugin() -> None:
@@ -51,17 +51,17 @@ def test_exclusive_claim_idempotent_same_plugin() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
     # Second call should not raise; useful on plugin restart.
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
-    assert mgr.claimed_by(cam.device_path) == "com.example.vision-nav"
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
+    assert mgr.claimed_by(cam.device_path) == "com.example.navigation"
 
 
 def test_exclusive_claim_conflict_across_plugins() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
     with pytest.raises(RoleConflict) as info:
         mgr.assign_role_exclusive(
             cam, CameraRole.NAV, plugin_id="com.other.tracker"
@@ -69,7 +69,7 @@ def test_exclusive_claim_conflict_across_plugins() -> None:
     exc = info.value
     assert exc.device_path == cam.device_path
     assert exc.role == CameraRole.NAV
-    assert exc.current_holder == "com.example.vision-nav"
+    assert exc.current_holder == "com.example.navigation"
     assert exc.requested_by == "com.other.tracker"
 
 
@@ -80,7 +80,7 @@ def test_setup_wizard_assign_blocked_by_claim() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
     with pytest.raises(RoleConflict):
         mgr.assign_role(cam, CameraRole.PRIMARY)
 
@@ -89,8 +89,8 @@ def test_release_claim_returns_true_for_holder() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
-    released = mgr.release_claim(cam.device_path, "com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
+    released = mgr.release_claim(cam.device_path, "com.example.navigation")
     assert released is True
     assert mgr.claimed_by(cam.device_path) is None
 
@@ -99,10 +99,10 @@ def test_release_claim_returns_false_for_wrong_plugin() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
     released = mgr.release_claim(cam.device_path, "com.other.tracker")
     assert released is False
-    assert mgr.claimed_by(cam.device_path) == "com.example.vision-nav"
+    assert mgr.claimed_by(cam.device_path) == "com.example.navigation"
 
 
 def test_release_claim_idempotent_when_unclaimed() -> None:
@@ -118,16 +118,16 @@ def test_to_dict_surfaces_claimed_by() -> None:
     nav = _cam(name="uvc-down", path="/dev/video2")
     mgr.set_cameras([primary, nav])
     mgr.assign_role(primary, CameraRole.PRIMARY)
-    mgr.assign_role_exclusive(nav, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(nav, CameraRole.NAV, plugin_id="com.example.navigation")
 
     snap = mgr.to_dict()
     by_path = {c["device_path"]: c for c in snap["cameras"]}
     assert by_path["/dev/video0"]["claimed_by"] is None
-    assert by_path["/dev/video2"]["claimed_by"] == "com.example.vision-nav"
+    assert by_path["/dev/video2"]["claimed_by"] == "com.example.navigation"
 
     assignments = snap["assignments"]
     assert assignments["primary"]["claimed_by"] is None
-    assert assignments["nav"]["claimed_by"] == "com.example.vision-nav"
+    assert assignments["nav"]["claimed_by"] == "com.example.navigation"
 
 
 def test_assign_role_after_release_succeeds() -> None:
@@ -135,8 +135,8 @@ def test_assign_role_after_release_succeeds() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
-    mgr.release_claim(cam.device_path, "com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
+    mgr.release_claim(cam.device_path, "com.example.navigation")
     # Wizard repurposes the camera as SECONDARY.
     mgr.assign_role(cam, CameraRole.SECONDARY)
     assert mgr.get_by_role(CameraRole.SECONDARY) is cam
@@ -165,14 +165,14 @@ def test_reassign_role_exclusive_drops_existing_holder() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
 
     dropped = mgr.reassign_role_exclusive(
-        cam, CameraRole.NAV, plugin_id="com.altnautica.vision-nav"
+        cam, CameraRole.NAV, plugin_id="com.altnautica.navigation"
     )
 
-    assert dropped == "com.example.vision-nav"
-    assert mgr.claimed_by(cam.device_path) == "com.altnautica.vision-nav"
+    assert dropped == "com.example.navigation"
+    assert mgr.claimed_by(cam.device_path) == "com.altnautica.navigation"
     assert mgr.get_by_role(CameraRole.NAV) is cam
 
 
@@ -186,13 +186,13 @@ def test_reassign_role_exclusive_clears_claim_when_plugin_id_none() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
 
     dropped = mgr.reassign_role_exclusive(
         cam, CameraRole.PRIMARY, plugin_id=None
     )
 
-    assert dropped == "com.example.vision-nav"
+    assert dropped == "com.example.navigation"
     assert mgr.claimed_by(cam.device_path) is None
     assert mgr.get_by_role(CameraRole.PRIMARY) is cam
 
@@ -205,11 +205,11 @@ def test_reassign_role_exclusive_when_no_prior_claim() -> None:
     mgr.set_cameras([cam])
 
     dropped = mgr.reassign_role_exclusive(
-        cam, CameraRole.NAV, plugin_id="com.altnautica.vision-nav"
+        cam, CameraRole.NAV, plugin_id="com.altnautica.navigation"
     )
 
     assert dropped is None
-    assert mgr.claimed_by(cam.device_path) == "com.altnautica.vision-nav"
+    assert mgr.claimed_by(cam.device_path) == "com.altnautica.navigation"
     assert mgr.get_by_role(CameraRole.NAV) is cam
 
 
@@ -218,8 +218,8 @@ def test_reassign_role_exclusive_empty_plugin_id_clears_claim() -> None:
     mgr = CameraManager()
     cam = _cam()
     mgr.set_cameras([cam])
-    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.navigation")
 
     dropped = mgr.reassign_role_exclusive(cam, CameraRole.SECONDARY, plugin_id="   ")
-    assert dropped == "com.example.vision-nav"
+    assert dropped == "com.example.navigation"
     assert mgr.claimed_by(cam.device_path) is None

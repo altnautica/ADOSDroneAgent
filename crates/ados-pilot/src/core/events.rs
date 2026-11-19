@@ -5,6 +5,9 @@ use ados_protocol::pilot::{ControlMode, Mission, Owner, CLIENT_MODE_TOPIC};
 use serde_json::json;
 
 use super::Pilot;
+use crate::events::{
+    TOPIC_LIDAR, TOPIC_MAP_STATUS, TOPIC_NAV_STATE, TOPIC_OCCUPANCY, TOPIC_POSE, TOPIC_SCAN,
+};
 use crate::flows::banner;
 
 mod params;
@@ -41,7 +44,7 @@ impl Pilot {
     /// (`mission`) or a `feed` relay.
     pub fn on_feed(&mut self, topic: &str, payload: &serde_json::Value, now_ms: u64) {
         match topic {
-            "plugin.world-engine.scan" => {
+            TOPIC_SCAN => {
                 let returns = crate::obstacles::scan_returns(payload);
                 self.lidar.on_scan(returns, now_ms);
                 let Some(ned) = self.pos(now_ms) else {
@@ -83,10 +86,10 @@ impl Pilot {
                     }
                 }
             }
-            "plugin.world-engine.lidar" => self.lidar.on_status(payload, now_ms),
-            "plugin.world-engine.map_status" => self.nav_imu.on_status(payload, now_ms),
-            "plugin.world-engine.occupancy" => self.obstacles.ingest_occupancy(payload),
-            "plugin.world-engine.pose" => {
+            TOPIC_LIDAR => self.lidar.on_status(payload, now_ms),
+            TOPIC_MAP_STATUS => self.nav_imu.on_status(payload, now_ms),
+            TOPIC_OCCUPANCY => self.obstacles.ingest_occupancy(payload),
+            TOPIC_POSE => {
                 let pos = self.pos_ne(now_ms);
                 self.obstacles.ingest_pose(payload, pos, now_ms);
             }
@@ -95,7 +98,7 @@ impl Pilot {
                 self.route.set_feed(super::control::route_of(payload));
                 self.on_mission(m, now_ms);
             }
-            "nav.state" => {
+            TOPIC_NAV_STATE => {
                 // The FC keeps a source set until told otherwise: a report
                 // naming none leaves the last one.
                 let set = payload

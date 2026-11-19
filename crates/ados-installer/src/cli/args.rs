@@ -119,11 +119,11 @@ pub struct Args {
     /// `--no-rtl-driver` — skip building the RTL8812EU WFB radio driver (a node
     /// with no long-range radio, e.g. workstation/compute, does not need it).
     pub no_rtl_driver: bool,
-    /// `--world-engine` / `--no-world-engine` — install (or skip) the first-party
-    /// World Engine extension (3D world model + compute offload). `None` means
+    /// `--reconstruct` / `--no-reconstruct` — install (or skip) the first-party
+    /// Reconstruct extension (reconstruction and perception offload). `None` means
     /// the profile default: on for workstation/compute, off for
     /// drone/ground-station. The last of the two flags wins.
-    pub world_engine: Option<bool>,
+    pub reconstruct: Option<bool>,
     /// `--no-reboot` — never perform the single automatic reboot, even when
     /// provisioning is staged that needs one (a camera/display overlay, an I2C
     /// dtparam). The install then reports `degraded` and NAMES what is staged,
@@ -343,28 +343,28 @@ mod tests {
     }
 
     #[test]
-    fn world_engine_flags_parse_to_an_explicit_choice() {
+    fn reconstruct_flags_parse_to_an_explicit_choice() {
         assert_eq!(
-            Args::parse(["--world-engine"]).unwrap().world_engine,
+            Args::parse(["--reconstruct"]).unwrap().reconstruct,
             Some(true)
         );
         assert_eq!(
-            Args::parse(["--no-world-engine"]).unwrap().world_engine,
+            Args::parse(["--no-reconstruct"]).unwrap().reconstruct,
             Some(false)
         );
         // Absent means "the profile decides", not off.
-        assert_eq!(Args::default().world_engine, None);
+        assert_eq!(Args::default().reconstruct, None);
         // The last flag wins, so a wrapper can append an override.
         assert_eq!(
-            Args::parse(["--world-engine", "--no-world-engine"])
+            Args::parse(["--reconstruct", "--no-reconstruct"])
                 .unwrap()
-                .world_engine,
+                .reconstruct,
             Some(false)
         );
         assert_eq!(
-            Args::parse(["--no-world-engine", "--world-engine"])
+            Args::parse(["--no-reconstruct", "--reconstruct"])
                 .unwrap()
-                .world_engine,
+                .reconstruct,
             Some(true)
         );
     }

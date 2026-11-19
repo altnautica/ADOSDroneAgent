@@ -1,4 +1,4 @@
-// The Capture screen's controls over the world-engine extension's capture
+// The Capture screen's controls over the Capture extension's
 // session. Stop closes the session (no resume), so it is fired from a guarded
 // button; REC and MARK are plain. The extension answers 404 when absent.
 

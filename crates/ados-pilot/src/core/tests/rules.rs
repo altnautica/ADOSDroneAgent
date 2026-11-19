@@ -1072,7 +1072,7 @@ fn vantage_with_scan(
     while w.now < end {
         w.vantage_goal(lease_id, pred, [0.0, 0.0]);
         for _ in 0..10 {
-            w.p.on_feed("plugin.world-engine.scan", scan, w.now);
+            w.p.on_feed(crate::events::TOPIC_SCAN, scan, w.now);
             w.run(20);
         }
     }
@@ -1148,7 +1148,7 @@ fn a_vantage_goal_with_no_view_holds_as_no_vantage_not_blocked() {
         ));
         w.req(Request::Goal { lease_id: id, goal });
         for _ in 0..10 {
-            w.p.on_feed("plugin.world-engine.scan", &wall_scan(4.0), w.now);
+            w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(4.0), w.now);
             w.run(20);
         }
     }

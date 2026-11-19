@@ -10,7 +10,7 @@
 //!
 //! Producer: the `ados-cloud` offload reconciler. Consumers: `ados-control`
 //! (`/api/status`) and `ados-cloud` (the cloud heartbeat). Single writer, many
-//! readers — the same sidecar shape as compute-heartbeat / atlas-forward.
+//! readers — the same sidecar shape as compute-heartbeat / keyframe-forward.
 
 use std::path::Path;
 

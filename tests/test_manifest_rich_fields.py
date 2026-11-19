@@ -163,27 +163,24 @@ def test_fc_parameter_param_is_required() -> None:
         PluginManifest.from_yaml_text(_yaml(d))
 
 
-def test_vision_nav_rich_field_subset_parses() -> None:
-    """The rich-field subset of the shipped vision-nav manifest parses.
+def test_navigation_rich_field_subset_parses() -> None:
+    """The rich-field subset of the shipped navigation manifest parses.
 
-    The shipped ``ADOSExtensions/extensions/vision-nav/manifest.yaml``
-    carries a few legacy top-level fields (``contains_vendor_binary``,
-    ``vendor_attribution`` as a list, ``locales``) that the current
-    strict Pydantic schema does not recognize; that drift predates this
-    change. This test loads only the rich-content slice the install
-    modal needs so we still exercise the vision-nav copy verbatim.
+    This test loads only the rich-content slice the install modal needs from
+    ``ADOSExtensions/extensions/navigation/manifest.yaml``, so it exercises the
+    shipped copy verbatim without depending on the rest of the manifest.
     """
     repo_root = Path(__file__).resolve().parents[2]
     manifest_path = (
         repo_root
         / "ADOSExtensions"
         / "extensions"
-        / "vision-nav"
+        / "navigation"
         / "manifest.yaml"
     )
     if not manifest_path.exists():
         pytest.skip(
-            f"vision-nav manifest not present at {manifest_path}; "
+            f"navigation manifest not present at {manifest_path}; "
             "run inside the monorepo to exercise this case"
         )
 
@@ -199,7 +196,7 @@ def test_vision_nav_rich_field_subset_parses() -> None:
         "screenshots",
     }
     slim = _base_manifest_dict()
-    slim["id"] = "com.altnautica.vision-nav"
+    slim["id"] = "com.altnautica.navigation"
     slim["version"] = raw["version"]
     slim["name"] = raw["name"]
     for key in rich_keys:
@@ -207,7 +204,7 @@ def test_vision_nav_rich_field_subset_parses() -> None:
             slim[key] = raw[key]
 
     m = PluginManifest.from_yaml_text(_yaml(slim))
-    assert m.id == "com.altnautica.vision-nav"
+    assert m.id == "com.altnautica.navigation"
     assert m.version == raw["version"]
     assert m.description_long is not None
     assert m.description_long.strip()
@@ -220,7 +217,7 @@ def test_vision_nav_rich_field_subset_parses() -> None:
     assert m.hardware_requirements is not None
     assert "USB UVC" in (m.hardware_requirements.cameras or "")
     assert m.resource_impact is not None
-    assert m.resource_impact.ram_mb == 512
+    assert m.resource_impact.ram_mb == raw["resource_impact"]["ram_mb"]
     assert m.required_fc_parameters is not None
     # The parametrised-entry shape is what the model owes its consumers: a
     # param name plus an optional value, per firmware. Which parameters the

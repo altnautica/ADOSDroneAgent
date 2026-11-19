@@ -1863,7 +1863,7 @@
   "capture": {
     "title": "Capture",
     "loadFailed": "Could not read the capture state.",
-    "extensionMissing": "The world-engine extension is not installed on this node.",
+    "extensionMissing": "The Capture extension is not installed on this node.",
     "state": {
       "idle": "idle",
       "recording": "recording",
@@ -2281,7 +2281,7 @@
       "title": "Node",
       "tabJobs": "Jobs",
       "tabOffload": "Perception offload",
-      "unavailable": "The World Engine compute service is not running on this node.",
+      "unavailable": "The Reconstruct node service is not running on this node.",
       "loading": "Reading the compute node…",
       "role": "Role",
       "queue": "Queued",

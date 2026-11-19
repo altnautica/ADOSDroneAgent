@@ -33,7 +33,7 @@
 //! the pose places the scans in, so drift of the whole frame is no risk, only
 //! drift since the obstacle was seen. It comes from the live pose
 //! uncertainty, the planar scan matcher's `sigma_xy_m` on the
-//! `plugin.world-engine.pose` topic, and the σ each map cell turned
+//! `plugin.navigation.pose` topic, and the σ each map cell turned
 //! occupied at: the matcher's own growth between the two, plus the matched
 //! pose's σ. A cell of unknown sighting needs the whole σ. The FC offers no
 //! usable figure: ArduCopter never sends LOCAL_POSITION_NED_COV or ODOMETRY

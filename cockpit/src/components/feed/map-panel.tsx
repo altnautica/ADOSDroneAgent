@@ -1,8 +1,8 @@
-// The Map panel: the world-engine mapping state from the nav stream's `map`
+// The Map panel: Navigation's mapping state from the nav stream's `map`
 // frames (`map_status`), opened from the minimap header. Compute placement,
 // mapping memory against its budget, voxel size (it grows when the sweep
-// cloud hits its budget), dropped keyframes, sweep points, mapped area, and
-// upload or live-stream progress. Loaded on first open, off the Feed's chunk.
+// cloud hits its budget), sweep points, mapped area, the pose provider and
+// the FC IMU feed. Loaded on first open, off the Feed's chunk.
 
 import { Sheet } from "@/components/ui/sheet";
 import { useNow } from "@/hooks/use-now";

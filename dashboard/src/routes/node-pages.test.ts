@@ -277,9 +277,9 @@ describe("/capture", () => {
     fetchMock.mockResolvedValueOnce(reply(200, { ok: true, segment: 2 }));
     await startCapture({ room: "Dock", floor: 0 });
     await markCapture({ room: "Kitchen", floor: 1 });
-    expect(fetchMock.mock.calls[0]![0]).toBe("/api/plugins/com.altnautica.world-engine/x/atlas/capture/start");
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/plugins/com.altnautica.capture/x/capture/start");
     expect(fetchMock.mock.calls[0]![1]!.method).toBe("POST");
-    expect(fetchMock.mock.calls[1]![0]).toBe("/api/plugins/com.altnautica.world-engine/x/atlas/capture/mark");
+    expect(fetchMock.mock.calls[1]![0]).toBe("/api/plugins/com.altnautica.capture/x/capture/mark");
     expect(JSON.parse(fetchMock.mock.calls[1]![1]!.body as string)).toEqual({ room: "Kitchen", floor: 1 });
   });
 

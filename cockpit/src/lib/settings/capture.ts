@@ -1,5 +1,5 @@
 // The Capture settings page's logic: the capture storage tone and the exposure
-// draft sent to the world-engine extension's capture service. The draft keeps
+// draft sent to the Capture extension's capture service. The draft keeps
 // the typed numbers as text, so a half-typed "1." stays on screen; it becomes a
 // request only when every field is valid.
 

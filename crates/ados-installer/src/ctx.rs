@@ -44,11 +44,11 @@ pub struct Ctx {
     /// `--no-rtl-driver` opts out (a workstation/compute node or a rig with no
     /// long-range radio does not need it). The `dkms` step honours this.
     pub install_rtl8812eu: bool,
-    /// Whether the `extensions` step installs the first-party World Engine
-    /// extension: the `--world-engine` / `--no-world-engine` choice (the wizard
+    /// Whether the `extensions` step installs the first-party Reconstruct
+    /// extension: the `--reconstruct` / `--no-reconstruct` choice (the wizard
     /// writes the same field), else the profile default
-    /// ([`crate::steps::extensions::world_engine_default`]).
-    pub install_world_engine: bool,
+    /// ([`crate::steps::extensions::reconstruct_default`]).
+    pub install_reconstruct: bool,
     /// Release channel selector (default `edge` — clone + build from source,
     /// matching the predecessor installer's default).
     pub channel: String,
@@ -165,9 +165,9 @@ impl Ctx {
             .map(crate::host::detection_basis)
             .or_else(|| args.host.is_some().then(|| "--host".to_string()));
         let install_rtl8812eu = !args.no_rtl_driver;
-        let install_world_engine = args
-            .world_engine
-            .unwrap_or_else(|| crate::steps::extensions::world_engine_default(&profile));
+        let install_reconstruct = args
+            .reconstruct
+            .unwrap_or_else(|| crate::steps::extensions::reconstruct_default(&profile));
         // A pinned channel installs an explicit release, so an upgrade with no
         // `--version` must reuse the pinned one rather than fail or drift.
         let mut args = args;
@@ -186,7 +186,7 @@ impl Ctx {
             host,
             host_basis,
             install_rtl8812eu,
-            install_world_engine,
+            install_reconstruct,
             channel,
             region_pinned: None,
             cloud_from_anywhere: false,
@@ -344,14 +344,14 @@ mod tests {
     }
 
     #[test]
-    fn the_world_engine_follows_the_profile_unless_a_flag_pins_it() {
+    fn the_reconstruct_follows_the_profile_unless_a_flag_pins_it() {
         let ctx_for = |profile: &str, choice: Option<bool>| {
             let a = Args {
                 profile: Some(profile.to_string()),
-                world_engine: choice,
+                reconstruct: choice,
                 ..Args::default()
             };
-            Ctx::from_args(a, EnvInfo::probe(), Checkpoint::new()).install_world_engine
+            Ctx::from_args(a, EnvInfo::probe(), Checkpoint::new()).install_reconstruct
         };
         // Workstation-class nodes are where the engine runs its heavy half.
         assert!(ctx_for("workstation", None));

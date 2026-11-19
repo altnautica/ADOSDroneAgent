@@ -29,15 +29,15 @@
       "value_name": null
     },
     {
-      "help": "Install the World Engine extension (3D world model + compute offload). Default: on for workstation and compute, off for drone and ground station. An installed extension is left alone; plugin auto-update keeps it current. The last of --world-engine and --no-world-engine wins.",
-      "name": "--world-engine",
+      "help": "Install the Reconstruct extension (reconstruction and perception offload). Default: on for workstation and compute, off for drone and ground station. An installed extension is left alone; plugin auto-update keeps it current. The last of --reconstruct and --no-reconstruct wins.",
+      "name": "--reconstruct",
       "short": null,
       "takes_value": false,
       "value_name": null
     },
     {
-      "help": "Skip the World Engine extension",
-      "name": "--no-world-engine",
+      "help": "Skip the Reconstruct extension",
+      "name": "--no-reconstruct",
       "short": null,
       "takes_value": false,
       "value_name": null

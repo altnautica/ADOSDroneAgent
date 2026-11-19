@@ -68,7 +68,7 @@ export async function loadEkfSourceParams(signal?: AbortSignal): Promise<void> {
   useNavStreamStore.getState().setEkfParams(out);
 }
 
-/** The chip's input from the FC telemetry (live or not), the fresh vision-nav
+/** The chip's input from the FC telemetry (live or not), the fresh Navigation
  *  state, the last commanded set and the parameters. An EKF report counts only
  *  while the vehicle telemetry itself is live. */
 export function navSourceInput(
@@ -98,7 +98,7 @@ export function navSourceInput(
   };
 }
 
-/** The nav-source popover's external-nav row: vision-nav's health, its
+/** The nav-source popover's external-nav row: Navigation's health, its
  *  odometry rate and the age of its newest pose (`pose_age_ms`), each while
  *  reported. */
 export function extNavLine(nav: Pick<NavState, "extnavHealth" | "odomRateHz" | "poseAgeMs"> | null): string {

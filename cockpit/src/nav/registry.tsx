@@ -4,7 +4,7 @@
 // opened via `open-detail`) without touching the shell or the navigator.
 //
 // Feed is wired now (video + HUD); Link/Mesh/Pair/Uplink/System read their live
-// agent surfaces; Node is the compute node's home (World Engine jobs, products
+// agent surfaces; Node is the compute node's home (Reconstruct jobs, products
 // and perception offload). Each profile opens on its own home tab. Settings is the full config tree: its tab renders the curated
 // root, and each drill level (`settings:<path>`) resolves to a Settings screen
 // bound to that path — so the shell's detail stack + hardware "back" drive the

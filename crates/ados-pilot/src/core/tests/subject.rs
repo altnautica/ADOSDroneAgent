@@ -468,7 +468,7 @@ fn the_back_away_keeps_the_nav_cap() {
     w.fly = true;
     let ext_nav = |w: &mut World| {
         w.p.on_feed(
-            "nav.state",
+            crate::events::TOPIC_NAV_STATE,
             &serde_json::json!({"active_set": 2, "gps_fix": 0}),
             w.now,
         );

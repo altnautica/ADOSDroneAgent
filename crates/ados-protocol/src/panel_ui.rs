@@ -35,7 +35,7 @@ pub const PREV_SCREEN: &str = "prev_screen";
 /// Prefix of a screen id that names a plugin-filled page.
 pub const PLUGIN_SCREEN_PREFIX: &str = "plugin:";
 
-/// The world-engine capture HUD, the first visor screen.
+/// The Capture extension's HUD, the first visor screen.
 pub const CAPTURE_HUD_SCREEN: &str = "plugin:capture_hud";
 
 /// Ground-station default button mapping (short/long per front-panel button).

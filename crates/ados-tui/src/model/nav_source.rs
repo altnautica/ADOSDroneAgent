@@ -124,7 +124,7 @@ fn gps_row(flags: u32, tel: &Telemetry) -> NavPill {
 
 fn ext_row(flags: u32, nav: Option<&NavSource>) -> NavPill {
     let health = nav.and_then(|n| n.extnav_health.as_deref());
-    // A reason from vision-nav on a degraded or lost pose says why the
+    // A reason from Navigation on a degraded or lost pose says why the
     // position cannot be trusted: never just "degraded".
     if let (Some("degraded" | "lost"), Some(why)) =
         (health, nav.and_then(|n| n.health_reason.as_deref()))

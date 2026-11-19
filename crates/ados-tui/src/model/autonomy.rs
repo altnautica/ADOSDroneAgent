@@ -120,7 +120,7 @@ fn follow_phase(state: &Value) -> Option<String> {
     })
 }
 
-/// The navigation source (vision-nav `nav.state`).
+/// The navigation source (Navigation `nav.state`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NavSource {
     pub mode: Option<String>,
@@ -132,13 +132,13 @@ pub struct NavSource {
     pub obstacle_rate_hz: Option<f64>,
     pub min_obstacle_m: Option<f64>,
     pub gps_fix: Option<i64>,
-    /// How old vision-nav's pose was when it reported (ms).
+    /// How old Navigation's pose was when it reported (ms).
     pub pose_age_ms: Option<f64>,
     pub stale: bool,
 }
 
 /// The pilot's `position_unverified`: its reason (`flow_disagrees`,
-/// `extnav_lost`, `extnav_degraded`) and vision-nav's own reason, if any.
+/// `extnav_lost`, `extnav_degraded`) and Navigation's own reason, if any.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PositionUnverified {
     pub reason: String,

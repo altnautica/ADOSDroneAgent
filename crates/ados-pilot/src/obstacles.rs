@@ -3,7 +3,7 @@
 //! vehicle with a chamfer 3-4 clearance transform.
 //!
 //! Frames: occupancy tiles arrive in `map_ned` (north-aligned NED whose origin
-//! is the first scan); the `plugin.world-engine.pose` topic gives the vehicle
+//! is the first scan); the `plugin.navigation.pose` topic gives the vehicle
 //! in that frame, so `LOCAL_POSITION_NED − pose.t` is the shift into the FC's
 //! local frame. Scans arrive in body FRD, bins clockwise from the nose.
 
@@ -62,7 +62,7 @@ pub const MIN_RETURN_M: f32 = 0.05;
 /// surface when measuring how wide it is ([`Obstacles::nearest_surface`]).
 pub const SURFACE_GAP_M: f32 = 0.5;
 
-/// The bins of a `plugin.world-engine.scan` payload that returned a surface
+/// The bins of a `plugin.navigation.scan` payload that returned a surface
 /// (a finite range above [`MIN_RETURN_M`]), whatever its frame.
 pub fn scan_returns(payload: &Value) -> usize {
     payload
@@ -174,7 +174,7 @@ impl Obstacles {
         }
     }
 
-    /// Ingest a `plugin.world-engine.pose` payload with the FC local position
+    /// Ingest a `plugin.navigation.pose` payload with the FC local position
     /// at the same moment.
     pub fn ingest_pose(&mut self, payload: &Value, local_ne: Option<V2>, now_ms: u64) {
         // The planar scan matcher's horizontal one-sigma (`sigma_xy_m`); a
@@ -206,7 +206,7 @@ impl Obstacles {
         self.pose_sigma
     }
 
-    /// Ingest a `plugin.world-engine.scan` payload. `closing_max_mps` is the
+    /// Ingest a `plugin.navigation.scan` payload. `closing_max_mps` is the
     /// fastest closing speed a standing obstacle can show this scan (the
     /// brake's trust bound on the vehicle's own speed, or
     /// [`SCAN_CLOSING_MAX_MPS`] when that speed is unknown): a sector whose

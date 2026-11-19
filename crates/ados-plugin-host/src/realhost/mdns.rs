@@ -384,13 +384,13 @@ mod tests {
     #[test]
     fn instance_names_are_per_plugin_per_node_and_fit_a_label() {
         assert_eq!(
-            instance_name("com.altnautica.world-engine", "5A89C1FEABE9", "ws.local"),
-            "com-altnautica-world-engine-5a89c1feabe9"
+            instance_name("com.altnautica.reconstruct", "5A89C1FEABE9", "ws.local"),
+            "com-altnautica-reconstruct-5a89c1feabe9"
         );
         // No device id yet: the hostname's first label names the node.
         assert_eq!(
-            instance_name("com.altnautica.world-engine", " ", "skynode.local"),
-            "com-altnautica-world-engine-skynode"
+            instance_name("com.altnautica.reconstruct", " ", "skynode.local"),
+            "com-altnautica-reconstruct-skynode"
         );
         let long = instance_name(&"p".repeat(80), "0011aabbccdd", "h.local");
         assert_eq!(long.len(), INSTANCE_MAX_LEN);

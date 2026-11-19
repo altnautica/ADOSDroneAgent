@@ -56,7 +56,7 @@ export interface HomeStatusInputs {
   pilotAgeMs: number | null;
   /** False while the agent's own status read fails. */
   agentReachable: boolean;
-  /** The fresh vision-nav state, or null when absent or stale. */
+  /** The fresh Navigation state, or null when absent or stale. */
   nav?: NavState | null;
   /** Where the arm state is judged: the fresh pilot frame and live
    *  telemetry only (null when stale or not live). A kept frame may say
@@ -72,7 +72,7 @@ export function pillArmed(i: Pick<HomeStatusInputs, "pilot" | "telemetry">): boo
   return typeof i.telemetry?.armed === "boolean" ? i.telemetry.armed : null;
 }
 
-/** The nav source from the live EKF report, GPS and the fresh vision-nav
+/** The nav source from the live EKF report, GPS and the fresh Navigation
  *  state (the cockpit chip's inputs, without a commanded set or params). */
 export function homeNavSource(i: Pick<HomeStatusInputs, "telemetry" | "live" | "nav" | "pilot">): NavSourceResult {
   const ekf = i.telemetry?.ekf;
@@ -90,7 +90,7 @@ export function homeNavSource(i: Pick<HomeStatusInputs, "telemetry" | "live" | "
   });
 }
 
-/** `Pose age {ms} ms` from the fresh vision-nav state, or null without one. */
+/** `Pose age {ms} ms` from the fresh Navigation state, or null without one. */
 export function poseAgeText(nav: NavState | null | undefined): string | null {
   return nav?.poseAgeMs != null ? specText("nav_source.pose_age", { ms: Math.round(nav.poseAgeMs) }) : null;
 }

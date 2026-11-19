@@ -60,8 +60,8 @@ class is bounded only by the field limits on :class:`ResourceLimits`."""
 
 
 def _plugin_leaf(plugin_id: str) -> str:
-    """Last dot-segment of a plugin id (``com.example.world-engine`` ->
-    ``world-engine``); the namespace for its declared capabilities and topics."""
+    """Last dot-segment of a plugin id (``com.example.navigation`` ->
+    ``navigation``); the namespace for its declared capabilities and topics."""
     return plugin_id.rsplit(".", 1)[-1]
 
 

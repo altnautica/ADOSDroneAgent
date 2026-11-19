@@ -43,7 +43,7 @@ export interface MinimapFrameInput {
   noFixSince: number | null;
   now: number;
   ekfParams: Readonly<Record<string, number>> | null;
-  /** The source set vision-nav reports active, else the one this cockpit
+  /** The source set Navigation reports active, else the one this cockpit
    *  last commanded, else null (set 1 is the FC's boot default). */
   activeSet: 1 | 2 | 3 | null;
 }

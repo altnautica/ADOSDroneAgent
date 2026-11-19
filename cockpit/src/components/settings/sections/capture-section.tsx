@@ -1,5 +1,5 @@
 // Capture: the capture storage budget (`/api/v1/storage`) and the exposure the
-// world-engine extension's capture service records with. The extension answers
+// Capture extension's service records with. The extension answers
 // 404 through the plugin proxy when it is not installed on this node.
 
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
@@ -81,7 +81,7 @@ function ExposureGroup() {
   const { t } = useTranslation();
   const capture = useResource(useCallback((s: AbortSignal) => getCaptureState(s), []), CAPTURE_STATE_POLL_MS);
   const current = capture.data?.exposure ?? null;
-  // The plugin proxy answers 404 when the world-engine extension is absent.
+  // The plugin proxy answers 404 when the Capture extension is absent.
   const missing = capture.status === 404;
 
   // The draft re-seeds when the agent's values change, never on a bare poll.

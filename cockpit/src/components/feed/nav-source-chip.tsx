@@ -2,7 +2,7 @@
 // GPS chip: what the EKF navigates on (DR, EXT NAV, GPS, FLOW) with a quality
 // word, coloured by quality and never by colour alone. Inputs: the FC's
 // EKF_STATUS_REPORT flags and GPS fix from the telemetry poll, the EKF source
-// sets read once per FC link, and vision-nav's `nav.state` from the nav
+// sets read once per FC link, and Navigation's `nav.state` from the nav
 // stream. A tap opens the source-set popover (its own lazy chunk).
 
 import { lazy, Suspense, useState } from "react";

@@ -433,6 +433,15 @@
       "side": "gcs"
     },
     {
+      "category": "data_network",
+      "description": "Lets the plugin's GCS module call the routes of the one extension the grant names (`plugin.http.<extension id>`), on the nodes this GCS reaches, with the operator's own access. Extensions that ship as a set use it to share one workflow, such as pairing a drone with a reconstruction node.",
+      "enforced": null,
+      "id": "plugin.http",
+      "label": "Call a companion extension's server",
+      "risk": "medium",
+      "side": "gcs"
+    },
+    {
       "category": "compute_process",
       "description": "Lets the plugin launch helper subprocesses listed in its manifest's spawn allowlist. Required to ship vendor-binary drivers and language runtimes outside the Python plugin host.",
       "enforced": true,

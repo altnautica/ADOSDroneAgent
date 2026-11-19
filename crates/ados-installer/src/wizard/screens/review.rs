@@ -6,7 +6,7 @@ use ados_term::widgets::{select_list, summary_select, text_input, Choice, Flow};
 
 use crate::cli::Args;
 use crate::env;
-use crate::steps::extensions::world_engine_default;
+use crate::steps::extensions::reconstruct_default;
 use crate::wizard::widgets::insert_region_char;
 use crate::wizard::WizardExtras;
 
@@ -120,10 +120,10 @@ pub(super) fn review_summary(
         theme,
         "Extension",
         if args
-            .world_engine
-            .unwrap_or_else(|| world_engine_default(&profile))
+            .reconstruct
+            .unwrap_or_else(|| reconstruct_default(&profile))
         {
-            "World Engine"
+            "Reconstruct"
         } else {
             "none"
         },

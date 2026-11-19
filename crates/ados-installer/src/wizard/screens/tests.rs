@@ -1,6 +1,6 @@
 use super::identity::default_name;
 use super::review::{friendly_profile, review_summary};
-use super::role::{catalog_body, pack_labels, set_profile, world_engine_item};
+use super::role::{catalog_body, pack_labels, reconstruct_item, set_profile};
 use super::wifi_flow::short_reason;
 use super::*;
 use crate::steps::config_identity::slugify_hostname;
@@ -162,10 +162,10 @@ fn visible_steps_omit_pairing_for_a_workstation() {
 }
 
 #[test]
-fn the_world_engine_row_defaults_per_profile_and_keeps_an_answer() {
+fn the_reconstruct_row_defaults_per_profile_and_keeps_an_answer() {
     let with = |profile: &str, choice: Option<bool>| Args {
         profile: Some(profile.into()),
-        world_engine: choice,
+        reconstruct: choice,
         ..Args::default()
     };
     for (profile, on) in [
@@ -174,36 +174,36 @@ fn the_world_engine_row_defaults_per_profile_and_keeps_an_answer() {
         ("drone", false),
         ("ground_station", false),
     ] {
-        let item = world_engine_item(&with(profile, None), profile);
+        let item = reconstruct_item(&with(profile, None), profile);
         assert_eq!(item.checked, on, "{profile} default");
         assert!(!item.locked, "{profile}: the operator can always change it");
     }
     // An answer already given (a flag, or an earlier pass) is what shows.
-    assert!(world_engine_item(&with("drone", Some(true)), "drone").checked);
-    assert!(!world_engine_item(&with("workstation", Some(false)), "workstation").checked);
+    assert!(reconstruct_item(&with("drone", Some(true)), "drone").checked);
+    assert!(!reconstruct_item(&with("workstation", Some(false)), "workstation").checked);
 }
 
 #[test]
-fn changing_the_profile_resets_the_world_engine_answer() {
+fn changing_the_profile_resets_the_reconstruct_answer() {
     // The first pick keeps a flag the operator passed.
     let mut args = Args {
-        world_engine: Some(true),
+        reconstruct: Some(true),
         ..Args::default()
     };
     set_profile(&mut args, "drone");
-    assert_eq!(args.world_engine, Some(true));
+    assert_eq!(args.reconstruct, Some(true));
     // Re-picking the same profile keeps the answer.
     set_profile(&mut args, "drone");
-    assert_eq!(args.world_engine, Some(true));
+    assert_eq!(args.reconstruct, Some(true));
     // A different profile offers its own default again.
-    args.world_engine = Some(false);
+    args.reconstruct = Some(false);
     set_profile(&mut args, "workstation");
-    assert_eq!(args.world_engine, None);
+    assert_eq!(args.reconstruct, None);
     assert_eq!(args.profile.as_deref(), Some("workstation"));
 }
 
 #[test]
-fn the_review_names_the_world_engine_choice() {
+fn the_review_names_the_reconstruct_choice() {
     let theme = Theme::detect(true, true);
     let rows = |args: &Args| {
         review_summary(
@@ -218,12 +218,12 @@ fn the_review_names_the_world_engine_choice() {
         profile: Some("workstation".into()),
         ..Args::default()
     };
-    assert!(rows(&ws).contains("World Engine"));
+    assert!(rows(&ws).contains("Reconstruct"));
     let drone = Args {
         profile: Some("drone".into()),
         ..Args::default()
     };
-    assert!(!rows(&drone).contains("World Engine"));
+    assert!(!rows(&drone).contains("Reconstruct"));
 }
 
 #[test]

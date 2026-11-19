@@ -6,6 +6,9 @@ use axum::http::{HeaderValue, Method};
 use serde_json::json;
 
 use super::hub::{ClientView, KIND_COUNT};
+
+/// A first-party plugin that publishes none of the hub's topics.
+const CAPTURE_ID: &str = "com.altnautica.capture";
 use super::tiles::MAX_TILES;
 use super::topics::{
     TOPIC_FOLLOW_LOST, TOPIC_FOLLOW_REACQUIRED, TOPIC_FOLLOW_STATE, TOPIC_MAP_STATUS,
@@ -33,22 +36,22 @@ fn live_tiles(seq: u64, tiles: &[(i64, i64, &str)]) -> Value {
 #[test]
 fn each_topic_is_pinned_to_its_owning_plugin() {
     assert_eq!(
-        route(TOPIC_POSE, WORLD_ENGINE_ID),
+        route(TOPIC_POSE, NAVIGATION_ID),
         Routed::Latest(NavKind::Pose)
     );
     assert_eq!(
-        route(TOPIC_SCAN, WORLD_ENGINE_ID),
+        route(TOPIC_SCAN, NAVIGATION_ID),
         Routed::Latest(NavKind::Scan)
     );
     assert_eq!(
-        route(TOPIC_MAP_STATUS, WORLD_ENGINE_ID),
+        route(TOPIC_MAP_STATUS, NAVIGATION_ID),
         Routed::Latest(NavKind::Map)
     );
-    assert_eq!(route(TOPIC_OCCUPANCY, WORLD_ENGINE_ID), Routed::Tiles);
-    assert_eq!(route(TOPIC_LIDAR, WORLD_ENGINE_ID), Routed::LidarStatus);
-    assert_eq!(route(TOPIC_LIDAR, VISION_NAV_ID), Routed::Ignored);
+    assert_eq!(route(TOPIC_OCCUPANCY, NAVIGATION_ID), Routed::Tiles);
+    assert_eq!(route(TOPIC_LIDAR, NAVIGATION_ID), Routed::LidarStatus);
+    assert_eq!(route(TOPIC_LIDAR, CAPTURE_ID), Routed::Ignored);
     assert_eq!(
-        route(TOPIC_NAV_STATE, VISION_NAV_ID),
+        route(TOPIC_NAV_STATE, NAVIGATION_ID),
         Routed::Latest(NavKind::Nav)
     );
     assert_eq!(
@@ -66,11 +69,8 @@ fn each_topic_is_pinned_to_its_owning_plugin() {
         Routed::Ignored
     );
     assert_eq!(route(TOPIC_NAV_STATE, FOLLOW_ME_ID), Routed::Ignored);
-    assert_eq!(route(TOPIC_POSE, VISION_NAV_ID), Routed::Ignored);
-    assert_eq!(
-        route("plugin.world-engine.splat", WORLD_ENGINE_ID),
-        Routed::Ignored
-    );
+    assert_eq!(route(TOPIC_POSE, CAPTURE_ID), Routed::Ignored);
+    assert_eq!(route("plugin.capture.state", CAPTURE_ID), Routed::Ignored);
 }
 
 #[test]
@@ -78,13 +78,13 @@ fn scans_and_the_lidar_status_reach_the_lidar_view() {
     let hub = NavHub::new();
     assert_eq!(hub.lidar_view(), LidarView::default());
     // Another plugin's look-alike counts for nothing.
-    hub.ingest(TOPIC_SCAN, VISION_NAV_ID, 1, json!({"ranges": []}));
-    hub.ingest(TOPIC_LIDAR, VISION_NAV_ID, 1, json!({"connected": true}));
+    hub.ingest(TOPIC_SCAN, CAPTURE_ID, 1, json!({"ranges": []}));
+    hub.ingest(TOPIC_LIDAR, CAPTURE_ID, 1, json!({"connected": true}));
     assert_eq!(hub.lidar_view(), LidarView::default());
-    hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 1, json!({"ranges": []}));
+    hub.ingest(TOPIC_SCAN, NAVIGATION_ID, 1, json!({"ranges": []}));
     hub.ingest(
         TOPIC_LIDAR,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         1,
         json!({"v": 1, "device": "/dev/ttyUSB0", "connected": true, "health": "good"}),
     );
@@ -108,13 +108,13 @@ fn scans_without_a_return_read_no_returns_on_the_sensors_route() {
     };
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_millis(1300) {
-        hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 1, scan(vec![0.0; 360]));
+        hub.ingest(TOPIC_SCAN, NAVIGATION_ID, 1, scan(vec![0.0; 360]));
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert_eq!(lidar_state(&hub.lidar_view(), &THRESHOLDS), "no_returns");
     let mut one = vec![0.0; 360];
     one[90] = 3.2;
-    hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 1, scan(one));
+    hub.ingest(TOPIC_SCAN, NAVIGATION_ID, 1, scan(one));
     // One return ends it (the rate over real sleeps may read degraded).
     assert_ne!(lidar_state(&hub.lidar_view(), &THRESHOLDS), "no_returns");
     assert_eq!(hub.lidar_view().empty_ms, None);
@@ -123,7 +123,7 @@ fn scans_without_a_return_read_no_returns_on_the_sensors_route() {
 #[test]
 fn every_routed_topic_is_subscribed() {
     for topic in EXPORT_TOPICS {
-        let routed = [WORLD_ENGINE_ID, VISION_NAV_ID, FOLLOW_ME_ID]
+        let routed = [NAVIGATION_ID, FOLLOW_ME_ID]
             .iter()
             .any(|p| route(topic, p) != Routed::Ignored);
         assert!(routed, "{topic} is subscribed but never routed");
@@ -149,7 +149,7 @@ fn status_reports_every_kind_null_until_it_arrives() {
     for kind in NavKind::ALL {
         assert_eq!(body[kind.as_str()], Value::Null, "{}", kind.as_str());
     }
-    hub.ingest(TOPIC_NAV_STATE, VISION_NAV_ID, 42, json!({"active_set": 1}));
+    hub.ingest(TOPIC_NAV_STATE, NAVIGATION_ID, 42, json!({"active_set": 1}));
     let body = hub.status_body();
     assert_eq!(body["nav"]["ts_ms"], 42);
     assert_eq!(body["nav"]["data"]["active_set"], 1);
@@ -181,9 +181,9 @@ fn frames_since_sends_only_the_latest_of_each_changed_kind() {
     assert!(hub.frames_since(&mut sent, ClientView::All).is_empty());
 
     for n in 0..5 {
-        hub.ingest(TOPIC_POSE, WORLD_ENGINE_ID, n, json!({"n": n}));
+        hub.ingest(TOPIC_POSE, NAVIGATION_ID, n, json!({"n": n}));
     }
-    hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 9, json!({"ranges_m": []}));
+    hub.ingest(TOPIC_SCAN, NAVIGATION_ID, 9, json!({"ranges_m": []}));
     let frames = hub.frames_since(&mut sent, ClientView::All);
     assert_eq!(frames.len(), 2, "one frame per changed kind: {frames:?}");
     assert_eq!(frames[0]["kind"], "pose");
@@ -193,12 +193,7 @@ fn frames_since_sends_only_the_latest_of_each_changed_kind() {
 
     // Nothing changed: nothing to send.
     assert!(hub.frames_since(&mut sent, ClientView::All).is_empty());
-    hub.ingest(
-        TOPIC_MAP_STATUS,
-        WORLD_ENGINE_ID,
-        10,
-        json!({"voxel_m": 0.1}),
-    );
+    hub.ingest(TOPIC_MAP_STATUS, NAVIGATION_ID, 10, json!({"voxel_m": 0.1}));
     let frames = hub.frames_since(&mut sent, ClientView::All);
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0]["kind"], "map");
@@ -208,7 +203,7 @@ fn frames_since_sends_only_the_latest_of_each_changed_kind() {
 async fn a_latest_value_change_wakes_the_watch() {
     let hub = NavHub::new();
     let mut changes = hub.watch();
-    hub.ingest(TOPIC_POSE, WORLD_ENGINE_ID, 1, json!({}));
+    hub.ingest(TOPIC_POSE, NAVIGATION_ID, 1, json!({}));
     tokio::time::timeout(std::time::Duration::from_secs(1), changes.changed())
         .await
         .unwrap()
@@ -248,13 +243,13 @@ fn map_live_returns_the_latest_tile_changed_after_since() {
     let hub = NavHub::new();
     hub.ingest(
         TOPIC_OCCUPANCY,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         1,
         live_tiles(1, &[(0, 0, "a"), (1, 0, "b")]),
     );
     hub.ingest(
         TOPIC_OCCUPANCY,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         2,
         live_tiles(2, &[(0, 0, "a2")]),
     );
@@ -280,7 +275,7 @@ fn a_product_payload_does_not_touch_the_live_tiles() {
     let hub = NavHub::new();
     hub.ingest(
         TOPIC_OCCUPANCY,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         1,
         json!({"kind": "product", "seq": 5}),
     );
@@ -292,13 +287,13 @@ fn a_restarted_producer_starts_a_new_session() {
     let hub = NavHub::new();
     hub.ingest(
         TOPIC_OCCUPANCY,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         1,
         live_tiles(40, &[(5, 5, "old")]),
     );
     hub.ingest(
         TOPIC_OCCUPANCY,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         2,
         live_tiles(1, &[(0, 0, "new")]),
     );
@@ -313,10 +308,10 @@ fn a_restarted_producer_starts_a_new_session() {
 fn the_tile_store_drops_the_tiles_changed_longest_ago_past_its_cap() {
     let hub = NavHub::new();
     let first: Vec<(i64, i64, &str)> = (0..MAX_TILES as i64).map(|i| (i, 0, "p")).collect();
-    hub.ingest(TOPIC_OCCUPANCY, WORLD_ENGINE_ID, 1, live_tiles(1, &first));
+    hub.ingest(TOPIC_OCCUPANCY, NAVIGATION_ID, 1, live_tiles(1, &first));
     hub.ingest(
         TOPIC_OCCUPANCY,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         2,
         live_tiles(2, &[(-1, -1, "q")]),
     );
@@ -331,7 +326,7 @@ async fn the_map_live_route_reads_since_from_the_query() {
     let state = test_state(dir.path());
     state.nav.ingest(
         TOPIC_OCCUPANCY,
-        WORLD_ENGINE_ID,
+        NAVIGATION_ID,
         1,
         live_tiles(3, &[(2, -1, "t")]),
     );

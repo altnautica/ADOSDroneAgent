@@ -19,13 +19,13 @@
 //! * `GET /api/v1/map/live?since=<seq>`: the live occupancy tiles changed after
 //!   `seq`.
 //!
-//! The sources are plugin event-bus topics: the world-engine extension's pose,
-//! scan, occupancy and map-status topics, vision-nav's `nav.state` and
+//! The sources are plugin event-bus topics: the Navigation extension's pose,
+//! scan, occupancy, map-status and `nav.state` topics, and
 //! follow-me's `follow.state` and follow events. They reach this process over
 //! the plugin host's event export ([`crate::ipc::plugin_events_client`]), so
 //! the operator surfaces read navigation without loading an extension UI. `data`
 //! is the source payload verbatim, except that the `nav` kind gains
-//! `pose_age_ms` (number or `null`), vision-nav's pose age from its
+//! `pose_age_ms` (number or `null`), Navigation's pose age from its
 //! `navigation` telemetry channel (see [`pose_age`]).
 
 mod hub;
@@ -44,8 +44,7 @@ pub use hub::{NavHub, NavKind, DEPTH_CAMERA_STALE_MS, KIND_COUNT};
 pub use lidar_watch::{LidarStatus, LidarView};
 pub use mission::{get_mission, mission_body};
 pub use topics::{
-    route, Routed, EXPORT_TOPICS, FOLLOW_ME_ID, TOPIC_LIDAR, TOPIC_SCAN, VISION_NAV_ID,
-    WORLD_ENGINE_ID,
+    route, Routed, EXPORT_TOPICS, FOLLOW_ME_ID, NAVIGATION_ID, TOPIC_LIDAR, TOPIC_SCAN,
 };
 pub use view::{ViewDemand, ViewLease, VIEW_LAYERS, VIEW_LEASE_TTL};
 

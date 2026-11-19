@@ -4,17 +4,14 @@ import { compactCount, mapStatusRows } from "@/lib/map-status-view";
 import type { MapStatus } from "@/shared/hud/nav-types";
 
 const EMPTY: MapStatus = {
-  sessionId: null,
   placement: null,
   memoryUsedMb: null,
   memoryBudgetMb: null,
   voxelM: null,
-  keyframesDropped: null,
   sweepPoints: null,
   areaM2: null,
-  navPose: null,
-  upload: null,
-  stream: null,
+  poseProvider: null,
+  imuFeed: null,
 };
 
 const row = (s: MapStatus, id: string) => mapStatusRows(s).find((r) => r.id === id);
@@ -22,7 +19,7 @@ const row = (s: MapStatus, id: string) => mapStatusRows(s).find((r) => r.id === 
 describe("mapStatusRows", () => {
   it("shows dashes, never zeros, for absent fields", () => {
     const rows = mapStatusRows(EMPTY);
-    expect(rows.map((r) => r.id)).toEqual(["placement", "memory", "voxel", "keyframes", "points", "area", "session"]);
+    expect(rows.map((r) => r.id)).toEqual(["placement", "memory", "voxel", "points", "area", "pose"]);
     expect(rows.every((r) => r.value === "—" && r.tone === "muted")).toBe(true);
   });
 
@@ -45,26 +42,20 @@ describe("mapStatusRows", () => {
     expect(row({ ...EMPTY, memoryUsedMb: 300 }, "memory")?.value).toBe("300 MB");
   });
 
-  it("warns on dropped keyframes", () => {
-    expect(row({ ...EMPTY, keyframesDropped: 0 }, "keyframes")?.tone).toBe("normal");
-    expect(row({ ...EMPTY, keyframesDropped: 3 }, "keyframes")).toMatchObject({ value: "3", tone: "warn" });
+  it("names the pose provider", () => {
+    expect(row({ ...EMPTY, poseProvider: "lidar_planar" }, "pose")).toMatchObject({ value: "Planar LiDAR", tone: "normal" });
   });
 
-  it("shows upload progress and failures", () => {
-    const up = row({ ...EMPTY, upload: { state: "uploading", bytesDone: 12e6, bytesTotal: 48e6 } }, "upload");
-    expect(up).toMatchObject({ value: "Uploading 25 % · 12.0 / 48.0 MB", fraction: 0.25 });
-    expect(row({ ...EMPTY, upload: { state: "failed", bytesDone: 0, bytesTotal: 0 } }, "upload")).toMatchObject({
-      value: "Failed",
-      tone: "crit",
-    });
-  });
-
-  it("shows the live stream rate", () => {
-    expect(row({ ...EMPTY, stream: { state: "live", bytesPerS: 1_000_000 } }, "stream")).toMatchObject({
-      value: "Live · 8.0 Mbit/s",
+  it("shows the FC IMU feed only when the pose takes it, toned by its state", () => {
+    expect(row({ ...EMPTY, imuFeed: { state: "ok", reason: null, rateHz: 49.6 } }, "imu")).toMatchObject({
+      value: "OK · 50 Hz",
       tone: "good",
     });
-    expect(row({ ...EMPTY, stream: { state: "off", bytesPerS: 0 } }, "stream")?.value).toBe("Off");
+    expect(row({ ...EMPTY, imuFeed: { state: "degraded", reason: "starved", rateHz: 8 } }, "imu")?.tone).toBe("warn");
+    expect(row({ ...EMPTY, imuFeed: { state: "lost", reason: "stalled", rateHz: null } }, "imu")).toMatchObject({
+      value: "Lost",
+      tone: "crit",
+    });
   });
 });
 

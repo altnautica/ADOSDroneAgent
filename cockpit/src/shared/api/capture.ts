@@ -1,4 +1,4 @@
-// Capture session control. The capture service belongs to the world-engine
+// Capture session control. The capture service belongs to the Capture
 // extension; the agent reaches it through the plugin HTTP proxy
 // (`/api/plugins/{plugin_id}/x/...`). A 404 there means the extension is not
 // installed on this node.
@@ -33,30 +33,30 @@ export interface CaptureState {
   storage: { free_bytes: number; est_remaining_s: number } | null;
 }
 
-export const CAPTURE_STATE_PATH = "/api/plugins/com.altnautica.world-engine/x/atlas/capture/state";
+export const CAPTURE_STATE_PATH = "/api/plugins/com.altnautica.capture/x/capture/state";
 
 export function startCapture(args: { room?: string; floor?: number }): Promise<{ ok: boolean; session_id: string }> {
-  return apiFetch("/api/plugins/com.altnautica.world-engine/x/atlas/capture/start", {
+  return apiFetch("/api/plugins/com.altnautica.capture/x/capture/start", {
     method: "POST",
     body: args,
   });
 }
 
 export function stopCapture(): Promise<CaptureState> {
-  return apiFetch<CaptureState>("/api/plugins/com.altnautica.world-engine/x/atlas/capture/stop", {
+  return apiFetch<CaptureState>("/api/plugins/com.altnautica.capture/x/capture/stop", {
     method: "POST",
   });
 }
 
 export function markCapture(args: { room: string; floor: number }): Promise<{ ok: boolean; segment: number }> {
-  return apiFetch("/api/plugins/com.altnautica.world-engine/x/atlas/capture/mark", {
+  return apiFetch("/api/plugins/com.altnautica.capture/x/capture/mark", {
     method: "POST",
     body: args,
   });
 }
 
 export function putCaptureExposure(exposure: CaptureExposure): Promise<CaptureExposure> {
-  return apiFetch<CaptureExposure>("/api/plugins/com.altnautica.world-engine/x/atlas/capture/exposure", {
+  return apiFetch<CaptureExposure>("/api/plugins/com.altnautica.capture/x/capture/exposure", {
     method: "PUT",
     body: { locked: exposure.locked, exposure_us: exposure.exposure_us, gain: exposure.gain, mode: exposure.mode },
   });

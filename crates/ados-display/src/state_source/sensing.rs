@@ -1,5 +1,5 @@
 //! Sensing reads for the cameras, sensors and storage pages: the sensor, clock
-//! and storage routes plus the world-engine capture state. Each read is
+//! and storage routes plus the Capture extension's state. Each read is
 //! independent: a `present: false` body (or a route not served) leaves its
 //! block absent, a failed request leaves it unreachable. The sensors route's
 //! `health` (flow, range, lidar, cameras) is worded by the cockpit spec on the
@@ -14,9 +14,8 @@ use crate::pages::sensing_ctx::{
 };
 use crate::pages::sensor_health::nav_health;
 
-/// The world-engine capture state route behind the plugin proxy.
-pub(super) const CAPTURE_STATE_PATH: &str =
-    "/api/plugins/com.altnautica.world-engine/x/atlas/capture/state";
+/// The Capture extension's state route behind the plugin proxy.
+pub(super) const CAPTURE_STATE_PATH: &str = "/api/plugins/com.altnautica.capture/x/capture/state";
 
 impl StateSource {
     /// Fetch every sensing route and map them into a [`SensingCtx`].

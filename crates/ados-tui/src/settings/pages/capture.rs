@@ -1,4 +1,4 @@
-//! Settings page: capture exposure (visor). The world-engine extension owns
+//! Settings page: capture exposure (visor). The Capture extension owns
 //! the capture service; the state and the exposure write go through its
 //! plugin route. A 404 means the extension is not installed.
 
@@ -20,8 +20,8 @@ use crate::toast::ToastKind;
 use crate::worker::{Purpose, Reply, Request, Route};
 
 const ROUTE: Route = Route::page("capture");
-const EXPOSURE_PATH: &str = "/api/plugins/com.altnautica.world-engine/x/atlas/capture/exposure";
-const MISSING: &str = "Install the World Engine extension to configure capture";
+const EXPOSURE_PATH: &str = "/api/plugins/com.altnautica.capture/x/capture/exposure";
+const MISSING: &str = "Install the Capture extension to configure capture";
 const INCOMPLETE: &str = "Exposure, gain and mode are all needed before the camera takes a change.";
 
 /// The four exposure fields, in row order.

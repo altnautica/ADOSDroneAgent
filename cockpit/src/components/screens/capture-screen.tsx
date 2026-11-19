@@ -1,4 +1,4 @@
-// Capture — the visor's home: the world-engine extension's capture session.
+// Capture — the visor's home: the Capture extension's session.
 // REC starts a session for a room and floor, MARK starts a new segment, and
 // Stop closes the session (no resume), so Stop fires from a guarded button. A
 // node without the extension answers 404 and the screen says so.

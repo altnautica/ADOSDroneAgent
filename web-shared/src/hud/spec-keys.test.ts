@@ -258,11 +258,9 @@ describe("cockpit panel words", () => {
       "target.reacquire_mode",
       "nav_source.no_ack",
       "map.status.memory",
-      "map.status.upload",
-      "map.status.live_stream",
       "map.status.placement.onboard",
-      "map.status.upload.uploading",
-      "map.status.stream.degraded",
+      "map.status.pose_provider.lidar_planar",
+      "map.status.imu_feed.degraded",
     ]) {
       expect(S[k], k).toBeTruthy();
     }

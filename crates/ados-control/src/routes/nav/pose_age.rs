@@ -1,6 +1,6 @@
 //! `pose_age_ms` on the `nav` kind.
 //!
-//! vision-nav reports how old a pose is when its `ODOMETRY` goes out (the
+//! Navigation reports how old a pose is when its `ODOMETRY` goes out (the
 //! median over its last poses, `poseAgeMs`) on its `navigation` telemetry
 //! channel, not on `nav.state`. The plugin host mirrors that channel into the
 //! plugin's state sidecar as `telemetry.navigation`; the `nav` value the hub
@@ -19,10 +19,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-use super::topics::VISION_NAV_ID;
+use super::topics::NAVIGATION_ID;
 use crate::routes::plugins_state::read_plugin_sidecar;
 
-/// The sidecar entry vision-nav's `navigation` telemetry channel lands in.
+/// The sidecar entry Navigation's `navigation` telemetry channel lands in.
 const NAVIGATION_CHANNEL: &str = "telemetry.navigation";
 
 /// The cockpit spec the surfaces judge staleness by.
@@ -38,7 +38,7 @@ static STALE_AFTER_MS: LazyLock<i64> = LazyLock::new(|| {
         .expect("flight-state.json carries stale_after_ms")
 });
 
-/// The pose age (ms, one decimal) at `now_ms`: what vision-nav last reported
+/// The pose age (ms, one decimal) at `now_ms`: what Navigation last reported
 /// in its sidecar `doc` plus the time since that report. `None` before the
 /// first pose, when the channel is absent, future-dated or at least
 /// [`STALE_AFTER_MS`] old, or when the value is not a finite non-negative
@@ -67,13 +67,13 @@ pub(crate) fn with_pose_age(mut payload: Value, pose_age_ms: Option<f64>) -> Val
     payload
 }
 
-/// A vision-nav `nav.state` payload with the pose age from its state sidecar
+/// A Navigation `nav.state` payload with the pose age from its state sidecar
 /// in `sidecar_dir`, read at `now`.
 pub(crate) fn enrich_nav_state(payload: Value, sidecar_dir: &Path, now: SystemTime) -> Value {
     let now_ms = now
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let pose_age = read_plugin_sidecar(sidecar_dir, VISION_NAV_ID, now)
+    let pose_age = read_plugin_sidecar(sidecar_dir, NAVIGATION_ID, now)
         .and_then(|doc| pose_age_from_sidecar(&doc, now_ms));
     with_pose_age(payload, pose_age)
 }
@@ -147,7 +147,7 @@ mod tests {
         let body = json!({"telemetry.navigation": {"ts_ms": written_ms - 200,
             "payload": {"poseAgeMs": 96.0}}});
         std::fs::write(
-            dir.path().join(format!("{VISION_NAV_ID}-state.json")),
+            dir.path().join(format!("{NAVIGATION_ID}-state.json")),
             body.to_string(),
         )
         .unwrap();

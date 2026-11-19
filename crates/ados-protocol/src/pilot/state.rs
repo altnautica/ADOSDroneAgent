@@ -293,7 +293,7 @@ impl SpeedCap {
     }
 }
 
-/// The pilot does not trust the EKF's horizontal position: the vision-nav
+/// The pilot does not trust the EKF's horizontal position: the Navigation
 /// external position is degraded or lost, or the flight controller's optical
 /// flow says the vehicle moves when the estimate says otherwise. While set,
 /// no hold is a position hold and nothing new is flown on the estimate.
@@ -303,7 +303,7 @@ pub struct PositionUnverified {
     /// `flow_disagrees` (the pilot's own flow-against-estimate check),
     /// `extnav_lost` or `extnav_degraded`.
     pub reason: String,
-    /// vision-nav's `health_reason` (`corridor_unmeasured`, `flow_disagrees`,
+    /// Navigation's `health_reason` (`corridor_unmeasured`, `flow_disagrees`,
     /// `ekf_flow_disagree`, …) when it named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
