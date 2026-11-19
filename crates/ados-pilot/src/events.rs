@@ -19,7 +19,7 @@ pub const TOPIC_OCCUPANCY: &str = "plugin.navigation.occupancy";
 /// Navigation's pose.
 pub const TOPIC_POSE: &str = "plugin.navigation.pose";
 /// Navigation's active EKF source set: the GNSS-denied speed cap.
-pub const TOPIC_NAV_STATE: &str = "nav.state";
+pub const TOPIC_NAV_STATE: &str = "plugin.navigation.state";
 
 /// Topics the pilot reads.
 pub const TOPICS: &[&str] = &[

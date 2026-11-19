@@ -1,7 +1,7 @@
 //! Whether the EKF's horizontal position can be trusted.
 //!
 //! Two sources say it cannot:
-//! - Navigation's `nav.state` reports the external position degraded or lost
+//! - Navigation's `plugin.navigation.state` reports the external position degraded or lost
 //!   while the active EKF source set takes its horizontal position from it;
 //! - the FC's own optical flow (rate × range) and the EKF's velocity disagree
 //!   by more than [`TRIP_M`] over [`WINDOW_MS`]. A frozen external position
@@ -32,7 +32,7 @@ pub const CLEAR_M: f32 = 0.75;
 const MAX_STEP_MS: u64 = 200;
 /// A flow check whose last flow is older than this no longer speaks.
 const FLOW_STALE_MS: u64 = 1_000;
-/// A `nav.state` older than this no longer speaks for Navigation.
+/// A `plugin.navigation.state` older than this no longer speaks for Navigation.
 pub const EXTNAV_STALE_MS: u64 = 3_000;
 /// `EK3_SRCn_POSXY` value for external navigation.
 const POSXY_EXTNAV: f32 = 6.0;
@@ -147,7 +147,7 @@ impl FlowCheck {
     }
 }
 
-/// Navigation's last `nav.state`, as far as the position check reads it.
+/// Navigation's last `plugin.navigation.state`, as far as the position check reads it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExtNav {
     pub mode: String,

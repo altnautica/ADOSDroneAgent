@@ -24,6 +24,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The pilot, the cockpit, the dashboard and the TUI read Navigation's
+  state from the shared topic `plugin.navigation.state` instead of
+  `nav.state`: only Navigation may publish it, and plugins granted
+  `telemetry.read` (Follow-Me) may subscribe to it.
+
 - The 3D-capture extension split into Capture (`com.altnautica.capture`), Reconstruct (`com.altnautica.reconstruct`) and Navigation (`com.altnautica.navigation`), and the core follows it. The pilot, the nav hub and the depth feed read `plugin.navigation.{pose,scan,lidar,occupancy,map_status}` and `nav.state` from Navigation; the HAL leaves the serial port Navigation's `navigation.lidar` names to the LiDAR; the cockpit, the agent dashboard, the HDMI display and the TUI reach capture at `/api/plugins/com.altnautica.capture/x/capture/…`, and the cockpit's Node screen reads the reconstruction node through Reconstruct. The cockpit's Map panel shows Navigation's map status: placement, memory, voxel size, sweep points, area, the pose provider and the FC IMU feed.
 - The installer's extension toggle is `--reconstruct` / `--no-reconstruct` (on by default for workstation and compute), installing Reconstruct.
 - Every install replaces a retired first-party extension with its successors, whatever the toggle: Vision Navigation becomes Navigation, and the single 3D-capture extension becomes Navigation and Capture on a drone or Visor, Capture on a ground station and Reconstruct on a workstation or compute node. Every retired extension is stopped before any successor installs (both generations would claim the same LiDAR and MAVLink components) and removed with its data kept once all its successors are in; when none of them could install it is switched back on if it was on, and when only some did it stays off. Settings start from the successor's defaults.

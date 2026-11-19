@@ -3,14 +3,14 @@
 //! readiness items: `nav_imu`, the FC IMU feed itself, and `nav_heading`, the
 //! lidar map's heading state the same field carries while the feed measures.
 //! Both hold a pilot-flown launch only while Navigation flies external
-//! navigation from that pose (its `nav.state` mode).
+//! navigation from that pose (its `plugin.navigation.state` mode).
 
 use ados_protocol::pilot::{ControlMode, Readiness, Severity};
 use serde::Deserialize;
 
 use crate::sensor_spec::spec;
 
-/// Navigation's `nav.state` mode while the flight controller fuses the lidar
+/// Navigation's `plugin.navigation.state` mode while the flight controller fuses the lidar
 /// pose as external navigation.
 const EXTERNAL_NAV: &str = "external_nav";
 
@@ -37,7 +37,7 @@ pub struct ImuFeed {
 #[derive(Debug, Clone, Default)]
 pub struct NavImuTrack {
     last: Option<(ImuFeed, u64)>,
-    /// Whether Navigation's last `nav.state` named [`EXTERNAL_NAV`]; false
+    /// Whether Navigation's last `plugin.navigation.state` named [`EXTERNAL_NAV`]; false
     /// before any (nothing fuses the lidar pose without Navigation).
     external_nav: bool,
 }
@@ -53,7 +53,7 @@ impl NavImuTrack {
             .map(|f| (f, now_ms));
     }
 
-    /// Fold a Navigation `nav.state` report in. A report naming no mode
+    /// Fold a Navigation `plugin.navigation.state` report in. A report naming no mode
     /// keeps the last one.
     pub fn on_nav_state(&mut self, payload: &serde_json::Value) {
         if let Some(mode) = payload.get("mode").and_then(serde_json::Value::as_str) {
@@ -268,7 +268,7 @@ mod tests {
         let severities = |t: &NavImuTrack| items(t, ControlMode::Ados, 0).map(|i| i.map(|i| i.1));
         let warn = [Some(Severity::Warn), Some(Severity::Warn)];
         let block = [Some(Severity::Block), Some(Severity::Block)];
-        assert_eq!(severities(&t), warn, "before any nav.state");
+        assert_eq!(severities(&t), warn, "before any plugin.navigation.state");
         t.on_nav_state(&json!({"mode": "off", "active_set": null}));
         assert_eq!(severities(&t), warn);
         t.on_nav_state(&json!({"mode": "external_nav", "active_set": 1}));

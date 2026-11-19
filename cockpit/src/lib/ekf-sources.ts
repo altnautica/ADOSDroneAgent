@@ -1,7 +1,7 @@
 // The EKF source sets as the nav-source chip and the minimap read them: the
 // nine `EK3_SRC{1,2,3}_{POSXY,VELXY,YAW}` parameters, read once per FC link
 // from the parameter cache in one `GET /api/params`, decoded to words, and the chip's input
-// assembled from the FC telemetry and the companion's `nav.state`.
+// assembled from the FC telemetry and the companion's `plugin.navigation.state`.
 
 import { getParams } from "@/lib/fc-config";
 import type { VehicleState } from "@/lib/types";

@@ -84,7 +84,7 @@ pub(crate) fn request_line() -> Vec<u8> {
 }
 
 /// Apply one exported event line to the hub. A line that is not a well-formed
-/// event of this wire version is skipped. Navigation's `nav.state` gains the
+/// event of this wire version is skipped. Navigation's `plugin.navigation.state` gains the
 /// pose age from its state sidecar in `sidecar_dir`.
 pub(crate) fn apply_line(hub: &NavHub, sidecar_dir: &Path, line: &[u8]) {
     let Ok(event) = serde_json::from_slice::<Value>(line) else {
@@ -219,7 +219,7 @@ mod tests {
     fn nav_state_gains_the_pose_age() {
         let hub = NavHub::new();
         let dir = tempfile::tempdir().unwrap();
-        let line = br#"{"v":1,"topic":"nav.state","publisher":"com.altnautica.navigation","ts_ms":1,"payload":{"mode":"external_nav"}}"#;
+        let line = br#"{"v":1,"topic":"plugin.navigation.state","publisher":"com.altnautica.navigation","ts_ms":1,"payload":{"mode":"external_nav"}}"#;
         apply_line(&hub, dir.path(), line);
         let nav = &hub.status_body()["nav"]["data"];
         assert_eq!(nav["mode"], "external_nav");

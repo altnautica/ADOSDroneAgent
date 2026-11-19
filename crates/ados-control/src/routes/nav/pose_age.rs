@@ -2,7 +2,7 @@
 //!
 //! Navigation reports how old a pose is when its `ODOMETRY` goes out (the
 //! median over its last poses, `poseAgeMs`) on its `navigation` telemetry
-//! channel, not on `nav.state`. The plugin host mirrors that channel into the
+//! channel, not on `plugin.navigation.state`. The plugin host mirrors that channel into the
 //! plugin's state sidecar as `telemetry.navigation`; the `nav` value the hub
 //! serves carries it as `pose_age_ms`, so every operator surface reads it from
 //! the nav state.
@@ -67,7 +67,7 @@ pub(crate) fn with_pose_age(mut payload: Value, pose_age_ms: Option<f64>) -> Val
     payload
 }
 
-/// A Navigation `nav.state` payload with the pose age from its state sidecar
+/// A Navigation `plugin.navigation.state` payload with the pose age from its state sidecar
 /// in `sidecar_dir`, read at `now`.
 pub(crate) fn enrich_nav_state(payload: Value, sidecar_dir: &Path, now: SystemTime) -> Value {
     let now_ms = now
@@ -120,7 +120,7 @@ mod tests {
             json!({"telemetry.navigation": {"ts_ms": 1, "payload": {"poseAgeMs": null}}}),
             json!({"telemetry.navigation": {"ts_ms": 1, "payload": {}}}),
             json!({"telemetry.navigation": {"payload": {"poseAgeMs": 5.0}}}),
-            json!({"nav.state": {"ts_ms": 1, "payload": {"poseAgeMs": 5.0}}}),
+            json!({"plugin.navigation.state": {"ts_ms": 1, "payload": {"poseAgeMs": 5.0}}}),
         ] {
             assert_eq!(pose_age_from_sidecar(&doc(d.clone()), 1), None, "{d}");
         }

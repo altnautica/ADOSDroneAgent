@@ -3,7 +3,7 @@
 //! targets, so the pilot enforces it on every setpoint it flies.
 //!
 //! The pilot knows the active EKF source set only from Navigation's
-//! `nav.state`: it keeps the last set named there (the FC keeps a set until
+//! `plugin.navigation.state`: it keeps the last set named there (the FC keeps a set until
 //! told otherwise), and the boot set 1 before any. A source-set switch made
 //! by an RC switch or a ground station does not reach the pilot, which keeps
 //! flying under the last set it heard of.

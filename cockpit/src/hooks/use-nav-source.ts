@@ -1,5 +1,5 @@
 // What the EKF navigates on, resolved from the telemetry poll, the EKF source
-// sets and Navigation's fresh `nav.state`: read by the nav-source chip and by
+// sets and Navigation's fresh `plugin.navigation.state`: read by the nav-source chip and by
 // the status pill (whose shared rules raise a degraded source).
 
 import { useEffect } from "react";

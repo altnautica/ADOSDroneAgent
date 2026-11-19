@@ -507,6 +507,35 @@ mod tests {
     }
 
     #[test]
+    fn follow_me_may_read_the_shared_navigation_state_and_never_publish_it() {
+        let shared = SharedTopics::new(vec![SharedTopic {
+            topic: "plugin.navigation.state".to_string(),
+            owner: "com.altnautica.navigation".to_string(),
+            subscribe_capability: "telemetry.read".to_string(),
+        }]);
+        let follow_me = caps(&["event.subscribe", "telemetry.read", "event.publish"]);
+        assert!(is_subscribe_allowed(
+            "com.altnautica.follow-me",
+            "plugin.navigation.state",
+            &caps(&["event.subscribe", "telemetry.read"]),
+            &shared
+        ));
+        // Only the owner publishes it, so no other plugin can spoof the state.
+        assert!(!is_publish_allowed(
+            "com.altnautica.follow-me",
+            "plugin.navigation.state",
+            &follow_me,
+            &shared
+        ));
+        assert!(is_publish_allowed(
+            "com.altnautica.navigation",
+            "plugin.navigation.state",
+            &caps(&["event.publish"]),
+            &shared
+        ));
+    }
+
+    #[test]
     fn a_shared_topic_is_matched_exactly() {
         // A longer topic that merely starts with a shared one names no
         // capability and falls through to the ordinary namespace rule.

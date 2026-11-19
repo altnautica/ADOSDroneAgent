@@ -183,14 +183,14 @@ pub struct Pilot {
     /// Where a skill goal or goto holds while the obstacle data is stale,
     /// from the tick it went stale; cleared on any tick that does not keep it.
     stale_hold: Option<[f32; 3]>,
-    /// The EKF source set the FC flies: the last one Navigation's `nav.state`
+    /// The EKF source set the FC flies: the last one Navigation's `plugin.navigation.state`
     /// named, the boot set before any ([`nav_cap`]).
     nav_set: u8,
     /// The last capped horizontal velocity flown and its time ([`nav_cap`]).
     cap_vel: Option<(V2, u64)>,
     /// The FC's flow against the EKF's velocity ([`position_check`]).
     flow_check: position_check::FlowCheck,
-    /// Navigation's last `nav.state` ([`position_check`]).
+    /// Navigation's last `plugin.navigation.state` ([`position_check`]).
     extnav: Option<position_check::ExtNav>,
     last_tick_ms: Option<u64>,
     controller_lost_shown: bool,

@@ -148,7 +148,7 @@ fn a_stale_nav_state_keeps_the_last_reported_set() {
 
 #[test]
 fn a_non_gps_boot_set_is_capped_despite_a_3d_fix() {
-    // No nav.state yet: the FC flies source set 1, here external nav.
+    // No plugin.navigation.state yet: the FC flies source set 1, here external nav.
     let mut w = World::new();
     w.p.fc.params.insert("EK3_SRC1_POSXY".into(), 6.0);
     w.airborne(copter::GUIDED);

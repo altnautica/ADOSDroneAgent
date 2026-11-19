@@ -120,7 +120,7 @@ fn follow_phase(state: &Value) -> Option<String> {
     })
 }
 
-/// The navigation source (Navigation `nav.state`).
+/// The navigation source (Navigation `plugin.navigation.state`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NavSource {
     pub mode: Option<String>,

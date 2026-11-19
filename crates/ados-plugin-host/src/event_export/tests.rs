@@ -60,13 +60,13 @@ async fn forwards_only_the_subscribed_topics() {
     let bus = Arc::new(EventBus::new());
     let (path, task) = serve_event_export(bus.clone(), dir.path().join("plugin-host")).unwrap();
 
-    let mut lines = connect(&path, r#"{"v":1,"op":"subscribe","topics":["nav.state"]}"#).await;
+    let mut lines = connect(&path, r#"{"v":1,"op":"subscribe","topics":["plugin.navigation.state"]}"#).await;
     assert_eq!(next_json(&mut lines).await["ok"], true);
 
     bus.publish(event("follow.state", "com.example.follow", 1));
-    bus.publish(event("nav.state", "com.example.nav", 2));
+    bus.publish(event("plugin.navigation.state", "com.example.nav", 2));
     let got = next_json(&mut lines).await;
-    assert_eq!(got["topic"], "nav.state");
+    assert_eq!(got["topic"], "plugin.navigation.state");
     assert_eq!(got["publisher"], "com.example.nav");
     assert_eq!(got["payload"]["n"], 2);
 

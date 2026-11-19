@@ -20,7 +20,7 @@
 //!   `seq`.
 //!
 //! The sources are plugin event-bus topics: the Navigation extension's pose,
-//! scan, occupancy, map-status and `nav.state` topics, and
+//! scan, occupancy, map-status and `plugin.navigation.state` topics, and
 //! follow-me's `follow.state` and follow events. They reach this process over
 //! the plugin host's event export ([`crate::ipc::plugin_events_client`]), so
 //! the operator surfaces read navigation without loading an extension UI. `data`

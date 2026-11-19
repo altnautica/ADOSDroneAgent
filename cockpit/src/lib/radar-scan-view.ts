@@ -25,7 +25,7 @@ export type RadarReadoutBand = RadarBand | "no_returns";
 
 /** The scan arrives at 10 Hz; one second without one is a dead source. */
 export const SCAN_FRESH_MS = 1000;
-/** `nav.state` (and its `min_obstacle_m`) arrives at about 1 Hz. */
+/** `plugin.navigation.state` (and its `min_obstacle_m`) arrives at about 1 Hz. */
 export const NAV_FRESH_MS = 3000;
 
 /**
@@ -47,7 +47,7 @@ export interface RadarViewInput {
   fcNearestM: number | null;
   /** True when the FC reports proximity sectors at all. */
   fcPresent: boolean;
-  /** The companion's `nav.state.min_obstacle_m`, null when absent. */
+  /** The companion's `plugin.navigation.state.min_obstacle_m`, null when absent. */
   minObstacleM: number | null;
   navAgeMs: number;
   radiusPx: number;
