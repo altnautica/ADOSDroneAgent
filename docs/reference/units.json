@@ -86,9 +86,7 @@
       "api_restartable": true,
       "appliance_only": false,
       "category": "core",
-      "condition_paths": [
-        "/opt/ados/bin/ados-cloud"
-      ],
+      "condition_paths": [],
       "description": "ADOS Cloud Relay (MQTT + Convex Heartbeat)",
       "drops_link": true,
       "install": "none",
@@ -108,9 +106,7 @@
       "api_restartable": false,
       "appliance_only": false,
       "category": "on_demand",
-      "condition_paths": [
-        "/opt/ados/bin/ados-control"
-      ],
+      "condition_paths": [],
       "description": "ADOS Native Control API",
       "drops_link": false,
       "install": "universal",
@@ -270,9 +266,7 @@
       "api_restartable": true,
       "appliance_only": true,
       "category": "hardware",
-      "condition_paths": [
-        "/opt/ados/bin/ados-input"
-      ],
+      "condition_paths": [],
       "description": "ADOS Input Manager (ground-station profile)",
       "drops_link": true,
       "install": "profile",
@@ -397,8 +391,7 @@
       "appliance_only": true,
       "category": "hardware",
       "condition_paths": [
-        "/dev/i2c-1",
-        "/opt/ados/bin/ados-oled-i2c"
+        "/dev/i2c-1"
       ],
       "description": "ADOS I2C status OLED (ground-station profile)",
       "drops_link": false,
@@ -435,9 +428,7 @@
       "api_restartable": true,
       "appliance_only": true,
       "category": "hardware",
-      "condition_paths": [
-        "/opt/ados/bin/ados-pic"
-      ],
+      "condition_paths": [],
       "description": "ADOS Pilot-in-Command Arbiter (ground-station profile)",
       "drops_link": true,
       "install": "profile",
@@ -454,9 +445,7 @@
       "api_restartable": true,
       "appliance_only": false,
       "category": "core",
-      "condition_paths": [
-        "/opt/ados/bin/ados-pilot"
-      ],
+      "condition_paths": [],
       "description": "ADOS Pilot (on-board command authority)",
       "drops_link": false,
       "install": "none",
@@ -472,9 +461,7 @@
       "api_restartable": true,
       "appliance_only": false,
       "category": null,
-      "condition_paths": [
-        "/opt/ados/bin/ados-plugin-host"
-      ],
+      "condition_paths": [],
       "description": "ADOS Plugin Host",
       "drops_link": false,
       "install": "universal",
@@ -572,9 +559,7 @@
       "api_restartable": true,
       "appliance_only": false,
       "category": "core",
-      "condition_paths": [
-        "/opt/ados/bin/ados-swarmbus"
-      ],
+      "condition_paths": [],
       "description": "ADOS Swarm State Bus",
       "drops_link": true,
       "install": "none",
@@ -700,9 +685,7 @@
       "api_restartable": true,
       "appliance_only": false,
       "category": "hardware",
-      "condition_paths": [
-        "/opt/ados/bin/ados-vision"
-      ],
+      "condition_paths": [],
       "description": "ADOS Vision Engine",
       "drops_link": false,
       "install": "none",

@@ -389,7 +389,7 @@
     },
     {
       "category": "data_network",
-      "description": "Lets a declared plugin service bind the TCP ports it lists in its manifest (listen_ports) so other nodes on the network can reach it, and advertise those ports on the local network over mDNS through the agent. Every other port stays closed to the plugin, and the plugin's main process never listens.",
+      "description": "Lets a declared plugin service bind the TCP ports in its manifest's listen_ports and the UDP ports in its udp_listen_ports so other nodes on the network can reach it, and advertise its TCP ports on the local network over mDNS through the agent. Every other port stays closed to the plugin, and the plugin's main process never listens.",
       "enforced": true,
       "id": "network.listen",
       "label": "Accept inbound network connections",

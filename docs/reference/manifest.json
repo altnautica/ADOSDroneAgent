@@ -110,6 +110,14 @@
     },
     {
       "default": null,
+      "description": "Udp Listen Ports",
+      "enum": null,
+      "path": "agent.contributes.services[].udp_listen_ports",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
       "description": "Shared Topics",
       "enum": null,
       "path": "agent.contributes.shared_topics",
