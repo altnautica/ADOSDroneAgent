@@ -690,7 +690,9 @@ fn request_list(ts: u8, tc: u8) -> MavMessage {
 }
 
 /// Drive the core from the FC fan-out and the client tap, publish into the
-/// state, and send the download frames through the router's own path.
+/// state, and send the download frames through the router's own path. The
+/// core's deadlines and the vehicle position it reads are on the vehicle
+/// state's clock (ADOS time); the 200 ms poll is a fixed wall rate.
 pub async fn run(
     fc: Arc<FcConnection>,
     state: Arc<Mutex<VehicleState>>,
@@ -699,6 +701,7 @@ pub async fn run(
     cancel: Shutdown,
 ) {
     let mut core = MirrorCore::new(fc.our_ids());
+    let clock = state.lock().await.clock.clone();
     let path = std::path::Path::new(&dir).join(MIRROR_FILE);
     let mut written: Option<(u32, bool, bool)> = None;
     let mut fc_rx = fc.subscribe();
@@ -708,7 +711,7 @@ pub async fn run(
         let out = tokio::select! {
             frame = fc_rx.recv() => match frame {
                 Ok(f) => {
-                    let now = Instant::now();
+                    let now = clock.now();
                     let mut out = Vec::new();
                     for m in wire::frames(&f.bytes) {
                         out.extend(core.on_fc_frame(&m, now));
@@ -720,7 +723,7 @@ pub async fn run(
             },
             bytes = client_rx.recv() => match bytes {
                 Ok(b) => {
-                    let now = Instant::now();
+                    let now = clock.now();
                     for m in wire::frames(&b) {
                         core.on_client_frame(&m, now);
                     }
@@ -730,7 +733,7 @@ pub async fn run(
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             _ = tick.tick() => {
-                let now = Instant::now();
+                let now = clock.now();
                 let (fw, position) = {
                     let s = state.lock().await;
                     (s.firmware, VehiclePosition::of(&s))

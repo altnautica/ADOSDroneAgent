@@ -22,13 +22,14 @@ pub struct BatteryPack {
     pub consumed_wh: Option<f64>,
     /// `MAV_BATTERY_FUNCTION` as its numeric value.
     pub function: u8,
-    /// When this id's last BATTERY_STATUS arrived. Published as `age_ms`, so a
+    /// When this id's last BATTERY_STATUS arrived, on the vehicle state's
+    /// clock. Published as `age_ms`, so a
     /// pack whose stream stopped is told apart from one still reporting.
     pub received_at: Option<std::time::Instant>,
 }
 
 impl BatteryPack {
-    pub(super) fn from_status(m: &BATTERY_STATUS_DATA) -> Self {
+    pub(super) fn from_status(m: &BATTERY_STATUS_DATA, now: std::time::Instant) -> Self {
         Self {
             id: m.id,
             cell_voltages: cell_voltages(&m.voltages),
@@ -38,16 +39,15 @@ impl BatteryPack {
             consumed_mah: (m.current_consumed != -1).then_some(m.current_consumed as i64),
             consumed_wh: (m.energy_consumed != -1).then(|| m.energy_consumed as f64 / 36.0),
             function: m.battery_function as u8,
-            received_at: Some(std::time::Instant::now()),
+            received_at: Some(now),
         }
     }
 
-    pub(super) fn to_wire(&self) -> Value {
-        let age_ms = self.received_at.map(|at| {
-            std::time::Instant::now()
-                .saturating_duration_since(at)
-                .as_millis() as u64
-        });
+    /// The wire form, aged at `now` on the clock the pack was stamped on.
+    pub(super) fn to_wire(&self, now: std::time::Instant) -> Value {
+        let age_ms = self
+            .received_at
+            .map(|at| now.saturating_duration_since(at).as_millis() as u64);
         json!({
             "id": self.id,
             "cell_voltages": self.cell_voltages,

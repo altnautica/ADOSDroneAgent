@@ -1,4 +1,6 @@
-//! The swarm socket reader, the control loop and the setpoint send.
+//! The swarm socket reader, the control loop and the setpoint send. The loop
+//! ticks, and the payload and own-fix stamps age, on ADOS time
+//! ([`crate::clock`]); only the socket reconnect backoff is wall time.
 
 use super::*;
 
@@ -8,10 +10,12 @@ use super::*;
 /// table, never a backlog, so a loop that fell behind must skip stale frames
 /// rather than work through them. Reading in its own task also keeps the byte
 /// reader out of the control loop's `select!`, where a cancelled read would drop
-/// buffered bytes and mis-frame the next line.
+/// buffered bytes and mis-frame the next line. Each payload is stamped on
+/// `clock`, the loop's ADOS time.
 pub(super) async fn read_swarm_socket(
     path: String,
     tx: watch::Sender<Option<(Value, Instant)>>,
+    clock: RouterClock,
     cancel: Shutdown,
 ) {
     loop {
@@ -31,7 +35,7 @@ pub(super) async fn read_swarm_socket(
                     Ok(v) => {
                         // A send failure means the control loop is gone; so is the
                         // reason to keep reading.
-                        if tx.send(Some((v, Instant::now()))).is_err() {
+                        if tx.send(Some((v, clock.now()))).is_err() {
                             return;
                         }
                     }
@@ -52,7 +56,7 @@ pub(super) async fn read_swarm_socket(
 }
 
 /// Tick the controller and send what it asks for, re-reading the block every
-/// [`CONFIG_POLL`].
+/// [`CONFIG_POLL`]. Both timers run on the connection's ADOS time.
 pub(super) async fn control_loop(
     fc: Arc<FcConnection>,
     state: Arc<Mutex<VehicleState>>,
@@ -62,11 +66,10 @@ pub(super) async fn control_loop(
     status: Arc<SwarmSetpointStatus>,
     cancel: Shutdown,
 ) -> LoopExit {
+    let clock = fc.clock().clone();
     let mut fixes: Vec<NeighborFix> = Vec::new();
-    let mut tick = tokio::time::interval(CONTROL_PERIOD);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut reload = tokio::time::interval(CONFIG_POLL);
-    reload.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut tick = clock.interval(CONTROL_PERIOD);
+    let mut reload = clock.interval(CONFIG_POLL);
 
     loop {
         tokio::select! {
@@ -85,7 +88,7 @@ pub(super) async fn control_loop(
             }
             _ = tick.tick() => {}
         }
-        let now = Instant::now();
+        let now = clock.now();
 
         fixes.clear();
         if let Some((payload, at)) = rx.borrow().as_ref() {
@@ -115,10 +118,9 @@ pub(super) async fn control_loop(
                 // specifically, never from `last_update`, which every frame
                 // refreshes: a heartbeat arriving while the position has frozen
                 // is precisely the case the controller has to refuse, and
-                // `last_update` reports it as healthy.
-                fix_age: s
-                    .position_at
-                    .map(|t| std::time::Instant::now().saturating_duration_since(t)),
+                // `last_update` reports it as healthy. Aged on the clock the
+                // state stamped it on.
+                fix_age: s.position_at.map(|t| s.clock.since(t)),
             }
         };
 

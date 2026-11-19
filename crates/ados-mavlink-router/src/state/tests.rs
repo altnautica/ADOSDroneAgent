@@ -812,3 +812,34 @@ fn ekf_status_and_local_position_are_published_with_an_age() {
     assert_eq!(lp["vz"], json!(-0.25));
     assert!(lp["age_ms"].as_u64().unwrap() < 1_000);
 }
+
+#[test]
+fn the_position_age_counts_sim_time_on_a_node_following_the_simulator() {
+    use crate::clock::tests::{advance, sim_clock};
+    let (clock, feed) = sim_clock();
+    let mut s = VehicleState {
+        clock,
+        ..VehicleState::default()
+    };
+    advance(&feed, 1, 1_000);
+    s.update_from_message(
+        &MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
+            time_boot_ms: 0,
+            lat: 129_716_000,
+            lon: 775_946_000,
+            alt: 120_000,
+            relative_alt: 50_000,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            hdg: 0,
+        }),
+        TS,
+    );
+    // Wall time alone ages nothing: the simulator has not moved.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(s.to_wire()["position_age_ms"], json!(0));
+    // 2.5 s of sim time, in no wall time at all.
+    advance(&feed, 2, 3_500);
+    assert_eq!(s.to_wire()["position_age_ms"], json!(2_500));
+}

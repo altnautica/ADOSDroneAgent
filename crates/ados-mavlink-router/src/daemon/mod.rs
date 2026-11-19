@@ -49,14 +49,32 @@ async fn serve() {
 
     let cfg = MavlinkConfig::load();
 
-    let state = Arc::new(Mutex::new(VehicleState::default()));
+    // ADOS time for the control lanes and the vehicle-state stamps: the
+    // simulator's feed on `simulation.clock_feed` + 3 on a node configured for
+    // `simulation.clock: sim`, wall otherwise (see `crate::clock`).
+    let config_path =
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+    let gate = ados_config::simulation::read_gate(std::path::Path::new(&config_path));
+    let clock = match crate::clock::RouterClock::from_config(&gate) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "mavlink_sim_clock_bind_failed");
+            return;
+        }
+    };
+    tracing::info!(clock = clock.source(), "mavlink_router_clock");
+
+    let state = Arc::new(Mutex::new(VehicleState {
+        clock: clock.clone(),
+        ..VehicleState::default()
+    }));
     let mut pc = ParamCache::default_path();
     if let Err(e) = pc.load() {
         tracing::warn!(error = %e, "param_cache_load_failed");
     }
     let params = Arc::new(Mutex::new(pc));
 
-    let fc = FcConnection::new(cfg.clone(), state.clone(), params.clone());
+    let fc = FcConnection::with_clock(cfg.clone(), state.clone(), params.clone(), clock);
     let cancel = Shutdown::new();
 
     let dir = ados_protocol::paths::run_dir()

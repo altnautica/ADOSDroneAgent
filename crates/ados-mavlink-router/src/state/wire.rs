@@ -7,12 +7,15 @@ use super::*;
 impl VehicleState {
     /// The vehicle-derived wire snapshot.
     ///
-    /// `position_age_ms` is evaluated against the clock at call time, so this is
+    /// `position_age_ms` is evaluated against the state's clock (ADOS time) at
+    /// call time, so this is
     /// a snapshot-at-an-instant rather than a pure projection of the struct.
     /// That is the point: the age has to describe the moment the frame is
     /// published, because the consumer that reads it is deciding whether this
     /// node's fix is alive enough to broadcast to the fleet.
     pub fn to_wire(&self) -> Value {
+        let now = self.clock.now();
+        let age_ms = |at: std::time::Instant| now.saturating_duration_since(at).as_millis() as u64;
         // `null`, never a number, when no position has ever been decoded. A
         // sentinel like 0 would read as "fixed a moment ago" — the single worst
         // possible reading, since it is the one a freshness gate passes.
@@ -43,7 +46,6 @@ impl VehicleState {
             }),
             None => Value::Null,
         };
-        let now = std::time::Instant::now();
         let prearm: Vec<&str> = self
             .prearm
             .iter()
@@ -92,7 +94,11 @@ impl VehicleState {
             },
             // One entry per BATTERY_STATUS id, ordered by id. `battery` above
             // stays the single-pack view every existing reader projects.
-            "batteries": self.battery_packs.values().map(BatteryPack::to_wire).collect::<Vec<_>>(),
+            "batteries": self
+                .battery_packs
+                .values()
+                .map(|p| p.to_wire(now))
+                .collect::<Vec<_>>(),
             "gps": {
                 "fix_type": self.gps_fix_type,
                 "satellites": self.gps_satellites,
@@ -141,11 +147,4 @@ impl VehicleState {
         }
         wire
     }
-}
-
-/// Milliseconds since `at` on the monotonic clock, evaluated now.
-fn age_ms(at: std::time::Instant) -> u64 {
-    std::time::Instant::now()
-        .saturating_duration_since(at)
-        .as_millis() as u64
 }

@@ -5,7 +5,19 @@
 seam crates/ados-pilot/src/runtime.rs
 seam crates/ados-pilot/src/setup/service.rs
 seam crates/ados-plugin-host/src/pilot_client.rs
+seam crates/ados-mavlink-router/src/connection/swarm_setpoint/control.rs
+seam crates/ados-mavlink-router/src/connection/link_state.rs
+seam crates/ados-mavlink-router/src/connection/send_scheduler/ticks.rs
+seam crates/ados-mavlink-router/src/connection/send_scheduler/landed_request.rs
+seam crates/ados-mavlink-router/src/state.rs
+seam crates/ados-mavlink-router/src/state/wire.rs
+seam crates/ados-mavlink-router/src/state/battery.rs
+seam crates/ados-mavlink-router/src/state/landed.rs
+seam crates/ados-mavlink-router/src/mission_mirror.rs
 
 allow crates/ados-pilot/src/runtime.rs tokio::time::sleep( -- the MAVLink socket reconnect backoff is real time
 allow crates/ados-plugin-host/src/pilot_client.rs Instant::now() -- pilot link liveness (ALIVE) is real time
 allow crates/ados-plugin-host/src/pilot_client.rs tokio::time::sleep( -- pilot socket reconnect backoff is real time
+allow crates/ados-mavlink-router/src/connection/swarm_setpoint/control.rs tokio::time::sleep( -- swarm socket reconnect backoff is real time
+allow crates/ados-mavlink-router/src/connection/link_state.rs Instant::now() -- PIC sidecar freshness is judged against the file's wall-clock stamps
+allow crates/ados-mavlink-router/src/mission_mirror.rs tokio::time::interval( -- the mirror polls at a fixed wall rate; every deadline it checks reads ADOS time

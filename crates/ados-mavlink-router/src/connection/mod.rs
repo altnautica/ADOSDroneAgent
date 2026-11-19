@@ -233,12 +233,14 @@ pub struct FcConnection {
     /// open, cleared on teardown.
     fc_variant: Mutex<Option<String>>,
     baud: AtomicU32,
-    /// Monotonic nanoseconds since [`Self::epoch`] of the last inbound frame.
+    /// ADOS-time nanoseconds ([`Self::clock`]) of the last inbound frame.
     /// An atomic rather than a mutex: it is stamped once per read on the
     /// hottest path and read by the stream cadence.
     last_msg_at: AtomicU64,
-    /// The monotonic origin `last_msg_at` counts from.
+    /// The monotonic origin of the visor drop-log rate limit (wall time).
     epoch: Instant,
+    /// ADOS time for the control lanes (see [`crate::clock`]).
+    clock: crate::clock::RouterClock,
     /// Whether the vehicle's most recent frame carried a MAVLink 2 signature:
     /// the FC answers signed, so it has a signing key and drops the unsigned
     /// frames this router originates on every link but channel 0.
@@ -322,11 +324,22 @@ pub struct FcConnection {
 }
 
 impl FcConnection {
-    /// Build a connection sharing the given state + param cache.
+    /// Build a connection sharing the given state + param cache, on wall time.
     pub fn new(
         cfg: MavlinkConfig,
         state: std::sync::Arc<Mutex<VehicleState>>,
         params: std::sync::Arc<Mutex<ParamCache>>,
+    ) -> std::sync::Arc<Self> {
+        Self::with_clock(cfg, state, params, crate::clock::RouterClock::wall())
+    }
+
+    /// [`Self::new`] with the control lanes on `clock` (the service passes the
+    /// one it also gave the vehicle state).
+    pub fn with_clock(
+        cfg: MavlinkConfig,
+        state: std::sync::Arc<Mutex<VehicleState>>,
+        params: std::sync::Arc<Mutex<ParamCache>>,
+        clock: crate::clock::RouterClock,
     ) -> std::sync::Arc<Self> {
         let (frame_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
         let (raw_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
@@ -365,6 +378,7 @@ impl FcConnection {
             baud: AtomicU32::new(0),
             last_msg_at: AtomicU64::new(0),
             epoch: Instant::now(),
+            clock,
             fc_signed: AtomicBool::new(false),
             fc_device: Mutex::new(None),
             attitude_cadence: Mutex::new(crate::cadence::InboundCadence::new(ATTITUDE_DEADLINE)),

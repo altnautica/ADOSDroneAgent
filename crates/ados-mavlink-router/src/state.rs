@@ -91,7 +91,7 @@ pub struct VehicleState {
     // Timestamps (ISO-8601 UTC strings, supplied by the caller)
     pub last_heartbeat: String,
     pub last_update: String,
-    /// When a POSITION was last decoded, monotonic.
+    /// When a POSITION was last decoded, on ADOS time ([`Self::clock`]).
     ///
     /// Deliberately separate from `last_update`, which is refreshed by EVERY
     /// frame before the match below and therefore stays fresh while a heartbeat
@@ -107,7 +107,7 @@ pub struct VehicleState {
     /// than a wall-clock stamp so a clock step cannot make a stale fix look
     /// fresh, and so no consumer needs an RFC3339 parser to gate on it.
     pub position_at: Option<std::time::Instant>,
-    /// The last EKF_STATUS_REPORT `flags` and when it was decoded, monotonic.
+    /// The last EKF_STATUS_REPORT `flags` and when it was decoded, on ADOS time.
     /// `None` until the FC sends one (PX4 never does). Published as the
     /// `ekf` block with an age, so a surface showing what the EKF navigates
     /// on can tell a live report from a frozen one.
@@ -140,6 +140,10 @@ pub struct VehicleState {
     /// monotonic. `None` until the FC sends one; published as `landed_state`
     /// only while fresh (see [`Self::landed_state_at`]).
     pub landed_state: Option<(MavLandedState, std::time::Instant)>,
+    /// The clock every stamp above is taken and aged on: ADOS time, so on a
+    /// node following the simulator a fix's age is sim time and a paused
+    /// simulator ages nothing. Wall by default; the service sets the router's.
+    pub clock: crate::clock::RouterClock,
 }
 
 /// How long GIMBAL_DEVICE_ATTITUDE_STATUS stays preferred over
@@ -222,6 +226,7 @@ impl Default for VehicleState {
             prearm: std::collections::VecDeque::new(),
             mission: None,
             landed_state: None,
+            clock: crate::clock::RouterClock::wall(),
         }
     }
 }
@@ -269,7 +274,7 @@ impl VehicleState {
                 let end = m.text.iter().position(|&b| b == 0).unwrap_or(m.text.len());
                 let text = String::from_utf8_lossy(&m.text[..end]);
                 if text.starts_with("PreArm:") || text.starts_with("Arm:") {
-                    let now = std::time::Instant::now();
+                    let now = self.clock.now();
                     self.prearm.push_back((now, text.trim().to_owned()));
                     self.prune_prearm(now);
                 }
@@ -295,7 +300,7 @@ impl VehicleState {
                 self.vy = m.vy as f64 / 100.0;
                 self.vz = m.vz as f64 / 100.0;
                 self.heading = m.hdg as f64 / 100.0;
-                self.position_at = Some(std::time::Instant::now());
+                self.position_at = Some(self.clock.now());
                 None
             }
             MavMessage::ATTITUDE(m) => {
@@ -318,7 +323,7 @@ impl VehicleState {
                 None
             }
             MavMessage::GIMBAL_DEVICE_ATTITUDE_STATUS(m) => {
-                let now = std::time::Instant::now();
+                let now = self.clock.now();
                 let (pitch, yaw) = quat_pitch_yaw_deg(m.q);
                 let bits = m.flags.bits();
                 // YAW_IN_EARTH_FRAME (64), or YAW_LOCK (16) without
@@ -336,7 +341,7 @@ impl VehicleState {
             // Legacy gimbals still report attitude only through this message.
             #[allow(deprecated)]
             MavMessage::MOUNT_ORIENTATION(m) => {
-                let now = std::time::Instant::now();
+                let now = self.clock.now();
                 let device_fresh = self
                     .gimbal_device_at
                     .is_some_and(|at| now.saturating_duration_since(at) < GIMBAL_DEVICE_PREFERRED);
@@ -369,12 +374,12 @@ impl VehicleState {
                 None
             }
             MavMessage::EXTENDED_SYS_STATE(m) => {
-                self.landed_state = Some((m.landed_state, std::time::Instant::now()));
+                self.landed_state = Some((m.landed_state, self.clock.now()));
                 None
             }
             MavMessage::EKF_STATUS_REPORT(m) => {
                 self.ekf_flags = Some(m.flags.bits());
-                self.ekf_at = Some(std::time::Instant::now());
+                self.ekf_at = Some(self.clock.now());
                 None
             }
             MavMessage::LOCAL_POSITION_NED(m) => {
@@ -386,7 +391,7 @@ impl VehicleState {
                     m.vy as f64,
                     m.vz as f64,
                 ]);
-                self.local_at = Some(std::time::Instant::now());
+                self.local_at = Some(self.clock.now());
                 None
             }
             MavMessage::VFR_HUD(m) => {
@@ -405,7 +410,8 @@ impl VehicleState {
                 if self.battery_packs.contains_key(&m.id)
                     || self.battery_packs.len() < MAX_BATTERY_PACKS
                 {
-                    self.battery_packs.insert(m.id, BatteryPack::from_status(m));
+                    self.battery_packs
+                        .insert(m.id, BatteryPack::from_status(m, self.clock.now()));
                 }
                 None
             }

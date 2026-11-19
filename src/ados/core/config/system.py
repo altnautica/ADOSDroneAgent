@@ -150,7 +150,9 @@ class SimulationConfig(BaseModel):
     # Which clock the agent's control loops run on: `wall` (default) or `sim`,
     # the World Engine sim-clock feed (`simclock.v1`). `sim` needs `enabled`.
     clock: Literal["wall", "sim"] = "wall"
-    # UDP `host:port` the agent listens on for the sim-clock feed.
+    # UDP `host:port` base of the sim-clock feed (default 127.0.0.1:14650). Each
+    # agent process listens on its own port: the pilot on it, the log store on
+    # +1, the plugin relay on +2, the MAVLink router's control lanes on +3.
     clock_feed: str | None = None
     # `follow` runs on the broadcast time; `lockstep` also acknowledges each grant.
     clock_mode: Literal["follow", "lockstep"] = "follow"

@@ -14,6 +14,8 @@ ados-clock = { workspace = true }
 ados-swarm = { workspace = true }
 ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
+# ADOS time: the control lanes follow the simulator's clock on a simulated node.
+ados-time = { path = "../ados-time" }
 # The PIC-verdict authority half the injector gate consults (ground-profile,
 # so the same verdict propagates over every bearer).
 ados-hid = { path = "../ados-hid" }

@@ -104,8 +104,13 @@ impl FcConnection {
             return;
         }
         let linked = self.mavlink_alive().await;
-        let now = Instant::now();
-        let arriving = self.state.lock().await.landed_state_at(now).is_some();
+        // The landed stamp is aged on the clock it was taken on: the vehicle
+        // state's (ADOS time).
+        let (now, arriving) = {
+            let s = self.state.lock().await;
+            let now = s.clock.now();
+            (now, s.landed_state_at(now).is_some())
+        };
         let (due, first) = {
             let mut req = self
                 .landed_state_req

@@ -29,6 +29,8 @@ pub enum FeedPeer {
     Logd,
     /// The plugin relay ([`relay`]), on `clock_feed` + 2.
     Plugins,
+    /// The MAVLink router's control lanes, on `clock_feed` + 3.
+    Router,
 }
 
 impl FeedPeer {
@@ -37,6 +39,7 @@ impl FeedPeer {
             FeedPeer::Pilot => 0,
             FeedPeer::Logd => 1,
             FeedPeer::Plugins => 2,
+            FeedPeer::Router => 3,
         };
         SocketAddr::new(base.ip(), base.port().wrapping_add(off))
     }

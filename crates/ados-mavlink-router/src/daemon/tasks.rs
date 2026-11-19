@@ -208,7 +208,8 @@ pub(super) fn spawn_core(
         }));
     }
 
-    // Adaptive stream cadence + parameter sweep (evaluated every second).
+    // Adaptive stream cadence + parameter sweep (evaluated every second of
+    // ADOS time).
     {
         let fc = fc.clone();
         let cancel = cancel.clone();

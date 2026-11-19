@@ -74,16 +74,24 @@ impl FcConnection {
         }
     }
 
-    /// Stamp the inbound-activity clock.
-    pub(super) fn stamp_last_msg(&self) {
-        let nanos = u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.last_msg_at.store(nanos, Ordering::Relaxed);
+    /// ADOS time for the control lanes: the swarm setpoint loop, the FC
+    /// request ticks and the inbound-activity clock below.
+    pub fn clock(&self) -> &crate::clock::RouterClock {
+        &self.clock
     }
 
-    /// Time since the last inbound frame.
+    /// Stamp the inbound-activity clock, on ADOS time.
+    pub(super) fn stamp_last_msg(&self) {
+        self.last_msg_at
+            .store(self.clock.now_ns(), Ordering::Relaxed);
+    }
+
+    /// ADOS time since the last inbound frame: on a node following the
+    /// simulator a paused simulator idles nothing, and a link the simulator
+    /// runs at N× goes stale after the same sim time as at 1×.
     pub(super) fn last_msg_idle(&self) -> Duration {
-        let at = Duration::from_nanos(self.last_msg_at.load(Ordering::Relaxed));
-        self.epoch.elapsed().saturating_sub(at)
+        let at = self.last_msg_at.load(Ordering::Relaxed);
+        Duration::from_nanos(self.clock.now_ns().saturating_sub(at))
     }
 
     /// Record whether the vehicle's latest frame was signed.

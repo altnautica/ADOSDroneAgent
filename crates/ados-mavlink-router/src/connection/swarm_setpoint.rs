@@ -83,6 +83,7 @@ use serde_json::Value;
 use tokio::sync::{watch, Mutex};
 
 use super::FcConnection;
+use crate::clock::RouterClock;
 use crate::state::VehicleState;
 
 /// Largest swarm payload accepted. A 24-drone table is under 9 KB; this is a
@@ -335,7 +336,12 @@ pub async fn run(
         );
 
         let (tx, rx) = watch::channel::<Option<(Value, Instant)>>(None);
-        let reader = tokio::spawn(read_swarm_socket(swarm_sock.clone(), tx, cancel.clone()));
+        let reader = tokio::spawn(read_swarm_socket(
+            swarm_sock.clone(),
+            tx,
+            fc.clock().clone(),
+            cancel.clone(),
+        ));
         let exit = control_loop(
             fc.clone(),
             state.clone(),

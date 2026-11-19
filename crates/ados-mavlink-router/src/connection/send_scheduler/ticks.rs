@@ -1,4 +1,6 @@
-//! The periodic stream cadence, banner request and parameter sweep ticks.
+//! The periodic stream cadence, banner request and parameter sweep ticks, on
+//! ADOS time ([`crate::clock`]): the FC they pace is the simulator's on a
+//! simulated node, so its intervals and deadlines are counted in sim time.
 
 use super::*;
 use crate::connection::imu_fallback::{MSG_HIGHRES_IMU, MSG_RAW_IMU, RAW_IMU_FALLBACK_HZ};
@@ -75,7 +77,7 @@ impl FcConnection {
         // default rate (interval 0): the FC otherwise keeps streaming it at
         // the old rate, and a stop (-1) would also kill the default streams
         // ArduPilot sends from its SRx parameters until the FC reboots.
-        let now = Instant::now();
+        let now = self.clock.now();
         let rates = stream_rates(&self.cfg.profile, self.sensor_streams.capture_active());
         let capture_table = rates.iter().any(|&(id, _)| id == MSG_HIGHRES_IMU);
         let raw = capture_table && self.sensor_streams.poll(now);
@@ -133,7 +135,7 @@ impl FcConnection {
                 self.send_msg(&req).await;
             }
         }
-        *self.last_stream_req.lock().await = Some(Instant::now());
+        *self.last_stream_req.lock().await = Some(self.clock.now());
     }
 
     /// `MAV_CMD_SET_MESSAGE_INTERVAL` for `msg_id` to the FC `fc` (system id,
@@ -184,10 +186,10 @@ impl FcConnection {
         let retargeted = self.retarget(RequestLane::Banner, fc);
         {
             let mut last = self.last_banner_req.lock().await;
-            if !retargeted && last.is_some_and(|t| t.elapsed() < BANNER_RETRY) {
+            if !retargeted && last.is_some_and(|t| self.clock.since(t) < BANNER_RETRY) {
                 return;
             }
-            *last = Some(Instant::now());
+            *last = Some(self.clock.now());
         }
         let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
             target_system: fc.0,
@@ -222,14 +224,14 @@ impl FcConnection {
         }
         let due = {
             let last = self.param_last_request.lock().await;
-            last.map(|t| t.elapsed() >= PARAM_RATE_LIMIT)
+            last.map(|t| self.clock.since(t) >= PARAM_RATE_LIMIT)
                 .unwrap_or(true)
         };
         if !due {
             // While priming and past the deadline with nothing cached, flag the timeout.
             if self.param_priming.load(Ordering::Relaxed) && cached == 0 {
                 if let Some(started) = *self.param_sweep_started.lock().await {
-                    if started.elapsed() >= PARAM_DEADLINE {
+                    if self.clock.since(started) >= PARAM_DEADLINE {
                         self.param_sweep_timed_out.store(true, Ordering::Relaxed);
                     }
                 }
@@ -263,11 +265,28 @@ impl FcConnection {
         let ok = self.send_msg(&req).await;
         self.param_sweep_send_failed.store(!ok, Ordering::Relaxed);
         self.param_priming.store(true, Ordering::Relaxed);
-        let now = Instant::now();
+        let now = self.clock.now();
         *self.param_last_request.lock().await = Some(now);
         let mut started = self.param_sweep_started.lock().await;
         if started.is_none() {
             *started = Some(now);
+        }
+    }
+
+    /// Run the stream cadence, banner, landed-state and parameter-sweep ticks
+    /// once a second of ADOS time until `cancel`.
+    pub async fn run_request_ticks(&self, cancel: Shutdown) {
+        let mut tick = self.clock.interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    self.tick_streams().await;
+                    self.tick_banner_request().await;
+                    self.tick_landed_state_request().await;
+                    self.tick_param_sweep().await;
+                }
+                _ = cancel.wait() => break,
+            }
         }
     }
 }
