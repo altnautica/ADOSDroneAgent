@@ -70,6 +70,12 @@ const EXTRA_PARAMS: &[&str] = &[
     "PSC_JERK_Z",
     "ATC_ACC_Y_MAX",
     "ATC_ACCEL_Y_MAX",
+    // The yaw rate GUIDED turns a heading target at (`ATC_SLEW_YAW`,
+    // centidegrees, before it became `ATC_RATE_WPY_MAX`) and the yaw rate
+    // ceiling (`ATC_RATE_Y_MAX`, 0 none).
+    "ATC_RATE_WPY_MAX",
+    "ATC_SLEW_YAW",
+    "ATC_RATE_Y_MAX",
 ];
 
 impl Pilot {

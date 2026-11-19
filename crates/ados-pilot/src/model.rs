@@ -217,7 +217,10 @@ pub fn stick_limits(class: VehicleClass, p: Profile) -> StickLimits {
 /// older `WPNAV_ACCEL` and `WPNAV_ACCEL_Z` in cm/s²), `PSC_NE_JERK` and
 /// `PSC_D_JERK` (m/s³; the older `PSC_JERK_XY` and `PSC_JERK_Z`), and
 /// `ATC_ACC_Y_MAX` (°/s², or the older `ATC_ACCEL_Y_MAX` in cdeg/s²; 0 is
-/// no limit). Asking more than these, the FC would shape the reference again.
+/// no limit), and the yaw rate: GUIDED turns the heading target the pilot
+/// sends no faster than `ATC_RATE_WPY_MAX` (°/s; the older `ATC_SLEW_YAW` in
+/// cdeg/s), nor than `ATC_RATE_Y_MAX` (°/s, 0 none). Asking more than these,
+/// the FC would shape the reference again.
 pub fn fc_capped(mut lim: StickLimits, param: impl Fn(&str) -> Option<f32>) -> StickLimits {
     let pos = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0);
     let either = |new: &str, old: &str, old_scale: f32| {
@@ -242,6 +245,10 @@ pub fn fc_capped(mut lim: StickLimits, param: impl Fn(&str) -> Option<f32>) -> S
         .or_else(|| pos(param("ATC_ACCEL_Y_MAX")).map(|v| v / 100.0));
     if let Some(y) = yaw {
         lim.yaw_dps2 = lim.yaw_dps2.min(y);
+    }
+    let slew = either("ATC_RATE_WPY_MAX", "ATC_SLEW_YAW", 0.01);
+    for y in [slew, pos(param("ATC_RATE_Y_MAX"))].into_iter().flatten() {
+        lim.yaw_dps = lim.yaw_dps.min(y);
     }
     lim
 }

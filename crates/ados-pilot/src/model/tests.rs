@@ -151,3 +151,28 @@ fn the_fc_guidance_limits_cap_the_profile_in_either_unit() {
     let lax = |n: &str| (n == "WP_ACC").then_some(9.0);
     assert_eq!(fc_capped(lim, lax), lim);
 }
+
+/// GUIDED turns the heading target at `ATC_RATE_WPY_MAX` (60 °/s by
+/// default), whatever yaw rate the sticks ask: the profile's yaw rate is held
+/// to it, and to `ATC_RATE_Y_MAX` when set. Before, Normal and Sport asked 90
+/// and 150 °/s and both turned at 60.
+#[test]
+fn the_fc_heading_slew_caps_the_yaw_rate() {
+    let lim = stick_limits(VehicleClass::Multirotor, Profile::Sport);
+    let wpy = |n: &str| match n {
+        "ATC_RATE_WPY_MAX" => Some(60.0),
+        "ATC_RATE_Y_MAX" => Some(0.0),
+        _ => None,
+    };
+    assert_eq!(fc_capped(lim, wpy).yaw_dps, 60.0);
+    let old = |n: &str| (n == "ATC_SLEW_YAW").then_some(4500.0);
+    assert_eq!(fc_capped(lim, old).yaw_dps, 45.0);
+    let both = |n: &str| match n {
+        "ATC_RATE_WPY_MAX" => Some(180.0),
+        "ATC_RATE_Y_MAX" => Some(120.0),
+        _ => None,
+    };
+    assert_eq!(fc_capped(lim, both).yaw_dps, 120.0);
+    let cine = stick_limits(VehicleClass::Multirotor, Profile::Cine);
+    assert_eq!(fc_capped(cine, wpy).yaw_dps, 30.0, "never raised");
+}

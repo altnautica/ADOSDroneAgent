@@ -485,6 +485,35 @@ fn the_stick_brake_plans_on_the_brake_deceleration() {
     );
 }
 
+/// Full stick in Sport over a scan with no return: the brake holds the
+/// sticks to what stops inside the space the lidar has seen free, and the
+/// command's speed cap says so. Before, it read the profile's 10 m/s while
+/// the vehicle could fly only about 5.
+#[test]
+fn the_seen_space_ceiling_is_the_published_speed_cap() {
+    let mut w = World::new();
+    w.p.settings.pilot.profile = Profile::Sport;
+    w.airborne(copter::GUIDED);
+    w.action("take_control");
+    w.stick(CENTRED, 600);
+    let c = ticks(&mut w, Some(FWD), 6000);
+    let s = serde_json::to_value(w.p.state(w.now)).unwrap();
+    let cmd = &s["command"];
+    assert!(
+        cmd["limits"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|l| l == "seen_space")),
+        "{cmd}"
+    );
+    let cap = cmd["v_cap_mps"].as_f64().unwrap() as f32;
+    let v = c.last().unwrap().speed();
+    assert!(
+        cap > 1.0 && cap < 9.0,
+        "cap {cap} below the profile's 10 m/s"
+    );
+    assert!((cap - v).abs() < 0.3, "cap {cap} is the speed flown, {v}");
+}
+
 /// The pilot asks the FC for its guidance limits, under either name, and
 /// holds the stick profile to them. Before, it never asked, so the profile
 /// was never held to them.
@@ -503,6 +532,9 @@ fn the_fc_guidance_limits_are_asked_for_and_cap_the_profile() {
         "PSC_JERK_Z",
         "ATC_ACC_Y_MAX",
         "ATC_ACCEL_Y_MAX",
+        "ATC_RATE_WPY_MAX",
+        "ATC_SLEW_YAW",
+        "ATC_RATE_Y_MAX",
     ] {
         let asked = w.sent.iter().any(|m| {
             matches!(m, MavMessage::PARAM_REQUEST_READ(r)

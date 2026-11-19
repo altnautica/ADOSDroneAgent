@@ -115,6 +115,9 @@ pub(crate) struct StickTick {
     pub limits: u16,
     /// The limits flown.
     pub lim: StickLimits,
+    /// The horizontal speed the sticks may fly now: the profile's, or the
+    /// speed the seen-space brake holds them to while it does.
+    pub v_cap: f32,
 }
 
 impl StickTick {
@@ -229,7 +232,7 @@ impl Pilot {
                 c.cmd_vel_ne = ne(s.cmd);
                 c.sp_vel_ned = [s.v[0], s.v[1], s.vd].map(wire);
                 c.sp_acc_ne = ne(s.a);
-                c.v_cap_mps = wire(s.lim.v_h);
+                c.v_cap_mps = wire(s.v_cap);
                 c.stick = Some(s.wire());
                 c.profile_limits = Some(self.profile_limits_of(&s.lim));
                 (s.limits | self.latch.limits, 0, c)

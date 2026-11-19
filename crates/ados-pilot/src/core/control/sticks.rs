@@ -115,6 +115,11 @@ impl Pilot {
         if let Some(b) = braked {
             limits |= b.by;
         }
+        // The speed the sticks may fly now: the seen-space brake holds them
+        // below the profile when the space the lidar has seen free is short.
+        let v_cap = braked
+            .filter(|b| b.by & limit::SEEN_SPACE != 0)
+            .map_or(lim.v_h, |b| lim.v_h.min(geo::norm(b.v)));
         let fenced = geofence(pos_ne, self.fc.home_ne(), self.settings.pilot.max_dist(), v);
         if geo::dist(fenced, v) > 1e-3 {
             limits |= limit::GEOFENCE;
@@ -251,6 +256,7 @@ impl Pilot {
             input_seq: self.sessions.last_seq().unwrap_or(0),
             limits,
             lim,
+            v_cap,
         });
 
         let tx = self.tx();
