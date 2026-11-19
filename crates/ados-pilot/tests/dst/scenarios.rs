@@ -60,7 +60,11 @@ pub fn low_battery(seed: u64) -> Sim {
     s.boot();
     launch_to_hold(&mut s, 5.0);
     fly_sticks(&mut s, out, out_ms);
-    assert!(s.home_distance_m() > 3.0, "flew out: {}", s.home_distance_m());
+    assert!(
+        s.home_distance_m() > 3.0,
+        "flew out: {}",
+        s.home_distance_m()
+    );
     let counting = s.run_until(120_000, |s| s.state.low_battery_action.is_some());
     assert!(counting, "no low-battery action at {}%", s.fc.battery_pct);
     let fired_ms = s.now;
@@ -81,8 +85,15 @@ pub fn low_battery(seed: u64) -> Sim {
         "SmartRTL {delay} ms after the countdown began"
     );
     assert!(s.mode_commands(copter::RTL).is_empty(), "never a plain RTL");
-    assert!(s.mode_commands(copter::LAND).is_empty(), "never lands in place");
-    assert!(s.home_distance_m() < 1.5, "landed home: {}", s.home_distance_m());
+    assert!(
+        s.mode_commands(copter::LAND).is_empty(),
+        "never lands in place"
+    );
+    assert!(
+        s.home_distance_m() < 1.5,
+        "landed home: {}",
+        s.home_distance_m()
+    );
     s
 }
 
@@ -180,7 +191,11 @@ pub fn link_loss(seed: u64) -> Sim {
     assert_eq!(s.mode_commands(copter::SMART_RTL).len(), 1);
     assert!(s.mode_commands(copter::RTL).is_empty(), "never a plain RTL");
     assert_eq!(s.p.owner(), Owner::FcMode);
-    assert!(s.home_distance_m() < 1.5, "landed home: {}", s.home_distance_m());
+    assert!(
+        s.home_distance_m() < 1.5,
+        "landed home: {}",
+        s.home_distance_m()
+    );
     s
 }
 
@@ -211,7 +226,10 @@ pub fn mission(seed: u64) -> Sim {
     assert_eq!(s.p.owner(), Owner::MissionFc);
 
     // Hold: pause on the way to item 2, the copter stays put, resume.
-    assert!(s.run_until(60_000, |s| s.fc.seq == 2), "never reached item 2");
+    assert!(
+        s.run_until(60_000, |s| s.fc.seq == 2),
+        "never reached item 2"
+    );
     s.run(pause_after_ms);
     assert!(ok(&s.action("pause", None)));
     // Braked to its stopping point first.
@@ -220,7 +238,10 @@ pub fn mission(seed: u64) -> Sim {
     s.run(3_000);
     let drift = ((s.fc.pos[0] - held_at[0]).powi(2) + (s.fc.pos[1] - held_at[1]).powi(2)).sqrt();
     assert!(drift < 0.5, "held while paused: drifted {drift} m");
-    assert_eq!(s.state.mission.as_ref().map(|m| m.state.as_str()), Some("paused"));
+    assert_eq!(
+        s.state.mission.as_ref().map(|m| m.state.as_str()),
+        Some("paused")
+    );
     assert!(ok(&s.action("resume", None)));
     let pauses: Vec<f32> = s
         .commands(MavCmd::MAV_CMD_DO_PAUSE_CONTINUE)
@@ -240,7 +261,10 @@ pub fn mission(seed: u64) -> Sim {
         .map(|(_, c)| c.param1 as u32)
         .collect();
     assert_eq!(currents, vec![blocked + 1]);
-    assert!(!s.mode_commands(copter::BRAKE).is_empty(), "braked at the stall");
+    assert!(
+        !s.mode_commands(copter::BRAKE).is_empty(),
+        "braked at the stall"
+    );
 
     // The mission's end: when-done RTH, home and down.
     let landed = s.run_until(240_000, |s| !s.fc.armed);
@@ -248,11 +272,22 @@ pub fn mission(seed: u64) -> Sim {
     assert!(s.fc.mission_complete, "flew the rest of the mission");
     assert_eq!(s.mode_commands(copter::SMART_RTL).len(), 1);
     assert!(s.mode_commands(copter::RTL).is_empty(), "never a plain RTL");
-    let gaps = s.state.mission.as_ref().map(|m| m.gaps.clone()).unwrap_or_default();
+    let gaps = s
+        .state
+        .mission
+        .as_ref()
+        .map(|m| m.gaps.clone())
+        .unwrap_or_default();
     assert_eq!(
-        gaps.iter().map(|g| (g.seq, g.reason.as_str())).collect::<Vec<_>>(),
+        gaps.iter()
+            .map(|g| (g.seq, g.reason.as_str()))
+            .collect::<Vec<_>>(),
         vec![(blocked, "stall_timeout")]
     );
-    assert!(s.home_distance_m() < 1.5, "landed home: {}", s.home_distance_m());
+    assert!(
+        s.home_distance_m() < 1.5,
+        "landed home: {}",
+        s.home_distance_m()
+    );
     s
 }
