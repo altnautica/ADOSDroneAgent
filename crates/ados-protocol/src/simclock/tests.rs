@@ -146,3 +146,68 @@ fn no_env_is_wall() {
         assert_eq!(Clock::from_env().source(), "wall");
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn next_due_follows_the_sim_interval() {
+    let feed = SimFeed::new();
+    let clock = Clock::Sim(feed.clone());
+    let mut iv = clock.interval(Duration::from_millis(20));
+    assert_eq!(iv.next_due_ns(), None);
+    feed.ingest(&tick(1, 0), Instant::now());
+    iv.tick().await;
+    assert_eq!(iv.next_due_ns(), Some(20_000_000));
+    feed.ingest(&tick(2, 45), Instant::now());
+    iv.tick().await;
+    assert_eq!(iv.next_due_ns(), Some(60_000_000));
+    assert_eq!(Clock::wall().interval(Duration::from_millis(5)).next_due_ns(), None);
+}
+
+/// One `DONE` frame's `done_ns` from `s`.
+async fn read_done(s: &mut tokio::net::UnixStream) -> u64 {
+    use tokio::io::AsyncReadExt;
+    let mut b = [0u8; wire::DONE_LEN];
+    tokio::time::timeout(Duration::from_secs(3), s.read_exact(&mut b))
+        .await
+        .unwrap()
+        .unwrap();
+    wire::Done::decode(&b).unwrap().done_ns
+}
+
+#[tokio::test]
+async fn a_participant_writes_its_latest_done_and_reregisters() {
+    use tokio::io::AsyncReadExt;
+    let dir = std::env::temp_dir().join(format!("simclock-part-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = participants_socket_beside(&dir.join("relay.sock"));
+    assert_eq!(path, dir.join(PARTICIPANTS_SOCKET));
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let part = Participant::connect(path.clone());
+    part.done(40_000_000);
+    part.done(30_000_000);
+    assert_eq!(part.reported(), Some(40_000_000));
+    let (mut s, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_done(&mut s).await, 40_000_000, "the latest report on connect");
+    part.done(60_000_000);
+    assert_eq!(read_done(&mut s).await, 60_000_000);
+    // The barrier restarts: the participant registers again with its latest report.
+    drop(s);
+    part.done(80_000_000);
+    let (mut s, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_done(&mut s).await, 80_000_000);
+    // Dropping the participant unregisters it: the connection closes.
+    drop(part);
+    let mut b = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(3), s.read(&mut b))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(n, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
