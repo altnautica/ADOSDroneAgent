@@ -139,7 +139,7 @@ jobs:
     # target boards (Rock 5C, Pi 4B); no cross-compile needed.
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -250,7 +250,7 @@ jobs:
     name: MSRV (the declared rust-version actually builds)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read and floor-check the declared MSRV
         id: msrv
@@ -309,7 +309,7 @@ jobs:
     # macos-14 was retired on 2026-11-02; macos-15 is the same arm64 hardware.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -350,7 +350,7 @@ jobs:
     env:
       MEDIAMTX_VERSION: v1.17.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (musl target)
         uses: dtolnay/rust-toolchain@stable
@@ -459,7 +459,7 @@ jobs:
       ORT_WHEEL_SHA256: "76c44fc9a89dcefcd5a4ab5c6bbbb9ff1604325ab2d5d0bc9ff5a9cba7b37f4a"
       ORT_WHEEL_LIB_SHA256: "22a22a64e18aae2948e59b381c9d1b3a461bb706d8f02d561b4c39d8a737adc8"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -610,7 +610,7 @@ jobs:
       contents: write
     steps:
       # Full history: the pointer move checks commit ancestry.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
