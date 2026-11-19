@@ -9,6 +9,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 
+- A ground station reached only over the radio hears the drone's pilot again. A pilot state that does not fit one aux frame goes down as the fields a ground reads instead of being dropped silently; the router status counts states sent, dropped as oversized and failed (`pilot_downlink`) and logs the first drop. A phone's uplink take during a bind is refused with 409 `E_BIND_ACTIVE` instead of 503, since the bind stops the radio service that would have refused it.
+
 ## [0.123.1] - 2026-11-20
 
 ### Added

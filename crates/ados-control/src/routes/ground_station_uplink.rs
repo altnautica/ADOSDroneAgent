@@ -212,6 +212,15 @@ pub async fn post_uplink(
                     return refusal(e.status(), e.code(), e.detail());
                 }
             };
+            // A bind stops the radio service, so its own E_BIND_ACTIVE
+            // refusal never answers: read the bind sentinel here.
+            if req.op == "take" && ados_supervisor::bind::orchestrator::read_sentinel_active() {
+                return refusal(
+                    status_for("E_BIND_ACTIVE"),
+                    "E_BIND_ACTIVE",
+                    "A bind session is running on this ground station, and its radios belong to the bind.",
+                );
+            }
             let peer_ip = peer.map(|Extension(PeerAddr(a))| a.ip());
             let command = phone_command(&req, &fingerprint, peer_ip);
             reply_from(groundlink_cmd_roundtrip(&command).await)

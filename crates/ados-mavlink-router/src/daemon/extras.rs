@@ -261,6 +261,13 @@ pub(super) async fn build_extras(
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
     }
+    // The pilot state downlink's tally: states sent to the ground, states
+    // dropped because even the trimmed body exceeds one aux frame, failed
+    // sends, and the last body's size. Present only on a drone whose
+    // downlink is wired.
+    if let Some(status) = crate::pilot_link::global().and_then(|l| l.downlink_status()) {
+        extras.insert("pilot_downlink".into(), status);
+    }
     // Who the direct-GCS proxies serve (see `proxy_posture`), with each edge's
     // live listening flag.
     extras.insert("mavlink_proxy_posture".into(), proxy_posture.to_value());

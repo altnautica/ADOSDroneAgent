@@ -146,8 +146,12 @@ const IPC_ONLY_KEYS: [&str; 16] = [
 /// refused to forward because this node is a visor; it describes the agent's
 /// own command path.
 ///
+/// `pilot_downlink` is the drone router's tally of pilot states it sent to
+/// the ground over the aux link, dropped as oversized, or failed to send; it
+/// explains a ground's silent pilot link whether or not the FC is heard.
+///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 25] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 26] = [
     "agent_commands_unsigned_rejected_risk",
     "agent_signing",
     "aux_mavlink_tee",
@@ -166,6 +170,7 @@ const AGENT_DIAGNOSTIC_KEYS: [&str; 25] = [
     "param_priming",
     "param_sweep_send_failed",
     "param_sweep_timed_out",
+    "pilot_downlink",
     "swarm",
     "swarm_emergency",
     "swarm_precedence",

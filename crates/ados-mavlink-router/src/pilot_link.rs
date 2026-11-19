@@ -33,7 +33,9 @@ use ados_protocol::pilot::{self, ControlMode};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+mod downlink;
 mod filter;
+pub use downlink::*;
 pub use filter::*;
 
 /// The pilot counts as alive while its state arrived within this window.
@@ -46,16 +48,6 @@ pub const PILOT_INJECTOR: &str = "pilot";
 
 const MSG_MANUAL_CONTROL: u32 = 69;
 const MSG_RC_CHANNELS_OVERRIDE: u32 = 70;
-
-/// The pilot state goes down the aux link this often.
-pub const DOWNLINK_PERIOD_MS: u64 = 500;
-
-/// Who the downlinked state is from, and the lane it leaves on.
-pub struct Downlink {
-    pub egress: std::sync::Arc<ados_protocol::aux_egress::AuxEgress>,
-    /// The flight controller's system id, once learned.
-    pub fc_sysid: Box<dyn Fn() -> Option<u8> + Send + Sync>,
-}
 
 pub struct PilotLink {
     started: Instant,
@@ -70,6 +62,8 @@ pub struct PilotLink {
     pub relayed: AtomicU64,
     downlink: OnceLock<Downlink>,
     downlink_ms: AtomicU64,
+    /// What the state downlink sent and dropped (router status `pilot_downlink`).
+    pub downlink_stats: DownlinkStats,
     /// What the last state said the pilot was flying: 0 nothing (not in
     /// `ados`, disarmed, landed, or the FC owns motion), else the vehicle
     /// class ([`CLASS_MULTIROTOR`], [`CLASS_FIXEDWING`], [`CLASS_VTOL`]).
@@ -168,6 +162,7 @@ impl PilotLink {
             relayed: AtomicU64::new(0),
             downlink: OnceLock::new(),
             downlink_ms: AtomicU64::new(0),
+            downlink_stats: DownlinkStats::default(),
             flying: AtomicU8::new(0),
             fired: AtomicBool::new(false),
             goto_ok: AtomicBool::new(false),
@@ -286,6 +281,11 @@ impl PilotLink {
         let _ = self.downlink.set(d);
     }
 
+    /// The downlink's status entry, on a drone whose downlink is wired.
+    pub fn downlink_status(&self) -> Option<serde_json::Value> {
+        self.downlink.get().map(|_| self.downlink_stats.snapshot())
+    }
+
     /// The state body to downlink, when one is due.
     fn downlink_due(
         &self,
@@ -301,7 +301,16 @@ impl PilotLink {
         }
         self.downlink_ms.store(now, Ordering::Relaxed);
         let mut payload = vec![(d.fc_sysid)().unwrap_or(0)];
-        payload.extend(downlink_body(body)?);
+        match downlink_body(body) {
+            Ok(b) => {
+                self.downlink_stats.body(b.len());
+                payload.extend(b);
+            }
+            Err(bytes) => {
+                self.downlink_stats.oversize(bytes);
+                return None;
+            }
+        }
         Some((std::sync::Arc::clone(&d.egress), payload))
     }
 
@@ -384,8 +393,9 @@ async fn run(path: PathBuf, mut rx: mpsc::Receiver<Vec<u8>>) {
                                 if let Some((egress, payload)) = link.downlink_due(&v) {
                                     tokio::spawn(async move {
                                         let ch = ados_protocol::aux_mux::AuxChannel::Pilot;
-                                        if let Err(e) = egress.send(ch, &payload).await {
-                                            tracing::debug!(error = %e, "pilot_state_downlink_failed");
+                                        match egress.send(ch, &payload).await {
+                                            Ok(()) => link.downlink_stats.sent(),
+                                            Err(e) => link.downlink_stats.send_failed(&e),
                                         }
                                     });
                                 }
@@ -412,64 +422,6 @@ async fn run(path: PathBuf, mut rx: mpsc::Receiver<Vec<u8>>) {
         while rx.try_recv().is_ok() {}
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-}
-
-/// The `state` body trimmed to fit one aux frame: the per-tick onboard
-/// diagnostics (`command`, `shadow`, `stick`; the frame's own
-/// `input_age_ms` still goes down) never go down; then the plan polyline
-/// goes first, then the readiness items that pass, then every readiness item.
-pub fn downlink_body(state: &rmpv::Value) -> Option<Vec<u8>> {
-    let max = ados_protocol::aux_mux::AUX_MAX_PAYLOAD - 1;
-    let rmpv::Value::Map(map) = state else {
-        return None;
-    };
-    let encode = |m: &Vec<(rmpv::Value, rmpv::Value)>| {
-        let mut out = Vec::new();
-        rmpv::encode::write_value(&mut out, &rmpv::Value::Map(m.clone()))
-            .ok()
-            .map(|_| out)
-    };
-    let mut m: Vec<(rmpv::Value, rmpv::Value)> = map
-        .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), Some("command" | "shadow" | "stick")))
-        .cloned()
-        .collect();
-    let mut out = encode(&m)?;
-    let set = |m: &mut Vec<(rmpv::Value, rmpv::Value)>,
-               key: &str,
-               f: &dyn Fn(&rmpv::Value) -> rmpv::Value| {
-        for (k, v) in m.iter_mut() {
-            if k.as_str() == Some(key) {
-                *v = f(v);
-            }
-        }
-    };
-    if out.len() > max {
-        set(&mut m, "plan_ned", &|_| rmpv::Value::Array(Vec::new()));
-        out = encode(&m)?;
-    }
-    if out.len() > max {
-        set(&mut m, "readiness", &|v| {
-            let items = v.as_array().cloned().unwrap_or_default();
-            rmpv::Value::Array(
-                items
-                    .into_iter()
-                    .filter(|i| {
-                        i.as_map()
-                            .and_then(|e| e.iter().find(|(k, _)| k.as_str() == Some("ok")))
-                            .and_then(|(_, v)| v.as_bool())
-                            == Some(false)
-                    })
-                    .collect(),
-            )
-        });
-        out = encode(&m)?;
-    }
-    if out.len() > max {
-        set(&mut m, "readiness", &|_| rmpv::Value::Array(Vec::new()));
-        out = encode(&m)?;
-    }
-    (out.len() <= max).then_some(out)
 }
 
 #[cfg(test)]

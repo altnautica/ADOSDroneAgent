@@ -513,3 +513,72 @@ fn the_downlink_drops_the_command_and_shadow_diagnostics() {
         "{keys:?}"
     );
 }
+
+/// A state that stays over one aux frame after every trim is refused with its
+/// trimmed size, which the downlink logs and counts (`pilot_downlink`).
+#[test]
+fn an_oversized_state_is_refused_with_its_size() {
+    let mut state = pilot_state("pilot", true, false, "multirotor");
+    if let rmpv::Value::Map(m) = &mut state {
+        m.push((
+            rmpv::Value::from("hold_reason"),
+            rmpv::Value::from("x".repeat(DOWNLINK_MAX_BODY)),
+        ));
+    }
+    let bytes = downlink_body(&state).expect_err("cannot fit");
+    assert!(bytes > DOWNLINK_MAX_BODY, "{bytes}");
+    let stats = DownlinkStats::default();
+    stats.oversize(bytes);
+    stats.oversize(bytes);
+    let snap = stats.snapshot();
+    assert_eq!(snap["oversize_dropped"], 2);
+    assert_eq!(snap["last_bytes"], bytes as u64);
+    assert_eq!(snap["sent"], 0);
+}
+
+/// A state over one aux frame goes down as the fields a ground reads: the
+/// onboard-only ones (`sensors`, the full profile row) stay behind before the
+/// plan polyline or the readiness list is cut.
+#[test]
+fn an_oversized_state_goes_down_as_the_fields_a_ground_reads() {
+    fn s(x: impl Into<rmpv::Value>) -> rmpv::Value {
+        x.into()
+    }
+    let mut state = pilot_state("pilot", true, false, "multirotor");
+    let plan: Vec<rmpv::Value> = (0..10)
+        .map(|i| rmpv::Value::Array(vec![s(i as f64), s(-(i as f64))]))
+        .collect();
+    let mut limits = vec![(s("profile"), s("normal"))];
+    for k in ["v_h_mps", "v_up_mps", "v_down_mps", "yaw_dps", "a_acc_mps2"] {
+        limits.push((s(k), s(1.5f64)));
+    }
+    for k in ["jerk_mps3", "a_v_mps2", "expo_h", "stop_m", "margin_m"] {
+        limits.push((s(k), s(1.5f64)));
+    }
+    if let rmpv::Value::Map(m) = &mut state {
+        m.insert(0, (s("op"), s("state")));
+        m.push((s("plan_ned"), rmpv::Value::Array(plan)));
+        m.push((s("profile_limits"), rmpv::Value::Map(limits)));
+        m.push((s("owner_label"), s("NOT READY · ".repeat(25))));
+        m.push((s("sensors"), s("x".repeat(600))));
+    }
+    let mut full = Vec::new();
+    rmpv::encode::write_value(&mut full, &state).unwrap();
+    assert!(full.len() > DOWNLINK_MAX_BODY, "{}", full.len());
+
+    let body = downlink_body(&state).expect("fits one frame once reduced");
+    assert!(body.len() <= DOWNLINK_MAX_BODY);
+    let back = rmpv::decode::read_value(&mut body.as_slice()).unwrap();
+    let map = back.as_map().unwrap();
+    let field = |name: &str| map.iter().find(|(k, _)| k.as_str() == Some(name));
+    let text = |name: &str| field(name).and_then(|(_, v)| v.as_str());
+    assert_eq!(text("op"), Some("state"));
+    assert_eq!(text("owner"), Some("pilot"));
+    assert!(field("sensors").is_none());
+    let plan = field("plan_ned").and_then(|(_, v)| v.as_array());
+    assert_eq!(plan.map(Vec::len), Some(10));
+    let (_, limits) = field("profile_limits").unwrap();
+    let limits = limits.as_map().unwrap();
+    let keys: Vec<&str> = limits.iter().filter_map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["profile", "v_h_mps", "margin_m"]);
+}
