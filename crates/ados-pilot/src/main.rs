@@ -36,6 +36,9 @@ async fn main() {
     };
     let mut daemon = Daemon::new(settings, path);
     daemon.clock = clock;
+    // Under `simulation.clock_mode: lockstep` the core is a participant of
+    // the barrier the simulator waits on at each grant.
+    daemon.lockstep = ados_time::lockstep_socket(&gate, &ados_protocol::paths::run_dir());
     let setup = ados_pilot::setup::service::start(&daemon);
     let run = daemon.run(Some(setup));
     tokio::select! {

@@ -15,6 +15,7 @@
 //! which follows the agent's local relay named in [`CLOCK_FEED_ENV`].
 
 mod feed;
+mod participant;
 pub mod wire;
 
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 pub use feed::{SimFeed, RECONNECT_EVERY, STALE_AFTER};
+pub use participant::{participants_socket_beside, Participant, PARTICIPANTS_SOCKET};
 pub use wire::SIMCLOCK_V1_VERSION;
 
 /// The environment variable the plugin host sets on a node following the
@@ -223,6 +225,16 @@ pub enum Interval {
 }
 
 impl Interval {
+    /// On sim, the sim time of the next tick, ns (`None` before the first
+    /// tick); `None` on wall. What a lockstep lane reports as done after its
+    /// tick ([`Participant::done_until`]).
+    pub fn next_due_ns(&self) -> Option<u64> {
+        match self {
+            Interval::Wall { .. } => None,
+            Interval::Sim { next_ns, .. } => *next_ns,
+        }
+    }
+
     /// Wait for the next tick; returns ADOS time in milliseconds.
     pub async fn tick(&mut self) -> u64 {
         match self {

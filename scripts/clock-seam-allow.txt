@@ -3,6 +3,7 @@
 #   allow <path> <pattern> -- <reason>
 
 seam crates/ados-pilot/src/runtime.rs
+seam crates/ados-pilot/src/runtime/mav_link.rs
 seam crates/ados-pilot/src/setup/service.rs
 seam crates/ados-plugin-host/src/pilot_client.rs
 seam crates/ados-mavlink-router/src/connection/swarm_setpoint/control.rs
@@ -15,7 +16,7 @@ seam crates/ados-mavlink-router/src/state/battery.rs
 seam crates/ados-mavlink-router/src/state/landed.rs
 seam crates/ados-mavlink-router/src/mission_mirror.rs
 
-allow crates/ados-pilot/src/runtime.rs tokio::time::sleep( -- the MAVLink socket reconnect backoff is real time
+allow crates/ados-pilot/src/runtime/mav_link.rs tokio::time::sleep( -- the MAVLink socket reconnect backoff is real time
 allow crates/ados-plugin-host/src/pilot_client.rs Instant::now() -- pilot link liveness (ALIVE) is real time
 allow crates/ados-plugin-host/src/pilot_client.rs tokio::time::sleep( -- pilot socket reconnect backoff is real time
 allow crates/ados-mavlink-router/src/connection/swarm_setpoint/control.rs tokio::time::sleep( -- swarm socket reconnect backoff is real time

@@ -134,12 +134,17 @@ async fn run_async() -> anyhow::Result<()> {
     let sim_floor = crate::config::sim_floor(&config);
     tracing::info!(?sim_floor, "clock_sim_latency_floor");
     // On a node following the simulator's clock: the relay plugins follow
-    // (`ADOS_CLOCK_FEED`), fed by the simulator on `clock_feed` + 2.
+    // (`ADOS_CLOCK_FEED`), fed by the simulator on `clock_feed` + 2. Under
+    // `clock_mode: lockstep` the relay is also the barrier: the pilot, the
+    // router's control lanes and opted-in plugins register on the
+    // participants socket, and each grant is acknowledged once all are done.
     let gate = ados_config::simulation::read_gate(&config);
     if let Some(listen) = ados_time::plugin_feed(&gate) {
         tokio::spawn(async move {
-            let socket = ados_time::relay_socket(&ados_protocol::paths::run_dir());
-            if let Err(e) = ados_time::relay(listen, socket).await {
+            let run_dir = ados_protocol::paths::run_dir();
+            let socket = ados_time::relay_socket(&run_dir);
+            let participants = ados_time::lockstep_socket(&gate, &run_dir);
+            if let Err(e) = ados_time::relay(listen, socket, participants).await {
                 tracing::error!(error = %e, %listen, "simclock_relay_failed");
             }
         });

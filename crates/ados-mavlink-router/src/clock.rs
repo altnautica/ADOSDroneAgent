@@ -16,11 +16,18 @@
 //! with each other; the files that hold them are on the clock-seam list
 //! (`scripts/clock-seam-allow.txt`), where a wall `Instant::now()` fails the
 //! guard.
+//!
+//! Under `simulation.clock_mode: lockstep` each control lane (the request
+//! ticks, the swarm control loop) is a participant of the simulator's
+//! barrier ([`RouterClock::lane`]): after its tick, and the FC writes the
+//! tick made, it reports done until its next tick, so the simulator does not
+//! step past a tick a lane has not run.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ados_config::simulation::SimulationGate;
-use ados_time::{Clock, FeedPeer, Interval};
+use ados_time::{Clock, FeedPeer, Interval, Participant};
 
 /// ADOS time for the router, as `Instant`s.
 #[derive(Clone)]
@@ -28,6 +35,8 @@ pub struct RouterClock {
     clock: Clock,
     /// The `Instant` sim time 0 maps to.
     anchor: Instant,
+    /// The lockstep barrier's participants socket, under lockstep.
+    lockstep: Option<PathBuf>,
 }
 
 impl RouterClock {
@@ -40,6 +49,7 @@ impl RouterClock {
         Self {
             clock,
             anchor: Instant::now(),
+            lockstep: None,
         }
     }
 
@@ -47,7 +57,16 @@ impl RouterClock {
     /// [`FeedPeer::Router`] on a node configured for `simulation.clock: sim`
     /// (binds the port; needs a Tokio runtime), wall otherwise.
     pub fn from_config(gate: &SimulationGate) -> std::io::Result<Self> {
-        ados_time::from_config(gate, FeedPeer::Router).map(Self::new)
+        let mut c = ados_time::from_config(gate, FeedPeer::Router).map(Self::new)?;
+        c.lockstep = ados_time::lockstep_socket(gate, &ados_protocol::paths::run_dir());
+        Ok(c)
+    }
+
+    /// A control lane's registration with the lockstep barrier
+    /// (`simulation.clock_mode: lockstep`); `None` otherwise. Dropping it
+    /// unregisters the lane. Needs a Tokio runtime.
+    pub fn lane(&self) -> Option<Participant> {
+        ados_time::participant(self.lockstep.as_deref())
     }
 
     /// `wall` or `sim`.

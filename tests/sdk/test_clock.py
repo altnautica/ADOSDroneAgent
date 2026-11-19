@@ -76,3 +76,43 @@ def test_without_the_env_it_is_wall(monkeypatch) -> None:
     assert not clock.is_sim()
     assert abs(clock.now() - time.monotonic()) < 0.1
     assert clock.speed() is None
+    monkeypatch.setattr(clock, "_PARTICIPANT_STARTED", False)
+    monkeypatch.setattr(clock, "_PARTICIPANT", None)
+    clock.done(1.0)
+    assert clock._PARTICIPANT is None
+
+
+# The bytes the agent's `ados_protocol::simclock::wire` test reads as `Done { done_ns: 1.54 s }`.
+GOLDEN_DONE = bytes(
+    [0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x89, 0xCA, 0x5B, 0x00, 0x00, 0x00, 0x00]
+)
+
+
+def _recv_exact(conn: socket.socket, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        assert chunk, "the participant closed the connection"
+        buf += chunk
+    return buf
+
+
+def test_done_registers_beside_the_relay_and_writes_the_golden_frame(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as d:
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(Path(d) / clock.PARTICIPANTS_SOCKET))
+        srv.listen(1)
+        srv.settimeout(3)
+        monkeypatch.setenv(clock.CLOCK_FEED_ENV, str(Path(d) / "relay.sock"))
+        monkeypatch.setattr(clock, "_PARTICIPANT_STARTED", False)
+        monkeypatch.setattr(clock, "_PARTICIPANT", None)
+        clock.done(1.54)
+        clock.done(1.0)
+        conn, _ = srv.accept()
+        conn.settimeout(3)
+        assert _recv_exact(conn, 16) == GOLDEN_DONE
+        assert clock._PARTICIPANT.reported() == 1_540_000_000
+        clock.done(1.6)
+        assert _recv_exact(conn, 16)[8:] == (1_600_000_000).to_bytes(8, "little")
+        conn.close()
+        srv.close()

@@ -276,10 +276,15 @@ impl FcConnection {
     }
 
     /// Run the stream cadence, banner, landed-state and parameter-sweep ticks
-    /// once a second of ADOS time until `cancel`.
+    /// once a second of ADOS time until `cancel`. Under lockstep the lane
+    /// reports done until its next tick once a tick's FC writes are sent.
     pub async fn run_request_ticks(&self, cancel: Shutdown) {
+        let lane = self.clock.lane();
         let mut tick = self.clock.interval(Duration::from_secs(1));
         loop {
+            if let Some(l) = &lane {
+                l.done_until(&tick);
+            }
             tokio::select! {
                 _ = tick.tick() => {
                     self.tick_streams().await;

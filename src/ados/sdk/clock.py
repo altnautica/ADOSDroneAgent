@@ -12,6 +12,15 @@ dropped, and a feed silent for ``STALE_AFTER_S`` of wall time is stale:
 ``sleep`` and ``interval`` wait until it ticks again. Nothing falls back to
 wall time. Use ``time.monotonic()`` directly only for what must stay on real
 time (reconnect backoff, latency measurement).
+
+In lockstep (``simulation.clock_mode: lockstep``) the simulator steps past a
+grant only when the agent is done with it. A plugin whose loop must keep up
+opts in with ``done(t)``: every piece of its work due before sim time ``t``
+is finished. The first call registers the plugin with the agent's barrier
+(the participants socket beside the relay, ``DONE`` frames of 16 bytes,
+little-endian ``<BBHIQ``: version, kind 3, rsv, rsv, done_ns); from then on
+the simulator waits for it. A loop on ``interval(period)`` reports
+``done(t + period)`` after each tick.
 """
 
 from __future__ import annotations
@@ -24,12 +33,26 @@ import threading
 import time
 from collections.abc import AsyncIterator
 
-__all__ = ["CLOCK_FEED_ENV", "STALE_AFTER_S", "SimFeed", "interval", "is_sim", "now", "sleep", "speed"]
+__all__ = [
+    "CLOCK_FEED_ENV",
+    "PARTICIPANTS_SOCKET",
+    "STALE_AFTER_S",
+    "Participant",
+    "SimFeed",
+    "done",
+    "interval",
+    "is_sim",
+    "now",
+    "sleep",
+    "speed",
+]
 
 CLOCK_FEED_ENV = "ADOS_CLOCK_FEED"
 STALE_AFTER_S = 0.5
 RECONNECT_S = 1.0
 _TICK = struct.Struct("<BBBBIQQd")
+_DONE = struct.Struct("<BBHIQ")
+PARTICIPANTS_SOCKET = "participants.sock"
 
 
 def _newer(seq: int, prev: int | None) -> bool:
@@ -114,6 +137,56 @@ def _resolve(fut: asyncio.Future[None]) -> None:
         fut.set_result(None)
 
 
+class Participant:
+    """One registration with the agent's lockstep barrier at ``path``.
+
+    A daemon thread connects, writes the highest ``done`` reported on every
+    change, and reconnects every ``RECONNECT_S`` after a refused or dropped
+    connection (each connection registers afresh with the latest report)."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._cond = threading.Condition()
+        self._done_ns: int | None = None
+        self._sent: int | None = None
+        threading.Thread(target=self._run, name="ados-simclock-done", daemon=True).start()
+
+    def done_ns(self, t_ns: int) -> None:
+        """Every piece of work due before sim time ``t_ns`` is finished; a
+        report at or below an earlier one changes nothing."""
+        with self._cond:
+            if self._done_ns is None or t_ns > self._done_ns:
+                self._done_ns = t_ns
+                self._cond.notify()
+
+    def reported(self) -> int | None:
+        with self._cond:
+            return self._done_ns
+
+    def _run(self) -> None:
+        while True:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.connect(self._path)
+                    with self._cond:
+                        self._sent = None
+                    while True:
+                        with self._cond:
+                            while self._done_ns is None or self._done_ns == self._sent:
+                                self._cond.wait()
+                            d = self._done_ns
+                        s.sendall(_DONE.pack(1, 3, 0, 0, d))
+                        with self._cond:
+                            self._sent = d
+            except OSError:
+                pass
+            time.sleep(RECONNECT_S)
+
+
+_PARTICIPANT: Participant | None = None
+_PARTICIPANT_STARTED = False
+
+
 _FEED: SimFeed | None = None
 _STARTED = False
 
@@ -169,3 +242,20 @@ async def interval(period: float) -> AsyncIterator[float]:
             t = now()
         nxt += period * (int((t - nxt) / period) + 1)
         yield t
+
+
+def done(t: float) -> None:
+    """Every piece of this plugin's work due before ADOS time ``t`` (seconds)
+    is finished, its commands sent. On sim time the first call registers the
+    plugin with the agent's lockstep barrier, so the simulator waits for it
+    from then on: keep reporting as sim time moves (a loop on
+    ``interval(period)``, with ``period`` a multiple of the run's grant,
+    reports ``done(t + period)`` after each tick). A no-op on wall time."""
+    global _PARTICIPANT, _PARTICIPANT_STARTED
+    if not _PARTICIPANT_STARTED:
+        _PARTICIPANT_STARTED = True
+        relay = os.environ.get(CLOCK_FEED_ENV, "").strip()
+        if relay:
+            _PARTICIPANT = Participant(os.path.join(os.path.dirname(relay), PARTICIPANTS_SOCKET))
+    if _PARTICIPANT is not None:
+        _PARTICIPANT.done_ns(round(t * 1e9))

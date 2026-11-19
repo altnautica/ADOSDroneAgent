@@ -1,4 +1,4 @@
-//! The `simclock.v1` datagrams, little-endian.
+//! The `simclock.v1` datagrams and frames, little-endian.
 //!
 //! Simulator to agent, `TICK` (32 bytes):
 //! `u8 v=1, u8 kind=1, u8 flags, u8 rsv, u32 seq, u64 sim_ns, u64 grant_ns, f64 speed`.
@@ -6,13 +6,25 @@
 //! `u8 v=1, u8 kind=2, u16 parts, u32 seq, u64 done_ns, u32 lag_wall_us, u32 rsv`.
 //! The agent's local relay passes each `TICK` on to its followers unchanged,
 //! as the 32 bytes on a Unix stream socket.
+//! A lockstep participant to the agent's barrier, `DONE` (16 bytes, on the
+//! Unix stream socket beside the relay's, [`super::PARTICIPANTS_SOCKET`]):
+//! `u8 v=1, u8 kind=3, u16 rsv, u32 rsv, u64 done_ns`.
+//!
+//! Lockstep: the simulator sends a `TICK` at each grant boundary and steps no
+//! further until the agent's `ACK` carries `done_ns >= grant_ns`. A
+//! participant's `DONE` says it finished every piece of work due before sim
+//! time `done_ns` (a periodic lane reports its next due time). The agent's
+//! barrier acknowledges a tick, with `done_ns` = the tick's `grant_ns`, once
+//! every registered participant reported `done_ns` past the tick's `sim_ns`.
 
-/// The contract version both datagrams carry in their first byte.
+/// The contract version every datagram and frame carries in its first byte.
 pub const SIMCLOCK_V1_VERSION: u8 = 1;
 pub const KIND_TICK: u8 = 1;
 pub const KIND_ACK: u8 = 2;
+pub const KIND_DONE: u8 = 3;
 pub const TICK_LEN: usize = 32;
 pub const ACK_LEN: usize = 24;
+pub const DONE_LEN: usize = 16;
 
 /// `TICK` flag bits.
 pub const FLAG_PAUSED: u8 = 1 << 0;
@@ -75,7 +87,10 @@ pub struct Ack {
     /// How many participants reported.
     pub parts: u16,
     pub seq: u32,
+    /// The sim time the agent is ready for the simulator to reach: the
+    /// acknowledged tick's `grant_ns`.
     pub done_ns: u64,
+    /// Wall time from the tick's arrival to the acknowledgement, µs.
     pub lag_wall_us: u32,
 }
 
@@ -104,6 +119,32 @@ impl Ack {
     }
 }
 
+/// One participant's progress report to the agent's lockstep barrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Done {
+    /// Every piece of the participant's work due before this sim time is done.
+    pub done_ns: u64,
+}
+
+impl Done {
+    pub fn encode(&self) -> [u8; DONE_LEN] {
+        let mut b = [0u8; DONE_LEN];
+        b[0] = SIMCLOCK_V1_VERSION;
+        b[1] = KIND_DONE;
+        b[8..16].copy_from_slice(&self.done_ns.to_le_bytes());
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Done> {
+        if b.len() != DONE_LEN || b[0] != SIMCLOCK_V1_VERSION || b[1] != KIND_DONE {
+            return None;
+        }
+        Some(Done {
+            done_ns: u64::from_le_bytes(b[8..16].try_into().ok()?),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +155,8 @@ mod tests {
         0x00, 0x00, 0x5c, 0x99, 0x5a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x08, 0x40,
     ];
+    /// The bytes the simulator's `participant` decode test reads back as
+    /// `{parts 3, seq 7, done 1.52 s, lag 250 µs}`.
     const GOLDEN_ACK: [u8; ACK_LEN] = [
         0x01, 0x02, 0x03, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x5c, 0x99, 0x5a, 0x00, 0x00, 0x00,
         0x00, 0xfa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -145,6 +188,23 @@ mod tests {
         };
         assert_eq!(a.encode(), GOLDEN_ACK);
         assert_eq!(Ack::decode(&GOLDEN_ACK), Some(a));
+    }
+
+    /// The bytes the Python SDK's participant writes for `done(1.54)`.
+    const GOLDEN_DONE: [u8; DONE_LEN] = [
+        0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x89, 0xca, 0x5b, 0x00, 0x00, 0x00,
+        0x00,
+    ];
+
+    #[test]
+    fn done_matches_the_golden_bytes() {
+        let d = Done {
+            done_ns: 1_540_000_000,
+        };
+        assert_eq!(d.encode(), GOLDEN_DONE);
+        assert_eq!(Done::decode(&GOLDEN_DONE), Some(d));
+        assert!(Done::decode(&GOLDEN_DONE[..15]).is_none());
+        assert!(Done::decode(&GOLDEN_ACK).is_none());
     }
 
     #[test]

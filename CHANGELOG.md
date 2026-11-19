@@ -8,6 +8,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Sim clock lockstep (`simulation.clock_mode: lockstep`): the plugin relay in ados-clock-service is also a barrier that answers each World Engine grant (`simclock.v1` ACK, `done_ns` = the grant) once every registered participant is done. Participants connect to `simclock/participants.sock` beside the relay and write 16-byte DONE frames: the pilot core reports its next tick once that tick's MAVLink frames are written to the router; the router's request-tick and swarm-control lanes report theirs too; plugins opt in with `ados_sdk::clock::done` / `ados.sdk.clock.done`. With nobody registered, a grant is acknowledged at once.
+
 - The pilot shapes sticks and goals with one reference and one shaper: a goal's limits feed the same jerk-limited tracker the sticks use (each kind keeps its own rest and unwind rule), with recorded trajectory pins for goal, goto arrival, blocked hold, stick takeover and landing that the merge reproduces to within 1e-6.
 
 - The MAVLink router's control lanes follow the simulator's clock on a node with `simulation.clock: sim`, on their own feed port `simulation.clock_feed` + 3 (default `127.0.0.1:14653`): the swarm setpoint loop and its neighbour and own-fix ages, the FC stream, banner, landed-state and parameter-sweep requests, the link-idle clock the stream cadence reads, the mission mirror's deadlines and every age on the vehicle state (`position_age_ms`, EKF, local position, battery, landed state, PreArm). A paused simulator ages nothing and a simulator at N× ticks them N× faster; reconnect backoffs, probes, aux shaping, the demo source, sidecars and FC heartbeat liveness stay on wall time.

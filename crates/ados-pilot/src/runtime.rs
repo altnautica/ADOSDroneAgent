@@ -5,11 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_protocol::mavlink::{self, ardupilotmega::MavMessage, MavHeader};
-use ados_protocol::mavlink_socket;
+use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use ados_protocol::pilot;
-use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::config::{self, Settings};
@@ -25,7 +22,9 @@ pub const COMPID: u8 = 196;
 /// State publish period (10 Hz).
 const STATE_PERIOD_MS: u64 = 100;
 
+mod mav_link;
 mod setup_view;
+use mav_link::{mavlink_link, Lockstep};
 pub use setup_view::SetupView;
 
 /// FC traffic for the setup engine: a copy of every FC frame, and a way to send.
@@ -158,6 +157,9 @@ pub struct Daemon {
     config_path: PathBuf,
     /// ADOS time (wall, or the simulator's feed): the core's tick and stamps.
     pub clock: ados_time::Clock,
+    /// The lockstep barrier's participants socket, under
+    /// `simulation.clock_mode: lockstep` (`ados_time::lockstep_socket`).
+    pub lockstep: Option<PathBuf>,
 }
 
 impl Daemon {
@@ -189,6 +191,7 @@ impl Daemon {
             settings,
             config_path,
             clock: ados_time::Clock::wall(),
+            lockstep: None,
         }
     }
 
@@ -214,9 +217,12 @@ impl Daemon {
             feed_tx,
         ));
         let mav_path = run_dir.join(ados_protocol::paths::MAVLINK_SOCK);
+        let (sync_tx, sync_rx) = mpsc::unbounded_channel();
+        let lockstep = self.lockstep.map(|socket| Lockstep::new(socket, sync_tx));
         tokio::spawn(mavlink_link(
             mav_path,
             self.fc_out_rx,
+            lockstep.is_some().then_some(sync_rx),
             self.fc_link.frames.clone(),
             self.fc_link.version_frames.clone(),
         ));
@@ -224,6 +230,7 @@ impl Daemon {
         pilot.epoch_offset_ms = epoch_ms();
         let core = Core {
             clock: self.clock,
+            lockstep,
             pilot,
             fc_tx: self.fc_link.tx.clone(),
             frames: self.fc_link.frames.subscribe(),
@@ -254,6 +261,8 @@ struct Core {
     deferred: HashMap<u64, oneshot::Sender<Reply>>,
     /// ADOS time, stamped on every state frame.
     clock: ados_time::Clock,
+    /// The core's part in the simulator's lockstep barrier.
+    lockstep: Option<Lockstep>,
 }
 
 impl Core {
@@ -268,8 +277,10 @@ impl Core {
         let mut tick = clock.interval(Duration::from_millis(crate::core::TICK_MS));
         let mut state_ms = 0u64;
         loop {
+            let mut ticked = false;
             tokio::select! {
                 _ = tick.tick() => {
+                    ticked = true;
                     let t = now();
                     self.pilot.sim_speed = clock.speed();
                     self.pilot.tick(t);
@@ -354,6 +365,11 @@ impl Core {
                 changed
             });
             self.flush().await;
+            // Lockstep: done until the next tick once this tick's frames are
+            // written (commands to the FC go out before the simulator steps).
+            if let (true, Some(ls), Some(next)) = (ticked, &self.lockstep, tick.next_due_ns()) {
+                ls.after_flush(next);
+            }
         }
     }
 
@@ -408,77 +424,6 @@ impl Core {
                 }
             }
         }
-    }
-}
-
-/// Keep a MAVLink socket session alive: read FC frames into `frames`, write
-/// queued frames with the pilot's identity.
-async fn mavlink_link(
-    path: PathBuf,
-    mut out_rx: mpsc::Receiver<MavMessage>,
-    frames: broadcast::Sender<(u8, u8, MavMessage)>,
-    version_frames: broadcast::Sender<Vec<u8>>,
-) {
-    let mut seq: u8 = 0;
-    loop {
-        match UnixStream::connect(&path).await {
-            Ok(stream) => {
-                tracing::info!(path = %path.display(), "pilot_mavlink_connected");
-                let (mut rd, mut wr) = stream.into_split();
-                let decl = ados_protocol::ipc::encode_injector_declaration("pilot", None);
-                let ok = match ados_protocol::frame::encode_frame(
-                    &decl,
-                    ados_protocol::frame::MAVLINK_MAX_FRAME,
-                ) {
-                    Ok(f) => wr.write_all(&f).await.is_ok(),
-                    Err(_) => false,
-                };
-                if ok {
-                    let frames = frames.clone();
-                    let version_frames = version_frames.clone();
-                    let reader = tokio::spawn(async move {
-                        while let Ok(Some(rec)) = mavlink_socket::read_frame(&mut rd).await {
-                            if let Ok((h, msg)) = mavlink::parse_any(&rec.frame) {
-                                if h.system_id == SYSID && h.component_id == COMPID {
-                                    continue;
-                                }
-                                if matches!(msg, MavMessage::AUTOPILOT_VERSION(_)) {
-                                    let _ = version_frames.send(rec.frame.clone());
-                                }
-                                let _ = frames.send((h.system_id, h.component_id, msg));
-                            }
-                        }
-                    });
-                    while let Some(m) = out_rx.recv().await {
-                        let header = MavHeader {
-                            system_id: SYSID,
-                            component_id: COMPID,
-                            sequence: seq,
-                        };
-                        seq = seq.wrapping_add(1);
-                        let Ok(bytes) = mavlink::serialize_v2(header, &m) else {
-                            continue;
-                        };
-                        let Ok(f) = ados_protocol::frame::encode_frame(
-                            &bytes,
-                            ados_protocol::frame::MAVLINK_MAX_FRAME,
-                        ) else {
-                            continue;
-                        };
-                        if wr.write_all(&f).await.is_err() || reader.is_finished() {
-                            break;
-                        }
-                    }
-                    if out_rx.is_closed() {
-                        reader.abort();
-                        return;
-                    }
-                    reader.abort();
-                }
-            }
-            Err(e) => tracing::debug!(error = %e, "pilot_mavlink_connect_failed"),
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 

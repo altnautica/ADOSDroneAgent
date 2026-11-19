@@ -56,7 +56,9 @@ pub(super) async fn read_swarm_socket(
 }
 
 /// Tick the controller and send what it asks for, re-reading the block every
-/// [`CONFIG_POLL`]. Both timers run on the connection's ADOS time.
+/// [`CONFIG_POLL`]. Both timers run on the connection's ADOS time; under
+/// lockstep the loop is a barrier lane, done until the sooner of its next
+/// two ticks once the previous one's setpoint is sent.
 pub(super) async fn control_loop(
     fc: Arc<FcConnection>,
     state: Arc<Mutex<VehicleState>>,
@@ -70,8 +72,12 @@ pub(super) async fn control_loop(
     let mut fixes: Vec<NeighborFix> = Vec::new();
     let mut tick = clock.interval(CONTROL_PERIOD);
     let mut reload = clock.interval(CONFIG_POLL);
+    let lane = clock.lane();
 
     loop {
+        if let (Some(l), Some(a), Some(b)) = (&lane, tick.next_due_ns(), reload.next_due_ns()) {
+            l.done(a.min(b));
+        }
         tokio::select! {
             _ = cancel.wait() => return LoopExit::Cancelled,
             _ = reload.tick() => {
