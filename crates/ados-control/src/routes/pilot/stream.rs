@@ -274,4 +274,43 @@ mod tests {
         let frame = json!({"op": "input", "src": "mc"});
         assert_eq!(decode_surface_frame(&frame).unwrap_err(), "malformed");
     }
+
+    /// Prints, for every shared client frame, the JSON a surface sends and the
+    /// `pilot.v1` body this stream sends the pilot for it; and, for three
+    /// `state` bodies, the client frame's `data`. Another ground
+    /// implementation that carries these frames over the radio asserts the same
+    /// bytes. Run with `cargo test -p ados-control ground_vectors -- --nocapture`.
+    #[test]
+    fn ground_vectors_pilot() {
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/pilot-requests.json"))
+                .unwrap();
+        for (key, frame) in doc.as_object().unwrap() {
+            let (_, body) = decode_surface_frame(frame).unwrap();
+            println!("PILOTJSON {key} {}", serde_json::to_string(frame).unwrap());
+            println!("VECTOR pilot_{key} {}", hex::encode(&body));
+        }
+        let fixture: ados_protocol::pilot::PilotState =
+            serde_json::from_str(include_str!("../../../tests/fixtures/pilot-frame.json")).unwrap();
+        let states = [
+            ("full", pilot::encode_op("state", &fixture).unwrap()),
+            ("minimal", pilot::encode_op("state", &json!({"owner": "pilot"})).unwrap()),
+            (
+                "mixed",
+                pilot::encode_op(
+                    "state",
+                    &json!({"owner": "operator", "fc_mode": -3, "input_age_ms": 70000,
+                            "min_clearance_m": -0.5, "big": 5_000_000_000u64, "flags": [true, false, null],
+                            "label": "x".repeat(40)}),
+                )
+                .unwrap(),
+            ),
+        ];
+        for (name, body) in states {
+            let (op, v) = pilot::peek_op(&body).unwrap();
+            let client = to_client(&op, v).unwrap();
+            println!("VECTOR state_{name} {}", hex::encode(&body));
+            println!("STATEJSON {name} {}", client["data"]);
+        }
+    }
 }

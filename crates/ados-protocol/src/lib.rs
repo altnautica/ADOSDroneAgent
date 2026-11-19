@@ -73,6 +73,9 @@ pub mod wfb_status;
 pub mod wfb_tables;
 pub mod ws_ticket;
 
+#[cfg(test)]
+mod ground_vectors_tests;
+
 /// Whether a flight-mode name is one that accepts offboard position setpoints.
 ///
 /// Which mode a vehicle must be in to be commanded is firmware-specific, and the
