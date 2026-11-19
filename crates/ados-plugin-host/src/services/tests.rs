@@ -144,15 +144,16 @@ fn listen_ports_without_the_listen_and_network_permissions_are_refused() {
 #[test]
 fn udp_listen_ports_without_listen_grant_refused() {
     let udp = |perms: &str| {
-        listener(perms).replace(
-            "listen_ports: [8092]",
-            "udp_listen_ports: [56101, 56201]",
-        )
+        listener(perms).replace("listen_ports: [8092]", "udp_listen_ports: [56101, 56201]")
     };
     for perms in ["", "network.listen", "network.outbound"] {
         let m = PluginManifest::from_yaml_text(&udp(perms)).unwrap();
         let err = declared_services(&m).unwrap_err();
-        assert!(err.0.contains("declares udp_listen_ports"), "{perms:?}: {}", err.0);
+        assert!(
+            err.0.contains("declares udp_listen_ports"),
+            "{perms:?}: {}",
+            err.0
+        );
     }
     let m = PluginManifest::from_yaml_text(&udp("network.listen, network.outbound")).unwrap();
     let s = &declared_services(&m).unwrap()[0];
@@ -160,7 +161,8 @@ fn udp_listen_ports_without_listen_grant_refused() {
     assert!(s.listen_ports.is_empty());
     let granted = render(&m, &["network.outbound", "network.listen"]);
     assert!(
-        granted.contains("SocketBindAllow=udp:56101\nSocketBindAllow=udp:56201\nSocketBindDeny=any"),
+        granted
+            .contains("SocketBindAllow=udp:56101\nSocketBindAllow=udp:56201\nSocketBindDeny=any"),
         "{granted}"
     );
     let ungranted = render(&m, &["network.outbound"]);

@@ -97,7 +97,8 @@ pub struct Sim {
 impl Drop for Sim {
     fn drop(&mut self) {
         if let Some(dir) = std::env::var_os("DST_TRACE_DIR") {
-            let path = std::path::Path::new(&dir).join(format!("{}-s{}.trace", self.name, self.seed));
+            let path =
+                std::path::Path::new(&dir).join(format!("{}-s{}.trace", self.name, self.seed));
             if let Err(e) = std::fs::write(&path, &self.trace.bytes) {
                 eprintln!("dst: could not write {}: {e}", path.display());
             }
@@ -355,9 +356,10 @@ impl Sim {
     pub fn boot(&mut self) {
         let ready = self.run_until(30_000, |s| {
             s.now - s.start >= 2_000
-                && s.state.readiness.iter().all(|r| {
-                    r.ok || r.severity != ados_protocol::pilot::Severity::Block
-                })
+                && s.state
+                    .readiness
+                    .iter()
+                    .all(|r| r.ok || r.severity != ados_protocol::pilot::Severity::Block)
         });
         assert!(
             ready,

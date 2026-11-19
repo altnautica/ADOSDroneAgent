@@ -79,7 +79,10 @@ async fn a_take_replies_only_after_both_transmitters_exited() {
 
     let reply = ops::take(u, take_req("a1b2c3d4e5f6", "KEY-1"), OK_CTX).await;
     // The phone starts on this reply, so nothing may still be transmitting.
-    assert!(!u.transmitters_up(), "the take replied while a transmitter ran");
+    assert!(
+        !u.transmitters_up(),
+        "the take replied while a transmitter ran"
+    );
     assert!(!stopping.load(Ordering::SeqCst));
     assert_eq!(reply["ok"], json!(true));
     assert_eq!(reply["state"], json!("standby"));

@@ -177,7 +177,8 @@ impl InviteStore {
 
     /// The phone behind a pending invite, read before its approval.
     pub fn pending_phone(&mut self, id: &str, now_ms: i64) -> Result<PendingPhone, InviteError> {
-        self.pending_invite(id, now_ms).map(|inv| PendingPhone::of(inv))
+        self.pending_invite(id, now_ms)
+            .map(|inv| PendingPhone::of(inv))
     }
 
     /// The pending invites, oldest first.

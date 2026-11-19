@@ -36,7 +36,16 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
     let declared = manifest.declared_permissions();
     raw.into_iter()
         .map(|r| {
-            let (name, command, ready_check, restart, slice, profiles, listen_ports, udp_listen_ports) = match r {
+            let (
+                name,
+                command,
+                ready_check,
+                restart,
+                slice,
+                profiles,
+                listen_ports,
+                udp_listen_ports,
+            ) = match r {
                 RawService::Bare(s) => (
                     s.clone(),
                     s,
@@ -94,7 +103,13 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
             let profiles = profiles
                 .map(|list| normalize_service_profiles(&name, list))
                 .transpose()?;
-            validate_listen_ports(&name, &listen_ports, MAX_LISTEN_PORTS, "listen_ports", &declared)?;
+            validate_listen_ports(
+                &name,
+                &listen_ports,
+                MAX_LISTEN_PORTS,
+                "listen_ports",
+                &declared,
+            )?;
             validate_listen_ports(
                 &name,
                 &udp_listen_ports,

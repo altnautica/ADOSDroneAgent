@@ -327,8 +327,8 @@ impl FcState {
             }
             MavMessage::DISTANCE_SENSOR(d) => {
                 use ados_protocol::mavlink::ardupilotmega::MavSensorOrientation as O;
-                let valid = d.current_distance >= d.min_distance
-                    && d.current_distance <= d.max_distance;
+                let valid =
+                    d.current_distance >= d.min_distance && d.current_distance <= d.max_distance;
                 if d.orientation == O::MAV_SENSOR_ROTATION_PITCH_270 && valid {
                     self.rangefinder = Some((f32::from(d.current_distance) / 100.0, now_ms));
                 }

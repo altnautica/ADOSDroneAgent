@@ -345,7 +345,12 @@ pub fn gs_video_delivering(wfb_status: Option<&Map<String, Value>>) -> bool {
     }
     ["valid_rx_packets_per_s", "packets_received"]
         .iter()
-        .any(|k| status.get(*k).and_then(Value::as_f64).is_some_and(|v| v > 0.0))
+        .any(|k| {
+            status
+                .get(*k)
+                .and_then(Value::as_f64)
+                .is_some_and(|v| v > 0.0)
+        })
 }
 
 #[cfg(test)]

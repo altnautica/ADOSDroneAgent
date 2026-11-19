@@ -750,7 +750,9 @@ mod tests {
     #[test]
     fn only_a_frame_read_grant_joins_the_ring_readers_group() {
         let readers = "SupplementaryGroups=ados-vision-readers".to_string();
-        assert!(sandbox_directives(&caps(&["vision.frame.read"]), true, &[], &[]).contains(&readers));
+        assert!(
+            sandbox_directives(&caps(&["vision.frame.read"]), true, &[], &[]).contains(&readers)
+        );
         assert!(!sandbox_directives(&caps(&["hardware.gpu"]), true, &[], &[]).contains(&readers));
     }
 

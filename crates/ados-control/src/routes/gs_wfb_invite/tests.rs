@@ -177,7 +177,14 @@ async fn pending_and_uncollected_invites_expire_to_410() {
     let mut store = InviteStore::new();
     create(&mut store, &phone.public, "p", T0);
     create(&mut store, &phone.public, "a", T0);
-    approve_with(true, &mut store, "a", || Ok(material()), no_issue, T0 + 60_000);
+    approve_with(
+        true,
+        &mut store,
+        "a",
+        || Ok(material()),
+        no_issue,
+        T0 + 60_000,
+    );
 
     // The pending one lapses at T0 + TTL; the approved one has its own window.
     let resp = fetch_with(true, &mut store, "p", T0 + INVITE_TTL_MS);

@@ -167,8 +167,10 @@ impl Fc {
     }
 
     fn ack(&mut self, command: MavCmd, result: MavResult) {
-        self.replies
-            .push(MavMessage::COMMAND_ACK(COMMAND_ACK_DATA { command, result }));
+        self.replies.push(MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+            command,
+            result,
+        }));
     }
 
     fn param_value(&self, name: &str) -> Option<MavMessage> {
@@ -188,7 +190,11 @@ impl Fc {
     fn stop_point(&self) -> [f32; 3] {
         let v = self.vel;
         let p = self.pos;
-        [p[0] + v[0] * VEL_TAU_S, p[1] + v[1] * VEL_TAU_S, p[2] + v[2] * VEL_TAU_S]
+        [
+            p[0] + v[0] * VEL_TAU_S,
+            p[1] + v[1] * VEL_TAU_S,
+            p[2] + v[2] * VEL_TAU_S,
+        ]
     }
 
     fn set_mode(&mut self, mode: u32) {
@@ -207,15 +213,15 @@ impl Fc {
         match m {
             MavMessage::PARAM_REQUEST_READ(r) => {
                 let id = r.param_id.to_str().unwrap_or("").trim_end_matches('\0');
-                let reply = self.param_value(id).unwrap_or(
-                    MavMessage::PARAM_ERROR(PARAM_ERROR_DATA {
-                        param_index: -1,
-                        target_system: 255,
-                        target_component: 0,
-                        param_id: r.param_id,
-                        error: MavParamError::MAV_PARAM_ERROR_DOES_NOT_EXIST,
-                    }),
-                );
+                let reply =
+                    self.param_value(id)
+                        .unwrap_or(MavMessage::PARAM_ERROR(PARAM_ERROR_DATA {
+                            param_index: -1,
+                            target_system: 255,
+                            target_component: 0,
+                            param_id: r.param_id,
+                            error: MavParamError::MAV_PARAM_ERROR_DOES_NOT_EXIST,
+                        }));
                 self.replies.push(reply);
             }
             MavMessage::PARAM_SET(s) => {
@@ -362,7 +368,11 @@ impl Fc {
                             && !self.mission_complete
                             && self.blocked_seq != Some(self.seq) =>
                     {
-                        let d = [wp[0] - self.pos[0], wp[1] - self.pos[1], wp[2] - self.pos[2]];
+                        let d = [
+                            wp[0] - self.pos[0],
+                            wp[1] - self.pos[1],
+                            wp[2] - self.pos[2],
+                        ];
                         if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < WP_RADIUS_M {
                             self.hold = wp;
                             if self.seq as usize >= self.mission.len() {
@@ -447,7 +457,10 @@ impl Fc {
         for (v, w) in self.vel.iter_mut().zip(want) {
             *v += (w - *v) * k;
         }
-        let acc = [(self.vel[0] - before[0]) / dt, (self.vel[1] - before[1]) / dt];
+        let acc = [
+            (self.vel[0] - before[0]) / dt,
+            (self.vel[1] - before[1]) / dt,
+        ];
         self.att = [(acc[1] / G).atan(), -(acc[0] / G).atan(), self.att[2]];
         let flying = !self.landed || self.vel[2] < -0.05 || self.takeoff_alt.is_some();
         if flying {
@@ -477,7 +490,10 @@ impl Fc {
     /// The frames the FC sends this tick: replies first, then its streams.
     pub fn frames(&mut self, now: u64, rng: &mut Rng) -> Vec<MavMessage> {
         let mut out = std::mem::take(&mut self.replies);
-        if self.hb_ms.is_none_or(|t| now.saturating_sub(t) >= HEARTBEAT_MS) {
+        if self
+            .hb_ms
+            .is_none_or(|t| now.saturating_sub(t) >= HEARTBEAT_MS)
+        {
             self.hb_ms = Some(now);
             let mut base = MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED;
             if self.armed {
@@ -497,7 +513,10 @@ impl Fc {
                 ..Default::default()
             }));
         }
-        if self.status_ms.is_none_or(|t| now.saturating_sub(t) >= STATUS_MS) {
+        if self
+            .status_ms
+            .is_none_or(|t| now.saturating_sub(t) >= STATUS_MS)
+        {
             self.status_ms = Some(now);
             out.push(MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
                 vtol_state: MavVtolState::MAV_VTOL_STATE_UNDEFINED,

@@ -144,7 +144,13 @@ fn a_timestamp_that_cannot_be_recorded_refuses_the_request() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("not-a-dir"), b"").unwrap();
     let mut guard = sign::ReplayGuard::load(dir.path().join("not-a-dir/uplink-replay.json"));
-    let e = admit_phone(&approved(), &signed(TAKE, NOW, &key()), TAKE, NOW, &mut guard);
+    let e = admit_phone(
+        &approved(),
+        &signed(TAKE, NOW, &key()),
+        TAKE,
+        NOW,
+        &mut guard,
+    );
     assert_eq!(e, Err(sign::MacError::Unrecorded));
     assert_eq!(
         sign::MacError::Unrecorded.status(),

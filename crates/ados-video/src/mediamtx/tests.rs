@@ -591,6 +591,9 @@ fn find_subslice_basic() {
 
 #[test]
 fn de_chunk_joins_the_chunks() {
-    assert_eq!(de_chunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"), b"Wikipedia");
+    assert_eq!(
+        de_chunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"),
+        b"Wikipedia"
+    );
     assert_eq!(de_chunk(b"0\r\n\r\n"), b"");
 }

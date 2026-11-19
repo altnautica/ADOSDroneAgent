@@ -149,7 +149,11 @@ fn the_imu_feed_of_the_lidar_pose_is_a_readiness_item() {
         &json!({"imu_feed": {"state": "degraded", "reason": "starved", "rate_hz": 12.0}}),
         w.now,
     );
-    assert_eq!(item(&w), Some((false, Severity::Warn)), "no plugin.navigation.state yet");
+    assert_eq!(
+        item(&w),
+        Some((false, Severity::Warn)),
+        "no plugin.navigation.state yet"
+    );
     w.p.on_feed(
         crate::events::TOPIC_NAV_STATE,
         &json!({"mode": "external_nav", "active_set": 1}),
