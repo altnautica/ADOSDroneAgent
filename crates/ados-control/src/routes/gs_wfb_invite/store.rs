@@ -36,6 +36,17 @@ pub struct PendingPhone {
     pub box_addr: Option<String>,
 }
 
+impl PendingPhone {
+    fn of(inv: &Invite) -> Self {
+        Self {
+            phone_pub: inv.phone_pub,
+            fingerprint: inv.fingerprint.clone(),
+            label: inv.label.clone(),
+            box_addr: inv.box_addr.clone(),
+        }
+    }
+}
+
 /// Every refusal the invite routes return.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InviteError {
@@ -46,6 +57,8 @@ pub enum InviteError {
     Expired,
     Material(MaterialError),
     SealFailed,
+    /// The uplink key sealed into the bundle could not be kept.
+    UplinkKeyStore,
 }
 
 /// What a fetch found.
@@ -164,13 +177,7 @@ impl InviteStore {
 
     /// The phone behind a pending invite, read before its approval.
     pub fn pending_phone(&mut self, id: &str, now_ms: i64) -> Result<PendingPhone, InviteError> {
-        let inv = self.pending_invite(id, now_ms)?;
-        Ok(PendingPhone {
-            phone_pub: inv.phone_pub,
-            fingerprint: inv.fingerprint.clone(),
-            label: inv.label.clone(),
-            box_addr: inv.box_addr.clone(),
-        })
+        self.pending_invite(id, now_ms).map(|inv| PendingPhone::of(inv))
     }
 
     /// The pending invites, oldest first.
@@ -206,11 +213,16 @@ impl InviteStore {
         }
     }
 
-    /// Approve a pending invite: seal the bundle to the phone's key now.
+    /// Approve a pending invite: seal the bundle to the phone's key, hand the
+    /// phone to `issue` so the box keeps what the bundle gives it, and only
+    /// then mark the invite approved. The caller holds the store's lock for
+    /// all of it, so a second approval of the same invite finds it decided
+    /// and issues nothing; an `issue` that fails leaves the invite pending.
     pub fn approve(
         &mut self,
         id: &str,
         material: Result<InviteMaterial, MaterialError>,
+        issue: impl FnOnce(&PendingPhone) -> std::io::Result<()>,
         now_ms: i64,
     ) -> Result<(), InviteError> {
         let inv = self.pending_invite(id, now_ms)?;
@@ -221,6 +233,15 @@ impl InviteStore {
             &bundle_plaintext(&material),
         )
         .map_err(|_| InviteError::SealFailed)?;
+        if let Err(e) = issue(&PendingPhone::of(inv)) {
+            tracing::error!(
+                error = %e,
+                invite_id = %inv.id,
+                phone_fingerprint = %inv.fingerprint,
+                "wfb_phone_invite_uplink_key_not_stored"
+            );
+            return Err(InviteError::UplinkKeyStore);
+        }
         inv.state = InviteState::Approved(sealed);
         inv.expires_at_ms = now_ms + INVITE_TTL_MS;
         tracing::info!(

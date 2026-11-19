@@ -10,10 +10,8 @@ const OK_CTX: TakeContext = TakeContext {
     direct_role: true,
 };
 
-fn leaked(dir: &tempfile::TempDir) -> &'static Uplink {
-    Box::leak(Box::new(Uplink::with_sidecar(
-        dir.path().join("wfb-stats.json"),
-    )))
+fn new_uplink(dir: &tempfile::TempDir) -> Arc<Uplink> {
+    Arc::new(Uplink::with_sidecar(dir.path().join("wfb-stats.json")))
 }
 
 fn take_req(id: &str, key: &str) -> TakeRequest {
@@ -25,20 +23,21 @@ fn take_req(id: &str, key: &str) -> TakeRequest {
     }
 }
 
-/// A receive generation as the daemon runs it: follows the wanted state,
-/// takes `switch` to stop or start its transmitters, and reports. `stopping`
-/// is raised from the moment a stop begins until the processes are gone.
-fn fake_generation(u: &'static Uplink, switch: Duration, stopping: Arc<AtomicBool>) {
-    let mut want = u.subscribe_transmit();
-    u.report_tx_up(*want.borrow_and_update());
+/// A receive generation as the daemon runs it: attaches, takes `switch` to
+/// carry out each later ask, and reports it. `stopping` is raised from the
+/// moment a stop begins until the processes are gone.
+fn fake_generation(u: &Arc<Uplink>, switch: Duration, stopping: Arc<AtomicBool>) {
+    let mut asks = u.attach_generation();
+    let first = asks.first();
+    u.report_applied(first.version, first.transmit);
+    let u = u.clone();
     tokio::spawn(async move {
-        while want.changed().await.is_ok() {
-            let w = *want.borrow_and_update();
-            if !w {
+        while let Some(ask) = asks.next().await {
+            if !ask.transmit {
                 stopping.store(true, Ordering::SeqCst);
             }
             tokio::time::sleep(switch).await;
-            u.report_tx_up(w);
+            u.report_applied(ask.version, ask.transmit);
             stopping.store(false, Ordering::SeqCst);
         }
     });
@@ -55,7 +54,7 @@ fn a_box_starts_transmitting_and_says_so_on_the_sidecar() {
     assert_eq!(v["holder_name"], Value::Null);
     assert!(v["since_ms"].as_u64().unwrap() > 0);
     assert_eq!(v["watcher"]["last_beacon_ms"], Value::Null);
-    assert!(*u.subscribe_transmit().borrow(), "a box never boots silent");
+    assert!(u.wants_transmit(), "a box never boots silent");
 }
 
 #[test]
@@ -72,15 +71,15 @@ fn a_beacon_carries_at_most_sixteen_bytes_of_the_id() {
 #[tokio::test(start_paused = true)]
 async fn a_take_replies_only_after_both_transmitters_exited() {
     let dir = tempfile::tempdir().unwrap();
-    let u = leaked(&dir);
+    let u = &new_uplink(&dir);
     let stopping = Arc::new(AtomicBool::new(false));
     fake_generation(u, Duration::from_millis(1500), stopping.clone());
     tokio::task::yield_now().await;
-    assert!(u.tx_up());
+    assert!(u.transmitters_up());
 
     let reply = ops::take(u, take_req("a1b2c3d4e5f6", "KEY-1"), OK_CTX).await;
     // The phone starts on this reply, so nothing may still be transmitting.
-    assert!(!u.tx_up(), "the take replied while a transmitter ran");
+    assert!(!u.transmitters_up(), "the take replied while a transmitter ran");
     assert!(!stopping.load(Ordering::SeqCst));
     assert_eq!(reply["ok"], json!(true));
     assert_eq!(reply["state"], json!("standby"));
@@ -94,30 +93,63 @@ async fn a_take_replies_only_after_both_transmitters_exited() {
     assert_eq!(side["uplink"]["state"], json!("standby"));
 }
 
+/// The start race: a take that lands after the receive generation read
+/// "transmit" but before it reported its transmitters up must not reply until
+/// the generation stopped them again.
+#[tokio::test(start_paused = true)]
+async fn a_take_while_the_generation_starts_its_transmitters_waits_for_their_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let u = &new_uplink(&dir);
+    let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let mut asks = u.attach_generation();
+    let first = asks.first();
+    let (gen_uplink, gen_log) = (u.clone(), log.clone());
+    tokio::spawn(async move {
+        // Spawning both transmitters takes a moment.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gen_log.lock().unwrap().push("started");
+        gen_uplink.report_applied(first.version, first.transmit);
+        while let Some(ask) = asks.next().await {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            gen_log
+                .lock()
+                .unwrap()
+                .push(if ask.transmit { "started" } else { "stopped" });
+            gen_uplink.report_applied(ask.version, ask.transmit);
+        }
+    });
+    let reply = ops::take(u, take_req("a1b2c3d4e5f6", "KEY-1"), OK_CTX).await;
+    log.lock().unwrap().push("standby");
+    assert_eq!(reply["state"], json!("standby"));
+    assert_eq!(*log.lock().unwrap(), ["started", "stopped", "standby"]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_take_with_no_receive_generation_stands_by_at_once() {
     let dir = tempfile::tempdir().unwrap();
-    let u = leaked(&dir);
+    let u = &new_uplink(&dir);
     let reply = ops::take(u, take_req("a1b2", "K"), OK_CTX).await;
     assert_eq!(reply["state"], json!("standby"));
-    assert!(!*u.subscribe_transmit().borrow());
+    assert!(!u.wants_transmit());
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_take_whose_transmitters_never_stop_is_refused_and_the_box_keeps_transmitting() {
     let dir = tempfile::tempdir().unwrap();
-    let u = leaked(&dir);
-    u.report_tx_up(true); // a generation that never answers
+    let u = &new_uplink(&dir);
+    // A generation that reports its pair up and never answers again.
+    let asks = u.attach_generation();
+    u.report_applied(asks.first().version, true);
     let reply = ops::take(u, take_req("a1b2", "K"), OK_CTX).await;
     assert_eq!(reply["error"], json!("E_TX_STOP_FAILED"));
     assert_eq!(u.state(), UplinkState::Transmitting);
-    assert!(*u.subscribe_transmit().borrow());
+    assert!(u.wants_transmit());
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_refusals_each_say_why_in_one_sentence() {
     let dir = tempfile::tempdir().unwrap();
-    let u = leaked(&dir);
+    let u = &new_uplink(&dir);
     let bind = TakeContext {
         bind_active: true,
         direct_role: true,
@@ -155,7 +187,7 @@ async fn the_refusals_each_say_why_in_one_sentence() {
 #[tokio::test(start_paused = true)]
 async fn only_the_holding_phone_gives_back_and_the_box_transmits_again() {
     let dir = tempfile::tempdir().unwrap();
-    let u = leaked(&dir);
+    let u = &new_uplink(&dir);
     let stopping = Arc::new(AtomicBool::new(false));
     fake_generation(u, Duration::from_millis(200), stopping);
     tokio::task::yield_now().await;
@@ -172,27 +204,30 @@ async fn only_the_holding_phone_gives_back_and_the_box_transmits_again() {
 
     let back = ops::give_back(u, "a1b2", "K").await;
     assert_eq!(back["state"], json!("transmitting"));
-    assert!(u.tx_up(), "the transmitters run again before the reply");
+    assert!(
+        u.transmitters_up(),
+        "the transmitters run again before the reply"
+    );
     assert_eq!(back["uplink"]["holder_device_id"], Value::Null);
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_boxs_operator_takes_back_whether_or_not_the_phone_answered() {
     let dir = tempfile::tempdir().unwrap();
-    let u = leaked(&dir);
+    let u = &new_uplink(&dir);
     // Idempotent while transmitting.
     let idle = ops::take_back(u, false).await;
     assert_eq!(idle["state"], json!("transmitting"));
     ops::take(u, take_req("a1b2", "K"), OK_CTX).await;
     let r = ops::take_back(u, false).await;
     assert_eq!(r["state"], json!("transmitting"));
-    assert!(*u.subscribe_transmit().borrow());
+    assert!(u.wants_transmit());
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_silent_holder_loses_the_uplink_after_the_stale_window_and_not_before() {
     let dir = tempfile::tempdir().unwrap();
-    let u = leaked(&dir);
+    let u = &new_uplink(&dir);
     ops::take(u, take_req("a1b2c3d4e5f6", "K"), OK_CTX).await;
     let t0 = Instant::now();
     assert!(!ops::fall_back_if_absent(u, t0 + Duration::from_secs(24)).await);
@@ -207,7 +242,7 @@ async fn a_silent_holder_loses_the_uplink_after_the_stale_window_and_not_before(
 
     assert!(ops::fall_back_if_absent(u, t0 + Duration::from_secs(45)).await);
     assert_eq!(u.state(), UplinkState::Transmitting);
-    assert!(*u.subscribe_transmit().borrow());
+    assert!(u.wants_transmit());
     // Nothing to fall back from any more.
     assert!(!ops::fall_back_if_absent(u, t0 + Duration::from_secs(90)).await);
 }

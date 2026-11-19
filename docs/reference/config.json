@@ -1003,6 +1003,16 @@
       "type": "boolean"
     },
     {
+      "default": false,
+      "description": "Lets phones and tablets on your network reach this computer's ground station. Off: only this computer can.",
+      "enum": null,
+      "key": "host.share_on_lan",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": "/var/ados/logs/flights",
       "description": "Flight Log Dir",
       "enum": null,
@@ -2695,7 +2705,8 @@
         "http://localhost:4000",
         "http://127.0.0.1:4000",
         "http://localhost:4001",
-        "http://127.0.0.1:4001"
+        "http://127.0.0.1:4001",
+        "https://command.altnautica.com"
       ],
       "description": "Cors Origins",
       "enum": null,

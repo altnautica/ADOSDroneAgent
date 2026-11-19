@@ -1,4 +1,5 @@
 use super::*;
+use crate::routes::ground_station_uplink::phones;
 use ados_groundlink::pairing::{generate_keypair, open_from_peer, seal_to_peer_with};
 
 const T0: i64 = 1_800_000_000_000;
@@ -67,6 +68,11 @@ fn b64d(v: &Value) -> Vec<u8> {
         .unwrap()
 }
 
+/// An approval's `issue` that keeps nothing.
+fn no_issue(_: &PendingPhone) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[tokio::test]
 async fn create_approve_fetch_once_then_gone() {
     let phone = generate_keypair();
@@ -88,7 +94,7 @@ async fn create_approve_fetch_once_then_gone() {
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     assert_eq!(body_json(resp).await, json!({"state": "pending"}));
 
-    let resp = approve_with(true, &mut store, id, || Ok(material()), T0 + 3);
+    let resp = approve_with(true, &mut store, id, || Ok(material()), no_issue, T0 + 3);
     assert_eq!(resp.status(), StatusCode::OK);
     // Approved invites leave the pending list.
     let list = body_json(list_with(true, &mut store, T0 + 4)).await;
@@ -161,7 +167,7 @@ async fn reject_answers_403_and_cannot_be_approved() {
     let resp = fetch_with(true, &mut store, id, T0 + 2);
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(body_json(resp).await, json!({"state": "rejected"}));
-    let resp = approve_with(true, &mut store, id, || Ok(material()), T0 + 3);
+    let resp = approve_with(true, &mut store, id, || Ok(material()), no_issue, T0 + 3);
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
@@ -171,12 +177,19 @@ async fn pending_and_uncollected_invites_expire_to_410() {
     let mut store = InviteStore::new();
     create(&mut store, &phone.public, "p", T0);
     create(&mut store, &phone.public, "a", T0);
-    approve_with(true, &mut store, "a", || Ok(material()), T0 + 60_000);
+    approve_with(true, &mut store, "a", || Ok(material()), no_issue, T0 + 60_000);
 
     // The pending one lapses at T0 + TTL; the approved one has its own window.
     let resp = fetch_with(true, &mut store, "p", T0 + INVITE_TTL_MS);
     assert_eq!(resp.status(), StatusCode::GONE);
-    let resp = approve_with(true, &mut store, "p", || Ok(material()), T0 + INVITE_TTL_MS);
+    let resp = approve_with(
+        true,
+        &mut store,
+        "p",
+        || Ok(material()),
+        no_issue,
+        T0 + INVITE_TTL_MS,
+    );
     assert_eq!(resp.status(), StatusCode::GONE);
     let resp = fetch_with(true, &mut store, "a", T0 + 60_000 + INVITE_TTL_MS);
     assert_eq!(resp.status(), StatusCode::GONE);
@@ -248,6 +261,7 @@ async fn bad_phone_key_and_unpaired_station_are_refused() {
         &mut store,
         "z",
         || Err(MaterialError::NotPaired),
+        no_issue,
         T0 + 1,
     );
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -256,6 +270,7 @@ async fn bad_phone_key_and_unpaired_station_are_refused() {
         &mut store,
         "z",
         || Err(MaterialError::HopKeyUnavailable),
+        no_issue,
         T0 + 1,
     );
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -280,7 +295,7 @@ async fn drone_profile_gets_404_on_every_route() {
     for resp in [
         create_with(false, &mut store, &req, "d".into(), true, T0),
         list_with(false, &mut store, T0),
-        approve_with(false, &mut store, "d", || Ok(material()), T0),
+        approve_with(false, &mut store, "d", || Ok(material()), no_issue, T0),
         reject_with(false, &mut store, "d", T0),
         fetch_with(false, &mut store, "d", T0),
     ] {
@@ -291,6 +306,88 @@ async fn drone_profile_gets_404_on_every_route() {
         );
     }
     assert!(store.invites.is_empty());
+}
+
+/// Two approvals of one invite race: both read it pending and mint a key
+/// before either lands. Only the approval that sealed the bundle stores its
+/// key; the other finds the invite decided and stores nothing, so the box
+/// keeps the key the phone holds.
+#[tokio::test]
+async fn a_second_approval_of_one_invite_keeps_the_key_the_phone_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("uplink-phones.json");
+    let phone = generate_keypair();
+    let mut store = InviteStore::new();
+    let id = "0a0b0c0d";
+    create(&mut store, &phone.public, id, T0);
+    let with_key = |key: [u8; 32]| {
+        let mut m = material();
+        m.ground.uplink_key = key;
+        m
+    };
+    let (first, second) = ([0x11u8; 32], [0x22u8; 32]);
+    let resp = approve_with(
+        true,
+        &mut store,
+        id,
+        || Ok(with_key(first)),
+        keep_uplink_key(&path, first, T0 + 1),
+        T0 + 1,
+    );
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = approve_with(
+        true,
+        &mut store,
+        id,
+        || Ok(with_key(second)),
+        keep_uplink_key(&path, second, T0 + 2),
+        T0 + 2,
+    );
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    let kept = phones::load(&path);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].uplink_key(), Some(first));
+    assert_eq!(kept[0].fingerprint, phone_fingerprint(&phone.public));
+    assert_eq!(kept[0].label, "Pilot phone");
+    // The key the box kept is the one sealed into the phone's bundle.
+    let sealed = body_json(fetch_with(true, &mut store, id, T0 + 3)).await;
+    let plaintext = open_from_peer(
+        &phone.secret.to_bytes(),
+        &b64d(&sealed["gs_eph_pub_b64"]),
+        &b64d(&sealed["nonce_b64"]),
+        &b64d(&sealed["ciphertext_b64"]),
+        &invite_context(id),
+    )
+    .unwrap();
+    let bundle: Value = serde_json::from_slice(&plaintext).unwrap();
+    assert_eq!(b64d(&bundle["ground"]["uplink_key_b64"]), first.to_vec());
+}
+
+/// A key that cannot be stored fails the approval and leaves the invite
+/// pending, so the phone never holds a key this box does not know.
+#[tokio::test]
+async fn an_uplink_key_that_cannot_be_stored_leaves_the_invite_pending() {
+    let phone = generate_keypair();
+    let mut store = InviteStore::new();
+    create(&mut store, &phone.public, "k", T0);
+    let resp = approve_with(
+        true,
+        &mut store,
+        "k",
+        || Ok(material()),
+        |_| Err(std::io::Error::other("read-only key directory")),
+        T0 + 1,
+    );
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body_json(resp).await["detail"]["error"]["code"],
+        "E_UPLINK_KEY_STORE"
+    );
+    assert_eq!(
+        fetch_with(true, &mut store, "k", T0 + 2).status(),
+        StatusCode::ACCEPTED
+    );
 }
 
 #[test]

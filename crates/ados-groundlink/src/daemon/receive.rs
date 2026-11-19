@@ -216,10 +216,14 @@ pub(super) async fn receive_loop(
         // The two ground transmitters run unless the box stands by for a
         // phone holding the uplink; the uplink state decides, and a change of
         // it is applied inside the generation without touching a receiver.
-        let mut gen_tx = super::uplink_tx::GenTx::new(chain.tx);
-        let mut transmit = crate::uplink::uplink().subscribe_transmit();
-        let want = *transmit.borrow_and_update();
-        if !gen_tx.apply(want, &manager).await {
+        // The generation reports each ask it carried out, so a take is
+        // confirmed only once this generation's own pair exited.
+        let (mut gen_tx, mut asks) =
+            super::uplink_tx::GenTx::attach(crate::uplink::uplink(), chain.tx);
+        if !gen_tx
+            .apply(asks.first(), || manager.spawn_uplink_watcher())
+            .await
+        {
             tokio::time::sleep(RETRY_INTERVAL).await;
             continue;
         }
@@ -360,13 +364,10 @@ pub(super) async fn receive_loop(
                 _ = &mut watchdog_task => break,
                 _ = gen_tx.wait_stall() => break,
                 _ = &mut reconcile => break,
-                changed = transmit.changed() => {
+                ask = asks.next() => {
                     // The sender is the process-wide uplink; it never drops.
-                    if changed.is_err() {
-                        break;
-                    }
-                    let want = *transmit.borrow_and_update();
-                    if !gen_tx.apply(want, &manager).await {
+                    let Some(ask) = ask else { break };
+                    if !gen_tx.apply(ask, || manager.spawn_uplink_watcher()).await {
                         break;
                     }
                 }
@@ -377,8 +378,9 @@ pub(super) async fn receive_loop(
         // watchdog handles are aborted alongside the fan-out / telemetry / stats
         // tasks (an already-finished task's abort is a no-op), so no generation's
         // watchdog survives into the next, mirroring the air-side abort-siblings
-        // discipline. Dropping `gen_tx` aborts the transmitter watchers and
-        // killpg's the transmitters with the generation.
+        // discipline. Closing `gen_tx` stops both transmitters, waits until
+        // both exited, and only then detaches the generation from the uplink,
+        // so a take waiting on it is answered once nothing it ran transmits.
         zombie_task.abort();
         watchdog_task.abort();
         fanout_task.abort();
@@ -387,7 +389,7 @@ pub(super) async fn receive_loop(
         if let Some(t) = stats_task {
             t.abort();
         }
-        drop(gen_tx);
+        gen_tx.close().await;
 
         tokio::time::sleep(RETRY_INTERVAL).await;
     }

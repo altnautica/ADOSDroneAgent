@@ -6,12 +6,13 @@
 //! puts a fresh 32-byte uplink key in it and keeps the same key here, against
 //! the phone's public key; every uplink request after that is authenticated
 //! with an HMAC under it, in both directions (the phone's take and give-back,
-//! the box's take-back call to the phone). An X25519 key can agree a secret
-//! but cannot sign, which is why the bundle carries a key rather than the
-//! request carrying a signature.
+//! the box's take-back call to the phone), each direction under its own MAC
+//! context. An X25519 key can agree a secret but cannot sign, which is why the
+//! bundle carries a key rather than the request carrying a signature.
 //!
 //! Stored at `<wfb key dir>/uplink-phones.json`, mode 0600, at most
 //! [`MAX_PHONES`] entries; approving the same phone again replaces its key.
+//! Writes are serialised in this process, so two approvals at once both land.
 
 use std::path::{Path, PathBuf};
 
@@ -64,8 +65,12 @@ pub fn load(path: &Path) -> Vec<ApprovedPhone> {
         .unwrap_or_default()
 }
 
+/// Serialises [`remember`]'s read-modify-write of the store.
+static REMEMBER: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Keep `phone`, replacing an earlier approval of the same key.
 pub fn remember(path: &Path, phone: ApprovedPhone) -> std::io::Result<()> {
+    let _write = REMEMBER.lock();
     let mut phones = load(path);
     phones.retain(|p| p.phone_pub_b64 != phone.phone_pub_b64);
     phones.push(phone);

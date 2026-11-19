@@ -1569,6 +1569,24 @@
     {
       "method": "GET",
       "notes": null,
+      "path": "/api/v1/ground-station/uplink",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/uplink",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
       "path": "/api/v1/ground-station/wfb",
       "public": false,
       "relay_forbidden": false,

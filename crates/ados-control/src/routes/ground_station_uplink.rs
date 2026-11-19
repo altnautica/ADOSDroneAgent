@@ -10,12 +10,15 @@
 //!
 //! - `take` / `give_back` must carry the phone's key ([`sign::PHONE_KEY_HEADER`]),
 //!   a timestamp and an HMAC under the uplink key the phone's invite delivered
-//!   ([`phones`], [`sign`]). `take` may carry `yield_port`: the box calls
+//!   ([`phones`], [`sign`]); the last timestamp accepted from each phone is
+//!   kept on disk, so a captured request stays a replay across a restart.
+//!   `take` may carry `yield_port`: the box calls
 //!   `http://<the phone's address>:<yield_port>/uplink/yield` before a
-//!   take-back.
+//!   take-back, signed under its own MAC context.
 //! - `take_back` is the box's operator: any caller that passed this listener's
 //!   own auth (on-box, or holding the node's key). The phone is told first and
-//!   given [`sign::YIELD_TIMEOUT`] to confirm; the box transmits either way.
+//!   given [`sign::YIELD_TIMEOUT`] to stop and confirm; the box transmits
+//!   either way.
 //!
 //! Ground-station only; listed in [`crate::auth::RELAY_FORBIDDEN_PATHS`], so no
 //! request that crossed the radio can move the uplink.
@@ -140,7 +143,8 @@ pub async fn get_uplink(State(state): State<AppState>) -> Response {
     Json(json!({"uplink": uplink_view(&state.run_dir)})).into_response()
 }
 
-/// The guard every phone request passes, process-wide.
+/// The guard every phone request passes, process-wide, loaded from
+/// [`sign::replay_path`] on first use.
 static REPLAY: parking_lot::Mutex<Option<sign::ReplayGuard>> = parking_lot::Mutex::new(None);
 
 /// Authenticate a phone's `take` / `give_back`: the fingerprint of the
@@ -198,18 +202,14 @@ pub async fn post_uplink(
                     &headers,
                     &body,
                     now_ms(),
-                    guard.get_or_insert_with(Default::default),
+                    guard.get_or_insert_with(|| sign::ReplayGuard::load(sign::replay_path())),
                 )
             };
             let fingerprint = match admitted {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!(op = %req.op, reason = ?e, "uplink_request_refused");
-                    return refusal(
-                        StatusCode::UNAUTHORIZED,
-                        "E_UPLINK_UNAUTHORIZED",
-                        e.detail(),
-                    );
+                    return refusal(e.status(), e.code(), e.detail());
                 }
             };
             let peer_ip = peer.map(|Extension(PeerAddr(a))| a.ip());
@@ -251,7 +251,8 @@ pub fn phone_command(
     })
 }
 
-/// Transition 3: tell the holder first, wait up to two seconds, then transmit.
+/// Transition 3: tell the holder first, wait up to [`sign::YIELD_TIMEOUT`] for
+/// it to stop, then transmit.
 async fn take_back() -> Response {
     let Some(status) = groundlink_cmd_roundtrip(&json!({"op": "uplink_status"})).await else {
         return reply_from(None);

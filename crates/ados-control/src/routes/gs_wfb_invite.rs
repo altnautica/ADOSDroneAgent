@@ -276,6 +276,11 @@ fn error_response(err: InviteError) -> Response {
             "E_PHONE_PUB_INVALID",
             "the bundle cannot be sealed to this phone key",
         ),
+        InviteError::UplinkKeyStore => nested_detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "E_UPLINK_KEY_STORE",
+            "the phone's uplink key could not be stored",
+        ),
     }
 }
 
@@ -363,14 +368,38 @@ fn approve_with(
     store: &mut InviteStore,
     id: &str,
     material: impl FnOnce() -> Result<InviteMaterial, MaterialError>,
+    issue: impl FnOnce(&PendingPhone) -> std::io::Result<()>,
     now_ms: i64,
 ) -> Response {
     if !gs {
         return profile_mismatch();
     }
-    match store.approve(id, material(), now_ms) {
+    match store.approve(id, material(), issue, now_ms) {
         Ok(()) => Json(json!({"invite_id": id, "state": "approved"})).into_response(),
         Err(e) => error_response(e),
+    }
+}
+
+/// The approval's `issue`: keep `uplink_key`, the key sealed into the phone's
+/// bundle, against the phone's key in the approved-phone store at `path`.
+fn keep_uplink_key(
+    path: &std::path::Path,
+    uplink_key: [u8; 32],
+    now_ms: i64,
+) -> impl FnOnce(&PendingPhone) -> std::io::Result<()> + '_ {
+    use crate::routes::ground_station_uplink::phones;
+    move |phone| {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        phones::remember(
+            path,
+            phones::ApprovedPhone {
+                phone_pub_b64: b64.encode(phone.phone_pub),
+                fingerprint: phone.fingerprint.clone(),
+                label: phone.label.clone(),
+                uplink_key_b64: b64.encode(uplink_key),
+                approved_at_ms: now_ms,
+            },
+        )
     }
 }
 
@@ -428,10 +457,12 @@ pub async fn list_invites() -> Response {
 
 /// `POST /api/v1/ground-station/wfb/invite/{id}/approve`.
 ///
-/// Issues the phone its uplink key and stores it against the phone's key
-/// BEFORE sealing, so a phone never holds a key this box does not know. A key
-/// stored for an approval that then fails is harmless: the next approval of
-/// the same phone replaces it.
+/// Issues the phone a fresh uplink key. The material that carries it is read
+/// outside the store's lock, since it touches the disk. The key is stored
+/// against the phone's key inside the approval, under that lock, after the
+/// bundle sealed and before the invite reads approved: a phone never holds a
+/// key this box does not know, and a second approval of the same invite finds
+/// it decided and stores nothing.
 pub async fn approve_invite(Path(id): Path<String>) -> Response {
     use crate::routes::ground_station_uplink::phones;
     if !is_ground_station() {
@@ -442,30 +473,17 @@ pub async fn approve_invite(Path(id): Path<String>) -> Response {
         Err(e) => return error_response(e),
     };
     let uplink_key = phones::new_uplink_key();
-    // Read the material before taking the lock again: it touches the disk.
-    let material = load_material(phone.box_addr.clone(), uplink_key);
-    if material.is_ok() {
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let remembered = phones::remember(
-            &phones::phones_path(),
-            phones::ApprovedPhone {
-                phone_pub_b64: b64.encode(phone.phone_pub),
-                fingerprint: phone.fingerprint,
-                label: phone.label,
-                uplink_key_b64: b64.encode(uplink_key),
-                approved_at_ms: now_ms(),
-            },
-        );
-        if let Err(e) = remembered {
-            tracing::error!(error = %e, "wfb_phone_invite_uplink_key_not_stored");
-            return nested_detail(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "E_UPLINK_KEY_STORE",
-                "the phone's uplink key could not be stored",
-            );
-        }
-    }
-    approve_with(true, &mut STORE.lock(), &id, || material, now_ms())
+    let material = load_material(phone.box_addr, uplink_key);
+    let phones_path = phones::phones_path();
+    let now = now_ms();
+    approve_with(
+        true,
+        &mut STORE.lock(),
+        &id,
+        || material,
+        keep_uplink_key(&phones_path, uplink_key, now),
+        now,
+    )
 }
 
 /// `POST /api/v1/ground-station/wfb/invite/{id}/reject`.
