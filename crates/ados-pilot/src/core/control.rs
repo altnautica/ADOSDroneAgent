@@ -233,14 +233,17 @@ impl Pilot {
             _ => None,
         };
         let Some(goal) = goal else {
+            self.held_route.clear();
             self.plan = planner::Plan::hold(AvoidState::Clear);
             return;
         };
         if goal.kind == GoalKind::Vantage {
+            self.held_route.clear();
             self.replan_vantage(&goal, pos, margin, now_ms);
             return;
         }
         if self.settings.pilot.avoid == AvoidMode::Off {
+            self.held_route.clear();
             let t = [goal.n, goal.e];
             self.plan = planner::Plan {
                 state: AvoidState::Off,
@@ -252,9 +255,13 @@ impl Pilot {
             return;
         }
         match self.obstacle_data_state(now_ms) {
-            Some(AvoidState::Stale) => self.plan = planner::Plan::hold(AvoidState::Stale),
+            Some(AvoidState::Stale) => {
+                self.held_route.clear();
+                self.plan = planner::Plan::hold(AvoidState::Stale);
+            }
             // No obstacle sensor: the goal flies straight, reported as such.
             Some(s) => {
+                self.held_route.clear();
                 let t = [goal.n, goal.e];
                 self.plan = planner::Plan {
                     state: s,
@@ -264,8 +271,17 @@ impl Pilot {
                     min_clearance: None,
                 };
             }
-            None => self.plan = planner::plan(&self.obstacles, &goal, pos, margin),
+            None => {
+                let held = &mut self.held_route;
+                self.plan = planner::plan_committed(&self.obstacles, &goal, pos, margin, held);
+            }
         }
+    }
+
+    /// How many times the planner changed the route it flies: straight to a
+    /// detour or back, or a detour to another spot ([`planner::Commit`]).
+    pub fn route_switches(&self) -> u32 {
+        self.held_route.switches
     }
 
     /// Produce this tick's command for the owner.

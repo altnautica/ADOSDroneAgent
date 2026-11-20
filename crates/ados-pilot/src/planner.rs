@@ -1,6 +1,7 @@
 //! The skill and goto planner (C2): keep the goal when it is clear, otherwise
 //! search detour candidates on the skill's ring and route to the best
-//! reachable one with A* over the clearance grid.
+//! reachable one with A* over the clearance grid, preferring wide gaps; a
+//! chosen detour is held from one replan to the next ([`commit`]).
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -9,6 +10,9 @@ use ados_protocol::pilot::{AvoidState, Goal, GoalKind};
 
 use crate::geo::{self, V2};
 use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
+
+mod commit;
+pub use commit::{plan_committed, Commit, RECHOOSE_GOAL_M, RELEASE_PLANS, RELEASE_ROOM_M};
 
 /// Expansion budget per search.
 pub const MAX_EXPANSIONS: usize = 4000;
@@ -55,8 +59,29 @@ pub fn segment_clear(grid: &Grid, a: V2, b: V2, margin: f32) -> bool {
     })
 }
 
+/// Where a detour candidate sits on the subject's ring, relative to the
+/// goal's own point: (bearing offset, degrees; radius offset, metres). A
+/// committed detour keeps its spot while the ring moves with the subject.
+pub type Spot = (f32, f32);
+
 /// Detour candidates around the subject, cheapest first: `(point, cost)`.
 pub fn candidates(goal: &Goal, from: V2) -> Vec<(V2, f32)> {
+    ring(goal, from, 0.0)
+        .into_iter()
+        .map(|(p, cost, _)| (p, cost))
+        .collect()
+}
+
+/// What choosing a detour on the other side of the ring than the one held
+/// costs, in the ring's cost units (one is 90° off the goal's bearing): a
+/// detour chosen again keeps round the side it went, unless the other side
+/// is clearly better or the only way.
+pub const SIDE_SWITCH_COST: f32 = 0.5;
+
+/// [`candidates`] with each one's [`Spot`]; those on the other side of the
+/// ring than `side` (the sign of a held spot's bearing offset; 0 for none)
+/// cost [`SIDE_SWITCH_COST`] more.
+fn ring(goal: &Goal, from: V2, side: f32) -> Vec<(V2, f32, Spot)> {
     let Some(c) = &goal.candidates else {
         return Vec::new();
     };
@@ -74,7 +99,7 @@ pub fn candidates(goal: &Goal, from: V2) -> Vec<(V2, f32)> {
                     }
                     let b = (c.angle_deg + dphi).to_radians();
                     let p = geo::add(center, geo::scale(geo::bearing_unit(b), r));
-                    out.push((p, dphi.abs() / 60.0 + dr.abs() / 2.0));
+                    out.push((p, dphi.abs() / 60.0 + dr.abs() / 2.0, (dphi, dr)));
                 }
             }
         }
@@ -86,9 +111,14 @@ pub fn candidates(goal: &Goal, from: V2) -> Vec<(V2, f32)> {
                     }
                     let b = (c.angle_deg + delta).to_radians();
                     let p = geo::add(center, geo::scale(geo::bearing_unit(b), c.radius_m + dd));
-                    out.push((p, delta.abs() / 90.0 + dd / 4.0));
+                    out.push((p, delta.abs() / 90.0 + dd / 4.0, (delta, dd)));
                 }
             }
+        }
+    }
+    for (_, cost, (delta, _)) in &mut out {
+        if *delta * side < 0.0 {
+            *cost += SIDE_SWITCH_COST;
         }
     }
     // Ties broken by distance from the vehicle.
@@ -104,28 +134,78 @@ pub fn candidates(goal: &Goal, from: V2) -> Vec<(V2, f32)> {
     out
 }
 
-/// Plan one goal from `from`. A detour candidate off the grid (a subject
+/// Plan one goal from `from`, with no route held from before
+/// ([`plan_committed`] with a fresh [`Commit`]).
+pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
+    plan_committed(obs, goal, from, margin, &mut Commit::default())
+}
+
+/// The straight plan to the goal's own point `target` (clearance `gc`).
+fn direct(grid: &Grid, from: V2, target: V2, gc: f32) -> Plan {
+    Plan {
+        state: AvoidState::Clear,
+        target: Some(target),
+        goal: Some(target),
+        path: vec![from, target],
+        min_clearance: Some(gc.min(clearance(grid, from))).filter(|c| c.is_finite()),
+    }
+}
+
+/// Clearance beyond the margin a detour is first routed with, metres: the
+/// obstacle brake keeps its creep slack and a cell's quantisation beyond
+/// the margin (0.205 m) clear of every stop path, so a route through a gap
+/// it fits only at the bare margin is flown at a crawl. Only when no
+/// candidate is reachable with it is the bare margin routed.
+pub const ROUTE_ROOM_M: f32 = 0.25;
+
+/// Which detour spots a route may go to.
+#[derive(Debug, Clone, Copy)]
+enum Choose {
+    /// Only this one (a held detour, re-routed).
+    Only(Spot),
+    /// Any, keeping to `side` of the ring ([`ring`]).
+    Any { side: f32 },
+}
+
+/// The cheapest reachable detour candidate of those `choose` allows, routed
+/// from `from` with the search staying near `prefer` (the route flown
+/// before; empty for none), with [`ROUTE_ROOM_M`] beyond the margin when
+/// any candidate is reachable with it. A candidate off the grid (a subject
 /// more than half the grid away) is routed toward through the grid's edge
 /// ([`Flood::exit_toward`]): the grid knows nothing beyond it, so the way
 /// out that leaves the least straight distance still to go is flown.
-pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
+fn detour(
+    obs: &Obstacles,
+    goal: &Goal,
+    from: V2,
+    margin: f32,
+    choose: Choose,
+    prefer: &[V2],
+) -> Option<(Plan, Spot)> {
+    route(obs, goal, from, margin + ROUTE_ROOM_M, choose, prefer)
+        .or_else(|| route(obs, goal, from, margin, choose, prefer))
+}
+
+/// [`detour`] at one routing margin.
+fn route(
+    obs: &Obstacles,
+    goal: &Goal,
+    from: V2,
+    margin: f32,
+    choose: Choose,
+    prefer: &[V2],
+) -> Option<(Plan, Spot)> {
     let grid = &obs.grid;
-    let target = [goal.n, goal.e];
-    let gc = clearance(grid, target);
-    if gc >= margin && segment_clear(grid, from, target, margin) {
-        return Plan {
-            state: AvoidState::Clear,
-            target: Some(target),
-            goal: Some(target),
-            path: vec![from, target],
-            min_clearance: Some(gc.min(clearance(grid, from))).filter(|c| c.is_finite()),
-        };
-    }
     let subject = goal.subject_ne;
     // One flood serves every candidate off the grid.
     let mut flooded: Option<Option<Flood>> = None;
-    for (cand, _) in candidates(goal, from) {
-        if clearance(grid, cand) < margin {
+    let side = match choose {
+        Choose::Only(_) => 0.0,
+        Choose::Any { side } => side,
+    };
+    for (cand, _, spot) in ring(goal, from, side) {
+        let other = matches!(choose, Choose::Only(o) if o != spot);
+        if other || clearance(grid, cand) < margin {
             continue;
         }
         if let Some(s) = subject {
@@ -133,13 +213,13 @@ pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
                 continue;
             }
         }
-        let path = if grid.cell(cand).is_some() {
-            astar(grid, from, cand, margin)
-        } else {
-            flooded
-                .get_or_insert_with(|| flood(grid, from, margin))
+        let path = match grid.cell(cand) {
+            Some(cell) => search(grid, from, Some(cell), margin, MAX_EXPANSIONS, prefer)
+                .and_then(|f| f.path(grid, cand)),
+            None => flooded
+                .get_or_insert_with(|| search(grid, from, None, margin, GRID_N * GRID_N, prefer))
                 .as_ref()
-                .and_then(|f| f.exit_toward(grid, cand))
+                .and_then(|f| f.exit_toward(grid, cand)),
         };
         if let Some(path) = path {
             let wp = along(&path, LOOKAHEAD_M);
@@ -147,16 +227,17 @@ pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
                 .iter()
                 .map(|p| clearance(grid, *p))
                 .fold(f32::INFINITY, f32::min);
-            return Plan {
+            let plan = Plan {
                 state: AvoidState::Detour,
                 target: Some(wp),
                 goal: Some(cand),
                 path: decimate(&path, 16),
                 min_clearance: minc.is_finite().then_some(minc),
             };
+            return Some((plan, spot));
         }
     }
-    Plan::hold(AvoidState::Blocked)
+    None
 }
 
 /// Costs and parents of a search over the grid from one point.
@@ -208,17 +289,54 @@ impl Flood {
     }
 }
 
+/// Within this much clearance beyond the margin a route's length costs up to
+/// [`GAP_COST`] times more, metres: of two gaps the vehicle fits, the wider
+/// one is preferred, and through a gap the route keeps to its middle.
+pub const GAP_ROOM_M: f32 = 0.6;
+/// The extra cost per metre at the margin itself ([`GAP_ROOM_M`]).
+pub const GAP_COST: f32 = 1.0;
+/// The extra cost per metre per metre a route strays from the one flown
+/// before (up to [`PREFER_CAP_M`]): a held detour stays on the side of a
+/// trunk it chose unless the other side is clearly shorter.
+pub const PREFER_COST: f32 = 0.5;
+pub const PREFER_CAP_M: f32 = 1.5;
+
+/// Distance from `p` to the polyline `path` (infinite for an empty one).
+fn dist_to_path(path: &[V2], p: V2) -> f32 {
+    match path {
+        [] => f32::INFINITY,
+        [only] => geo::dist(*only, p),
+        _ => path
+            .windows(2)
+            .map(|w| {
+                let ab = geo::sub(w[1], w[0]);
+                let l2 = geo::dot(ab, ab);
+                let t = if l2 > 1e-9 {
+                    (geo::dot(geo::sub(p, w[0]), ab) / l2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                geo::dist(geo::add(w[0], geo::scale(ab, t)), p)
+            })
+            .fold(f32::INFINITY, f32::min),
+    }
+}
+
 /// Best-first search over 8 neighbours from `from`; step cost
-/// `len + 0.5 / max(clearance, 0.25)`; cells under `margin` clearance are
-/// blocked except near the start. With a `goal` it is A* and stops there;
-/// without one it floods every reachable cell. `None` when `from` is off
-/// the grid, or a goal was given and not reached within `max_expansions`.
+/// `len·(1 + gap) + 0.5 / max(clearance, 0.25)`, where `gap` grows to
+/// [`GAP_COST`] as the clearance falls to the margin ([`GAP_ROOM_M`]), plus
+/// [`PREFER_COST`] per metre of distance from `prefer` (a route flown
+/// before; empty for none); cells under `margin` clearance are blocked
+/// except near the start. With a `goal` it is A* and stops there; without
+/// one it floods every reachable cell. `None` when `from` is off the grid,
+/// or a goal was given and not reached within `max_expansions`.
 fn search(
     grid: &Grid,
     from: V2,
     goal: Option<(usize, usize)>,
     margin: f32,
     max_expansions: usize,
+    prefer: &[V2],
 ) -> Option<Flood> {
     let (si, sj) = grid.cell(from)?;
     let idx = |i: usize, j: usize| i * GRID_N + j;
@@ -277,7 +395,13 @@ fn search(
             } else {
                 CELL_M
             };
-            let cost = gi0 + len + 0.5 / c.max(0.25);
+            let gap = GAP_COST * ((margin + GAP_ROOM_M - c) / GAP_ROOM_M).clamp(0.0, 1.0);
+            let stray = if prefer.is_empty() {
+                0.0
+            } else {
+                PREFER_COST * dist_to_path(prefer, p).min(PREFER_CAP_M)
+            };
+            let cost = gi0 + len * (1.0 + gap + stray) + 0.5 / c.max(0.25);
             let k = idx(ni, nj);
             if cost < f.g[k] {
                 f.g[k] = cost;
@@ -289,16 +413,10 @@ fn search(
     goal.is_none().then_some(f)
 }
 
-/// A* from `from` to `to`, with the step costs of the search above.
-pub fn astar(grid: &Grid, from: V2, to: V2, margin: f32) -> Option<Vec<V2>> {
-    let goal = grid.cell(to)?;
-    search(grid, from, Some(goal), margin, MAX_EXPANSIONS)?.path(grid, to)
-}
-
 /// Every cell reachable from `from` at `margin`, in one search: routes to
 /// many candidate points cost one flood instead of one A* each.
 pub fn flood(grid: &Grid, from: V2, margin: f32) -> Option<Flood> {
-    search(grid, from, None, margin, GRID_N * GRID_N)
+    search(grid, from, None, margin, GRID_N * GRID_N, &[])
 }
 
 fn ordered(v: f32) -> u32 {

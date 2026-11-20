@@ -22,6 +22,10 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("liftoff", liftoff),
     ("link_loss", link_loss),
     ("mission", mission),
+    ("forest_corridor", crate::forest::forest_corridor),
+    ("forest_gap", crate::forest::forest_gap),
+    ("forest_detour", crate::forest::forest_detour),
+    ("forest_stand", crate::forest::forest_stand),
 ];
 
 fn ok(a: &ados_protocol::pilot::ActionResult) -> bool {

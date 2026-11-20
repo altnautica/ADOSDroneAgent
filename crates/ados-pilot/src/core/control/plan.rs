@@ -2,14 +2,12 @@
 //! reference ([`super::MotionRef`]) at the profile's goal limits, braked as
 //! stick flight is, and held inside the geofence and the altitude limits.
 
-use ados_protocol::pilot::{AvoidMode, AvoidState, Goal, GoalKind, Owner, VelMode};
+use ados_protocol::pilot::{AvoidMode, AvoidState, GoalKind, Owner};
 
+mod ask;
 mod bounds;
 
-use super::motion_ref::{
-    approach, leash_within, MotionRef, APPROACH_DECEL_SHARE, ASK_SMOOTH_S, REF_LEASH_M,
-    SHAPER_REPORT_MPS,
-};
+use super::motion_ref::{leash_within, MotionRef, ASK_SMOOTH_S, REF_LEASH_M, SHAPER_REPORT_MPS};
 use super::subject_guard::Subject;
 use super::{
     geofence, FC_POS_GAIN, FLOOR_AGL_M, GOTO_ARRIVE_M, HARD_STOP_FRAC, HOLD_NO_VANTAGE,
@@ -439,62 +437,5 @@ impl Pilot {
         ));
         let m = self.tx().setpoint(MASK_POS_VEL_YAW, hold, vel, yaw, 0.0);
         self.mav(m);
-    }
-
-    /// The goal's speed limit, `max_speed` held to the profile's limit and to
-    /// any nav cap, and its own limit without the nav cap.
-    fn goal_v_cap(&self, max_speed: f32, now_ms: u64) -> (f32, f32) {
-        let v_cap = max_speed.min(self.limits_now(now_ms).v_h).max(0.5);
-        let own = max_speed
-            .min(limits(self.settings.pilot.profile).v_h)
-            .max(0.5);
-        (v_cap, own)
-    }
-
-    /// The velocity a goal asks with its target `to` away, before any
-    /// limit. A commanded velocity is asked as it is ([`VelMode::Command`]);
-    /// a feed-forward gets the pilot's pull toward the target, slowing into
-    /// it on the goal limits ([`approach`]). On a detour, and for a vantage
-    /// goal, the pilot flies its path toward the target with no feed-forward:
-    /// a commanded velocity then only sets the speed (at least
-    /// [`DETOUR_MIN_MPS`]), and a commanded stop stays a stop.
-    fn goal_ask(&self, goal: Option<&Goal>, to: V2, gl: &GoalLimits, dt: f32) -> V2 {
-        let a_dec = APPROACH_DECEL_SHARE * gl.a_h;
-        let detour = self.plan.state == AvoidState::Detour
-            || goal.is_some_and(|g| g.kind == GoalKind::Vantage);
-        let Some(g) = goal else {
-            return approach(to, a_dec, f32::INFINITY, dt);
-        };
-        let gv = [g.vn, g.ve];
-        let command = g.vel_mode == VelMode::Command;
-        match (command, detour) {
-            (true, false) => gv,
-            (true, true) if geo::norm(gv) < 1e-3 => [0.0, 0.0],
-            (true, true) => approach(to, a_dec, geo::norm(gv).max(DETOUR_MIN_MPS), dt),
-            (false, false) => geo::add(gv, approach(to, a_dec, f32::INFINITY, dt)),
-            (false, true) => approach(to, a_dec, f32::INFINITY, dt),
-        }
-    }
-
-    /// What the goal asks while the pilot holds: as [`Pilot::goal_ask`],
-    /// toward the plan's target, else toward the goal's own point.
-    fn held_ask(
-        &self,
-        goal: Option<&Goal>,
-        max_speed: f32,
-        pos_ne: V2,
-        dt: f32,
-        now_ms: u64,
-    ) -> Ask {
-        let Some(aim) = self.commanded_goal() else {
-            return Ask::NONE;
-        };
-        let target = self.plan.target.unwrap_or([aim[0], aim[1]]);
-        let gl = self.goal_limits_now(now_ms);
-        Ask {
-            target_ne: Some(target),
-            vel: self.goal_ask(goal, geo::sub(target, pos_ne), &gl, dt),
-            v_cap: self.goal_v_cap(max_speed, now_ms).0,
-        }
     }
 }

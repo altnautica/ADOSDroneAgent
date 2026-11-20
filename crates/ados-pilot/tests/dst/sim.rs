@@ -89,6 +89,9 @@ pub struct Sim {
     /// The latest published frame.
     pub state: PilotState,
     scan: Value,
+    /// Vertical trunks the lidar sees, `(centre NE, radius)`: with any set,
+    /// each scan is cast against them from the vehicle ([`Sim::stand_scan`]).
+    pub stand: Vec<([f32; 2], f32)>,
 }
 
 /// With `DST_TRACE_DIR` set, every run writes its trace there as
@@ -135,6 +138,7 @@ impl Sim {
             answers: Vec::new(),
             state,
             scan,
+            stand: Vec::new(),
         };
         sim.trace.line(format_args!("{name} seed {seed}"));
         sim
@@ -194,6 +198,9 @@ impl Sim {
                 .on_feed(ados_pilot::router_state::MISSION_TOPIC, &m, now);
         }
         if (now - self.start).is_multiple_of(SCAN_MS) {
+            if !self.stand.is_empty() {
+                self.scan = self.stand_scan();
+            }
             self.p
                 .on_feed(ados_pilot::events::TOPIC_SCAN, &self.scan, now);
         }
@@ -380,5 +387,44 @@ impl Sim {
                 .filter(|r| !r.ok)
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+/// The planar lidar's reach, m (the 12 m class the pilot is built for).
+const LIDAR_RANGE_M: f32 = 12.0;
+
+impl Sim {
+    /// One planar scan of the stand from the vehicle: 360 bins clockwise
+    /// from the nose, each the range to the nearest trunk surface along it
+    /// (0 for no return within [`LIDAR_RANGE_M`]).
+    fn stand_scan(&self) -> Value {
+        let p = [self.fc.pos[0], self.fc.pos[1]];
+        let yaw = self.fc.att[2];
+        let ranges: Vec<f32> = (0..360)
+            .map(|k| {
+                let b = yaw + (k as f32).to_radians();
+                let u = [b.cos(), b.sin()];
+                self.stand
+                    .iter()
+                    .filter_map(|&(c, r)| {
+                        let rel = [c[0] - p[0], c[1] - p[1]];
+                        let along = rel[0] * u[0] + rel[1] * u[1];
+                        let perp2 = rel[0] * rel[0] + rel[1] * rel[1] - along * along;
+                        (along > 0.0 && perp2 < r * r).then(|| along - (r * r - perp2).sqrt())
+                    })
+                    .fold(f32::INFINITY, f32::min)
+            })
+            .map(|d| if d <= LIDAR_RANGE_M { d.max(0.0) } else { 0.0 })
+            .collect();
+        json!({"frame": "body_frd", "angle_start_rad": 0.0,
+            "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": ranges})
+    }
+
+    /// The nearest trunk surface to the vehicle, m (infinite with no stand).
+    pub fn stand_clearance_m(&self) -> f32 {
+        self.stand
+            .iter()
+            .map(|&(c, r)| (c[0] - self.fc.pos[0]).hypot(c[1] - self.fc.pos[1]) - r)
+            .fold(f32::INFINITY, f32::min)
     }
 }

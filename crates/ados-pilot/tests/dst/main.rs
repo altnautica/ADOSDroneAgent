@@ -12,15 +12,17 @@
 //!
 //! The matrix ([`scenarios`]) covers decision sequences, not flight feel:
 //! the low-battery floor's countdown and SmartRTL return, the supervised
-//! lift-off to a hover, the operator link-loss return, and a mission's
-//! pause, resume and stalled-waypoint skip. Latency, stick feel and
-//! throughput stay with the real-time World Engine benches. The shaper pins
-//! ([`shaper_pins`]) hold the trajectories of goals, holds and landings to
-//! their recordings.
+//! pause, resume and stalled-waypoint skip; and follow flights through
+//! trunks ([`forest`]): a corridor between trunk rows, a gap too narrow to
+//! enter, a held detour round a trunk and a seeded random stand. Latency,
+//! stick feel and throughput stay with the real-time World Engine benches.
+//! The shaper pins ([`shaper_pins`]) hold the trajectories of goals, holds
+//! and landings to their recordings.
 //!
 //! Every test name starts `dst_`: `cargo test -p ados-pilot dst` runs them.
 
 mod fc;
+mod forest;
 #[path = "../pins/mod.rs"]
 mod pins;
 mod rng;
@@ -83,6 +85,26 @@ fn dst_link_loss_returns_by_smart_rtl() {
 #[test]
 fn dst_mission_pause_resume_and_stall_skip() {
     matrix("mission");
+}
+
+#[test]
+fn dst_forest_corridor_flies_full_speed_between_trunk_rows() {
+    matrix("forest_corridor");
+}
+
+#[test]
+fn dst_forest_gap_narrower_than_the_margin_is_never_entered() {
+    matrix("forest_gap");
+}
+
+#[test]
+fn dst_forest_detour_round_a_trunk_is_held() {
+    matrix("forest_detour");
+}
+
+#[test]
+fn dst_forest_stand_follows_a_walker_inside_the_margin() {
+    matrix("forest_stand");
 }
 
 /// One seed replays byte for byte: every frame the pilot sent, every frame

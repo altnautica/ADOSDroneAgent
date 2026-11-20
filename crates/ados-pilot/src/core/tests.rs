@@ -11,6 +11,7 @@ mod confined_flight;
 mod confined_route;
 mod extnav_settle;
 mod fc_failsafe;
+mod forest;
 mod handoff;
 mod harness;
 mod liftoff;

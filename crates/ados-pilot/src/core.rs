@@ -107,6 +107,8 @@ pub struct Pilot {
     /// The brake's verdict this tick (stick flight, or a braked goal).
     brake_avoid: ados_protocol::pilot::AvoidState,
     plan: Plan,
+    /// The route the planner holds between replans.
+    held_route: crate::planner::Commit,
     plan_ms: u64,
     sessions: Sessions,
     failsafe: Failsafe,
@@ -225,6 +227,7 @@ impl Pilot {
             mr: Default::default(),
             fw: Fixedwing::default(),
             plan: Plan::hold(ados_protocol::pilot::AvoidState::Clear),
+            held_route: Default::default(),
             plan_ms: 0,
             sessions: Sessions::default(),
             failsafe: Failsafe::default(),
