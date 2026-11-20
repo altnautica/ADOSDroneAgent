@@ -173,7 +173,7 @@ zstd = "0.13"
 # back to this so the status surfaces report real numbers instead of zeros. Lean
 # feature set: `system` (CPU + memory) + `disk` (filesystem capacity); the
 # component/network/user collectors are unused. Already in the tree transitively.
-sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system", "disk"] }
 # PMTiles v3 archive reader for the ground station's field tile packs. Only the
 # async mmap backend: no HTTP backend, so no second reqwest enters the tree.
 pmtiles = { version = "0.25", default-features = false, features = ["mmap-async-tokio"] }
