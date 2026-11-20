@@ -159,7 +159,7 @@ bytes = { workspace = true }
 # AF_INET (0.0.0.0) and one AF_INET6 (::) socket on the same port without the two
 # contending for IPv4-mapped traffic. socket2 is pure Rust (libc only, no C
 # build), so it cross-compiles to the musl SBC target cleanly.
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 # Cross-platform host hardware read for the workstation / macOS fallback: when the
 # logging store has no merged snapshot (its collector is not running off-SBC), the
 # system + status routes read CPU/memory/disk/cores/board directly off this.
