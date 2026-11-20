@@ -43,11 +43,13 @@ const EXTRA_PARAMS: &[&str] = &[
     "WPNAV_SPEED",
     // The energy-aware low-battery return (`core::control::energy`): the
     // critical reserve, the descent speed (`WP_SPD_DN` m/s, `WPNAV_SPEED_DN`
-    // cm/s before it), the height the landing slows at (cm) and SmartRTL's
-    // path accuracy (its loop pruning).
+    // cm/s before it), the height the landing slows at (`LAND_ALT_LOW_M` m,
+    // `LAND_ALT_LOW` cm before it) and SmartRTL's path accuracy (its loop
+    // pruning).
     "BATT_CRT_MAH",
     "WP_SPD_DN",
     "WPNAV_SPEED_DN",
+    "LAND_ALT_LOW_M",
     "LAND_ALT_LOW",
     "SRTL_ACCURACY",
     // The EKF's horizontal position source per source set (3 = GPS): the

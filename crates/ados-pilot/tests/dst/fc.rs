@@ -98,6 +98,15 @@ pub struct Fc {
     pub battery_pct: f32,
     /// Battery drain while armed, % per second.
     pub drain_pct_s: f32,
+    /// The battery current SYS_STATUS reports while armed, A; `None`: no
+    /// current sensor (`current_battery` -1).
+    pub current_a: Option<f32>,
+    /// SmartRTL retraces the path at this share of the speed the copter flew
+    /// it out at in GUIDED (capped by `WPNAV_SPEED`), as the bench showed
+    /// (0.80-0.88 round the rig's orbit); `None`: at `WPNAV_SPEED`.
+    pub srtl_share: Option<f32>,
+    /// Horizontal distance and time flown in GUIDED while moving.
+    flown: (f32, f32),
     pub params: BTreeMap<String, f32>,
     pub rig: LiftoffRig,
     /// Mission waypoints, items 1..=n (item 0 is home).
@@ -132,6 +141,9 @@ impl Fc {
             landed: true,
             battery_pct: 95.0,
             drain_pct_s: 0.05,
+            current_a: None,
+            srtl_share: None,
+            flown: (0.0, 0.0),
             params: params(),
             rig: LiftoffRig {
                 af: Airframe::balanced(),
@@ -164,6 +176,15 @@ impl Fc {
 
     fn wp_mps(&self) -> f32 {
         self.param("WPNAV_SPEED", 500.0) / 100.0
+    }
+
+    /// SmartRTL's retrace speed ([`Fc::srtl_share`]).
+    fn srtl_mps(&self) -> f32 {
+        let wp = self.wp_mps();
+        match self.srtl_share {
+            Some(share) if self.flown.1 > 0.0 => (self.flown.0 / self.flown.1).min(wp) * share,
+            _ => wp,
+        }
     }
 
     fn ack(&mut self, command: MavCmd, result: MavResult) {
@@ -396,7 +417,7 @@ impl Fc {
                     return [0.0, 0.0, -MAX_UP_MPS];
                 }
                 // Straight home at the current height, then down.
-                let v = toward(self.pos, [0.0, 0.0, self.pos[2]], self.wp_mps());
+                let v = toward(self.pos, [0.0, 0.0, self.pos[2]], self.srtl_mps());
                 let home_m = (self.pos[0] * self.pos[0] + self.pos[1] * self.pos[1]).sqrt();
                 let vz = if home_m > 0.5 { 0.0 } else { self.land_mps() };
                 [v[0], v[1], vz]
@@ -471,6 +492,11 @@ impl Fc {
             self.pos[1] += (self.vel[1] + self.gust[1]) * dt;
             self.pos[2] += self.vel[2] * dt;
         }
+        let v_h = self.vel[0].hypot(self.vel[1]);
+        if self.mode == copter::GUIDED && v_h > 0.5 {
+            self.flown.0 += v_h * dt;
+            self.flown.1 += dt;
+        }
         if self.pos[2] >= 0.0 {
             self.pos[2] = 0.0;
             self.vel = [0.0; 3];
@@ -510,9 +536,11 @@ impl Fc {
                 system_status: MavState::MAV_STATE_ACTIVE,
                 mavlink_version: 3,
             }));
+            let current = if self.armed { self.current_a } else { None };
             out.push(MavMessage::SYS_STATUS(SYS_STATUS_DATA {
                 voltage_battery: ((12.8 + 4.0 * self.battery_pct / 100.0) * 1000.0) as u16,
                 battery_remaining: self.battery_pct.floor() as i8,
+                current_battery: current.map_or(-1, |a| (a * 100.0).round() as i16),
                 ..Default::default()
             }));
         }

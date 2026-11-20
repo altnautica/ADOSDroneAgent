@@ -518,7 +518,14 @@ fn the_energy_estimate_returns_above_the_floor_on_a_long_way_home() {
     assert_eq!(s.low_battery_action.as_deref(), Some("rth"));
     let b = s.banner.expect("a banner");
     assert_eq!(b.text_key, "pilot.banner.low_battery_rth_energy");
-    assert_eq!(b.args["need_pct"].as_i64(), Some(i64::from(r.need_pct)));
+    // The banner names the need the countdown began at; the reserve counts
+    // only the countdown still to run, so it reads up to a point lower.
+    let named = b.args["need_pct"].as_i64().expect("need_pct");
+    let now = i64::from(r.need_pct);
+    assert!(
+        (now..=now + 1).contains(&named),
+        "banner {named}, reserve {now}"
+    );
     report(&mut w, 45, 20.0, 10_000);
     assert_eq!(w.mode, copter::SMART_RTL);
     // On the ground the reserve is not published.
@@ -580,7 +587,10 @@ fn the_countdown_counts_in_the_time_home() {
 #[test]
 fn a_cancelled_energy_return_rearms_five_percent_above_its_need() {
     let mut w = energy_flight(FAR, 45, 20.0, 11_000);
-    let need = w.p.state(w.now).battery_reserve.expect("r").need_pct;
+    let banner = w.p.state(w.now).banner.expect("a banner");
+    let need = banner.args["need_pct"]
+        .as_i64()
+        .expect("the need it fired at");
     assert!(matches!(w.action("rth_cancel"), Reply::Action(a) if a.ok));
     report(&mut w, 45, 20.0, 12_000);
     assert_eq!(w.p.state(w.now).low_battery_action, None);

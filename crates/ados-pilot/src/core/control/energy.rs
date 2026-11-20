@@ -3,11 +3,20 @@
 //! is long.
 //!
 //! The time home is the flown path back (loops pruned, as SmartRTL prunes
-//! them: [`super::trail::Trail::return_len_m`]) at the waypoint speed, the
-//! descent at the FC's descent speed down to `LAND_ALT_LOW`, the rest at its
-//! landing speed, the countdown and a few seconds' slack. The current is an
-//! average over the flight so far ([`TAU_S`]); the need is that current over
-//! the time home with a margin, plus the FC's critical reserve.
+//! them: [`super::trail::Trail::return_len_m`]) plus the way the vehicle
+//! still flies on through the countdown, at the speed SmartRTL retraces it
+//! ([`v_ret_mps`]), the descent at the FC's descent speed down to
+//! `LAND_ALT_LOW`, the rest at its landing speed, the countdown and a few
+//! seconds' slack. The current is an average over the flight so far
+//! ([`TAU_S`]); the need is that current over the time home with a margin,
+//! plus the FC's critical reserve.
+//!
+//! SmartRTL does not fly home at the waypoint speed. On the bench (rig
+//! survey, 2.5 Ah, four flights) it retraced the orbit path at 2.0-2.2 m/s
+//! with `WP_SPD` 4, after the mission flew it at about 2.5 m/s: its points
+//! are straight segments it rounds corner by corner. Counting `WP_SPD` put
+//! the time home at 68 s where the return took 66 s to the descent alone,
+//! and the FC reached its critical level before touchdown.
 
 use ados_protocol::pilot::BatteryReserve;
 
@@ -28,6 +37,15 @@ pub const CRT_SHARE: f32 = 0.15;
 pub const SLACK_S: f32 = 5.0;
 /// ArduCopter's default waypoint speed, m/s.
 const V_RET_DEFAULT_MPS: f32 = 5.0;
+/// SmartRTL's retrace speed as a share of the speed the path was flown at
+/// (capped by the waypoint speed): 2.0-2.2 m/s over a path flown at 2.5 m/s
+/// on the bench, rounded down.
+pub const SRTL_SPEED_SHARE: f32 = 0.8;
+/// The slowest retrace speed counted, m/s: a vehicle that has barely moved
+/// is not taken to crawl home.
+const V_RET_MIN_MPS: f32 = 1.0;
+/// Horizontal speeds below this are hovering, not flying the path, m/s.
+const MOVING_MPS: f32 = 0.5;
 /// ArduCopter's default descent speed, m/s.
 const V_DN_DEFAULT_MPS: f32 = 1.5;
 /// ArduCopter's default `LAND_ALT_LOW`, m.
@@ -39,6 +57,9 @@ pub struct Energy {
     current_a: Option<f32>,
     sample_ms: u64,
     since_ms: Option<u64>,
+    /// Average horizontal speed while moving, m/s ([`TAU_S`]).
+    speed_mps: Option<f32>,
+    speed_ms: u64,
     /// This tick's reserve, airborne.
     pub reserve: Option<Reserve>,
     /// The need the low-battery countdown started at: it re-arms 5 % above.
@@ -64,6 +85,27 @@ impl Energy {
             }
         });
         self.sample_ms = s.at_ms;
+    }
+
+    /// Fold this tick's horizontal speed in while the vehicle moves.
+    pub fn sample_speed(&mut self, v_h: f32, now_ms: u64) {
+        if v_h < MOVING_MPS {
+            return;
+        }
+        self.speed_mps = Some(match self.speed_mps {
+            None => v_h,
+            Some(v) => {
+                let dt = now_ms.saturating_sub(self.speed_ms) as f32 / 1000.0;
+                v + (dt / TAU_S).min(1.0) * (v_h - v)
+            }
+        });
+        self.speed_ms = now_ms;
+    }
+
+    /// The average horizontal speed the path was flown at, `None` before the
+    /// vehicle has moved.
+    pub fn flown_mps(&self) -> Option<f32> {
+        self.speed_mps
     }
 
     /// The average current, once airborne [`VALID_AFTER_MS`] with a fresh
@@ -102,6 +144,14 @@ pub fn return_s(w: &Way) -> f32 {
 /// critical reserve.
 pub fn need_mah(current_a: f32, t_s: f32, crt_mah: f32) -> f32 {
     MARGIN * current_a * t_s / 3.6 + crt_mah
+}
+
+/// The speed SmartRTL retraces the path at, m/s: the speed the path was
+/// flown at (`flown_mps`, `None` before the vehicle moved), capped by the
+/// waypoint speed, times [`SRTL_SPEED_SHARE`].
+pub fn v_ret_mps(wp_mps: f32, flown_mps: Option<f32>) -> f32 {
+    let v = flown_mps.map_or(wp_mps, |f| f.min(wp_mps));
+    (v * SRTL_SPEED_SHARE).max(V_RET_MIN_MPS)
 }
 
 /// This tick's reserve: the need and whether it fires.
@@ -146,20 +196,36 @@ impl Pilot {
         if let Some(s) = self.fc.battery_current_a {
             self.sup.energy.sample(s, now_ms);
         }
+        let local = self.fc.fresh_local(now_ms);
+        let v_now = local.map_or(0.0, |l| l.vn.hypot(l.ve));
+        self.sup.energy.sample_speed(v_now, now_ms);
+        // The countdown still to run: none once the FC returns or lands,
+        // what is left of a running one, else all of it. Through it the
+        // vehicle flies on, away from home as often as not.
+        let countdown_s = if self.fc_returns_or_lands() {
+            0.0
+        } else if let Some(deadline) = self.rth_deadline_ms {
+            deadline.saturating_sub(now_ms) as f32 / 1000.0
+        } else {
+            self.settings.pilot.low_battery_countdown_s as f32
+        };
         let p = &self.fc.params;
         let get = |n: &str| p.get(n).copied().filter(|v| *v > 0.0);
-        let pos = self.fc.fresh_local(now_ms).map(|l| [l.n, l.e]);
         let home = self.fc.home_ne();
+        let back_m = local.map_or(0.0, |l| self.sup.trail.return_len_m([l.n, l.e], home));
+        let wp_mps = self.default_wp_speed().unwrap_or(V_RET_DEFAULT_MPS);
         let way = Way {
-            len_m: pos.map_or(0.0, |pos| self.sup.trail.return_len_m(pos, home)),
+            len_m: back_m + v_now * countdown_s,
             h_m: self.fc.ekf_height(now_ms).unwrap_or(0.0),
-            v_ret_mps: self.default_wp_speed().unwrap_or(V_RET_DEFAULT_MPS),
+            v_ret_mps: v_ret_mps(wp_mps, self.sup.energy.flown_mps()),
             v_dn_mps: get("WP_SPD_DN")
                 .or_else(|| get("WPNAV_SPEED_DN").map(|cm| cm / 100.0))
                 .unwrap_or(V_DN_DEFAULT_MPS),
-            h_low_m: get("LAND_ALT_LOW").map_or(H_LOW_DEFAULT_M, |cm| cm / 100.0),
+            h_low_m: get("LAND_ALT_LOW_M")
+                .or_else(|| get("LAND_ALT_LOW").map(|cm| cm / 100.0))
+                .unwrap_or(H_LOW_DEFAULT_M),
             v_land_mps: self.land_speed(),
-            countdown_s: self.settings.pilot.low_battery_countdown_s as f32,
+            countdown_s,
         };
         let t = return_s(&way);
         let floor = Reserve {
@@ -217,6 +283,91 @@ mod tests {
     fn the_need_is_the_charge_home_with_a_margin_and_the_reserve() {
         // 20 A for 180 s: 1000 mAh, 1300 with the margin, plus 500.
         assert!((need_mah(20.0, 180.0, 500.0) - 1800.0).abs() < 1e-2);
+    }
+
+    /// The rig survey on a 2.5 Ah pack (bench run 20261120-050707, energy
+    /// s2): `WP_SPD` 4, `WP_SPD_DN` 1.5, `LAND_SPD_MS` 0.5, `LAND_ALT_LOW_M`
+    /// 10, `BATT_CRT_MAH` 250, 22.7 A, 19.5 m up, the orbit flown at 2.5 m/s,
+    /// the pruned path back 106.7 m when the return fired at 32 %.
+    fn rig(len_m: f32, v_ret_mps: f32) -> Way {
+        Way {
+            len_m,
+            h_m: 19.5,
+            v_ret_mps,
+            v_dn_mps: 1.5,
+            h_low_m: 10.0,
+            v_land_mps: 0.5,
+            countdown_s: 10.0,
+        }
+    }
+
+    #[test]
+    fn the_bench_return_that_reached_critical_is_counted_short_no_more() {
+        let (c, crt, i) = (2500.0, 250.0, 22.7);
+        // What the return cost: 10 s of countdown and 133 m of SmartRTL at
+        // 2.0 m/s took 490 mAh to the start of the descent; the descent
+        // from 19.5 m at the FC's speeds takes 26.3 s at 23.3 A, 170 mAh.
+        // Arriving with the critical reserve intact needs 36.4 %.
+        let cost_pct = 100.0 * (490.0 + 26.33 * 23.3 / 3.6 + crt) / c;
+        // The old count: the pruned path at WP_SPD, nothing flown on in the
+        // countdown. 68 s and 33 %, as published at the fire: short.
+        let old = return_s(&rig(106.7, 4.0));
+        assert!((old - 68.0).abs() < 0.5, "{old}");
+        let old_pct = 100.0 * need_mah(i, old, crt) / c;
+        assert!((32.0..33.5).contains(&old_pct), "{old_pct}");
+        assert!(old_pct < cost_pct, "old {old_pct} cost {cost_pct}");
+        // Now: the 25 m flown on through the countdown, at SmartRTL's
+        // retrace speed from the 2.5 m/s the orbit was flown at.
+        let v = v_ret_mps(4.0, Some(2.5));
+        assert!((v - 2.0).abs() < 1e-4, "{v}");
+        let new = return_s(&rig(106.7 + 2.5 * 10.0, v));
+        // 10 s of countdown and 65.8 s of SmartRTL: 75.8 s to the descent,
+        // measured 76.2 s.
+        assert!((new - 26.33 - SLACK_S - 75.8).abs() < 0.2, "{new}");
+        let new_pct = 100.0 * need_mah(i, new, crt) / c;
+        assert!(new_pct > cost_pct, "new {new_pct} cost {cost_pct}");
+    }
+
+    #[test]
+    fn the_floor_variant_return_is_covered_too() {
+        // Bench run 20261120-065132 (floor s3): published 61 s at the fire,
+        // so 78 m back; the return then flew 103 m in 46.9 s (2.2 m/s).
+        let old = return_s(&Way {
+            h_m: 19.8,
+            ..rig(78.0, 4.0)
+        });
+        assert!((old - 61.0).abs() < 0.5, "{old}");
+        let new = return_s(&Way {
+            h_m: 19.8,
+            ..rig(78.0 + 25.0, v_ret_mps(4.0, Some(2.5)))
+        });
+        let flown_s = new - 10.0 - SLACK_S - 9.8 / 1.5 - 10.0 / 0.5;
+        assert!(flown_s >= 46.9, "{flown_s}");
+    }
+
+    #[test]
+    fn the_retrace_speed_is_the_flown_speed_capped_by_wp_spd() {
+        // Flown faster than WP_SPD: SmartRTL flies at most WP_SPD.
+        assert!((v_ret_mps(4.0, Some(7.0)) - 3.2).abs() < 1e-4);
+        // Not moved yet: WP_SPD.
+        assert!((v_ret_mps(5.0, None) - 4.0).abs() < 1e-4);
+        // A crawl is not counted below the floor.
+        assert_eq!(v_ret_mps(4.0, Some(0.6)), V_RET_MIN_MPS);
+    }
+
+    #[test]
+    fn the_flown_speed_ignores_hovering() {
+        let mut e = Energy::default();
+        e.sample_speed(0.2, 0);
+        assert_eq!(e.flown_mps(), None);
+        for k in 1..=100u64 {
+            e.sample_speed(2.5, k * 100);
+        }
+        // Hovering for a minute leaves the flown speed where it was.
+        for k in 101..=700u64 {
+            e.sample_speed(0.1, k * 100);
+        }
+        assert!((e.flown_mps().unwrap() - 2.5).abs() < 1e-4);
     }
 
     #[test]

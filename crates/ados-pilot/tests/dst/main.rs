@@ -61,6 +61,11 @@ fn dst_low_battery_floor_returns_by_smart_rtl() {
 }
 
 #[test]
+fn dst_energy_return_lands_before_the_critical_level() {
+    matrix("energy_return");
+}
+
+#[test]
 fn dst_supervised_liftoff_reaches_hover() {
     matrix("liftoff");
 }

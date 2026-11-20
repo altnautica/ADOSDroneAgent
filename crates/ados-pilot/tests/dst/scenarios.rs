@@ -17,6 +17,7 @@ pub type Scenario = fn(u64) -> Sim;
 /// The scenarios, by name.
 pub const ALL: &[(&str, Scenario)] = &[
     ("low_battery", low_battery),
+    ("energy_return", energy_return),
     ("liftoff", liftoff),
     ("link_loss", link_loss),
     ("mission", mission),
@@ -93,6 +94,51 @@ pub fn low_battery(seed: u64) -> Sim {
         s.home_distance_m() < 1.5,
         "landed home: {}",
         s.home_distance_m()
+    );
+    s
+}
+
+/// The energy-aware return, as the bench rig survey on a 2.5 Ah pack flew
+/// it: a GNSS copter with a measured current (21-24 A) flown out 100-140 m
+/// at a modest stick speed, with SmartRTL retracing at 0.80-0.88 of the
+/// speed it flew out (the bench range). The pilot returns on its energy
+/// estimate above the 20 % floor (`BATT_LOW_MAH` 500), and the copter
+/// lands home before the FC's critical level (`BATT_CRT_MAH` 250, 10 %).
+pub fn energy_return(seed: u64) -> Sim {
+    let mut s = Sim::new("energy_return", seed, |st| st.pilot.link_loss_s = 3600);
+    for (n, v) in [
+        ("BATT_CAPACITY", 2500.0),
+        ("BATT_LOW_MAH", 500.0),
+        ("BATT_CRT_MAH", 250.0),
+        ("WPNAV_SPEED", 400.0),
+    ] {
+        s.fc.params.insert(n.to_string(), v);
+    }
+    let amps = s.rng.range(21.0, 24.0);
+    s.fc.current_a = Some(amps);
+    // mAh per second over the capacity, in %.
+    s.fc.drain_pct_s = amps / 3.6 / 2500.0 * 100.0;
+    s.fc.battery_pct = s.rng.range(68.0, 72.0);
+    s.fc.srtl_share = Some(s.rng.range(0.80, 0.88));
+    let out_ms = s.rng.range(40_000.0, 55_000.0) as u64;
+    s.boot();
+    launch_to_hold(&mut s, 5.0);
+    fly_sticks(&mut s, [0.0, 0.5, 0.0, 0.0], out_ms);
+    let out_m = s.home_distance_m();
+    assert!(out_m > 80.0, "flew out: {out_m}");
+    let counting = s.run_until(300_000, |s| s.state.low_battery_action.is_some());
+    assert!(counting, "no low-battery action at {}%", s.fc.battery_pct);
+    let fired_pct = s.fc.battery_pct;
+    let reserve = s.state.battery_reserve.clone().expect("a reserve airborne");
+    assert_eq!(reserve.basis, "energy", "{reserve:?} at {fired_pct}%");
+    assert!(fired_pct > 21.0, "above the floor: {fired_pct}%");
+    let landed = s.run_until(300_000, |s| !s.fc.armed);
+    assert!(landed, "never landed: mode {} at {:?}", s.fc.mode, s.fc.pos);
+    assert_eq!(s.mode_commands(copter::SMART_RTL).len(), 1);
+    assert!(
+        s.fc.battery_pct >= 10.0,
+        "landed at {}% (fired at {fired_pct}%, {out_m:.0} m out): under the critical level",
+        s.fc.battery_pct
     );
     s
 }
