@@ -1,12 +1,11 @@
-//! Presence beacon emitter, the control-plane return-port bind and the
-//! proof-only listener used when the hop supervisor is disabled.
+//! Presence beacon emitter, the control-plane return-port bind and listener,
+//! and the proof-only listener used when the hop supervisor is disabled.
 
 use super::*;
 
 /// Emit a periodic PresenceBeacon on the control plane so the peer hears this
-/// rig even when the hop supervisor is disabled. The live channel is read each
-/// tick (falling back to the configured channel) so the beacon advertises where
-/// the radio actually is.
+/// rig even when the hop supervisor is disabled. Ends at once when the send
+/// socket cannot be bound.
 pub(crate) async fn emit_presence_beacons(
     device_id: &str,
     iface: &str,
@@ -14,15 +13,28 @@ pub(crate) async fn emit_presence_beacons(
     pair_key: &[u8; 32],
     cancel: Shutdown,
 ) {
-    let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
+    let Ok(control) = LoopbackControl::bind(iface).await else {
         return;
     };
+    emit_presence_beacons_on(&control, device_id, fallback_channel, pair_key, cancel).await;
+}
+
+/// The presence-beacon loop over `control`. The live channel is read each tick
+/// (falling back to the last one read, first the configured channel) so the
+/// beacon advertises where the radio actually is.
+pub async fn emit_presence_beacons_on<C: ControlPlane>(
+    control: &C,
+    device_id: &str,
+    fallback_channel: u8,
+    pair_key: &[u8; 32],
+    cancel: Shutdown,
+) {
     let mut tick = tokio::time::interval(PRESENCE_INTERVAL);
     let mut last_live = fallback_channel;
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                if let Some(live) = channel_from_iface(iface).await {
+                if let Some(live) = control.live_channel().await {
                     last_live = live;
                 }
                 let epoch = now_unix_ms();
@@ -34,9 +46,7 @@ pub(crate) async fn emit_presence_beacons(
                     epoch,
                     pair_key,
                 );
-                let _ = sock
-                    .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
-                    .await;
+                control.send_control(&pkt).await;
             }
             _ = cancel.wait() => return,
         }
@@ -49,12 +59,13 @@ pub(crate) async fn emit_presence_beacons(
 pub(super) const ACK_BIND_RETRY: Duration = Duration::from_secs(5);
 
 /// Bind the control-plane return port (`127.0.0.1:5810`), retrying every
-/// [`ACK_BIND_RETRY`] until it binds or `cancel` fires (`None`). Loopback only:
-/// the one producer is the rx-control `wfb_rx` re-emitting on 127.0.0.1, and
-/// nothing on the network should be able to post into this listener.
-pub(super) async fn bind_ack_socket(cancel: &Shutdown) -> Option<tokio::net::UdpSocket> {
+/// [`ACK_BIND_RETRY`] until it binds or `cancel` fires (`None`).
+pub(super) async fn bind_return_port<C: ControlPlane>(
+    control: &C,
+    cancel: &Shutdown,
+) -> Option<C::Port> {
     loop {
-        match tokio::net::UdpSocket::bind(("127.0.0.1", HOP_ACK_PORT)).await {
+        match control.bind_return_port().await {
             Ok(s) => return Some(s),
             Err(e) => {
                 tracing::warn!(error = %e, port = HOP_ACK_PORT, "hop_ack_socket_bind_failed_retrying");
@@ -63,6 +74,69 @@ pub(super) async fn bind_ack_socket(cancel: &Shutdown) -> Option<tokio::net::Udp
                     _ = cancel.wait() => return None,
                 }
             }
+        }
+    }
+}
+
+/// The control-plane listener: a verified HopAck goes to the hop loop, a
+/// verified peer PresenceBeacon updates the shared hop state. Both are
+/// received-side proof.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn listen_return<R: HopRadio>(
+    radio: Arc<R>,
+    port: R::Port,
+    pair_key: [u8; 32],
+    // Own device-id, for the self-beacon drop. The beacon carries a 16-byte
+    // device-id, so the loopback-delivered copy of this rig's own beacon is
+    // recognised by its first 16 bytes.
+    own_device_id: String,
+    state: Arc<tokio::sync::Mutex<HopState>>,
+    // The shared received-side proof: a verified HopAck or a peer PresenceBeacon
+    // is the drone's evidence that its energy reached a receiver. The heartbeat
+    // reads this to compute `channel_locked` / `rf_unverified`.
+    rx_proof: RxProof,
+    proof_reference: Instant,
+    ack_tx: tokio::sync::mpsc::Sender<u8>,
+    cancel: Shutdown,
+) {
+    let mut buf = [0u8; 128];
+    // Tracks the last peer device-id back-filled so the cross-process write
+    // only fires on a CHANGE (matches the Python `previous != device_id`).
+    let mut last_backfilled: Option<String> = None;
+    loop {
+        tokio::select! {
+            r = radio.recv_return(&port, &mut buf) => {
+                let Ok(n) = r else { continue };
+                let pkt = &buf[..n];
+                if let Some(target) = parse_hop_ack(pkt, &pair_key) {
+                    // A verified ack from the peer is received-side proof, and
+                    // proof the peer is present on this channel.
+                    rx_proof.observe(Instant::now(), proof_reference);
+                    let _ = ack_tx.try_send(target);
+                } else if let Some(p) = parse_presence_beacon(pkt, &pair_key) {
+                    // Drop this rig's own beacon (a loopback race can deliver
+                    // it) so a self-beacon never registers as a peer.
+                    if is_self_beacon(&own_device_id, &p.device_id) {
+                        continue;
+                    }
+                    // A verified peer beacon is received-side proof too.
+                    rx_proof.observe(Instant::now(), proof_reference);
+                    let peer_id = p.device_id.clone();
+                    state.lock().await.on_peer_beacon(p);
+                    write_peer_presence_json(&*radio, &state).await;
+                    // On a NEW peer device-id, latch it so the persisted pair
+                    // state learns the peer over the radio (the bind tunnel
+                    // does not always carry it). The latch is a small additive
+                    // sidecar the front's peer-backfill reconciler reads and
+                    // persists — Rust does not round-trip config.yaml from
+                    // here, because the front already owns every write to it.
+                    if last_backfilled.as_deref() != Some(peer_id.as_str()) {
+                        write_peer_backfill_json(&*radio, &peer_id);
+                        last_backfilled = Some(peer_id);
+                    }
+                }
+            }
+            _ = cancel.wait() => break,
         }
     }
 }
@@ -82,7 +156,8 @@ pub(crate) async fn proof_only_listener(
     reference: Instant,
     cancel: Shutdown,
 ) {
-    let Some(sock) = bind_ack_socket(&cancel).await else {
+    let control = LoopbackControl::receive_only();
+    let Some(sock) = bind_return_port(&control, &cancel).await else {
         return;
     };
     let pair_key = *pair_key;
@@ -90,8 +165,8 @@ pub(crate) async fn proof_only_listener(
     let mut buf = [0u8; 128];
     loop {
         tokio::select! {
-            r = sock.recv_from(&mut buf) => {
-                let Ok((n, _)) = r else { continue };
+            r = control.recv_return(&sock, &mut buf) => {
+                let Ok(n) = r else { continue };
                 let pkt = &buf[..n];
                 if parse_hop_ack(pkt, &pair_key).is_some() {
                     rx_proof.observe(Instant::now(), reference);

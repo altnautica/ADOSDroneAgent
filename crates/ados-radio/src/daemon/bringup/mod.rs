@@ -178,6 +178,9 @@ pub(super) async fn bring_up_group(
         );
         return Err(park_retry());
     }
+    // The record follows the radio: a bring-up on home after the peer went
+    // stale must not leave the hop state on the old hop channel.
+    svc.hop_state.lock().await.record_bring_up(bringup_ch);
 
     // ── Regulatory re-assert (prevention layer) ──────────────────────
     // A self-managed injection PHY (the RTL family) can leave its

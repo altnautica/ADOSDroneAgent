@@ -10,7 +10,9 @@
 // drives. Each groups one concern; the service behaves identically.
 mod bringup;
 mod heartbeat;
-mod hop_supervisor;
+// Public for the deterministic simulation (`tests/dst`), which runs the hop
+// supervisor's real loop over a simulated radio.
+pub mod hop_supervisor;
 mod service;
 mod sidecar;
 mod signals;

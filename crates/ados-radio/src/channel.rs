@@ -158,6 +158,19 @@ pub async fn pick_hop_target(
         return current;
     }
     let ranked = scan_channels(iface).await;
+    pick_from_ranking(&ranked, current, band, enabled)
+}
+
+/// The choice [`pick_hop_target`] makes from one scan's `ranked` list
+/// (`(channel, ap_count)`): the quietest enabled in-band channel that is not
+/// `current`, else the next enabled in-band channel, else `current`.
+pub fn pick_from_ranking(
+    ranked: &[(u8, u32)],
+    current: u8,
+    band: &str,
+    enabled: Option<&BTreeSet<u8>>,
+) -> u8 {
+    let allowed = apply_enabled_filter(band_channels(band), enabled);
     // Quietest enabled in-band channel != current, by ascending congestion.
     if let Some((ch, _)) = ranked
         .iter()

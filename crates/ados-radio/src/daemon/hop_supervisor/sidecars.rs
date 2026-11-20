@@ -1,6 +1,7 @@
 //! Contract E hop/peer sidecar writers and the hop-supervisor body.
 
 use super::*;
+use crate::paths::{run_path, write_sidecar};
 
 /// Latch a freshly-learned peer device-id for back-fill into the persisted pair
 /// state. Writes `peer-backfill.json` = `{"peer_device_id": <id>}` atomically.
@@ -10,13 +11,16 @@ use super::*;
 /// config keys (every other write to that file goes through the front too). The
 /// bind tunnel does not always carry the peer id, so the presence beacon is the
 /// canonical source.
-pub(super) fn write_peer_backfill_json(peer_device_id: &str) {
+pub(super) fn write_peer_backfill_json<R: HopRadio>(radio: &R, peer_device_id: &str) {
     let v = json!({ "peer_device_id": peer_device_id });
-    let _ = write_sidecar(&run_path("peer-backfill.json"), &v);
+    radio.write_sidecar("peer-backfill.json", &v);
 }
 
 /// Write `peer-presence.json` (Contract E) from the shared hop state.
-pub(super) async fn write_peer_presence_json(state: &Arc<tokio::sync::Mutex<HopState>>) {
+pub(super) async fn write_peer_presence_json<R: HopRadio>(
+    radio: &R,
+    state: &Arc<tokio::sync::Mutex<HopState>>,
+) {
     let v = {
         let s = state.lock().await;
         match s.peer() {
@@ -36,7 +40,7 @@ pub(super) async fn write_peer_presence_json(state: &Arc<tokio::sync::Mutex<HopS
             }),
         }
     };
-    let _ = write_sidecar(&run_path("peer-presence.json"), &v);
+    radio.write_sidecar("peer-presence.json", &v);
 }
 
 /// Write `hop-supervisor.json` (Contract E) from the shared hop state + config.
@@ -56,7 +60,8 @@ pub(crate) fn periodic_hop_suppression_reason(cfg: &WfbConfig) -> Option<&'stati
     }
 }
 
-pub(super) async fn write_hop_supervisor_json(
+pub(super) async fn write_hop_supervisor_json<R: HopRadio>(
+    radio: &R,
     state: &Arc<tokio::sync::Mutex<HopState>>,
     cfg: &WfbConfig,
     enabled_channels: &std::collections::BTreeSet<u8>,
@@ -72,7 +77,7 @@ pub(super) async fn write_hop_supervisor_json(
             periodic_hop_suppression_reason(cfg),
         )
     };
-    let _ = write_sidecar(&run_path("hop-supervisor.json"), &v);
+    radio.write_sidecar("hop-supervisor.json", &v);
 }
 
 /// Publish that hopping is refused because the shared key file exists but

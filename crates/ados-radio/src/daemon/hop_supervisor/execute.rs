@@ -13,18 +13,14 @@ use super::*;
 /// without it: [`reannounce_back`] tells it to come back to the channel this
 /// radio is still on.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn try_execute_hop(
-    iface: &str,
-    cfg: &WfbConfig,
-    proc: &Arc<tokio::sync::Mutex<RadioProcesses>>,
+pub(super) async fn try_execute_hop<R: HopRadio>(
+    radio: &R,
     state: &Arc<tokio::sync::Mutex<HopState>>,
-    announce_sock: &tokio::net::UdpSocket,
     ack_rx: &mut tokio::sync::mpsc::Receiver<u8>,
     pair_key: &[u8; 32],
     target: u8,
     trigger: HopTrigger,
     label: &str,
-    link: &Arc<tokio::sync::Mutex<LinkStats>>,
     restart_count: &Arc<AtomicU64>,
 ) {
     let from = state.lock().await.channel;
@@ -32,7 +28,7 @@ pub(super) async fn try_execute_hop(
     // carries the time remaining, so the peer schedules against its own.
     let deadline = tokio::time::Instant::now() + HOP_COUNTDOWN;
     if !announce_until_acked(
-        announce_sock,
+        radio,
         ack_rx,
         pair_key,
         target,
@@ -48,18 +44,12 @@ pub(super) async fn try_execute_hop(
     // A silent `iw set channel` failure makes the hop outcome false even when
     // the radio respawns cleanly: a hop that landed on the old channel is not a
     // successful hop. The radio is always respawned so the link is never left
-    // dead. The group respawn reuses the live data-plane tunables (manual tier /
-    // adaptive FEC) so a hop never silently reverts the operator's link rate.
-    let channel_ok = set_channel(iface, target).await;
-    let spawn_ok = {
-        let mut p = proc.lock().await;
-        let ok = p.respawn_group(cfg, link.clone()).await;
-        if ok {
-            restart_count.fetch_add(1, Ordering::Relaxed);
-        }
-        ok
-    };
+    // dead.
+    let iface = radio.iface();
+    let channel_ok = radio.set_channel(target).await;
+    let spawn_ok = radio.respawn_group().await;
     if spawn_ok {
+        restart_count.fetch_add(1, Ordering::Relaxed);
         state.lock().await.record_hop(target, label, channel_ok);
         if channel_ok {
             tracing::info!(iface, channel = target, trigger = label, "hop_executed");
@@ -76,7 +66,7 @@ pub(super) async fn try_execute_hop(
         tracing::warn!(iface, channel = target, "hop_wfb_restart_failed");
     }
     if !channel_ok {
-        reannounce_back(announce_sock, ack_rx, pair_key, from, trigger).await;
+        reannounce_back(radio, ack_rx, pair_key, from, trigger).await;
     }
 }
 
@@ -92,8 +82,8 @@ pub(super) const REANNOUNCE_ROUNDS: u32 = 80;
 /// seconds and a ground station that cannot verify traffic would stay. The
 /// announce is the explicit instruction, and costs nothing if it went back
 /// already.
-pub(super) async fn reannounce_back(
-    announce_sock: &tokio::net::UdpSocket,
+pub(super) async fn reannounce_back<C: ControlPlane>(
+    control: &C,
     ack_rx: &mut tokio::sync::mpsc::Receiver<u8>,
     pair_key: &[u8; 32],
     channel: u8,
@@ -102,7 +92,7 @@ pub(super) async fn reannounce_back(
     tracing::warn!(channel, "hop_retune_failed_calling_peer_back");
     let deadline = tokio::time::Instant::now() + HOP_COUNTDOWN;
     let acked = announce_until_acked(
-        announce_sock,
+        control,
         ack_rx,
         pair_key,
         channel,
@@ -119,8 +109,8 @@ pub(super) async fn reannounce_back(
 /// Send the announce for `target` up to `rounds` times, 100 ms apart, each
 /// carrying the milliseconds left until `deadline`; stop on the matching ACK.
 /// Returns whether the peer acked.
-pub(super) async fn announce_until_acked(
-    announce_sock: &tokio::net::UdpSocket,
+pub(super) async fn announce_until_acked<C: ControlPlane>(
+    control: &C,
     ack_rx: &mut tokio::sync::mpsc::Receiver<u8>,
     pair_key: &[u8; 32],
     target: u8,
@@ -131,11 +121,10 @@ pub(super) async fn announce_until_acked(
     // Drain stale acks so we only count one for THIS announce.
     while ack_rx.try_recv().is_ok() {}
     for _ in 0..rounds {
-        let delay = delay_until_ms(deadline.into_std(), std::time::Instant::now());
+        // The deadline's clock: tokio's, as the flip's `sleep_until` reads.
+        let delay = delay_until_ms(deadline.into_std(), tokio::time::Instant::now().into_std());
         let pkt = build_hop_announce(delay, target, trigger, pair_key);
-        let _ = announce_sock
-            .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
-            .await;
+        control.send_control(&pkt).await;
         if let Ok(Some(ch)) = tokio::time::timeout(hop_announce_interval(), ack_rx.recv()).await {
             if ch == target {
                 return true;
