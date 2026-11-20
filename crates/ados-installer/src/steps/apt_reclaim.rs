@@ -246,7 +246,22 @@ impl Step for AptReclaim {
         }
         let cache_freed = cache_before.saturating_sub(dir_bytes(archives));
 
-        let lists_freed = prune_lists(Path::new(APT_LISTS_DIR));
+        // Measured after `apt-get clean`, so the cache just given back counts
+        // toward the room the index is judged against.
+        let (verdict, space, lists_freed) = reclaim_lists(Path::new(APT_LISTS_DIR), statvfs_space);
+        tracing::info!(
+            lists = verdict.as_str(),
+            free_bytes = space.map(|s| s.free_bytes),
+            total_bytes = space.map(|s| s.total_bytes),
+            min_free_bytes = LISTS_KEEP_MIN_FREE_BYTES,
+            min_free_pct = LISTS_KEEP_MIN_FREE_PCT,
+            "apt package index {}",
+            if verdict == ListsVerdict::Keep {
+                "kept: the card has room, the next install skips a full apt-get update"
+            } else {
+                "pruned: the card is short of space or could not be measured"
+            }
+        );
 
         let total = cache_freed.saturating_add(lists_freed);
         tracing::info!(
@@ -387,6 +402,59 @@ mod tests {
         .unwrap();
         fs::write(dir.join("lock"), b"").unwrap();
         tmp
+    }
+
+    #[test]
+    fn the_index_stays_when_the_card_has_room() {
+        // 32 GB card, 12 GiB free: over both floors.
+        assert_eq!(lists_verdict(space(32, 12)), ListsVerdict::Keep);
+        // Exactly on both floors is room enough.
+        assert_eq!(lists_verdict(space(10, 2)), ListsVerdict::Keep);
+
+        let tmp = seeded_lists();
+        let (verdict, _, freed) = reclaim_lists(tmp.path(), |_| space(32, 12));
+        assert_eq!(verdict, ListsVerdict::Keep);
+        assert_eq!(freed, 0);
+        assert!(
+            tmp.path()
+                .join("deb.example.org_dists_stable_Packages")
+                .exists(),
+            "a kept index spares the next install a full apt-get update"
+        );
+    }
+
+    #[test]
+    fn the_index_is_pruned_when_the_card_is_short_of_space() {
+        // 8 GB card, 1 GiB free: under the absolute floor (and the share).
+        assert_eq!(lists_verdict(space(8, 1)), ListsVerdict::PruneLowSpace);
+        // 128 GB card, 10 GiB free: plenty of bytes, but under 20 % of the card.
+        assert_eq!(lists_verdict(space(128, 10)), ListsVerdict::PruneLowSpace);
+        // 4 GB card, 1 GiB free: 25 %, but under the absolute floor.
+        assert_eq!(lists_verdict(space(4, 1)), ListsVerdict::PruneLowSpace);
+
+        let tmp = seeded_lists();
+        let (verdict, _, freed) = reclaim_lists(tmp.path(), |_| space(8, 1));
+        assert_eq!(verdict, ListsVerdict::PruneLowSpace);
+        assert_eq!(freed, 8192);
+        assert!(!tmp
+            .path()
+            .join("deb.example.org_dists_stable_Packages")
+            .exists());
+        assert!(
+            tmp.path().join("lock").exists(),
+            "apt's lock file must survive"
+        );
+    }
+
+    #[test]
+    fn an_unmeasurable_card_is_pruned() {
+        assert_eq!(lists_verdict(None), ListsVerdict::PruneUnknownSpace);
+        assert_eq!(lists_verdict(space(0, 0)), ListsVerdict::PruneUnknownSpace);
+
+        let tmp = seeded_lists();
+        let (verdict, _, freed) = reclaim_lists(tmp.path(), |_| None);
+        assert_eq!(verdict, ListsVerdict::PruneUnknownSpace);
+        assert_eq!(freed, 8192);
     }
 
     #[test]
