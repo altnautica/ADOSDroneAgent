@@ -205,23 +205,35 @@ async fn reclaims_the_lock_only_from_a_finished_or_wedged_session() {
     // session mid-setup (`Idle`), progressing, or finishing a bind that paired
     // must not be: cancelling it would end a live bind as aborted.
     let mut s = BindSession::new(BindRole::Gs, "operator", None);
-    s.transition(BindState::Failed); // terminal
-    let terminal_reclaimable = s.state.is_terminal();
-    assert!(terminal_reclaimable);
-    // A stale (watchdog-aged) phase clock is also reclaimable.
+    assert!(
+        !s.lock_reclaimable(),
+        "the Idle setup window is a live bind"
+    );
     s.transition(BindState::WaitingPeer);
-    s.phase_entered_at = Some(now_monotonic() - WAITING_PEER_WATCHDOG.as_secs_f64() - 30.0);
-    let stale_reclaimable = s
-        .phase_entered_at
-        .is_none_or(|t| now_monotonic() - t > WAITING_PEER_WATCHDOG.as_secs_f64());
-    assert!(stale_reclaimable);
-    // A fresh active session is NOT reclaimable.
+    assert!(!s.lock_reclaimable(), "a fresh phase is a live bind");
+    s.transition(BindState::Paired);
+    assert!(
+        !s.lock_reclaimable(),
+        "a paired holder is finishing its bind"
+    );
+    for done in [BindState::Failed, BindState::Aborted] {
+        s.transition(done);
+        assert!(s.lock_reclaimable(), "{done:?} holder is only cleaning up");
+    }
     s.transition(BindState::WaitingPeer);
-    let fresh_reclaimable = s.state.is_terminal()
-        || s.phase_entered_at
-            .is_none_or(|t| now_monotonic() - t > WAITING_PEER_WATCHDOG.as_secs_f64());
-    assert!(!fresh_reclaimable);
-    let _ = &orch;
+    tokio::time::advance(WAITING_PEER_WATCHDOG + std::time::Duration::from_secs(1)).await;
+    assert!(
+        s.lock_reclaimable(),
+        "a phase parked past the watchdog is wedged"
+    );
+    let mut idle = BindSession::new(BindRole::Drone, "operator", None);
+    tokio::time::advance(WAITING_PEER_WATCHDOG + std::time::Duration::from_secs(1)).await;
+    assert!(
+        idle.lock_reclaimable(),
+        "a setup window parked past the watchdog is wedged"
+    );
+    idle.transition(BindState::OpeningTunnel);
+    assert!(!idle.lock_reclaimable());
 }
 
 #[test]

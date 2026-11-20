@@ -196,7 +196,7 @@ impl BindOrchestrator {
             //    reads this file, so short-circuit the stat off the drone path.
             let upstream = role.upstream_key();
             let key_fresh =
-                role != BindRole::Drone || upstream_key_fresh(Path::new(upstream), session_start);
+                role != BindRole::Drone || self.host.file_fresh(upstream, session_start);
 
             // Both proofs run through one pure verdict so the invariant "never
             // declare Paired without a real peer" is unit-testable off-rig.

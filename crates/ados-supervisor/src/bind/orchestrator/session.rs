@@ -131,6 +131,39 @@ impl BindOrchestrator {
         self.cancel.notify_waiters();
     }
 
+    /// Undo a bind the previous supervisor process left mid-way. Call once at
+    /// startup, before the radio unit starts. The sentinel lives in `/run/ados`,
+    /// which survives a supervisor restart, so a process killed mid-bind (the
+    /// systemd watchdog, a crash) leaves it reading active, which holds the
+    /// radio's hop supervisor and the ground-station uplink off for good, and
+    /// leaves the bind unit holding the adapter. The key apply writes the key
+    /// and the pair config back to back, so only the bind window itself needs
+    /// undoing.
+    pub async fn recover_interrupted(&self) {
+        let Some(body) = self.host.read_sentinel() else {
+            return;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+            return;
+        };
+        if v.get("active").and_then(Value::as_bool) != Some(true) {
+            return;
+        }
+        let role = v
+            .get("role")
+            .and_then(Value::as_str)
+            .and_then(BindRole::parse);
+        tracing::warn!(
+            role = role.map(|r| r.as_str()),
+            "bind_interrupted_by_restart: closing the bind window"
+        );
+        self.host.kill_stale_socats().await;
+        for r in role.map_or(vec![BindRole::Drone, BindRole::Gs], |r| vec![r]) {
+            self.pm.stop(r.bind_unit()).await;
+        }
+        self.host.write_sentinel(&sentinel_body(None));
+    }
+
     /// Snapshot of the current session for the REST surface, or None if idle.
     pub async fn status(&self) -> Option<Value> {
         self.session.lock().await.as_ref().map(|s| s.to_json())
