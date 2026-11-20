@@ -9,7 +9,9 @@
 //! `LAND_ALT_LOW`, the rest at its landing speed, the countdown and a few
 //! seconds' slack. The current is an average over the flight so far
 //! ([`TAU_S`]); the need is that current over the time home with a margin,
-//! plus the FC's critical reserve.
+//! plus the charge the vehicle must still hold at touchdown ([`keep_mah`]):
+//! the FC's low level, so its own low-battery failsafe never interrupts the
+//! return (a Land low action would land partway home).
 //!
 //! SmartRTL does not fly home at the waypoint speed. On the bench (rig
 //! survey, 2.5 Ah, four flights) it retraced the orbit path at 2.0-2.2 m/s
@@ -146,6 +148,15 @@ pub fn need_mah(current_a: f32, t_s: f32, crt_mah: f32) -> f32 {
     MARGIN * current_a * t_s / 3.6 + crt_mah
 }
 
+/// mAh to hold at touchdown: the larger of the FC's low level (`low_pct`,
+/// from `BATT_LOW_MAH`, else the setup wizard's floor) and its critical one
+/// (`crt_mah`, `BATT_CRT_MAH`, else [`CRT_SHARE`]), of capacity `c_mah`.
+/// Arriving with only the critical level left, the rig returns tripped the
+/// FC's low failsafe on the way home on every bench flight.
+pub fn keep_mah(c_mah: f32, low_pct: f32, crt_mah: Option<f32>) -> f32 {
+    (low_pct / 100.0 * c_mah).max(crt_mah.unwrap_or(CRT_SHARE * c_mah))
+}
+
 /// The speed SmartRTL retraces the path at, m/s: the speed the path was
 /// flown at (`flown_mps`, `None` before the vehicle moved), capped by the
 /// waypoint speed, times [`SRTL_SPEED_SHARE`].
@@ -199,13 +210,13 @@ impl Pilot {
         let local = self.fc.fresh_local(now_ms);
         let v_now = local.map_or(0.0, |l| l.vn.hypot(l.ve));
         self.sup.energy.sample_speed(v_now, now_ms);
-        // The countdown still to run: none once the FC returns or lands,
-        // what is left of a running one, else all of it. Through it the
-        // vehicle flies on, away from home as often as not.
+        // The countdown and the way flown on through it: none once the FC
+        // returns or lands, else all of it, running or not. Counting only
+        // what is left of a running one made the need fall as it ran, so a
+        // countdown withdrawn for a shortfall gone (`failsafes`) restarted at
+        // once with the full countdown back in the need.
         let countdown_s = if self.fc_returns_or_lands() {
             0.0
-        } else if let Some(deadline) = self.rth_deadline_ms {
-            deadline.saturating_sub(now_ms) as f32 / 1000.0
         } else {
             self.settings.pilot.low_battery_countdown_s as f32
         };
@@ -237,8 +248,8 @@ impl Pilot {
         let (Some(c), Some(i)) = (get("BATT_CAPACITY"), self.sup.energy.current_a(now_ms)) else {
             return floor;
         };
-        let crt = get("BATT_CRT_MAH").unwrap_or(CRT_SHARE * c);
-        let need = need_mah(i, t, crt);
+        let keep = keep_mah(c, low_pct, get("BATT_CRT_MAH"));
+        let need = need_mah(i, t, keep);
         let left = self
             .fc
             .battery_consumed_mah
@@ -326,6 +337,20 @@ mod tests {
         assert!((new - 26.33 - SLACK_S - 75.8).abs() < 0.2, "{new}");
         let new_pct = 100.0 * need_mah(i, new, crt) / c;
         assert!(new_pct > cost_pct, "new {new_pct} cost {cost_pct}");
+    }
+
+    #[test]
+    fn the_return_keeps_the_fc_low_level_at_touchdown() {
+        // The 2.5 Ah rig: BATT_LOW_MAH 500 (20 %) over BATT_CRT_MAH 250.
+        assert_eq!(keep_mah(2500.0, 20.0, Some(250.0)), 500.0);
+        // A critical level above the low one (a misset FC) still holds.
+        assert_eq!(keep_mah(2500.0, 20.0, Some(600.0)), 600.0);
+        // No mAh levels: the setup wizard's 30 % floor over 15 %.
+        assert_eq!(keep_mah(5000.0, 30.0, None), 1500.0);
+        // The bench s2 fire: 22.7 A over the 107 s home now needs 55 %,
+        // landing at the 20 % low level with the margin to spare.
+        let pct = 100.0 * need_mah(22.7, 107.2, keep_mah(2500.0, 20.0, Some(250.0))) / 2500.0;
+        assert!((54.5..55.5).contains(&pct), "{pct}");
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub type Scenario = fn(u64) -> Sim;
 pub const ALL: &[(&str, Scenario)] = &[
     ("low_battery", low_battery),
     ("energy_return", energy_return),
+    ("energy_withdrawn", energy_withdrawn),
     ("liftoff", liftoff),
     ("link_loss", link_loss),
     ("mission", mission),
@@ -103,23 +104,10 @@ pub fn low_battery(seed: u64) -> Sim {
 /// at a modest stick speed, with SmartRTL retracing at 0.80-0.88 of the
 /// speed it flew out (the bench range). The pilot returns on its energy
 /// estimate above the 20 % floor (`BATT_LOW_MAH` 500), and the copter
-/// lands home before the FC's critical level (`BATT_CRT_MAH` 250, 10 %).
+/// lands home above the FC's low level (20 %), never mind its critical one.
 pub fn energy_return(seed: u64) -> Sim {
-    let mut s = Sim::new("energy_return", seed, |st| st.pilot.link_loss_s = 3600);
-    for (n, v) in [
-        ("BATT_CAPACITY", 2500.0),
-        ("BATT_LOW_MAH", 500.0),
-        ("BATT_CRT_MAH", 250.0),
-        ("WPNAV_SPEED", 400.0),
-    ] {
-        s.fc.params.insert(n.to_string(), v);
-    }
-    let amps = s.rng.range(21.0, 24.0);
-    s.fc.current_a = Some(amps);
-    // mAh per second over the capacity, in %.
-    s.fc.drain_pct_s = amps / 3.6 / 2500.0 * 100.0;
+    let mut s = energy_sim("energy_return", seed, 10);
     s.fc.battery_pct = s.rng.range(68.0, 72.0);
-    s.fc.srtl_share = Some(s.rng.range(0.80, 0.88));
     let out_ms = s.rng.range(40_000.0, 55_000.0) as u64;
     s.boot();
     launch_to_hold(&mut s, 5.0);
@@ -144,9 +132,133 @@ pub fn energy_return(seed: u64) -> Sim {
         "landed home: {}",
         s.home_distance_m()
     );
+    // Touchdown above the FC's low level (BATT_LOW_MAH 500, 20 %): its own
+    // low failsafe never interrupts the return.
     assert!(
-        s.fc.battery_pct >= 10.0,
-        "landed at {}% (fired at {fired_pct}%, {out_m:.0} m out): under the critical level",
+        s.fc.battery_pct >= 20.0,
+        "landed at {}% (fired at {fired_pct}%, {out_m:.0} m out): under the FC low level",
+        s.fc.battery_pct
+    );
+    s
+}
+
+/// The 2.5 Ah rig copter of [`energy_return`]: capacity, levels, a measured
+/// current of 21-24 A and the battery draining at it, SmartRTL retracing at
+/// 0.80-0.88 of the speed flown out; a low-battery countdown of
+/// `countdown_s`.
+fn energy_sim(name: &'static str, seed: u64, countdown_s: u32) -> Sim {
+    let mut s = Sim::new(name, seed, |st| {
+        st.pilot.link_loss_s = 3600;
+        st.pilot.low_battery_countdown_s = countdown_s;
+    });
+    for (n, v) in [
+        ("BATT_CAPACITY", 2500.0),
+        ("BATT_LOW_MAH", 500.0),
+        ("BATT_CRT_MAH", 250.0),
+        ("WPNAV_SPEED", 400.0),
+    ] {
+        s.fc.params.insert(n.to_string(), v);
+    }
+    let amps = s.rng.range(21.0, 24.0);
+    s.fc.current_a = Some(amps);
+    // mAh per second over the capacity, in %.
+    s.fc.drain_pct_s = amps / 3.6 / 2500.0 * 100.0;
+    s.fc.srtl_share = Some(s.rng.range(0.80, 0.88));
+    s
+}
+
+/// Fly `axes` from centred sticks until `done`, at most `cap_ms`; then
+/// centre the sticks for a second.
+fn fly_until(s: &mut Sim, axes: [f32; 4], cap_ms: u64, done: impl FnMut(&Sim) -> bool) -> bool {
+    s.sticks = Some([0.0; 4]);
+    s.run(800);
+    s.sticks = Some(axes);
+    let reached = s.run_until(cap_ms, done);
+    s.sticks = Some([0.0; 4]);
+    s.run(1_000);
+    reached
+}
+
+/// A countdown whose shortfall goes away is withdrawn, and the return comes
+/// after a fresh countdown. As on the bench rig survey (2.5 Ah, at ×1 and at
+/// `--speed max`): the path home of the survey's first pass is long, the
+/// countdown starts, then the crossing pass prunes the path (SmartRTL cuts
+/// the loop) and the need falls well below the charge. The countdown used
+/// to freeze with its deadline set, still published, and the next shortfall
+/// 140 s later fired SmartRTL at once, with no countdown. Here the copter
+/// flies a loop (60 m out, 30 m across, back to 6 m short of home), the
+/// countdown (20 s) starts while it holds there, and it closes the loop
+/// within the countdown, crossing its first leg 6 m from home.
+pub fn energy_withdrawn(seed: u64) -> Sim {
+    let mut s = energy_sim("energy_withdrawn", seed, 20);
+    s.fc.battery_pct = s.rng.range(90.0, 92.0);
+    s.boot();
+    launch_to_hold(&mut s, 5.0);
+    /// Stick axes, flown until the position check passes.
+    type Leg = ([f32; 4], fn(&Sim) -> bool);
+    let legs: [Leg; 3] = [
+        ([0.0, 0.5, 0.0, 0.0], |s| s.fc.pos[0] > 60.0),
+        ([0.5, 0.0, 0.0, 0.0], |s| s.fc.pos[1] > 30.0),
+        ([0.0, -0.5, 0.0, 0.0], |s| s.fc.pos[0] < 6.0),
+    ];
+    for (axes, done) in legs {
+        assert!(
+            fly_until(&mut s, axes, 120_000, done),
+            "leg {axes:?} at {:?}",
+            s.fc.pos
+        );
+    }
+    assert_eq!(
+        s.state.rth_countdown_s, None,
+        "counting down before the loop's end"
+    );
+    let counting = s.run_until(180_000, |s| s.state.rth_countdown_s.is_some());
+    assert!(counting, "no countdown at {}%", s.fc.battery_pct);
+    let first = s.now;
+    let first_pct = s.fc.battery_pct;
+    assert!(first_pct > 21.0, "the energy estimate, not the floor");
+    // Close the loop: across the first leg beside home.
+    assert!(fly_until(&mut s, [-0.5, 0.0, 0.0, 0.0], 15_000, |s| s
+        .fc
+        .pos[1]
+        < -2.0));
+    assert!(
+        s.now - first < 20_000,
+        "the loop closed inside the countdown"
+    );
+    assert!(s.home_distance_m() < 10.0, "beside home: {:?}", s.fc.pos);
+    assert_eq!(s.fc.mode, copter::GUIDED, "still flown by the pilot");
+    assert_eq!(
+        s.state.rth_countdown_s, None,
+        "withdrawn at {}%",
+        s.fc.battery_pct
+    );
+    assert_eq!(s.state.low_battery_action, None);
+    assert!(
+        s.mode_commands(copter::SMART_RTL).is_empty(),
+        "no return yet"
+    );
+    // The next shortfall counts down again, in full, before the return.
+    let again = s.run_until(300_000, |s| s.state.rth_countdown_s.is_some());
+    assert!(again, "no second countdown at {}%", s.fc.battery_pct);
+    let second = s.now;
+    let landed = s.run_until(300_000, |s| !s.fc.armed);
+    assert!(landed, "never landed: mode {} at {:?}", s.fc.mode, s.fc.pos);
+    let srtl = s.mode_commands(copter::SMART_RTL);
+    assert_eq!(srtl.len(), 1, "SmartRTL once: {srtl:?}");
+    let delay = srtl[0] - second;
+    assert!(
+        (19_500..=20_600).contains(&delay),
+        "SmartRTL {delay} ms after the second countdown began (first at {first_pct:.1}%)"
+    );
+    assert!(
+        s.home_distance_m() < 1.5,
+        "landed home: {}",
+        s.home_distance_m()
+    );
+    assert!(
+        s.fc.battery_pct >= 20.0,
+        "landed at {}%, under the FC low level",
         s.fc.battery_pct
     );
     s

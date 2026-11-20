@@ -66,6 +66,11 @@ fn dst_energy_return_lands_before_the_critical_level() {
 }
 
 #[test]
+fn dst_energy_countdown_withdrawn_then_counts_down_again() {
+    matrix("energy_withdrawn");
+}
+
+#[test]
 fn dst_supervised_liftoff_reaches_hover() {
     matrix("liftoff");
 }

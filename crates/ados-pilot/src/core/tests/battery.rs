@@ -544,11 +544,16 @@ fn the_estimate_waits_ten_seconds_airborne() {
 }
 
 #[test]
-fn a_short_way_home_keeps_the_floor() {
+fn a_short_way_home_needs_little_above_the_fc_low_level() {
+    // 5 m out the need is the low level kept at touchdown (no BATT_LOW_MAH:
+    // the 30 % floor) and a few points for the way home.
     let w = energy_flight([5.0, 0.0, -5.0], 45, 20.0, 12_000);
     let s = w.p.state(w.now);
     let r = s.battery_reserve.expect("a reserve");
-    assert_eq!((r.basis.as_str(), r.need_pct), ("floor", 30), "{r:?}");
+    assert!(
+        r.basis == "energy" && (31..=36).contains(&r.need_pct),
+        "{r:?}"
+    );
     assert_eq!(s.low_battery_action, None);
 }
 

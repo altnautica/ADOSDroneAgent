@@ -13,6 +13,13 @@ use crate::flows::banner;
 /// MAVLink severity of the low-battery announcement: CRITICAL.
 const LOW_BATT_SEVERITY: u8 = 2;
 
+/// The banners a low-battery countdown shows.
+const COUNTDOWN_BANNERS: [&str; 3] = [
+    "pilot.banner.low_battery_land_in",
+    "pilot.banner.low_battery_rth_energy",
+    "pilot.banner.low_battery_rth",
+];
+
 impl Pilot {
     pub(super) fn failsafes(&mut self, now_ms: u64) {
         self.watch_rc(now_ms);
@@ -138,17 +145,25 @@ impl Pilot {
             }
             return;
         }
-        if (pct > low_pct && !short)
+        // A running countdown either ends in the return or is withdrawn: once
+        // the charge is 5 % above the need again (the path home was pruned
+        // as a survey crossed its own lanes, or the vehicle came closer), it
+        // stops, and a later shortfall starts a fresh one. It used to freeze
+        // with its deadline set, still publishing the countdown, and the
+        // next shortfall fired the return at once with no countdown.
+        let counting = self.rth_deadline_ms.is_some();
+        if counting && !self.low_batt_cancelled && !short && pct > need_pct + 5.0 {
+            self.withdraw_low_battery(pct, need_pct, now_ms);
+            return;
+        }
+        if (!counting && pct > low_pct && !short)
             || self.low_batt_cancelled
             || matches!(self.owner(), Owner::FcMode)
         {
             return;
         }
-        let basis = if short && pct > low_pct {
-            "energy"
-        } else {
-            "floor"
-        };
+        // Above the floor only the energy estimate starts a countdown.
+        let basis = if pct > low_pct { "energy" } else { "floor" };
         let return_s = reserve.map_or(0.0, |r| r.return_s);
         let action = if land { "land" } else { "rth" };
         self.low_batt_action = Some(action);
@@ -260,6 +275,30 @@ impl Pilot {
                 "pilot_battery_reserve"
             );
         }
+    }
+
+    /// The charge covers the way home again: the countdown stops, its
+    /// banner goes, and the next shortfall starts a fresh one (the operator's
+    /// cancel is the one that waits for the charge to recover 5 %).
+    fn withdraw_low_battery(&mut self, pct: f32, need_pct: f32, now_ms: u64) {
+        self.rth_deadline_ms = None;
+        self.low_batt_action = None;
+        self.sup.energy.latch_pct = None;
+        if self
+            .banner
+            .as_ref()
+            .is_some_and(|b| COUNTDOWN_BANNERS.contains(&b.text_key.as_str()))
+        {
+            self.banner = None;
+        }
+        tracing::warn!(
+            target: "ados_pilot",
+            pct,
+            need_pct,
+            event = "withdrawn",
+            at_ms = now_ms,
+            "pilot_battery_reserve"
+        );
     }
 }
 
