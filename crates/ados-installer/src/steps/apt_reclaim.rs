@@ -12,13 +12,16 @@
 //!   only ever re-read by a re-install of the identical version, which is not
 //!   something that happens on an appliance. Removing it costs nothing.
 //! * **The package index** (`/var/lib/apt/lists`). Not waste — it is what lets
-//!   `apt install <pkg>` resolve a name without a network round trip. Removing
-//!   it means the next apt invocation must `apt-get update` first. That is safe
-//!   *here* because every apt path the agent owns runs `apt-get update` before
-//!   it installs anything, so the agent re-fetches what it needs; an operator
-//!   installing something by hand pays one `apt update`, which apt itself tells
-//!   them to run. The trade is a one-command inconvenience against a third of a
-//!   gigabyte on a card that has been filling up until it corrupts.
+//!   `apt install <pkg>` resolve a name without a network round trip, and what
+//!   spares the next install or upgrade a full `apt-get update` (minutes on a
+//!   slow link). So it is pruned **only when the card is short of space**: free
+//!   space below [`LISTS_KEEP_MIN_FREE_BYTES`] or below
+//!   [`LISTS_KEEP_MIN_FREE_PCT`] of the filesystem, or unreadable. Pruning is
+//!   safe when it happens because every apt path the agent owns runs
+//!   `apt-get update` before it installs anything; an operator installing
+//!   something by hand pays one `apt update`, which apt itself tells them to
+//!   run. On a card that is filling up, that one-command inconvenience is worth
+//!   a few hundred megabytes; on a card with room it is not.
 //!
 //! The step runs right after `deps`, not at the end, so the space is back
 //! *before* the venv, the fetched binaries and the DKMS build ask for it.
@@ -28,10 +31,12 @@
 //! full disk is the condition this step exists to relieve, so failing the
 //! install on it would be exactly backwards.
 //!
-//! Idempotent: a second run finds an empty cache and an already-pruned index,
-//! reclaims nothing, and reports zero.
+//! Idempotent: a second run finds an empty cache and either a kept index (room
+//! to spare) or an already-pruned one, reclaims nothing, and reports zero.
 
 use std::path::{Path, PathBuf};
+
+use ados_config::capture_storage::{statvfs_space, FsSpace};
 
 use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
@@ -49,6 +54,58 @@ const APT_LISTS_DIR: &str = "/var/lib/apt/lists";
 /// `partial` and `auxfiles` are directories apt expects to exist and recreates
 /// awkwardly; their *contents* are prunable, the directories themselves are not.
 const LISTS_KEEP: &[&str] = &["lock", "partial", "auxfiles"];
+
+/// Free space below which the package index is pruned, absolute.
+///
+/// The steps after this one (the venv, the fetched binaries, the DKMS build)
+/// still have to land on the card, and the agent's own logs and recordings
+/// follow them. Below 2 GiB that headroom is what matters, not a saved
+/// `apt-get update`; above it the index's few hundred megabytes are noise.
+pub const LISTS_KEEP_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Free space below which the package index is pruned, as a percentage of the
+/// filesystem. The same 20 % at which the supervisor janitor's Pressure rung
+/// engages (`DEFAULT_PRESSURE_FREE_PCT` in `ados-supervisor`, which this crate
+/// does not depend on, so the figure is restated here and moves with it):
+/// keeping the index must not be what pushes a card into a pressure sweep.
+pub const LISTS_KEEP_MIN_FREE_PCT: u64 = 20;
+
+/// What happens to the package index on this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListsVerdict {
+    /// Both free-space floors hold: the index stays for the next install.
+    Keep,
+    /// Free space is below one of the floors: the index is pruned.
+    PruneLowSpace,
+    /// The filesystem could not be measured: pruned, because this step exists
+    /// to relieve a full card and an unmeasurable one is not known to have room.
+    PruneUnknownSpace,
+}
+
+impl ListsVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ListsVerdict::Keep => "keep",
+            ListsVerdict::PruneLowSpace => "prune_low_space",
+            ListsVerdict::PruneUnknownSpace => "prune_unknown_space",
+        }
+    }
+}
+
+/// Decide whether the package index stays, from the free space of the
+/// filesystem that holds it. Pure.
+pub fn lists_verdict(space: Option<FsSpace>) -> ListsVerdict {
+    let Some(space) = space.filter(|s| s.total_bytes > 0) else {
+        return ListsVerdict::PruneUnknownSpace;
+    };
+    let pct_ok = u128::from(space.free_bytes) * 100
+        >= u128::from(space.total_bytes) * u128::from(LISTS_KEEP_MIN_FREE_PCT);
+    if space.free_bytes >= LISTS_KEEP_MIN_FREE_BYTES && pct_ok {
+        ListsVerdict::Keep
+    } else {
+        ListsVerdict::PruneLowSpace
+    }
+}
 
 /// Decide which names directly under `/var/lib/apt/lists` may be removed. Pure,
 /// so the keep-list is asserted without a filesystem.
@@ -137,6 +194,23 @@ fn prune_lists(dir: &Path) -> u64 {
         }
     }
     before.saturating_sub(dir_bytes(dir))
+}
+
+/// Measure the filesystem holding `dir` with `stat`, then keep or prune the
+/// index under it. Returns the verdict, the measurement it was made on, and the
+/// bytes freed (zero when kept). `stat` is `statvfs` on a node and a fixed
+/// figure in tests.
+fn reclaim_lists(
+    dir: &Path,
+    stat: fn(&Path) -> Option<FsSpace>,
+) -> (ListsVerdict, Option<FsSpace>, u64) {
+    let space = stat(dir);
+    let verdict = lists_verdict(space);
+    let freed = match verdict {
+        ListsVerdict::Keep => 0,
+        ListsVerdict::PruneLowSpace | ListsVerdict::PruneUnknownSpace => prune_lists(dir),
+    };
+    (verdict, space, freed)
 }
 
 /// Reclaim the disk apt used during the install.
@@ -291,6 +365,28 @@ mod tests {
 
         assert_eq!(prune_lists(dir), 4096);
         assert_eq!(prune_lists(dir), 0, "idempotent: nothing left to reclaim");
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn space(total_gib: u64, free_gib: u64) -> Option<FsSpace> {
+        Some(FsSpace {
+            total_bytes: total_gib * GIB,
+            free_bytes: free_gib * GIB,
+        })
+    }
+
+    /// An apt lists dir holding one 8 KiB index file and apt's `lock`.
+    fn seeded_lists() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::write(
+            dir.join("deb.example.org_dists_stable_Packages"),
+            vec![0u8; 8192],
+        )
+        .unwrap();
+        fs::write(dir.join("lock"), b"").unwrap();
+        tmp
     }
 
     #[test]
