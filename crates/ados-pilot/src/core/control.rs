@@ -272,8 +272,14 @@ impl Pilot {
                 };
             }
             None => {
+                let speed_mps = self
+                    .fc
+                    .fresh_local(now_ms)
+                    .map_or(0.0, |l| l.vn.hypot(l.ve));
+                let motion = planner::Motion { speed_mps, now_ms };
                 let held = &mut self.held_route;
-                self.plan = planner::plan_committed(&self.obstacles, &goal, pos, margin, held);
+                self.plan =
+                    planner::plan_committed(&self.obstacles, &goal, pos, margin, motion, held);
             }
         }
     }

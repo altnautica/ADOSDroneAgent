@@ -10,7 +10,7 @@ use super::safety::G;
 use crate::core::control::{brake_limit, keep_out_m, BRAKE_LAG_S, CREEP_SLACK_M};
 use crate::geo::{self, V2};
 use crate::obstacles::Obstacles;
-use crate::planner::{self, plan_committed, Commit};
+use crate::planner::{self, plan_committed, Commit, Motion};
 
 const A_H: f32 = 3.0;
 const MARGIN: f32 = 1.5;
@@ -146,6 +146,14 @@ fn follow_goal(at: V2, subject: V2) -> Goal {
     g
 }
 
+/// Replan `k` at the 200 ms period, the vehicle moving at 2 m/s.
+fn moving(k: u64) -> Motion {
+    Motion {
+        speed_mps: 2.0,
+        now_ms: 200 * k,
+    }
+}
+
 #[test]
 fn the_straight_way_at_the_margins_edge_does_not_flip_the_route() {
     // A trunk beside the straight way to the goal, its keep-out just reaching
@@ -164,7 +172,7 @@ fn the_straight_way_at_the_margins_edge_does_not_flip_the_route() {
             fresh_flips += 1;
         }
         last_fresh = Some(fresh);
-        plan_committed(&o, &goal, from, MARGIN, &mut held);
+        plan_committed(&o, &goal, from, MARGIN, moving(k), &mut held);
     }
     assert!(fresh_flips >= 10, "the jitter never flipped a fresh plan");
     assert!(held.switches <= 1, "{} route switches", held.switches);
@@ -181,8 +189,8 @@ fn a_goal_behind_a_trunk_gets_one_held_detour() {
     let mut pos = [0.0, 0.0];
     let mut states = Vec::new();
     let mut sides = Vec::new();
-    for _ in 0..60 {
-        let p = plan_committed(&o, &goal, pos, MARGIN, &mut held);
+    for k in 0..60 {
+        let p = plan_committed(&o, &goal, pos, MARGIN, moving(k), &mut held);
         states.push(p.state);
         let Some(t) = p.target else { break };
         if p.state == AvoidState::Detour && (5.0..7.0).contains(&pos[0]) {

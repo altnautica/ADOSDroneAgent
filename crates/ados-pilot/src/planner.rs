@@ -137,7 +137,11 @@ fn ring(goal: &Goal, from: V2, side: f32) -> Vec<(V2, f32, Spot)> {
 /// Plan one goal from `from`, with no route held from before
 /// ([`plan_committed`] with a fresh [`Commit`]).
 pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
-    plan_committed(obs, goal, from, margin, &mut Commit::default())
+    let motion = Motion {
+        speed_mps: f32::INFINITY,
+        now_ms: 0,
+    };
+    plan_committed(obs, goal, from, margin, motion, &mut Commit::default())
 }
 
 /// The straight plan to the goal's own point `target` (clearance `gc`).
@@ -169,11 +173,14 @@ enum Choose {
 
 /// The cheapest reachable detour candidate of those `choose` allows, routed
 /// from `from` with the search staying near `prefer` (the route flown
-/// before; empty for none), with [`ROUTE_ROOM_M`] beyond the margin when
-/// any candidate is reachable with it. A candidate off the grid (a subject
-/// more than half the grid away) is routed toward through the grid's edge
-/// ([`Flood::exit_toward`]): the grid knows nothing beyond it, so the way
-/// out that leaves the least straight distance still to go is flown.
+/// before; empty for none) and out of `narrows` (a stall's, for none),
+/// with [`ROUTE_ROOM_M`] beyond the margin when any candidate is reachable
+/// with it. A candidate off the grid (a subject more than half the grid
+/// away) is routed toward through the grid's edge ([`Flood::exit_toward`]):
+/// the grid knows nothing beyond it, so the way out that leaves the least
+/// straight distance still to go is flown. When `narrows` leaves no
+/// candidate reachable, the route ignores them: they never shut the only
+/// way out.
 fn detour(
     obs: &Obstacles,
     goal: &Goal,
@@ -181,6 +188,7 @@ fn detour(
     margin: f32,
     choose: Choose,
     prefer: &[V2],
+    narrows: Option<&Narrows>,
 ) -> Option<(Plan, Spot)> {
     route(obs, goal, from, margin + ROUTE_ROOM_M, choose, prefer)
         .or_else(|| route(obs, goal, from, margin, choose, prefer))
@@ -194,6 +202,7 @@ fn route(
     margin: f32,
     choose: Choose,
     prefer: &[V2],
+    narrows: Option<&Narrows>,
 ) -> Option<(Plan, Spot)> {
     let grid = &obs.grid;
     let subject = goal.subject_ne;
@@ -217,7 +226,9 @@ fn route(
             Some(cell) => search(grid, from, Some(cell), margin, MAX_EXPANSIONS, prefer)
                 .and_then(|f| f.path(grid, cand)),
             None => flooded
-                .get_or_insert_with(|| search(grid, from, None, margin, GRID_N * GRID_N, prefer))
+                .get_or_insert_with(|| {
+                    search(grid, from, None, margin, GRID_N * GRID_N, prefer, narrows)
+                })
                 .as_ref()
                 .and_then(|f| f.exit_toward(grid, cand)),
         };
@@ -327,7 +338,8 @@ fn dist_to_path(path: &[V2], p: V2) -> f32 {
 /// [`GAP_COST`] as the clearance falls to the margin ([`GAP_ROOM_M`]), plus
 /// [`PREFER_COST`] per metre of distance from `prefer` (a route flown
 /// before; empty for none); cells under `margin` clearance are blocked
-/// except near the start. With a `goal` it is A* and stops there; without
+/// except near the start, and so are the cells `narrows` bars
+/// ([`Narrows::bars`]). With a `goal` it is A* and stops there; without
 /// one it floods every reachable cell. `None` when `from` is off the grid,
 /// or a goal was given and not reached within `max_expansions`.
 fn search(
@@ -337,6 +349,7 @@ fn search(
     margin: f32,
     max_expansions: usize,
     prefer: &[V2],
+    narrows: Option<&Narrows>,
 ) -> Option<Flood> {
     let (si, sj) = grid.cell(from)?;
     let idx = |i: usize, j: usize| i * GRID_N + j;
@@ -390,6 +403,9 @@ fn search(
             if c < margin && geo::dist(p, from) >= margin {
                 continue;
             }
+            if narrows.is_some_and(|n| n.bars(p, c)) {
+                continue;
+            }
             let len = if di != 0 && dj != 0 {
                 CELL_M * std::f32::consts::SQRT_2
             } else {
@@ -416,7 +432,7 @@ fn search(
 /// Every cell reachable from `from` at `margin`, in one search: routes to
 /// many candidate points cost one flood instead of one A* each.
 pub fn flood(grid: &Grid, from: V2, margin: f32) -> Option<Flood> {
-    search(grid, from, None, margin, GRID_N * GRID_N, &[])
+    search(grid, from, None, margin, GRID_N * GRID_N, &[], None)
 }
 
 fn ordered(v: f32) -> u32 {

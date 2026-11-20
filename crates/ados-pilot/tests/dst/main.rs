@@ -107,6 +107,14 @@ fn dst_forest_stand_follows_a_walker_inside_the_margin() {
     matrix("forest_stand");
 }
 
+/// The stand whose follow route passed a trunk beyond the margin but inside
+/// the brake's keep-out, where the vehicle crawled until the planner chose
+/// again round it.
+#[test]
+fn dst_forest_stand_chooses_again_where_it_crawls() {
+    forest::forest_stand(14);
+}
+
 /// One seed replays byte for byte: every frame the pilot sent, every frame
 /// it published and the vehicle's state each tick.
 #[test]
