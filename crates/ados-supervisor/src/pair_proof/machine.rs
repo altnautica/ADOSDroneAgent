@@ -41,6 +41,17 @@ pub const REARM_CONFIRM_HOLD: Duration = Duration::from_secs(600);
 /// cooldown keeps recovery going at a pace that cannot become a bind storm.
 pub const DEFAULT_REARM_COOLDOWN_S: u64 = 1800;
 
+/// The longest quiet stretch inside one run of mis-keyed verdicts: as long as a
+/// peer can spend off the air in its own bind window (tunnel bring-up, waiting
+/// for its peer, key transfer and restart, 300 s). A re-keyed peer that stops
+/// transmitting to open that window keeps this rig's mis-keyed clock running,
+/// so the two windows stay in phase; a longer silence ends the run, so a
+/// neighbour's single undecodable burst never adds up to a confirm hold.
+pub const MIS_KEYED_QUIET_GRACE: Duration = crate::bind::TUNNEL_WAIT_TIMEOUT
+    .saturating_add(crate::bind::WAITING_PEER_WATCHDOG)
+    .saturating_add(crate::bind::KEY_TRANSFER_TIMEOUT)
+    .saturating_add(crate::bind::RESTART_TIMEOUT);
+
 /// Max age of `wfb-stats.json` before its signals count as no signal at all. The
 /// radio rewrites it every ~1 s; older than this means the writer is stopped or
 /// crashed and its last flags are frozen. Acting on a frozen `rf_unverified`
@@ -141,8 +152,8 @@ pub struct RearmInput {
     pub forced: bool,
     /// The unproven condition has held for the full confirm window.
     pub hold_armed: bool,
-    /// The peer was first heard on the air mis-keyed at least the confirm
-    /// window ago, and not one frame has decoded since.
+    /// The peer has been heard on the air mis-keyed for the full confirm
+    /// window, with no quiet stretch longer than [`MIS_KEYED_QUIET_GRACE`].
     pub mis_keyed_armed: bool,
     pub episodes: u32,
     /// Wall clock of the last episode, from the persisted record.
@@ -158,10 +169,11 @@ pub struct RearmInput {
 /// override exactly this machine. The proven latch runs next, ahead of the
 /// hold and the cooldown: a proven key is never re-armed for being down, so a
 /// multi-day dropout or a peer that is simply off cannot re-bind a pair that
-/// has worked. The only way past it is the mis-keyed hold, which a single
-/// decoded frame resets: the peer is present and transmitting on another key
-/// (it took a new key in a bind this rig missed), so waiting will never bring
-/// the link back. Either fault re-arms one episode per cooldown.
+/// has worked. The only way past it is the mis-keyed hold, which a decoded
+/// frame or a silence longer than a bind window resets: the peer stays present
+/// and transmitting on another key (it took a new key in a bind this rig
+/// missed), so waiting will never bring the link back. Either fault re-arms one
+/// episode per cooldown.
 pub fn decide_rearm(input: RearmInput) -> RearmStep {
     if input.forced {
         return RearmStep::Arm {

@@ -10,10 +10,21 @@
 //! Taking effect means restarting the radio unit, which drops the video,
 //! telemetry and command link for a few seconds. So the config write only
 //! records that a restart is owed (a sidecar under the run directory), and the
-//! applier here performs it when the vehicle is not treated as armed (the same
-//! judgement the armed interlock uses: a missing or stale vehicle state counts
-//! as armed). While armed the restart waits and the sidecar says so, which the
-//! full status surfaces as `radioFleetApply`.
+//! applier here performs it when no armed aircraft rides that link. While one
+//! does, the restart waits and the sidecar says so, which the full status
+//! surfaces as `radioFleetApply`.
+//!
+//! On a drone that is the armed interlock's judgement: a missing or stale
+//! vehicle state counts as armed. A ground station has no flight controller of
+//! its own (the top-level `armed` of its state snapshot is its own empty
+//! vehicle, always false), so it judges the drone it relays instead, from the
+//! snapshot's `relayed_vehicle` block ([`GroundStationArmed`]). Its own radio
+//! restart drops only a link it is hearing, and the natural order of an address
+//! change (the drone moves first, on the ground) leaves it hearing nothing, so
+//! a ground station that hears no drone restarts. It waits while it hears an
+//! armed drone (or one whose arm state it has not read), and for
+//! [`LOST_ARMED_HOLD`] after it last heard one armed, so a fade in flight does
+//! not move it off the address the aircraft is still on.
 //!
 //! The sidecar is the pending record as well as the status: it survives this
 //! process restarting, and a reboot needs no record because the radio then
@@ -22,9 +33,9 @@
 use std::future::Future;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use ados_protocol::armed::vehicle_treated_as_armed;
+use ados_protocol::armed::{vehicle_treated_as_armed, ARMED_STATE_MAX_AGE};
 use serde_json::{json, Value};
 
 use crate::state::AppState;
@@ -41,12 +52,87 @@ pub const SIDECAR_VERSION: u32 = 1;
 /// file.
 pub const APPLY_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a ground station that stops hearing its drone keeps treating it
+/// as armed after it last heard it armed. A drone that fades in flight goes on
+/// flying on the old address; the ground station waits this long for it
+/// rather than moving away from it. Past it, or with no armed drone heard, an
+/// unheard drone holds no link the restart could drop.
+pub const LOST_ARMED_HOLD: Duration = Duration::from_secs(60);
+
+/// The ground station's judgement of the drone it relays, for its own radio
+/// restart. Heard means a state snapshot younger than [`ARMED_STATE_MAX_AGE`]
+/// whose `relayed_vehicle` block is `fresh`. A heard drone is armed unless its
+/// relayed state says `armed: false` after a heartbeat; an unheard drone is
+/// armed only within [`LOST_ARMED_HOLD`] of the last time it was heard armed.
+#[derive(Debug, Default)]
+pub struct GroundStationArmed {
+    last_armed_at: Option<Instant>,
+}
+
+impl GroundStationArmed {
+    pub fn armed(&mut self, snapshot: Option<(Instant, Value)>, now: Instant) -> bool {
+        let heard = snapshot
+            .filter(|(at, _)| now.saturating_duration_since(*at) <= ARMED_STATE_MAX_AGE)
+            .and_then(|(at, state)| {
+                let relayed = state.get("relayed_vehicle")?;
+                if relayed.get("fresh").and_then(Value::as_bool) != Some(true) {
+                    return None;
+                }
+                let vehicle = relayed.get("vehicle");
+                let heartbeat = vehicle
+                    .and_then(|v| v.get("last_heartbeat"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty());
+                let disarmed = heartbeat
+                    && vehicle
+                        .and_then(|v| v.get("armed"))
+                        .and_then(Value::as_bool)
+                        == Some(false);
+                Some((at, !disarmed))
+            });
+        match heard {
+            Some((at, armed)) => {
+                self.last_armed_at = armed.then_some(at);
+                armed
+            }
+            None => self
+                .last_armed_at
+                .is_some_and(|at| now.saturating_duration_since(at) < LOST_ARMED_HOLD),
+        }
+    }
+}
+
+/// The armed verdict the applier acts on, per profile: the interlock's on a
+/// drone, [`GroundStationArmed`] on a ground station.
+pub enum ApplierArmed {
+    Drone,
+    GroundStation(GroundStationArmed),
+}
+
+impl ApplierArmed {
+    pub fn new(ground_station: bool) -> Self {
+        if ground_station {
+            Self::GroundStation(GroundStationArmed::default())
+        } else {
+            Self::Drone
+        }
+    }
+
+    pub fn armed(&mut self, snapshot: Option<(Instant, Value)>, now: Instant) -> bool {
+        match self {
+            Self::Drone => vehicle_treated_as_armed(snapshot),
+            Self::GroundStation(gs) => gs.armed(snapshot, now),
+        }
+    }
+}
+
 /// Where an owed radio restart stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// Recorded by the config write, not yet judged.
     Pending,
-    /// Waiting for the vehicle to disarm.
+    /// Waiting for the vehicle to disarm (on a ground station: the drone it
+    /// hears, or last heard within [`LOST_ARMED_HOLD`], is armed).
     DeferredArmed,
     /// The restart was issued; the radio is on the written address.
     Applied,
@@ -251,13 +337,14 @@ where
 /// Run the applier for the life of the process. Vehicle profiles only (drone
 /// and ground station): those are the nodes whose radio carries a flying
 /// aircraft's link.
-pub fn spawn_applier(state: AppState) {
+pub fn spawn_applier(state: AppState, ground_station: bool) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(APPLY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut judge = ApplierArmed::new(ground_station);
         loop {
             tick.tick().await;
-            let armed = vehicle_treated_as_armed(state.state.snapshot_at());
+            let armed = judge.armed(state.state.snapshot_at(), Instant::now());
             apply_tick(&state.run_dir, armed, |unit| async move {
                 crate::probe::status_only(
                     "systemctl",
@@ -375,5 +462,81 @@ mod tests {
     fn each_profile_restarts_its_own_radio_unit() {
         assert_eq!(radio_unit(false), "ados-wfb.service");
         assert_eq!(radio_unit(true), "ados-wfb-rx.service");
+    }
+
+    /// A ground station's state snapshot: its own (absent) FC disarmed at the
+    /// top level, and the relayed drone as the router stamps it.
+    fn gs_state(relayed: Option<(bool, bool)>) -> Value {
+        let mut s = json!({ "armed": false, "mavlink_alive": false });
+        if let Some((fresh, armed)) = relayed {
+            s["relayed_vehicle"] = json!({
+                "source": "relayed",
+                "fresh": fresh,
+                "vehicle": { "armed": armed, "last_heartbeat": "2026-11-20T00:00:00Z" },
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn a_ground_station_judges_the_drone_it_relays_not_its_own_empty_fc() {
+        let t0 = Instant::now();
+        let mut gs = ApplierArmed::new(true);
+        // Hearing an armed drone: wait, though the top-level `armed` is false.
+        assert!(gs.armed(Some((t0, gs_state(Some((true, true))))), t0));
+        // Hearing a disarmed drone: restart.
+        assert!(!gs.armed(Some((t0, gs_state(Some((true, false))))), t0));
+        // A heard drone whose arm state was never read (no heartbeat) waits.
+        let mut no_hb = gs_state(Some((true, false)));
+        no_hb["relayed_vehicle"]["vehicle"]["last_heartbeat"] = json!("");
+        assert!(gs.armed(Some((t0, no_hb)), t0));
+        // The drone side is unchanged: its own FC's `armed`, missing state armed.
+        let mut drone = ApplierArmed::new(false);
+        assert!(!drone.armed(Some((t0, gs_state(Some((true, true))))), t0));
+        assert!(drone.armed(None, t0));
+    }
+
+    #[test]
+    fn a_ground_station_that_hears_no_drone_restarts_unless_it_last_heard_one_armed() {
+        let t0 = Instant::now();
+        // Never heard a drone, a stale relayed block, or no state at all: the
+        // restart drops no link, so it is not deferred.
+        let mut gs = ApplierArmed::new(true);
+        assert!(!gs.armed(Some((t0, gs_state(None))), t0));
+        assert!(!gs.armed(Some((t0, gs_state(Some((false, true))))), t0));
+        assert!(!gs.armed(None, t0));
+        // The drone moved first, on the ground: last heard disarmed, then gone.
+        let mut gs = ApplierArmed::new(true);
+        assert!(!gs.armed(Some((t0, gs_state(Some((true, false))))), t0));
+        assert!(!gs.armed(Some((t0, gs_state(None))), t0 + Duration::from_secs(5)));
+        // A fade in flight: last heard armed holds the restart for the hold.
+        let mut gs = ApplierArmed::new(true);
+        assert!(gs.armed(Some((t0, gs_state(Some((true, true))))), t0));
+        let quiet = t0 + LOST_ARMED_HOLD - Duration::from_secs(1);
+        assert!(gs.armed(Some((quiet, gs_state(Some((false, true))))), quiet));
+        assert!(gs.armed(None, quiet));
+        let past = t0 + LOST_ARMED_HOLD;
+        assert!(!gs.armed(Some((past, gs_state(Some((false, true))))), past));
+    }
+
+    #[tokio::test]
+    async fn a_ground_station_that_stops_hearing_its_drone_moves_onto_its_new_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_pending(dir.path(), 1, 3, "ados-wfb.service");
+        let (calls, restart) = counting();
+        let t0 = Instant::now();
+        let mut gs = ApplierArmed::new(true);
+        // The drone, heard armed, defers the restart.
+        let armed = gs.armed(Some((t0, gs_state(Some((true, true))))), t0);
+        let body = apply_tick(dir.path(), armed, &restart).await.unwrap();
+        assert_eq!(body["outcome"], "deferred_armed");
+        // It lands and disarms, moves onto its new address, and goes quiet.
+        let t1 = t0 + Duration::from_secs(30);
+        gs.armed(Some((t1, gs_state(Some((true, false))))), t1);
+        let t2 = t1 + Duration::from_secs(10);
+        let armed = gs.armed(Some((t2, gs_state(Some((false, false))))), t2);
+        let body = apply_tick(dir.path(), armed, &restart).await.unwrap();
+        assert_eq!(body["outcome"], "applied");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

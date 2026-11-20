@@ -13,7 +13,7 @@
 //! the FC's low level, so its own low-battery failsafe never interrupts the
 //! return (a Land low action would land partway home).
 //!
-//! SmartRTL does not fly home at the waypoint speed. On the bench (rig
+//! SmartRTL does not fly home at the waypoint speed. In simulation (a rig
 //! survey, 2.5 Ah, four flights) it retraced the orbit path at 2.0-2.2 m/s
 //! with `WP_SPD` 4, after the mission flew it at about 2.5 m/s: its points
 //! are straight segments it rounds corner by corner. Counting `WP_SPD` put
@@ -41,7 +41,7 @@ pub const SLACK_S: f32 = 5.0;
 const V_RET_DEFAULT_MPS: f32 = 5.0;
 /// SmartRTL's retrace speed as a share of the speed the path was flown at
 /// (capped by the waypoint speed): 2.0-2.2 m/s over a path flown at 2.5 m/s
-/// on the bench, rounded down.
+/// in simulation, rounded down.
 pub const SRTL_SPEED_SHARE: f32 = 0.8;
 /// The slowest retrace speed counted, m/s: a vehicle that has barely moved
 /// is not taken to crawl home.
@@ -152,7 +152,7 @@ pub fn need_mah(current_a: f32, t_s: f32, crt_mah: f32) -> f32 {
 /// from `BATT_LOW_MAH`, else the setup wizard's floor) and its critical one
 /// (`crt_mah`, `BATT_CRT_MAH`, else [`CRT_SHARE`]), of capacity `c_mah`.
 /// Arriving with only the critical level left, the rig returns tripped the
-/// FC's low failsafe on the way home on every bench flight.
+/// FC's low failsafe on the way home on every simulated flight.
 pub fn keep_mah(c_mah: f32, low_pct: f32, crt_mah: Option<f32>) -> f32 {
     (low_pct / 100.0 * c_mah).max(crt_mah.unwrap_or(CRT_SHARE * c_mah))
 }
@@ -296,10 +296,10 @@ mod tests {
         assert!((need_mah(20.0, 180.0, 500.0) - 1800.0).abs() < 1e-2);
     }
 
-    /// The rig survey on a 2.5 Ah pack (bench run 20261120-050707, energy
-    /// s2): `WP_SPD` 4, `WP_SPD_DN` 1.5, `LAND_SPD_MS` 0.5, `LAND_ALT_LOW_M`
-    /// 10, `BATT_CRT_MAH` 250, 22.7 A, 19.5 m up, the orbit flown at 2.5 m/s,
-    /// the pruned path back 106.7 m when the return fired at 32 %.
+    /// The rig survey on a 2.5 Ah pack, as flown in simulation: `WP_SPD` 4,
+    /// `WP_SPD_DN` 1.5, `LAND_SPD_MS` 0.5, `LAND_ALT_LOW_M` 10, `BATT_CRT_MAH`
+    /// 250, 22.7 A, 19.5 m up, the orbit flown at 2.5 m/s, the pruned path
+    /// back 106.7 m when the return fired at 32 %.
     fn rig(len_m: f32, v_ret_mps: f32) -> Way {
         Way {
             len_m,
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bench_return_that_reached_critical_is_counted_short_no_more() {
+    fn a_return_that_reached_critical_is_counted_short_no_more() {
         let (c, crt, i) = (2500.0, 250.0, 22.7);
         // What the return cost: 10 s of countdown and 133 m of SmartRTL at
         // 2.0 m/s took 490 mAh to the start of the descent; the descent
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(keep_mah(2500.0, 20.0, Some(600.0)), 600.0);
         // No mAh levels: the setup wizard's 30 % floor over 15 %.
         assert_eq!(keep_mah(5000.0, 30.0, None), 1500.0);
-        // The bench s2 fire: 22.7 A over the 107 s home now needs 55 %,
+        // That flight's fire: 22.7 A over the 107 s home now needs 55 %,
         // landing at the 20 % low level with the margin to spare.
         let pct = 100.0 * need_mah(22.7, 107.2, keep_mah(2500.0, 20.0, Some(250.0))) / 2500.0;
         assert!((54.5..55.5).contains(&pct), "{pct}");
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn the_floor_variant_return_is_covered_too() {
-        // Bench run 20261120-065132 (floor s3): published 61 s at the fire,
+        // A floor-basis flight in simulation: published 61 s at the fire,
         // so 78 m back; the return then flew 103 m in 46.9 s (2.2 m/s).
         let old = return_s(&Way {
             h_m: 19.8,

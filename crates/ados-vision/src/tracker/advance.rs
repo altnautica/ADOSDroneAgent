@@ -98,11 +98,15 @@ impl SingleObjectTracker {
                 // distractor and self-reinforce. A track with no template yet
                 // (an operator designation is seeded from a wire box, without
                 // a descriptor) adopts the descriptor of its first association
-                // even on a re-confirm frame: there is no template to poison,
-                // and without one no later association is clean, so a
-                // designation that misses its first batch could only confirm
-                // on two associations in a row.
-                if blend && (!entering_reconfirm || track.template.is_none()) {
+                // on a re-confirm frame only when that candidate is the lone
+                // box in the gate: without a template no later association is
+                // clean, so a designation that misses its first batch could
+                // only confirm on two associations in a row; but the widened,
+                // motion-only gate of that frame can rank a neighbour above a
+                // small subject, and a template seeded from the neighbour
+                // would refuse the subject from then on.
+                let seeds_on_reconfirm = track.template.is_none() && scored.len() == 1;
+                if blend && (!entering_reconfirm || seeds_on_reconfirm) {
                     self.blend_template(&mut track, cand);
                 }
                 track.state = match track.state {

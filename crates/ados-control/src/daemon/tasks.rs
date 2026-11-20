@@ -190,10 +190,11 @@ where
 
     // Radio restart onto a fleet address written to config (a slot the ground
     // station's registry issued, delivered by its reconciler): owed by the
-    // config write, performed only while the vehicle is disarmed. Drone and
+    // config write, performed only while no armed aircraft rides the link (the
+    // drone judges its own FC, a ground station the drone it relays). Drone and
     // ground station alike, each restarting its own radio unit.
     if matches!(profile.as_str(), "drone" | "ground-station") {
-        crate::routes::radio_fleet_apply::spawn_applier(state.clone());
+        crate::routes::radio_fleet_apply::spawn_applier(state.clone(), is_ground_station);
     }
 
     // Build the relay-proxy caller on ground-station-profile nodes only. The

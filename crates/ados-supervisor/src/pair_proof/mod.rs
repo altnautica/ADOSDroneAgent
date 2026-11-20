@@ -55,7 +55,7 @@ use ados_protocol::pair_proof::{
 use crate::bind::BindRole;
 use machine::{
     decide_rearm, drone_signals, gs_signals, HoldTrigger, RearmInput, RearmSignals, RearmStep,
-    DEFAULT_REARM_COOLDOWN_S, PAIR_REARM_KIND, REARM_CONFIRM_HOLD,
+    DEFAULT_REARM_COOLDOWN_S, MIS_KEYED_QUIET_GRACE, PAIR_REARM_KIND, REARM_CONFIRM_HOLD,
 };
 
 /// How old the radio's stats sidecar may be and still count as this moment's
@@ -219,14 +219,17 @@ pub struct PairProofLatch {
     role: BindRole,
     path: PathBuf,
     trigger: HoldTrigger,
-    /// When the peer was first seen on the air mis-keyed with no decoded frame
-    /// since. Unlike the unproven hold it is not reset by the peer going
-    /// quiet: a re-keyed peer that stops to open its own bind window, or flies
-    /// out of range for a while, is still re-keyed, and resetting on that
-    /// silence would keep this rig's window permanently out of phase with the
-    /// peer's. Only a decoded frame, a key change, this rig's own bind or a
-    /// radio with no fresh verdict resets it.
+    /// When the peer was first heard on the air mis-keyed in the current run
+    /// of mis-keyed verdicts, and when it was last heard so. The run survives
+    /// a quiet gap no longer than [`MIS_KEYED_QUIET_GRACE`] (a re-keyed peer
+    /// off the air while it opens its own bind window, so this rig's window
+    /// stays in phase with the peer's), and ends on any longer stretch without
+    /// a mis-keyed verdict: a single undecodable burst from a neighbour's rig
+    /// followed by silence never re-binds a pair that worked. A decoded frame,
+    /// a key change, this rig's own bind or a radio with no fresh verdict ends
+    /// it at once.
     mis_keyed_since: Option<Instant>,
+    mis_keyed_last: Option<Instant>,
     hold: Duration,
 }
 
@@ -243,6 +246,7 @@ impl PairProofLatch {
             path,
             trigger: HoldTrigger::with_hold(REARM_CONFIRM_HOLD),
             mis_keyed_since: None,
+            mis_keyed_last: None,
             hold: REARM_CONFIRM_HOLD,
         }
     }
@@ -255,13 +259,21 @@ impl PairProofLatch {
     fn release(&mut self, now: Instant) {
         self.trigger.observe(false, now);
         self.mis_keyed_since = None;
+        self.mis_keyed_last = None;
     }
 
-    /// Feed one verdict to the mis-keyed clock; whether it has run the full
-    /// confirm hold.
+    /// Feed one verdict to the mis-keyed clock; whether its current run has
+    /// lasted the full confirm hold.
     fn observe_mis_keyed(&mut self, mis_keyed: bool, now: Instant) -> bool {
-        if mis_keyed && self.mis_keyed_since.is_none() {
-            self.mis_keyed_since = Some(now);
+        if mis_keyed {
+            self.mis_keyed_since.get_or_insert(now);
+            self.mis_keyed_last = Some(now);
+        } else if self
+            .mis_keyed_last
+            .is_some_and(|last| now.saturating_duration_since(last) > MIS_KEYED_QUIET_GRACE)
+        {
+            self.mis_keyed_since = None;
+            self.mis_keyed_last = None;
         }
         self.mis_keyed_since
             .is_some_and(|since| now.saturating_duration_since(since) >= self.hold)

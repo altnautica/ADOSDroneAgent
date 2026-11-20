@@ -99,11 +99,11 @@ pub fn low_battery(seed: u64) -> Sim {
     s
 }
 
-/// The energy-aware return, as the bench rig survey on a 2.5 Ah pack flew
-/// it: a GNSS copter with a measured current (21-24 A) flown out 100-140 m
-/// at a modest stick speed, with SmartRTL retracing at 0.80-0.88 of the
-/// speed it flew out (the bench range). The pilot returns on its energy
-/// estimate above the 20 % floor (`BATT_LOW_MAH` 500), and the copter
+/// The energy-aware return, as a rig survey on a 2.5 Ah pack flew it in
+/// simulation: a GNSS copter with a measured current (21-24 A) flown out
+/// 100-140 m at a modest stick speed, with SmartRTL retracing at 0.80-0.88
+/// of the speed it flew out (the range seen there). The pilot returns on its
+/// energy estimate above the 20 % floor (`BATT_LOW_MAH` 500), and the copter
 /// lands home above the FC's low level (20 %), never mind its critical one.
 pub fn energy_return(seed: u64) -> Sim {
     let mut s = energy_sim("energy_return", seed, 10);
@@ -180,15 +180,15 @@ fn fly_until(s: &mut Sim, axes: [f32; 4], cap_ms: u64, done: impl FnMut(&Sim) ->
 }
 
 /// A countdown whose shortfall goes away is withdrawn, and the return comes
-/// after a fresh countdown. As on the bench rig survey (2.5 Ah, at ×1 and at
-/// `--speed max`): the path home of the survey's first pass is long, the
-/// countdown starts, then the crossing pass prunes the path (SmartRTL cuts
-/// the loop) and the need falls well below the charge. The countdown used
-/// to freeze with its deadline set, still published, and the next shortfall
-/// 140 s later fired SmartRTL at once, with no countdown. Here the copter
-/// flies a loop (60 m out, 30 m across, back to 6 m short of home), the
-/// countdown (20 s) starts while it holds there, and it closes the loop
-/// within the countdown, crossing its first leg 6 m from home.
+/// after a fresh countdown. As on a rig survey in simulation (2.5 Ah, at real
+/// time and accelerated alike): the path home of the survey's first pass is
+/// long, the countdown starts, then the crossing pass prunes the path
+/// (SmartRTL cuts the loop) and the need falls well below the charge. The
+/// countdown used to freeze with its deadline set, still published, and the
+/// next shortfall 140 s later fired SmartRTL at once, with no countdown. Here
+/// the copter flies a loop (60 m out, 30 m across, back to 6 m short of
+/// home), the countdown (20 s) starts while it holds there, and it closes the
+/// loop within the countdown, crossing its first leg 6 m from home.
 pub fn energy_withdrawn(seed: u64) -> Sim {
     let mut s = energy_sim("energy_withdrawn", seed, 20);
     s.fc.battery_pct = s.rng.range(90.0, 92.0);

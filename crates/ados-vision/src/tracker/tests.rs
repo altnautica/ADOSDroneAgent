@@ -1361,3 +1361,32 @@ fn a_designation_that_misses_its_first_batch_locks_on_hit_miss_hit() {
     assert_eq!(run(0), Some(LockState::Locked));
     assert_eq!(run(1), Some(LockState::Uncertain));
 }
+
+/// A small designated subject is missed, and its re-confirm frame holds a
+/// larger neighbour beside it that the motion-only path ranks first (dead on
+/// the prediction, a louder detection). With no template yet, seeding the
+/// neighbour's descriptor there would make every later sighting of the
+/// subject inadmissible; with two boxes in the gate nothing is seeded, the
+/// subject is taken on the next frame and locks, and its own descriptor wins
+/// when the neighbour comes back.
+#[test]
+fn a_neighbour_on_the_reconfirm_frame_never_seeds_a_designation() {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let id = t.designate(&obj(100.0, 100.0)).unwrap();
+    let u = t.update_with_appearance(&[]);
+    assert_eq!(lock(&u), Some(LockState::Uncertain));
+    let neighbour = || cand(det(98.0, 97.0, 46.0, 46.0, 0.95, "object"), 1);
+    let subject = |x: f32| cand(det(x, 100.0, 40.0, 40.0, 0.35, "object"), 0);
+    let u = t.update_with_appearance(&[neighbour(), subject(132.0)]);
+    assert_eq!(lock(&u), Some(LockState::Uncertain), "the re-confirm frame");
+
+    let u = t.update_with_appearance(&[subject(130.0)]);
+    assert_eq!(u.track_id, Some(id));
+    assert!(u.measured, "the subject is not refused");
+    assert_eq!(lock(&u), Some(LockState::Locked));
+
+    let u = t.update_with_appearance(&[neighbour(), subject(128.0)]);
+    assert_eq!(u.track_id, Some(id));
+    let b = u.detection.unwrap().bbox.unwrap();
+    assert!(b.x > 115.0, "held on the subject, not the neighbour: {b:?}");
+}

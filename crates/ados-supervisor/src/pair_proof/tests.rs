@@ -222,17 +222,36 @@ fn one_decoded_frame_resets_the_mis_keyed_hold() {
 }
 
 #[test]
-fn a_re_keyed_peer_going_quiet_keeps_the_clock_and_one_never_heard_starts_none() {
-    let hold = PairRearmConfig::default().confirm_hold.as_secs();
-    // Heard mis-keyed, then quiet (it stopped to open its own bind window):
-    // the clock keeps running, so this rig's window lines up with the peer's.
+fn a_neighbours_single_burst_then_silence_never_rearms_a_proven_pair() {
+    // One undecodable burst from a neighbour's rig, then the channel goes
+    // quiet for a day: the run of mis-keyed verdicts ends once the silence
+    // outlasts a bind window, so a proven pair is never re-bound by it.
     let mut rig = Rig::new(BindRole::Gs);
     let mut seed = PairProof::fresh("gs", FP);
     seed.mark_proven(rig.unix0 - 5_000);
     write_pair_proof_to(&rig.path, &seed).unwrap();
     assert!(!rig.tick(0, mis_keyed()).rearm);
-    assert!(!rig.tick(hold / 2, quiet_signals()).rearm);
-    assert!(rig.tick(hold, quiet_signals()).rearm);
+    for minute in 1..=(24 * 60u64) {
+        assert!(
+            !rig.tick(minute * 60, quiet_signals()).rearm,
+            "minute {minute}"
+        );
+    }
+    assert_eq!(rig.stored().unwrap().rearm_episodes, 0);
+
+    // Bursts that recur with silences longer than a bind window between them
+    // never add up to a hold either.
+    let mut gaps = Rig::new(BindRole::Gs);
+    write_pair_proof_to(&gaps.path, &seed).unwrap();
+    let every = MIS_KEYED_QUIET_GRACE.as_secs() / 60 + 2;
+    for minute in 0..(24 * 60u64) {
+        let sig = if minute % every == 0 {
+            mis_keyed()
+        } else {
+            quiet_signals()
+        };
+        assert!(!gaps.tick(minute * 60, sig).rearm, "minute {minute}");
+    }
 
     // A proven key whose peer is merely away (never heard mis-keyed) stays
     // latched for a day.
@@ -241,6 +260,24 @@ fn a_re_keyed_peer_going_quiet_keeps_the_clock_and_one_never_heard_starts_none()
     for minute in 0..(24 * 60u64) {
         assert!(!away.tick(minute * 60, quiet_signals()).rearm);
     }
+}
+
+#[test]
+fn a_re_keyed_peer_off_the_air_for_its_bind_window_keeps_the_clock() {
+    // Heard mis-keyed, then quiet for its own bind window (shorter than the
+    // grace), then on the air mis-keyed again: the clock keeps running from
+    // the first verdict, so this rig's window lines up with the peer's.
+    let hold = PairRearmConfig::default().confirm_hold.as_secs();
+    let mut rig = Rig::new(BindRole::Gs);
+    let mut seed = PairProof::fresh("gs", FP);
+    seed.mark_proven(rig.unix0 - 5_000);
+    write_pair_proof_to(&rig.path, &seed).unwrap();
+    for t in (0..hold).step_by(20) {
+        let quiet = (120..240).contains(&t);
+        let sig = if quiet { quiet_signals() } else { mis_keyed() };
+        assert!(!rig.tick(t, sig).rearm, "{t} s");
+    }
+    assert!(rig.tick(hold, mis_keyed()).rearm);
 }
 
 #[test]
