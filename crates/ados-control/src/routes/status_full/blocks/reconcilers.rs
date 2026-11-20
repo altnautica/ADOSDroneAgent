@@ -173,6 +173,25 @@ pub(crate) fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String
         }
     }
 
+    // --- Radio fleet address → `radioFleetApply` --------------------------------
+    // A fleet address written to config takes effect when the radio restarts,
+    // which waits for the vehicle to disarm. Not freshness-gated: the record is
+    // written on a change, and a restart deferred for a whole flight is still
+    // owed. Omitted when no address was ever written.
+    if let Value::Object(fleet) = crate::routes::radio_fleet_apply::read_status(run_dir) {
+        out.push((
+            "radioFleetApply".to_string(),
+            json!({
+                "outcome": get_or_null(&fleet, "outcome"),
+                "fleetId": get_or_null(&fleet, "fleet_id"),
+                "fleetSlot": get_or_null(&fleet, "fleet_slot"),
+                "unit": get_or_null(&fleet, "unit"),
+                "sinceMs": get_or_null(&fleet, "since_ms"),
+                "atMs": get_or_null(&fleet, "at_ms"),
+            }),
+        ));
+    }
+
     out
 }
 

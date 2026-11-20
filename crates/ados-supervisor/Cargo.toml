@@ -40,6 +40,10 @@ hex = { workspace = true }
 getrandom = { workspace = true }
 # ISO-8601 second-precision UTC timestamps for the bind session + pair state.
 time = { version = "0.3", features = ["std", "formatting", "macros"] }
+# A bound drone's fleet addressing is judged by the radio's own `video.wfb`
+# model and fleet-identity rule (no cycle: ados-radio never depends on this
+# crate). The bind simulation checks a bound pair's config the same way.
+ados-radio = { path = "../ados-radio" }
 
 # Linux-only edges (systemd notify + journald + USB presence enumeration for
 # the hot-plug poller + setsid/killpg + flock + descriptor-relative capture
@@ -58,6 +62,3 @@ parking_lot = { workspace = true }
 # real 75 s stall budget. Dev-only: resolver 2 keeps test-util out of the
 # shipped binary's features.
 tokio = { workspace = true, features = ["test-util"] }
-# The bind simulation checks a bound pair's config the way the radio service
-# reads it: `ados_radio`'s `video.wfb` model and its fleet-identity rule.
-ados-radio = { path = "../ados-radio" }

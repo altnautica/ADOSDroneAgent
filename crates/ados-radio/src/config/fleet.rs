@@ -9,6 +9,12 @@ pub const FLEET_MAX_SLOTS: u8 = 24;
 /// never carries a drone slot and never emits a swarm beacon.
 pub const SLOT_GROUND: u8 = 0;
 
+/// The slot a fleet registry issues first, and the slot a ground station
+/// receives on while it has registered no drone. A drone that holds a pair key
+/// but no issued slot takes it until the ground's registry issues its own, so
+/// that ground can hear it, enrol it and deliver that slot.
+pub const FIRST_DRONE_SLOT: u8 = 1;
+
 /// wfb-ng `link_id` for a fleet slot. 16 bits of fleet plus 8 bits of slot
 /// fills the 24-bit `link_id` space exactly, so two fleets can operate side by
 /// side on one channel with no `channel_id` collision

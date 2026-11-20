@@ -83,6 +83,7 @@ pub mod plugins_proxy;
 pub mod plugins_state;
 pub mod plugins_tools;
 pub mod radio_adapters;
+pub mod radio_fleet_apply;
 pub mod reachable_addr;
 pub mod relay_secret;
 pub mod security_api_key;

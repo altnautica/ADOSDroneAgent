@@ -21,10 +21,10 @@ impl BindOrchestrator {
         // A rig holding no key keeps the fleet addressing the ground station's
         // registry issued it, from the moment it is issued: whether or not this
         // bind lands, the slot is this device's, and a later auto-pair bind
-        // (which carries none) must find it in config, or the radio parks the
-        // pair it completes on slot 0. A rig that holds a key takes new
-        // addressing only with its new key, so a failed re-pair never moves a
-        // working link to another slot.
+        // (which carries none) must find it in config, or it falls back to the
+        // provisional first slot and waits for the registry to re-issue it. A
+        // rig that holds a key takes new addressing only with its new key, so a
+        // failed re-pair never moves a working link to another slot.
         if let Some(f) = fleet {
             if self.host.read_public_fingerprint(role.key_path()).is_err() {
                 self.host.persist_fleet(f);

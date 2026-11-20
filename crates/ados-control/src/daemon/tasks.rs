@@ -188,6 +188,14 @@ where
         crate::routes::fc_identity::spawn_reconciler(state.clone());
     }
 
+    // Radio restart onto a fleet address written to config (a slot the ground
+    // station's registry issued, delivered by its reconciler): owed by the
+    // config write, performed only while the vehicle is disarmed. Drone and
+    // ground station alike, each restarting its own radio unit.
+    if matches!(profile.as_str(), "drone" | "ground-station") {
+        crate::routes::radio_fleet_apply::spawn_applier(state.clone());
+    }
+
     // Build the relay-proxy caller on ground-station-profile nodes only. The
     // proxy's AuxEgress talks to the radio's aux command socket; the response
     // listener binds the IPC socket that the ados-groundlink aux consumer

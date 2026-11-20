@@ -18,6 +18,13 @@
 //!   the shared config store, which preserves every other key and the file's
 //!   0600 mode. A write that landed then runs the config side effects (enable
 //!   markers, unit kicks; [`ados_config::side_effects`]).
+//! * **Fleet address.** `video.wfb.fleet_id` / `fleet_slot` (where the ground
+//!   station's slot reconciler delivers the slot its registry issued) are
+//!   judged by the radio's fleet-identity rule for this profile, written as a
+//!   pair the way a bind writes them, and a radio restart onto the new address
+//!   is recorded and performed once the vehicle is disarmed
+//!   ([`crate::routes::radio_fleet_apply`]); the answer then carries
+//!   `radio_restart: "pending"`.
 //!
 //! Response shapes: the write answers `{status: "ok", key, value, persisted:
 //! true}`, or a 500 `{status: "error", key, value, persisted: false,
@@ -143,6 +150,87 @@ fn refused_by(current: &Value, candidate: &Value) -> Option<&'static CrossRule> 
     ((rule.violated)(candidate) && !(rule.violated)(current)).then_some(rule)
 }
 
+/// The two keys that make up a node's fleet address.
+const FLEET_KEYS: [&str; 2] = ["video.wfb.fleet_id", "video.wfb.fleet_slot"];
+
+/// A write to one half of the fleet address, applied as the whole address.
+#[derive(Debug, Clone, Copy)]
+struct FleetWrite {
+    identity: ados_supervisor::bind::keys::FleetIdentity,
+    ground_station: bool,
+    /// Whether the radio comes up on the resulting address, so a restart onto
+    /// it is worth owing (a half-provisioned node stays parked either way).
+    usable: bool,
+}
+
+/// `(fleet_id, fleet_slot)` of an effective config, as the radio reads them.
+fn fleet_address(config: &Value) -> (u16, u8) {
+    let id = config
+        .pointer("/video/wfb/fleet_id")
+        .and_then(Value::as_u64)
+        .and_then(|v| u16::try_from(v).ok())
+        .unwrap_or(0);
+    let slot = config
+        .pointer("/video/wfb/fleet_slot")
+        .and_then(Value::as_u64)
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(u8::MAX);
+    (id, slot)
+}
+
+/// Judge a write to `key` from `current` to `candidate` against the radio's
+/// fleet-identity rule. `Ok(None)` for any other key; `Err` names why the radio
+/// would refuse the half being written (a reserved fleet id, slot 0 or a slot
+/// past the fleet's ceiling on a drone, a drone slot on a ground station). Only
+/// the written half is judged, so a node can still be provisioned one key at a
+/// time, and an unchanged value is never refused.
+///
+/// This is where a slot the ground station's registry issued lands on the
+/// drone (its slot reconciler writes `video.wfb.fleet_slot` here), so it is
+/// written the way the bind writes one: both halves, together, under the
+/// config lock, and the radio restart it owes is recorded.
+fn fleet_write(
+    config_path: &Path,
+    key: &str,
+    current: &Value,
+    candidate: &Value,
+) -> Result<Option<FleetWrite>, String> {
+    use ados_radio::config::{fleet_identity_error, FIRST_DRONE_SLOT, SLOT_GROUND};
+    if !FLEET_KEYS.contains(&key) {
+        return Ok(None);
+    }
+    let ground_station = ados_radio::config::profile_is_ground_station(
+        config_path,
+        Path::new(ados_radio::config::PROFILE_CONF),
+    );
+    let (fleet_id, fleet_slot) = fleet_address(candidate);
+    if fleet_address(current) != (fleet_id, fleet_slot) {
+        // The other half replaced by one the radio accepts, so only this
+        // write's own value can be the reason for a refusal.
+        let good_slot = if ground_station {
+            SLOT_GROUND
+        } else {
+            FIRST_DRONE_SLOT
+        };
+        let refusal = if key == FLEET_KEYS[0] {
+            fleet_identity_error(fleet_id, good_slot, ground_station)
+        } else {
+            fleet_identity_error(1, fleet_slot, ground_station)
+        };
+        if let Some(e) = refusal {
+            return Err(e.to_string());
+        }
+    }
+    Ok(Some(FleetWrite {
+        identity: ados_supervisor::bind::keys::FleetIdentity {
+            fleet_id,
+            fleet_slot,
+        },
+        ground_station,
+        usable: fleet_identity_error(fleet_id, fleet_slot, ground_station).is_none(),
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/config
 // ---------------------------------------------------------------------------
@@ -223,6 +311,7 @@ pub async fn put_config(
     Json(update): Json<ConfigUpdate>,
 ) -> Response {
     let path = state.pairing_paths.config.clone();
+    let run_dir = state.run_dir.clone();
     // The blocking pass writes the file and the markers and records the unit
     // commands; the commands then run here as bounded async probes, so a wedged
     // `systemctl` never holds a reactor or blocking-pool thread.
@@ -235,7 +324,7 @@ pub async fn put_config(
             record.lock().unwrap_or_else(|p| p.into_inner()).push(cmd);
             true
         };
-        put_config_at(&path, &update, &run)
+        put_config_at(&path, &run_dir, &update, &run)
     };
     let resp = match tokio::task::spawn_blocking(write).await {
         Ok(resp) => resp,
@@ -259,9 +348,11 @@ fn nested_error(status: StatusCode, error: Value) -> Response {
 }
 
 /// The write. `run` issues the side-effect commands; the enable markers live
-/// beside the config.
-fn put_config_at(
+/// beside the config. A fleet-address write records the radio restart it owes
+/// under `run_dir` ([`crate::routes::radio_fleet_apply`]).
+pub(crate) fn put_config_at(
     config_path: &Path,
+    run_dir: &Path,
     update: &ConfigUpdate,
     run: &dyn Fn(&str, &[&str]) -> bool,
 ) -> Response {
@@ -327,6 +418,16 @@ fn put_config_at(
         )
             .into_response();
     }
+    let fleet = match fleet_write(config_path, key, &config, &next) {
+        Ok(fleet) => fleet,
+        Err(message) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "E_INVALID", "field": key, "message": message })),
+            )
+                .into_response()
+        }
+    };
 
     let yaml_value = match serde_norway::to_value(&value) {
         Ok(v) => v,
@@ -335,20 +436,38 @@ fn put_config_at(
     let (parents, last) = parts.split_at(parts.len() - 1);
     let persisted = update_config(config_path, |root| {
         let before = root.clone();
-        section_path(root, parents)
-            .insert(serde_norway::Value::String(last[0].to_string()), yaml_value);
+        match fleet {
+            // Both halves of the address, as the bind writes them.
+            Some(f) => ados_supervisor::bind::keys::apply_fleet_fields(root, f.identity),
+            None => {
+                section_path(root, parents)
+                    .insert(serde_norway::Value::String(last[0].to_string()), yaml_value);
+            }
+        }
         Ok((before, root.clone()))
     });
     // The route has no live-apply leg, so a value that did not reach the file
     // took no effect at all: that is a server error, not a success.
     match persisted {
         Ok(write) => {
+            let mut body = json!({ "status": "ok", "key": key, "value": value, "persisted": true });
             if write.wrote {
                 let (before, after) = write.value;
                 run_side_effects(config_path, before, after, run);
+                if let Some(f) = fleet.filter(|f| f.usable) {
+                    let unit = crate::routes::radio_fleet_apply::radio_unit(f.ground_station);
+                    crate::routes::radio_fleet_apply::mark_pending(
+                        run_dir,
+                        f.identity.fleet_id,
+                        f.identity.fleet_slot,
+                        unit,
+                    );
+                    // The address is on disk; the radio moves onto it when the
+                    // vehicle is disarmed, and status says so until it has.
+                    body["radio_restart"] = json!("pending");
+                }
             }
-            Json(json!({ "status": "ok", "key": key, "value": value, "persisted": true }))
-                .into_response()
+            Json(body).into_response()
         }
         Err(e) => {
             tracing::warn!(error = %e, key, "config write failed");

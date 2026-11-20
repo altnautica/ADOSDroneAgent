@@ -19,6 +19,7 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("concurrent", concurrent),
     ("slow_systemd", slow_systemd),
     ("ground_misses_ok", ground_misses_ok),
+    ("unissued_drone", crate::unissued::unissued_drone),
 ];
 
 /// A fault-free run binds or, with no peer, aborts.

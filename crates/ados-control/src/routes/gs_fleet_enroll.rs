@@ -33,6 +33,16 @@
 //! decoded beacon is therefore not a weaker admission than the pair route — it
 //! is the same evidence, arriving over the radio instead of over HTTP.
 //!
+//! An auto-bound drone has no issued slot to beacon on, and the radio refuses
+//! slot 0 on a drone, so its bind gives it the first slot
+//! (`ados_supervisor::bind::keys::unissued_drone_fleet`) and every ground
+//! receives on that slot beside its registered ones
+//! (`ados_groundlink::wfb_rx::fleet_slots`). Enrolment issues the registry's
+//! own slot; the slot reconciler delivers it, and the drone's radio moves onto
+//! it once disarmed (`crate::routes::radio_fleet_apply`). Two drones beaconing
+//! on the first slot at once carry different device ids and are issued
+//! different slots.
+//!
 //! ## Shape
 //!
 //! A reconciler rather than a hook in the bind path, for the reason the bind
@@ -174,6 +184,9 @@ pub async fn run_enroll_reconciler() {
         }
     }
 }
+
+#[cfg(test)]
+mod auto_pair_e2e;
 
 #[cfg(test)]
 mod tests {

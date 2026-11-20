@@ -197,6 +197,135 @@ fn a_reassignment_overwrites_the_previous_slot() {
     assert_eq!(wfb.get("fleet_slot").unwrap(), &Value::Number(9.into()));
 }
 
+/// `video.wfb.<key>` as an unsigned number.
+fn wfb_u64(root: &Mapping, key: &str) -> Option<u64> {
+    root.get("video")
+        .and_then(|v| v.get("wfb"))
+        .and_then(|v| v.get(key))
+        .and_then(Value::as_u64)
+}
+
+/// Whether the radio service would bring a drone's link up on this config.
+fn radio_accepts_drone(root: &Mapping) -> bool {
+    let wfb = root
+        .get("video")
+        .and_then(|v| v.get("wfb"))
+        .cloned()
+        .unwrap_or(Value::Mapping(Mapping::new()));
+    let cfg: ados_radio::config::WfbConfig = serde_norway::from_value(wfb).unwrap();
+    ados_radio::config::fleet_identity_error(cfg.fleet_id, cfg.fleet_slot, false).is_none()
+}
+
+#[test]
+fn an_auto_paired_drone_takes_the_first_slot_instead_of_parking() {
+    // An auto-pair bind carries no assignment. A fresh drone holds slot 0,
+    // which its radio refuses, so without this the pair it completes never
+    // radiates and the ground never hears the beacon it would issue a slot on.
+    let mut root = Mapping::new();
+    assert!(
+        !radio_accepts_drone(&root),
+        "precondition: a fresh drone parks"
+    );
+    apply_pair_fields(
+        &mut root,
+        BindRole::Drone,
+        None,
+        Some("2026-11-20T00:00:00+00:00"),
+        Some(false),
+        None,
+    );
+    assert_eq!(wfb_u64(&root, "fleet_id"), Some(1));
+    assert_eq!(
+        wfb_u64(&root, "fleet_slot"),
+        Some(u64::from(ados_radio::config::FIRST_DRONE_SLOT))
+    );
+    assert!(radio_accepts_drone(&root), "the radio comes up on it");
+}
+
+#[test]
+fn only_the_unusable_half_of_an_identity_is_replaced() {
+    let cases: [(u64, u64, u64, u64); 4] = [
+        // An operator's fleet with no slot keeps its fleet.
+        (7, 0, 7, 1),
+        // A reserved fleet with a slot keeps the slot.
+        (0, 4, 1, 4),
+        // A slot past the fleet's ceiling is not an address.
+        (3, 200, 3, 1),
+        (0, 0, 1, 1),
+    ];
+    for (id, slot, want_id, want_slot) in cases {
+        let mut root: Mapping = serde_norway::from_str(&format!(
+            "video:\n  wfb:\n    fleet_id: {id}\n    fleet_slot: {slot}\n"
+        ))
+        .unwrap();
+        apply_pair_fields(
+            &mut root,
+            BindRole::Drone,
+            None,
+            Some("ts"),
+            Some(false),
+            None,
+        );
+        assert_eq!(
+            (wfb_u64(&root, "fleet_id"), wfb_u64(&root, "fleet_slot")),
+            (Some(want_id), Some(want_slot)),
+            "from ({id}, {slot})"
+        );
+        assert!(radio_accepts_drone(&root));
+    }
+}
+
+#[test]
+fn a_drone_with_a_usable_slot_or_an_assignment_takes_no_provisional_one() {
+    // An issued slot already on disk stays: the provisional one is only for a
+    // drone that has none.
+    let mut root: Mapping =
+        serde_norway::from_str("video:\n  wfb:\n    fleet_id: 5\n    fleet_slot: 6\n").unwrap();
+    apply_pair_fields(
+        &mut root,
+        BindRole::Drone,
+        None,
+        Some("ts"),
+        Some(false),
+        None,
+    );
+    assert_eq!(wfb_u64(&root, "fleet_id"), Some(5));
+    assert_eq!(wfb_u64(&root, "fleet_slot"), Some(6));
+    // An assignment the bind carries wins over the provisional slot.
+    let mut root = Mapping::new();
+    apply_pair_fields(
+        &mut root,
+        BindRole::Drone,
+        None,
+        Some("ts"),
+        Some(false),
+        Some(FleetIdentity {
+            fleet_id: 9,
+            fleet_slot: 12,
+        }),
+    );
+    assert_eq!(wfb_u64(&root, "fleet_slot"), Some(12));
+}
+
+#[test]
+fn neither_a_ground_nor_an_unpair_takes_a_provisional_slot() {
+    // A ground station holds slot 0 by rule.
+    let mut root = Mapping::new();
+    apply_pair_fields(
+        &mut root,
+        BindRole::Gs,
+        Some("d"),
+        Some("ts"),
+        Some(false),
+        None,
+    );
+    assert_eq!(wfb_u64(&root, "fleet_slot"), None);
+    // Clearing the pair records no pair, so it addresses nothing.
+    let mut root = Mapping::new();
+    apply_pair_fields(&mut root, BindRole::Drone, None, None, Some(true), None);
+    assert_eq!(wfb_u64(&root, "fleet_slot"), None);
+}
+
 #[test]
 fn apply_fields_gs_mirrors_ground_station() {
     let mut root = Mapping::new();

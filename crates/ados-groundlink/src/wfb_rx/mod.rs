@@ -100,25 +100,42 @@ pub use stats::{
 // the same module that owns the stats reader.
 pub use crate::watchdog::SharedRxHealth;
 
-/// The fleet slots this ground station receives on, ascending.
+/// The fleet slots this ground station receives on: the registered slots
+/// ascending, then [`FIRST_DRONE_SLOT`] when no drone holds it.
 ///
-/// An EMPTY registry resolves to the single default drone slot rather than the
-/// empty set: a ground station with no registered drone must still hear the
-/// first drone provisioned into the fleet, and `FleetRegistry::allocate` issues
-/// slot 1 first, so slot 1 is where that drone will be. Returning nothing would
-/// leave a freshly-imaged ground station structurally deaf with no error.
+/// The first element is the PRIMARY (its video RX anchors the generation's
+/// liveness), so it is the lowest REGISTERED slot whenever there is one: a
+/// listen-only slot with nobody on it must never be what the watchdog judges
+/// the link by. An empty registry resolves to [`FIRST_DRONE_SLOT`] alone.
+///
+/// [`FIRST_DRONE_SLOT`] is always heard because it is where a drone that holds
+/// a pair key but no issued slot transmits (an auto-paired drone): the ground
+/// must decode its presence beacon to enrol it and deliver the slot its
+/// registry issues. Without it, a ground whose registry no longer holds slot 1
+/// (that drone released, the rest still registered) would be deaf to every
+/// newly bound drone, and that drone's radio would never learn its address.
 pub fn fleet_slots(registry: &crate::fleet::FleetRegistry) -> Vec<u8> {
-    let slots: Vec<u8> = registry.slots().map(|s| s.slot).collect();
-    if slots.is_empty() {
-        vec![FIRST_DRONE_SLOT]
-    } else {
-        slots
+    let mut slots: Vec<u8> = registry.slots().map(|s| s.slot).collect();
+    if !slots.contains(&FIRST_DRONE_SLOT) {
+        slots.push(FIRST_DRONE_SLOT);
     }
+    slots
 }
 
-/// The slot `FleetRegistry::allocate` issues first, and the slot an empty
-/// registry falls back to.
-pub const FIRST_DRONE_SLOT: u8 = 1;
+/// How many aircraft a hop frame decoded on `slot` speaks for the fleet of:
+/// the registered drones, plus the sender itself when its slot is not
+/// registered (a drone on the provisional slot is one more transmitter the
+/// receive radio serves). Counted from the registry rather than from
+/// [`fleet_slots`], whose provisional listen slot is not an aircraft.
+pub fn hop_fleet_size(registry: &crate::fleet::FleetRegistry, slot: u8) -> usize {
+    let registered = registry.slots().count();
+    let sender_registered = registry.slots().any(|s| s.slot == slot);
+    registered + usize::from(!sender_registered)
+}
+
+/// The slot `FleetRegistry::allocate` issues first, the slot an empty registry
+/// falls back to, and the provisional slot an unissued drone transmits on.
+pub use ados_radio::config::FIRST_DRONE_SLOT;
 
 /// The receive manager. Holds the config + the shared liveness state the run
 /// loop wires together.
@@ -345,16 +362,59 @@ mod tests {
 
     #[test]
     fn registered_slots_drive_the_receive_chain_in_ascending_order() {
-        // The lowest slot is the PRIMARY (its video RX anchors the generation),
-        // so the order is load-bearing, not cosmetic.
+        // The lowest registered slot is the PRIMARY (its video RX anchors the
+        // generation), so the order is load-bearing, not cosmetic.
         let mut registry = crate::fleet::FleetRegistry::default();
         registry.allocate("drone-a").unwrap();
         registry.allocate("drone-b").unwrap();
         registry.allocate("drone-c").unwrap();
         registry.release("drone-a");
         // Slot 1 is free again, so the survivors are 2 and 3 and the primary
-        // becomes 2 — never a stale 1 pointing at a released drone.
-        assert_eq!(fleet_slots(&registry), vec![2, 3]);
+        // stays 2 — never the provisional 1 with nobody registered on it. Slot 1
+        // is still heard, after them, for a drone bound with no issued slot.
+        assert_eq!(fleet_slots(&registry), vec![2, 3, FIRST_DRONE_SLOT]);
+    }
+
+    #[test]
+    fn the_provisional_slot_is_heard_beside_any_registry() {
+        // An auto-paired drone transmits on the first slot until the registry
+        // issues its own. A ground deaf to that slot could never decode its
+        // beacon, so it could never enrol it or tell it where to go.
+        for drones in 0..4usize {
+            let mut registry = crate::fleet::FleetRegistry::default();
+            for i in 0..drones {
+                registry.allocate(&format!("drone-{i:04}")).unwrap();
+            }
+            if drones > 0 {
+                registry.release("drone-0000");
+            }
+            let slots = fleet_slots(&registry);
+            assert!(slots.contains(&FIRST_DRONE_SLOT), "{drones}: {slots:?}");
+            let unique: std::collections::BTreeSet<u8> = slots.iter().copied().collect();
+            assert_eq!(unique.len(), slots.len(), "no slot twice: {slots:?}");
+        }
+        // A registry that holds slot 1 lists it once, as the primary.
+        let mut registry = crate::fleet::FleetRegistry::default();
+        registry.allocate("drone-a").unwrap();
+        registry.allocate("drone-b").unwrap();
+        assert_eq!(fleet_slots(&registry), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_hop_counts_registered_drones_and_an_unregistered_sender() {
+        // The provisional listen slot is not an aircraft: a lone registered
+        // drone on slot 2 still has its hop followed.
+        let mut registry = crate::fleet::FleetRegistry::default();
+        registry.allocate("drone-a").unwrap();
+        registry.allocate("drone-b").unwrap();
+        registry.release("drone-a");
+        assert_eq!(hop_fleet_size(&registry, 2), 1);
+        // An unissued drone hopping from slot 1 beside it is a second aircraft:
+        // following it would strand the registered one.
+        assert_eq!(hop_fleet_size(&registry, FIRST_DRONE_SLOT), 2);
+        // The lone auto-paired drone of an empty registry is followed.
+        let empty = crate::fleet::FleetRegistry::default();
+        assert_eq!(hop_fleet_size(&empty, FIRST_DRONE_SLOT), 1);
     }
 
     #[test]

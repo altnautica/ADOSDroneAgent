@@ -155,12 +155,14 @@ pub(super) async fn listen_on_slot(
             continue;
         };
         // Only a hop frame needs the fleet size, and it is read fresh: a drone
-        // paired a moment ago turns a single-drone station into a fleet.
+        // paired a moment ago turns a single-drone station into a fleet. The
+        // provisional listen slot is not an aircraft, but a drone heard on it
+        // is, so the count comes from the registry plus the sender.
         let fleet_slots = if len == HOP_FRAME_LEN {
-            wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
-                FLEET_REGISTRY_PATH,
-            )))
-            .len()
+            wfb_rx::hop_fleet_size(
+                &FleetRegistry::load(std::path::Path::new(FLEET_REGISTRY_PATH)),
+                slot,
+            )
         } else {
             0
         };

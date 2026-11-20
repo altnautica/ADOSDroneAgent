@@ -21,8 +21,13 @@
 //! whole fleet and the addressee travels in the record. That is the same
 //! property the link-feedback lane relies on.
 //!
-//! So a drone on the wrong slot — or on no slot at all — still hears the
-//! ground station. It is reachable precisely when it most needs correcting.
+//! So a drone on the wrong slot still hears the ground station. It is
+//! reachable precisely when it most needs correcting. A drone with no slot at
+//! all would not be (its radio refuses slot 0 and stays parked), which is why
+//! a bind that issues none gives it the first slot, the one every ground
+//! receives on; see `gs_fleet_enroll`. A delivered slot takes effect when the
+//! drone's radio restarts onto it, which waits for the vehicle to disarm
+//! (`radio_fleet_apply`).
 //!
 //! ## Shape
 //!

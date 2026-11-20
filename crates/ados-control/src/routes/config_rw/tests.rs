@@ -24,7 +24,7 @@ fn no_run(_: &str, _: &[&str]) -> bool {
 }
 
 fn put(cfg: &Path, key: &str, value: Value) -> Response {
-    put_config_at(cfg, &update(key, value), &no_run)
+    put_config_at(cfg, cfg.parent().unwrap(), &update(key, value), &no_run)
 }
 
 #[test]
@@ -223,7 +223,12 @@ async fn crsf_enable_creates_marker() {
         calls.borrow_mut().push(format!("{p} {}", a.join(" ")));
         true
     };
-    let resp = put_config_at(&cfg, &update("radio.crsf.enabled", json!(true)), &run);
+    let resp = put_config_at(
+        &cfg,
+        dir.path(),
+        &update("radio.crsf.enabled", json!(true)),
+        &run,
+    );
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(dir.path().join("crsf-enabled").exists());
     assert_eq!(
@@ -232,7 +237,12 @@ async fn crsf_enable_creates_marker() {
     );
 
     // The same value again writes nothing and kicks nothing.
-    let resp = put_config_at(&cfg, &update("radio.crsf.enabled", json!(true)), &run);
+    let resp = put_config_at(
+        &cfg,
+        dir.path(),
+        &update("radio.crsf.enabled", json!(true)),
+        &run,
+    );
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(calls.borrow().len(), 1);
 }
@@ -312,4 +322,100 @@ fn the_native_validator_refuses_every_invalid_fixture() {
             "{name} is accepted natively but refused by the model"
         );
     }
+}
+
+// -------- fleet address --------
+
+/// A config at `dir` for `profile` on fleet 1, `slot`.
+fn fleet_config(dir: &Path, profile: &str, slot: u8) -> PathBuf {
+    let cfg = dir.join("config.yaml");
+    std::fs::write(
+        &cfg,
+        format!("agent:\n  profile: {profile}\nvideo:\n  wfb:\n    fleet_id: 1\n    fleet_slot: {slot}\n"),
+    )
+    .unwrap();
+    cfg
+}
+
+/// `video.wfb.{fleet_id,fleet_slot}` on disk.
+fn on_disk_fleet(cfg: &Path) -> (Option<u64>, Option<u64>) {
+    let doc: Value = serde_norway::from_str(&std::fs::read_to_string(cfg).unwrap()).unwrap();
+    (
+        doc.pointer("/video/wfb/fleet_id").and_then(Value::as_u64),
+        doc.pointer("/video/wfb/fleet_slot").and_then(Value::as_u64),
+    )
+}
+
+#[tokio::test]
+async fn an_issued_slot_lands_as_the_whole_address_and_owes_a_radio_restart() {
+    // The ground's reconciler moves a drone off its provisional first slot.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fleet_config(dir.path(), "drone", 1);
+    let (status, body) = body_of(put(&cfg, "video.wfb.fleet_slot", json!(3))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["radio_restart"], json!("pending"));
+    assert_eq!(on_disk_fleet(&cfg), (Some(1), Some(3)));
+    let owed = crate::routes::radio_fleet_apply::read_status(dir.path());
+    assert_eq!(owed["outcome"], json!("pending"));
+    assert_eq!(owed["fleet_slot"], json!(3));
+    assert_eq!(owed["unit"], json!("ados-wfb.service"));
+    // The radio accepts what landed.
+    assert!(ados_radio::config::fleet_identity_error(1, 3, false).is_none());
+
+    // The same slot restated (every reconciler restart does) owes nothing.
+    std::fs::remove_file(
+        dir.path()
+            .join(crate::routes::radio_fleet_apply::SIDECAR_FILE),
+    )
+    .unwrap();
+    let (status, body) = body_of(put(&cfg, "video.wfb.fleet_slot", json!(3))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("radio_restart").is_none(), "{body}");
+    assert!(crate::routes::radio_fleet_apply::read_status(dir.path()).is_null());
+}
+
+#[tokio::test]
+async fn an_address_the_radio_would_refuse_is_never_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fleet_config(dir.path(), "drone", 2);
+    for (key, value) in [
+        ("video.wfb.fleet_slot", 0),
+        ("video.wfb.fleet_slot", 25),
+        ("video.wfb.fleet_id", 0),
+    ] {
+        let (status, body) = body_of(put(&cfg, key, json!(value))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{key}={value}");
+        assert_eq!(body["error"], json!("E_INVALID"));
+        assert_eq!(body["field"], json!(key));
+    }
+    assert_eq!(on_disk_fleet(&cfg), (Some(1), Some(2)), "nothing changed");
+
+    // A ground station holds slot 0 and nothing else.
+    let gs = tempfile::tempdir().unwrap();
+    let cfg = fleet_config(gs.path(), "ground_station", 0);
+    let (status, _) = body_of(put(&cfg, "video.wfb.fleet_slot", json!(2))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Its fleet id moves, and its own receive unit owes the restart.
+    let (status, body) = body_of(put(&cfg, "video.wfb.fleet_id", json!(9))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(on_disk_fleet(&cfg), (Some(9), Some(0)));
+    assert_eq!(
+        crate::routes::radio_fleet_apply::read_status(gs.path())["unit"],
+        json!("ados-wfb-rx.service")
+    );
+}
+
+#[tokio::test]
+async fn a_node_can_be_provisioned_one_half_at_a_time() {
+    // A fresh drone (slot 0) takes its fleet first: the slot it still lacks is
+    // not this write's fault, and its radio stays parked, so no restart is owed.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fleet_config(dir.path(), "drone", 0);
+    let (status, body) = body_of(put(&cfg, "video.wfb.fleet_id", json!(7))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("radio_restart").is_none());
+    let (status, body) = body_of(put(&cfg, "video.wfb.fleet_slot", json!(4))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["radio_restart"], json!("pending"));
+    assert_eq!(on_disk_fleet(&cfg), (Some(7), Some(4)));
 }

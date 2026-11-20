@@ -177,12 +177,14 @@ pub(super) async fn receive_loop(
         // Resolve this generation's fleet slots and spawn the receive chain.
         // The lowest registered slot is the PRIMARY: its video RX carries the
         // stats stream, anchors the generation's liveness, and is the link the
-        // channel acquirer sweeps for. Every other registered slot gets its own
-        // additive video/aux/control trio on the same receiving adapters.
-        let mut slots = wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
+        // channel acquirer sweeps for. Every other slot (the other registered
+        // drones, and the provisional slot an unissued drone transmits on) gets
+        // its own additive video/aux/control trio on the same receiving
+        // adapters. `fleet_slots` orders them that way; re-sorting here would
+        // make an empty provisional slot the primary.
+        let slots = wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
             FLEET_REGISTRY_PATH,
         )));
-        slots.sort_unstable();
         let primary_slot = slots[0];
         let mut chain = match manager.spawn_receive_chain(primary_slot).await {
             Ok(chain) => chain,

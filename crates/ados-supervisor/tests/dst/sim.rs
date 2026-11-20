@@ -45,6 +45,11 @@ pub struct Plan {
     /// After the operators, run both rigs' auto-pair loops until the pair
     /// converges, within [`reconcile::bound`].
     pub reconcile: bool,
+    /// The drone's binds carry no fleet assignment, as an auto-pair bind's
+    /// never does: it must come out holding the provisional first slot, which
+    /// is the slot a fresh ground's registry issues it, and its radio must
+    /// accept it.
+    pub unissued_drone: bool,
 }
 
 /// A finished run.
@@ -79,7 +84,7 @@ pub fn simulate(seed: u64, faults: Faults, plan: Plan) -> Run {
         .expect("a paused runtime");
     rt.block_on(async move {
         let w: Shared = Arc::new(Mutex::new(World::new(seed, faults)));
-        let fleet = setup(&w);
+        let fleet = setup(&w, plan.unissued_drone);
         let before = check::Snapshot::take(&w);
         let monitor = tokio::spawn(check::monitor(w.clone()));
         let mut lives: Vec<(usize, JoinHandle<Arc<BindOrchestrator>>)> = Vec::new();
@@ -168,11 +173,18 @@ async fn reconcile_pair(
 /// holding the key of an earlier pairing that worked (disarmed, fleet slot
 /// 0). Returns the fleet addressing each rig's operator passes: the ground
 /// station's registry issues the drone a slot, the ground station itself takes
-/// slot 0.
-fn setup(w: &Shared) -> [FleetIdentity; 2] {
+/// slot 0. An `unissued` drone is told nothing, so both rigs run the radio's
+/// default fleet and the slot the drone must end on is the registry's first.
+fn setup(w: &Shared, unissued: bool) -> [FleetIdentity; 2] {
     let mut g = lock(w);
-    let fleet_id = 1 + (g.rng.next_u64() % 200) as u16;
-    let slot = 1 + (g.rng.next_u64() % 7) as u8;
+    let (fleet_id, slot) = if unissued {
+        (1, ados_radio::config::FIRST_DRONE_SLOT)
+    } else {
+        (
+            1 + (g.rng.next_u64() % 200) as u16,
+            1 + (g.rng.next_u64() % 7) as u8,
+        )
+    };
     let ground = FleetIdentity {
         fleet_id,
         fleet_slot: 0,
@@ -284,6 +296,8 @@ async fn life(
         let when = at(&w, window);
         tokio::spawn(second_bind(w.clone(), rig, orch.clone(), when));
     }
+    // An unissued drone's binds carry no assignment.
+    let fleet = (!(plan.unissued_drone && rig == DRONE)).then_some(fleet);
     let mut driver = tokio::spawn(operator(
         w.clone(),
         rig,
@@ -336,7 +350,7 @@ async fn operator(
     w: Shared,
     rig: usize,
     orch: Arc<BindOrchestrator>,
-    fleet: FleetIdentity,
+    fleet: Option<FleetIdentity>,
     first: tokio::time::Instant,
     attempts: u32,
     start_key: Option<Vec<u8>>,
@@ -355,7 +369,7 @@ async fn operator(
             g.rigs[rig].role
         };
         let res = orch
-            .start_local_bind(role, None, "operator", Some(fleet), std::future::pending())
+            .start_local_bind(role, None, "operator", fleet, std::future::pending())
             .await;
         let state = {
             let mut g = lock(&w);

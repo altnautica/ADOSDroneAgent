@@ -14,7 +14,8 @@
 //! The matrix ([`scenarios`]) proves logic and coverage, not timing on a rig:
 //! a clean bind, a lossy link with outages and failing units, a drone with no
 //! peer, a supervisor killed mid-bind, an operator cancel, a second bind racing
-//! the first and a slow service manager. The invariants live in [`check`].
+//! the first, a slow service manager and a drone paired with no fleet slot
+//! issued ([`unissued`]). The invariants live in [`check`].
 //!
 //! Every test name starts `dst_`: `cargo test -p ados-supervisor --test dst`
 //! runs them.
@@ -25,6 +26,7 @@ mod reconcile;
 mod rng;
 mod scenarios;
 mod sim;
+mod unissued;
 mod wire;
 mod world;
 
@@ -159,6 +161,11 @@ fn dst_slow_systemd() {
 #[test]
 fn dst_ground_misses_ok() {
     matrix("ground_misses_ok");
+}
+
+#[test]
+fn dst_unissued_drone() {
+    matrix("unissued_drone");
 }
 
 /// One seed replays byte for byte.

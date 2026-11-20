@@ -152,6 +152,9 @@ fn set_str(map: &mut Mapping, key: &str, val: &str) {
 /// existing `video.wfb.fleet_id` / `fleet_slot` are then left untouched rather
 /// than cleared: a re-pair that carries no assignment must not silently strip a
 /// flying drone's slot, which would park its radio on the next restart.
+///
+/// The one exception is a drone recording a pair (`paired_at` set) that holds
+/// no addressing its radio accepts: see [`unissued_drone_fleet`].
 pub fn apply_pair_fields(
     root: &mut Mapping,
     role: BindRole,
@@ -160,6 +163,11 @@ pub fn apply_pair_fields(
     auto_pair_enabled: Option<bool>,
     fleet: Option<FleetIdentity>,
 ) {
+    let fleet = fleet.or_else(|| {
+        (role == BindRole::Drone && paired_at.is_some())
+            .then(|| unissued_drone_fleet(root))
+            .flatten()
+    });
     {
         let wfb = ensure_map(ensure_map(root, "video"), "wfb");
         match peer_device_id {
@@ -264,6 +272,57 @@ pub fn apply_fleet_fields(root: &mut Mapping, fleet: FleetIdentity) {
     );
 }
 
+/// The addressing a drone takes when it records a pair but holds none its
+/// radio accepts, `None` when it already holds a usable one.
+///
+/// An auto-pair bind carries no fleet assignment: the device id that the
+/// ground's registry issues slots against is not known to the ground until the
+/// drone's presence beacon is decoded. A drone left on slot 0 (every fresh
+/// install's value) parks its radio, so that beacon is never sent and the slot
+/// is never issued. Instead it takes [`FIRST_DRONE_SLOT`], the slot every
+/// ground listens on for a drone it has not registered (and the registry's
+/// first issue, so the lone drone of a fresh pair usually keeps it). The
+/// ground enrols it from that beacon and its slot reconciler delivers the slot
+/// the registry holds, which replaces this one.
+///
+/// Only the unusable half is replaced: a reserved fleet id 0 becomes the
+/// radio's default fleet, an unusable slot becomes the first slot, and a
+/// usable half the config already carries is kept. An absent field reads as
+/// the radio's default and "usable" is the radio's own rule, so this never
+/// disagrees with what the radio would do with the same file.
+///
+/// [`FIRST_DRONE_SLOT`]: ados_radio::config::FIRST_DRONE_SLOT
+pub fn unissued_drone_fleet(root: &Mapping) -> Option<FleetIdentity> {
+    use ados_radio::config::{
+        fleet_identity_error, WfbConfig, FIRST_DRONE_SLOT, FLEET_MAX_SLOTS, SLOT_GROUND,
+    };
+    let defaults = WfbConfig::default();
+    let field = |key: &str| {
+        root.get("video")
+            .and_then(|v| v.get("wfb"))
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_u64)
+    };
+    // A value too wide for its field is as unusable as a reserved one.
+    let fleet_id = field("fleet_id").map_or(defaults.fleet_id, |v| u16::try_from(v).unwrap_or(0));
+    let fleet_slot =
+        field("fleet_slot").map_or(defaults.fleet_slot, |v| u8::try_from(v).unwrap_or(u8::MAX));
+    // A usable address (no refusal) is kept as it is: nothing to provide.
+    fleet_identity_error(fleet_id, fleet_slot, false)?;
+    Some(FleetIdentity {
+        fleet_id: if fleet_id == 0 {
+            defaults.fleet_id
+        } else {
+            fleet_id
+        },
+        fleet_slot: if fleet_slot == SLOT_GROUND || fleet_slot > FLEET_MAX_SLOTS {
+            FIRST_DRONE_SLOT
+        } else {
+            fleet_slot
+        },
+    })
+}
+
 /// Persist only the fleet addressing, under the same lock, root gate and
 /// atomic rewrite as [`persist_pair_state`].
 pub fn persist_fleet(config_path: &Path, lock_path: &Path, fleet: FleetIdentity) -> bool {
@@ -326,7 +385,8 @@ fn rewrite_config(config_path: &Path, lock_path: &Path, mutate: impl FnOnce(&mut
 /// `fleet` is the addressing the ground station issued for this pair — slot 0
 /// on a GS, the registry-allocated drone slot on a drone. `None` leaves any
 /// existing `video.wfb.fleet_id` / `fleet_slot` alone, so a bind that carries
-/// no assignment never strips a drone's slot.
+/// no assignment never strips a drone's slot; a drone that holds no usable
+/// addressing takes the provisional first slot ([`unissued_drone_fleet`]).
 ///
 /// The stop → confirm-inactive → write → start sequence runs inside a spawned
 /// task that this function JOINS rather than awaiting inline. A `JoinHandle`
