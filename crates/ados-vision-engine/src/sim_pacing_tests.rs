@@ -161,8 +161,8 @@ fn barrier_run(
     let mut b = ados_time::barrier::Barrier::default();
     let from: std::net::SocketAddr = "127.0.0.1:14650".parse().unwrap();
     let now = Instant::now();
-    let mut p = Pacing::default();
-    let (mut sim, mut delivered, mut seq) = (0u64, 0u64, 0u32);
+    let (mut sim, mut delivered, mut seq, mut wall_ms, mut held_ms) =
+        (0u64, 0u64, 0u32, 0u64, 0u64);
     let mut id = None;
     let mut checks = 0;
     while sim < until_ns {
@@ -215,20 +215,67 @@ fn barrier_run(
 fn the_barrier_keeps_advancing_with_a_two_frame_deep_source_for_any_grant() {
     const UNTIL: u64 = 20_000 * MS;
     for (fps, grant_ms) in [(30, 20), (60, 20), (30, 1), (30, 50), (10, 20), (60, 100)] {
-        let period = 1_000 * MS / fps;
-        let reached = barrier_run(period, grant_ms * MS, UNTIL, |p| p.done_target("a"));
-        assert!(
-            reached >= UNTIL,
-            "{fps} fps, grant {grant_ms} ms: stalled at {} ms",
-            reached / MS
-        );
+        for depth in [1, 2] {
+            let period = 1_000 * MS / fps;
+            let mut p = Pacing::default();
+            let (reached, held) = barrier_run(&mut p, period, depth, grant_ms * MS, UNTIL, |p| {
+                p.done_target("a")
+            });
+            let at = format!("{fps} fps, grant {grant_ms} ms, {depth} deep");
+            assert!(reached >= UNTIL, "{at}: stalled at {} ms", reached / MS);
+            assert_eq!(held, 0, "{at}: the run held on a missing frame");
+            assert_eq!(p.depth("a"), SOURCE_DEPTH_FRAMES, "{at}");
+        }
     }
 }
 
 /// A deeper source than expected holds the run one probe per missing frame
 /// of depth, then the lane has learned it and the run never holds again.
 #[test]
-fn half_a_period_past_the_next_frame_deadlocks_a_one_frame_late_source() {
+fn a_deeper_source_is_learned_and_the_barrier_keeps_advancing() {
+    const UNTIL: u64 = 20_000 * MS;
+    for (fps, grant_ms) in [(30, 20), (60, 20), (30, 50)] {
+        for depth in [3, 4] {
+            let period = 1_000 * MS / fps;
+            let mut p = Pacing::default();
+            let (reached, held) = barrier_run(&mut p, period, depth, grant_ms * MS, UNTIL, |p| {
+                p.done_target("a")
+            });
+            let at = format!("{fps} fps, grant {grant_ms} ms, {depth} deep");
+            assert!(reached >= UNTIL, "{at}: stalled at {} ms", reached / MS);
+            assert_eq!(p.depth("a"), depth, "{at}");
+            let probes = depth - SOURCE_DEPTH_FRAMES;
+            assert!(
+                held <= probes * (LANE_PROBE_MS + 2 * LANE_CHECK_MS),
+                "{at}: held {held} ms"
+            );
+        }
+    }
+}
+
+/// A source deeper than a lane learns: the lane leaves the barrier rather
+/// than hold the run, and the run goes on.
+#[test]
+fn a_source_deeper_than_the_deepest_never_holds_the_run_for_good() {
+    let period = 1_000 * MS / 30;
+    let mut p = Pacing::default();
+    let (reached, _) = barrier_run(
+        &mut p,
+        period,
+        MAX_SOURCE_DEPTH_FRAMES + 1,
+        20 * MS,
+        5_000 * MS,
+        |p| p.done_target("a"),
+    );
+    assert!(reached >= 5_000 * MS, "stalled at {} ms", reached / MS);
+}
+
+/// The target that counted one frame of source delay (the film take's
+/// stall) never lets the frame it waits for be rendered from a two-frame-deep
+/// source: the run holds for good (in the film take only the silence drop
+/// moved it, 1.25 s of wall time a frame).
+#[test]
+fn one_frame_of_source_delay_deadlocks_a_two_frame_deep_source() {
     for (fps, grant_ms) in [(30, 20), (60, 20)] {
         let period = 1_000 * MS / fps;
         let mut p = Pacing::default();
@@ -270,6 +317,25 @@ fn a_lane_held_past_its_frame_learns_depth_then_leaves_the_barrier() {
     assert_eq!(
         p.overdue(1_620 * MS, 40_000 + LANE_PROBE_MS),
         vec![Overdue::Deeper("a".into(), 3)]
+    );
+    assert_eq!(p.done_target("a"), Some(1_750 * MS));
+    assert!(
+        p.overdue(1_620 * MS, 50_000).is_empty(),
+        "not past 1700 yet"
+    );
+    assert!(p.overdue(1_720 * MS, 50_000).is_empty());
+    assert_eq!(
+        p.overdue(1_720 * MS, 50_000 + LANE_PROBE_MS),
+        vec![Overdue::Deeper("a".into(), 4)]
+    );
+    // At the deepest, the silence bound: then it leaves the barrier.
+    assert!(p.overdue(1_820 * MS, 60_000).is_empty());
+    assert!(p
+        .overdue(1_820 * MS, 60_000 + LANE_SILENCE_MS - 1)
+        .is_empty());
+    assert_eq!(
+        p.overdue(1_820 * MS, 60_000 + LANE_SILENCE_MS),
+        vec![Overdue::Gone("a".into())]
     );
     assert_eq!(p.done_target("a"), None, "it left the barrier");
     // Back with its frames, it keeps what it learned.
