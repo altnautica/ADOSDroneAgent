@@ -88,20 +88,52 @@ fn the_ground_s_fleet_id_is_read_as_its_radio_reads_it() {
 }
 
 #[tokio::test]
-async fn a_ground_off_the_default_fleet_offers_on_both_uplinks() {
+async fn the_provisional_uplink_carries_offers_only_to_a_waiting_drone() {
     let uplinks = Uplinks {
         fleet: test_drone::unheard_lane().await,
         provisional: Some(test_drone::unheard_lane().await),
     };
-    assert_eq!(uplinks.lanes(ados_radio::config::DEFAULT_FLEET_ID).len(), 1);
-    let lanes = uplinks.lanes(7);
+    // A ground on the default fleet reaches a waiting drone on its own uplink.
+    assert_eq!(
+        uplinks
+            .lanes(ados_radio::config::DEFAULT_FLEET_ID, true)
+            .len(),
+        1
+    );
+    // Off the default fleet: both for a drone heard waiting, the fleet's
+    // alone for any other.
+    let lanes = uplinks.lanes(7, true);
     assert_eq!(lanes.len(), 2);
+    assert!(Arc::ptr_eq(&lanes[0], &uplinks.fleet));
+    let lanes = uplinks.lanes(7, false);
+    assert_eq!(lanes.len(), 1);
     assert!(Arc::ptr_eq(&lanes[0], &uplinks.fleet));
     let without = Uplinks {
         provisional: None,
         ..uplinks
     };
-    assert_eq!(without.lanes(7).len(), 1);
+    assert_eq!(without.lanes(7, true).len(), 1);
+}
+
+/// A lane no drone answers on that counts every datagram sent on it.
+async fn counting_lane() -> (Arc<AuxRpcProxy>, Arc<std::sync::atomic::AtomicUsize>) {
+    let far_end = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = far_end.local_addr().unwrap().port();
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sock.connect(("127.0.0.1", port)).await.unwrap();
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&sent);
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while far_end.recv_from(&mut buf).await.is_ok() {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let proxy = Arc::new(AuxRpcProxy::with_timeout(
+        ados_protocol::aux_egress::AuxEgress::connected_for_test(sock),
+        Duration::from_millis(300),
+    ));
+    (proxy, sent)
 }
 
 #[tokio::test]
@@ -117,7 +149,7 @@ async fn an_address_reaches_a_drone_that_hears_only_the_provisional_uplink() {
     };
     let slots = vec![slot_with_secret(DRONE, 2, test_drone::SECRET)];
     let assignment = decide_tick(&slots, 7, &BTreeMap::new()).remove(0);
-    deliver(uplinks.lanes(7), &slots, &assignment)
+    deliver(uplinks.lanes(7, true), &slots, &assignment)
         .await
         .expect("answered on the provisional uplink");
     let seen = drone
@@ -140,7 +172,7 @@ async fn an_address_reaches_a_drone_that_hears_only_the_provisional_uplink() {
         secret: test_drone::SECRET.into(),
     };
     assert_eq!(
-        deliver_secret(uplinks.lanes(7), &secret).await,
+        deliver_secret(uplinks.lanes(7, true), &secret).await,
         Err("drone answered HTTP 401".to_string())
     );
     let seen = drone
@@ -155,7 +187,7 @@ async fn an_address_reaches_a_drone_that_hears_only_the_provisional_uplink() {
     // A ground on the default fleet does not use the provisional uplink, so
     // this drone (not on its fleet lane) is not reached and is retried.
     assert!(deliver(
-        uplinks.lanes(ados_radio::config::DEFAULT_FLEET_ID),
+        uplinks.lanes(ados_radio::config::DEFAULT_FLEET_ID, true),
         &slots,
         &assignment
     )

@@ -44,7 +44,7 @@ pub(super) fn set_recv_buffer(sock: &UdpSocket) {
 /// consumer is not running, and a datagram for it is counted and dropped rather
 /// than silently swallowed.
 pub async fn run_aux_consumer(
-    slot: u8,
+    lane: AuxLane,
     listen_port: u16,
     sinks: AuxSinksOwned,
     counters: AuxCounters,
@@ -54,7 +54,7 @@ pub async fn run_aux_consumer(
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, listen_port));
     let sock = UdpSocket::bind(addr).await?;
     set_recv_buffer(&sock);
-    tracing::info!(slot, port = listen_port, "ground_aux_consumer_listening");
+    tracing::info!(lane = ?lane, port = listen_port, "ground_aux_consumer_listening");
 
     // Borrowed once, not per datagram: the set is fixed for the life of a
     // generation and this is the hot receive path.
@@ -85,7 +85,7 @@ pub async fn run_aux_consumer(
             received = sock.recv_from(&mut buf) => match received {
                 Ok((n, _from)) => {
                     consecutive_errors = 0;
-                    dispatch(slot, &buf[..n], &borrowed, &counters, &mut gate, &peers).await;
+                    dispatch_on(lane, &buf[..n], &borrowed, &counters, &mut gate, &peers).await;
                 }
                 Err(e) => {
                     counters.bump(&counters.0.recv_errors);
@@ -118,7 +118,7 @@ pub async fn run_aux_consumer(
 /// failure is counted, so a consumer that never started listening is visible on
 /// the sidecar rather than merely absent from it.
 pub async fn supervise_aux_consumer(
-    slot: u8,
+    lane: AuxLane,
     listen_port: u16,
     sinks: AuxSinksOwned,
     counters: AuxCounters,
@@ -128,7 +128,7 @@ pub async fn supervise_aux_consumer(
     // No `backoff` state: every re-bind waits exactly BIND_RETRY_INTERVAL.
     loop {
         match run_aux_consumer(
-            slot,
+            lane,
             listen_port,
             sinks.clone(),
             counters.clone(),

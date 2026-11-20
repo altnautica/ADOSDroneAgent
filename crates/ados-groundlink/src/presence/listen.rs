@@ -294,3 +294,55 @@ pub async fn listen_supervisor(
         tokio::time::sleep(LISTEN_RETRY_INTERVAL).await;
     }
 }
+
+/// Listen on the provisional control port
+/// (`ados_radio::config::PROVISIONAL_CONTROL_RX_PORT`) for the service
+/// lifetime: the beacons of a drone this ground paired but has not yet
+/// addressed, decoded off the default fleet's first slot by a ground on
+/// another fleet. Run only on such a ground.
+///
+/// Its own socket and loop, apart from the slot listener: every frame here is
+/// recorded as a provisional peer and never as the registered drone's
+/// presence ([`super::follow::handle_provisional_frame`]). A port that cannot
+/// be bound is retried every [`LISTEN_RETRY_INTERVAL`].
+pub async fn provisional_listen_supervisor(cache: GsPresenceCache) {
+    let own_device_id = ados_protocol::identity::device_id(None);
+    let port = ados_radio::config::PROVISIONAL_CONTROL_RX_PORT;
+    loop {
+        match UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+            Ok(sock) => {
+                tracing::info!(port, "ground_provisional_presence_listening");
+                provisional_listen_on(&sock, &cache, &own_device_id).await;
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                port,
+                "ground_provisional_presence_bind_failed; retrying"
+            ),
+        }
+        tokio::time::sleep(LISTEN_RETRY_INTERVAL).await;
+    }
+}
+
+/// The provisional lane's receive loop. A recv error is logged and read past,
+/// as on a slot's loop; a frame is acted on only under a readable pair key.
+pub(super) async fn provisional_listen_on(
+    sock: &UdpSocket,
+    cache: &GsPresenceCache,
+    own_device_id: &str,
+) {
+    let mut buf = [0u8; 256];
+    loop {
+        let len = match sock.recv_from(&mut buf).await {
+            Ok((len, _)) => len,
+            Err(e) => {
+                tracing::warn!(error = %e, "ground_provisional_presence_recv_failed");
+                continue;
+            }
+        };
+        let (Some(pair_key), _) = resolve_pair_key() else {
+            continue;
+        };
+        super::follow::handle_provisional_frame(&buf[..len], &pair_key, cache, own_device_id);
+    }
+}

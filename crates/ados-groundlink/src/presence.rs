@@ -44,8 +44,11 @@ pub use emit::{
     linked_peers_persist_loop, HOP_PERSIST_CADENCE,
 };
 use follow::handle_control_frame;
-pub use follow::{handle_control_frame_on, hop_follow_refusal, ControlPort, FOLLOW_VERIFY_WINDOW};
-pub use listen::{listen_loop, listen_supervisor};
+pub use follow::{
+    handle_control_frame_on, handle_provisional_frame, hop_follow_refusal, ControlPort,
+    FOLLOW_VERIFY_WINDOW,
+};
+pub use listen::{listen_loop, listen_supervisor, provisional_listen_supervisor};
 
 /// Beacon cadence (10 s, matching the air side).
 pub const PRESENCE_CADENCE: Duration = Duration::from_secs(10);
@@ -241,6 +244,14 @@ pub struct LinkedPeer {
     /// and the field is present only when the peer actually told us its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Heard on the default fleet's first slot by a ground on another fleet: a
+    /// drone this ground paired but has not yet addressed (see
+    /// `wfb_rx::provisional_links`). Enrolment reads it like any peer, and the
+    /// slot reconciler offers its address on the provisional uplink only for a
+    /// peer marked so; it never counts as the registered drone's presence.
+    /// Skipped when false, so existing readers see no change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provisional: bool,
 }
 
 /// Thread-safe presence cache. Implements the watchdog's `PresenceCache` so it

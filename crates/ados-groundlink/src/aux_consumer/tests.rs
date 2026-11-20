@@ -674,7 +674,7 @@ async fn the_full_loop_carries_a_datagram_from_the_wire_to_the_seam() {
     let counters = AuxCounters::new();
     let cancel = Shutdown::new();
     let task = tokio::spawn(run_aux_consumer(
-        TEST_SLOT,
+        AuxLane::Slot(TEST_SLOT),
         port,
         AuxSinksOwned {
             mavlink: Arc::new(MavlinkIngest::new(&sock)),
@@ -739,7 +739,7 @@ async fn a_port_that_cannot_be_bound_is_reported_rather_than_silently_idle() {
 
     assert!(
         run_aux_consumer(
-            TEST_SLOT,
+            AuxLane::Slot(TEST_SLOT),
             port,
             AuxSinksOwned {
                 mavlink: ingest.clone(),
@@ -764,7 +764,7 @@ async fn a_port_that_cannot_be_bound_is_reported_rather_than_silently_idle() {
     // full-loop test above, and racing a notification against a task that
     // is between its two await points would only make this one flaky.
     let task = tokio::spawn(supervise_aux_consumer(
-        TEST_SLOT,
+        AuxLane::Slot(TEST_SLOT),
         port,
         AuxSinksOwned {
             mavlink: ingest,

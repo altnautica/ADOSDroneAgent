@@ -65,6 +65,15 @@ pub(super) async fn run_direct(
         Some(hop_follower.clone()),
         service_slots.clone(),
     ));
+    // Off the default fleet, a drone this ground auto-paired waits on the
+    // default fleet's first slot until it is told its address; its beacons
+    // arrive on their own port and are recorded for enrolment only, never as
+    // the registered drone's presence.
+    if wfb_rx::provisional_links(config.fleet_id).is_some() {
+        tokio::spawn(presence::provisional_listen_supervisor(
+            presence_cache.clone(),
+        ));
+    }
     {
         // The beacon's channel is a hint; the configured channel is a safe
         // service-wide source (the live channel the watchdog locks is surfaced
@@ -196,10 +205,14 @@ pub(super) async fn run_direct(
             pilot: Some(pilot_relay.clone() as Arc<dyn crate::aux_consumer::PilotStateSink>),
             local_plugins: Some(local_plugins.clone()),
         };
-        move |slot: u8| -> tokio::task::JoinHandle<()> {
+        move |lane: crate::AuxLane| -> tokio::task::JoinHandle<()> {
+            let port = match lane {
+                crate::AuxLane::Slot(slot) => wfb_rx::aux_rx_port(slot),
+                crate::AuxLane::Provisional => ados_radio::config::PROVISIONAL_AUX_RX_PORT,
+            };
             tokio::spawn(crate::supervise_aux_consumer(
-                slot,
-                wfb_rx::aux_rx_port(slot),
+                lane,
+                port,
                 sinks.clone(),
                 aux_counters.clone(),
                 aux_peers.clone(),
@@ -212,9 +225,16 @@ pub(super) async fn run_direct(
     {
         let mut bound = aux_tasks.lock().await;
         for &slot in &service_slots {
-            bound.insert(slot, spawn_aux_consumer(slot));
+            bound.insert(slot, spawn_aux_consumer(crate::AuxLane::Slot(slot)));
         }
     }
+    // Off the default fleet, the lane of a drone this ground auto-paired but
+    // has not yet addressed: its own port, and a consumer that takes only its
+    // relay answers, identity and status (its MAVLink is never republished as
+    // one of this ground's aircraft). Bound for the service lifetime like the
+    // slots'; a fleet id change restarts this unit.
+    let provisional_aux = wfb_rx::provisional_links(config.fleet_id)
+        .map(|_| spawn_aux_consumer(crate::AuxLane::Provisional));
 
     // A slot can be issued long after this service started. The pair route
     // deliberately skips re-installing the receive unit when the fleet key is
@@ -247,7 +267,7 @@ pub(super) async fn run_direct(
                 let mut bound = aux_tasks.lock().await;
                 let have: std::collections::BTreeSet<u8> = bound.keys().copied().collect();
                 for slot in aux_slots_to_bind(&want, &have) {
-                    bound.insert(slot, spawn_aux_consumer(slot));
+                    bound.insert(slot, spawn_aux_consumer(crate::AuxLane::Slot(slot)));
                     tracing::info!(
                         slot,
                         port = wfb_rx::aux_rx_port(slot),
@@ -298,6 +318,9 @@ pub(super) async fn run_direct(
     // into the map while the shutdown path is draining it.
     aux_reconcile.abort();
     for t in aux_tasks.lock().await.values() {
+        t.abort();
+    }
+    if let Some(t) = &provisional_aux {
         t.abort();
     }
     // The persister waits on the same latching signal and stops on its own;

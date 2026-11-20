@@ -36,6 +36,11 @@ pub(crate) struct LinkedPeerRow {
     /// The fleet slot whose receive chain decoded the beacon.
     #[serde(default)]
     pub(crate) slot: Option<u8>,
+    /// Heard on the provisional lane: a drone this ground paired but has not
+    /// yet addressed, still on the default fleet while this ground is on
+    /// another (absent, so false, for every other peer).
+    #[serde(default)]
+    pub(crate) provisional: bool,
 }
 
 /// The linked-peers sidecar document (the peer list plus header keys we ignore).
@@ -99,13 +104,18 @@ pub(crate) fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)
     }
 
     // The freshest peer (max last-seen) backs the single-peer scalar fallback.
+    // A drone waiting on the provisional lane is not the peer this ground
+    // links with, so it backs the scalars only when nothing else is heard.
+    let by_last_seen = |a: &&LinkedPeerRow, b: &&LinkedPeerRow| {
+        a.last_seen_unix
+            .partial_cmp(&b.last_seen_unix)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
     let freshest = fresh
         .iter()
-        .max_by(|a, b| {
-            a.last_seen_unix
-                .partial_cmp(&b.last_seen_unix)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .filter(|p| !p.provisional)
+        .max_by(by_last_seen)
+        .or_else(|| fresh.iter().max_by(by_last_seen))
         .expect("fresh is non-empty");
 
     let entries: Vec<Value> = fresh

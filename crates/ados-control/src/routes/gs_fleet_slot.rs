@@ -34,7 +34,8 @@
 //! (the bind carries no fleet id). So the ground's fleet id travels with the
 //! slot, as one address the drone writes and restarts onto together, and a
 //! ground off the default fleet offers it on a provisional uplink keyed to the
-//! default fleet's ground `link_id` as well as on its own ([`uplinks`]).
+//! default fleet's ground `link_id` as well, to a drone it hears waiting there
+//! and to no other ([`uplinks`]).
 //!
 //! ## Shape
 //!
@@ -58,6 +59,8 @@ use serde_json::json;
 pub mod uplinks;
 pub use uplinks::Uplinks;
 use uplinks::{call_on_lanes, LaneRequest};
+mod reconcile;
+pub use reconcile::{run_slot_reconciler, SlotReconciler};
 
 /// How often the ground station restates the fleet's slot assignments.
 ///
@@ -338,108 +341,6 @@ pub(crate) fn ground_fleet_id(config_path: &std::path::Path) -> Option<u16> {
         .and_then(serde_json::Value::as_u64)
         .and_then(|v| u16::try_from(v).ok())?;
     (fleet_id != 0).then_some(fleet_id)
-}
-
-/// Run the slot reconciler until the process exits. Ground-station profile
-/// only; spawned once at startup beside the hero reconciler that shares its
-/// relay proxy. The ground's fleet id is read from `config_path` every tick,
-/// so an operator's change of it is restated to the whole fleet.
-pub async fn run_slot_reconciler(uplinks: Uplinks, config_path: std::path::PathBuf) {
-    let mut tick = tokio::time::interval(SLOT_RECONCILE_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // What each drone has acknowledged, as `(fleet_id, slot)`. Held in memory
-    // only: on restart the ground station restates every address once, which
-    // is one cheap tick and strictly safer than trusting a persisted claim
-    // about a drone that may have been re-flashed while we were down.
-    let mut confirmed: BTreeMap<String, (u16, u8)> = BTreeMap::new();
-    // Which drones have taken the relay secret. In memory for the same reason
-    // the slot acknowledgements are: on restart the ground station re-offers
-    // once, which the drone answers as already-held at no cost, and that is
-    // strictly safer than trusting a persisted claim about a drone that may have
-    // been re-flashed while we were down.
-    let mut secret_acked: std::collections::BTreeSet<String> = Default::default();
-    loop {
-        tick.tick().await;
-        let slots = registered_slots();
-        let fleet_id = ground_fleet_id(&config_path);
-        // A ground whose own fleet id its radio refuses offers on its fleet
-        // lane alone, and delivers no address below.
-        let lanes = || uplinks.lanes(fleet_id.unwrap_or(ados_radio::config::DEFAULT_FLEET_ID));
-
-        // The secret goes first. Slot delivery now carries a ticket, and the
-        // drone cannot verify one until it holds the secret -- so offering the
-        // credential before the call that depends on it is what keeps the very
-        // first reconcile from being refused by the gate it just armed.
-        let present_ids: std::collections::BTreeSet<&str> =
-            slots.iter().map(|s| s.device_id.as_str()).collect();
-        secret_acked.retain(|device_id| present_ids.contains(device_id.as_str()));
-        forget_departed_relay_secret_states(&present_ids);
-        for delivery in decide_secret_tick(&slots, &secret_acked) {
-            match deliver_secret(lanes(), &delivery).await {
-                Ok(SecretOutcome::Held) => {
-                    tracing::info!(device_id = %delivery.device_id, "relay_secret_delivered");
-                    record_relay_secret_state(&delivery.device_id, RelaySecretState::Held);
-                    secret_acked.insert(delivery.device_id);
-                }
-                Ok(SecretOutcome::Conflict) => {
-                    tracing::warn!(
-                        device_id = %delivery.device_id,
-                        "relay_secret_conflict: the drone holds a different relay secret; unpair it to re-key"
-                    );
-                    record_relay_secret_state(&delivery.device_id, RelaySecretState::Conflict);
-                    // Settled: no further offers until it leaves the fleet.
-                    secret_acked.insert(delivery.device_id);
-                }
-                Err(e) => {
-                    // A drone that is off, rebooting or out of range is the
-                    // ordinary case this reconciler exists for.
-                    tracing::debug!(
-                        device_id = %delivery.device_id,
-                        error = %e,
-                        "relay_secret_delivery_deferred"
-                    );
-                }
-            }
-        }
-        // A drone that left the fleet stops being tracked, so its slot can be
-        // reissued to someone else without a stale acknowledgement suppressing
-        // the delivery.
-        let present: std::collections::BTreeSet<&str> =
-            slots.iter().map(|s| s.device_id.as_str()).collect();
-        confirmed.retain(|device_id, _| present.contains(device_id.as_str()));
-
-        let Some(fleet_id) = fleet_id else {
-            tracing::warn!(
-                config = %config_path.display(),
-                "fleet_address_delivery_skipped: this ground's own fleet id is unusable"
-            );
-            continue;
-        };
-        for assignment in decide_tick(&slots, fleet_id, &confirmed) {
-            match deliver(lanes(), &slots, &assignment).await {
-                Ok(()) => {
-                    tracing::info!(
-                        device_id = %assignment.device_id,
-                        fleet_id = assignment.fleet_id,
-                        slot = assignment.slot,
-                        "fleet_slot_delivered"
-                    );
-                    confirmed.insert(assignment.device_id, (assignment.fleet_id, assignment.slot));
-                }
-                Err(e) => {
-                    // Not an error state: a drone that is off, rebooting or out
-                    // of range is the ordinary case this reconciler exists for.
-                    tracing::debug!(
-                        device_id = %assignment.device_id,
-                        fleet_id = assignment.fleet_id,
-                        slot = assignment.slot,
-                        error = %e,
-                        "fleet_slot_delivery_deferred"
-                    );
-                }
-            }
-        }
-    }
 }
 
 /// The fleet registry's current slots, read fresh. Never cached:

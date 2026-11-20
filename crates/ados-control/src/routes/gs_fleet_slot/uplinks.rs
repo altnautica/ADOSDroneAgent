@@ -5,14 +5,23 @@
 //! so the drone it pairs comes up on the default fleet, and a ground on any
 //! other fleet reaches it only over its provisional aux uplink, keyed to the
 //! default fleet's ground `link_id` (see `ados_groundlink::wfb_rx::
-//! provisional_links`). Until the drone has taken the address, the reconciler
-//! cannot know which of the two it hears, so each offer goes out on both at
-//! once and the lane the drone answers on settles it; the other is never
-//! answered and is dropped. The drone's answer comes back through the one
-//! response path either way: it decodes onto a port the ground always binds,
-//! and the provisional proxy shares the fleet proxy's pending calls
+//! provisional_links`).
+//!
+//! The provisional uplink carries an offer only for a drone the ground hears
+//! waiting on the provisional lane right now (its fresh beacon, marked
+//! `provisional` in the linked-peers sidecar). Every other drone, an offline
+//! one included, is offered on the fleet uplink alone: the default fleet's
+//! ground `link_id` is every default-fleet drone's uplink, and frames on it
+//! keyed with this ground's key are undecodable noise to a nearby drone paired
+//! to another ground, which reads them as a mis-keyed link. For a waiting drone
+//! the offer goes out on both at once (it may move between ticks) and the lane
+//! it answers on settles it. Its answer comes back through the one response
+//! path: the provisional aux consumer forwards relay answers, and the
+//! provisional proxy shares the fleet proxy's pending calls
 //! ([`AuxRpcProxy::over_egress`]).
 
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use ados_protocol::aux_rpc::{RequestParts, RpcMethod};
@@ -29,16 +38,27 @@ pub struct Uplinks {
 }
 
 impl Uplinks {
-    /// The lanes an offer from a ground on `fleet_id` rides: its own fleet's,
-    /// and the provisional one while that is another fleet's (a ground on the
-    /// default fleet hears and reaches an unaddressed drone on its own).
-    pub fn lanes(&self, fleet_id: u16) -> Vec<Arc<AuxRpcProxy>> {
+    /// The lanes an offer from a ground on `fleet_id` rides to a drone: its
+    /// own fleet's, and the provisional one only when `waiting` (the drone is
+    /// heard on the provisional lane now) and that lane is another fleet's (a
+    /// ground on the default fleet reaches such a drone on its own uplink).
+    pub fn lanes(&self, fleet_id: u16, waiting: bool) -> Vec<Arc<AuxRpcProxy>> {
         let mut lanes = vec![Arc::clone(&self.fleet)];
-        if ados_radio::config::provisional_fleet(fleet_id).is_some() {
+        if waiting && ados_radio::config::provisional_fleet(fleet_id).is_some() {
             lanes.extend(self.provisional.iter().cloned());
         }
         lanes
     }
+}
+
+/// Device ids heard waiting on the provisional lane: fresh rows of the
+/// linked-peers sidecar at `sidecar` marked `provisional`.
+pub(crate) fn waiting_drones(sidecar: &Path, now: f64) -> BTreeSet<String> {
+    crate::routes::status_full::fresh_linked_peer_rows_in(sidecar, now)
+        .into_iter()
+        .filter(|p| p.provisional)
+        .map(|p| p.device_id)
+        .collect()
 }
 
 /// One relayed request, owned so each lane's call runs on its own task.

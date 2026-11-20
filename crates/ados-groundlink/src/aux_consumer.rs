@@ -62,7 +62,9 @@ mod dispatch;
 mod run;
 mod seam;
 use counters::report;
+#[cfg(test)]
 use dispatch::dispatch;
+use dispatch::dispatch_on;
 pub use run::{run_aux_consumer, supervise_aux_consumer};
 
 /// Largest datagram read in one go.
@@ -203,6 +205,9 @@ struct AuxCountersInner {
     /// Pilot-channel datagrams dropped for want of a relay. Sub-tally of
     /// `pilot_state`.
     pilot_state_undelivered: AtomicU64,
+    /// Datagrams on the provisional lane of a channel it never delivers
+    /// (MAVLink, pilot, application, config tunnel): see [`AuxLane`].
+    provisional_dropped: AtomicU64,
     recv_errors: AtomicU64,
     bind_failures: AtomicU64,
 }
@@ -312,11 +317,30 @@ pub struct AuxCountersSnapshot {
     /// Pilot-channel datagrams dropped for want of a relay. Sub-tally of
     /// `pilot_state`.
     pub pilot_state_undelivered: u64,
+    /// Datagrams on the provisional lane (a drone this ground paired but has
+    /// not yet addressed) of a channel that lane never delivers: its MAVLink,
+    /// pilot state, application stream and config tunnel are dropped, so a
+    /// waiting drone never reads as a registered aircraft.
+    pub provisional_dropped: u64,
     /// Failed reads on the loopback socket.
     pub recv_errors: u64,
     /// Failed attempts to bind the lane's loopback port. A non-zero value with
     /// nothing received means the consumer never started listening at all.
     pub bind_failures: u64,
+}
+
+/// Which receive lane a consumer reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxLane {
+    /// A fleet slot of this ground's own fleet: every channel is delivered.
+    Slot(u8),
+    /// The default fleet's first slot on a ground off the default fleet,
+    /// where a drone this ground paired but has not yet addressed waits
+    /// (`wfb_rx::provisional_links`). Only relay answers, identity and status
+    /// are taken from it; everything else is counted as `provisional_dropped`
+    /// and dropped, above all its flight controller's MAVLink, which would
+    /// otherwise reach the router as one of this ground's aircraft.
+    Provisional,
 }
 
 /// Retry gate for the republish seam.

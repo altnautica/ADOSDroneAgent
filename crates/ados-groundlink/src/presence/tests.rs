@@ -888,3 +888,57 @@ impl HopFollower {
         self
     }
 }
+
+#[test]
+fn a_beacon_on_the_provisional_lane_never_counts_as_the_linked_drone_s_presence() {
+    use ados_radio::hop::{build_hop_announce, HopTrigger};
+    let pair_key = test_key();
+    let cache = GsPresenceCache::new();
+
+    // Its own port, never a slot's control port.
+    for slot in 0..=ados_radio::config::FLEET_MAX_SLOTS {
+        assert_ne!(
+            presence_listen_port(slot),
+            ados_radio::config::PROVISIONAL_CONTROL_RX_PORT
+        );
+    }
+
+    // A waiting drone alone: the watchdog's presence and channel-follow
+    // inputs stay empty, so a ground whose registered drone is gone still
+    // sweeps for it rather than idling in paired-no-video.
+    let waiting = build_presence_beacon("waiting-drone1", true, 161, -55, 1, &pair_key);
+    handle_provisional_frame(&waiting, &pair_key, &cache, "");
+    assert_eq!(cache.presence_age_s(), None);
+    assert!(!PresenceCache::peer_present(&cache));
+    assert_eq!(cache.announced_channel(), None);
+    assert!(cache.hop_snapshot("u-nii-3").history.is_empty());
+    // Enrolment still sees it, marked provisional in the sidecar.
+    let peers = cache.linked_peers();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].device_id, "waiting-drone1");
+    assert!(peers[0].provisional);
+
+    // A hop announce on the lane is ignored: never followed.
+    let announce = build_hop_announce(0, 157, HopTrigger::Reactive, &pair_key);
+    handle_provisional_frame(&announce, &pair_key, &cache, "");
+    assert_eq!(cache.peer_channel(), None);
+    assert!(cache.hop_snapshot("u-nii-3").history.is_empty());
+
+    // The registered drone heard on its slot is the presence; a later
+    // waiting beacon neither refreshes nor moves it.
+    cache.record_peer("linked-drone1".into(), "drone".into(), 149, -50, 1);
+    let seen = cache.peer_last_seen_unix();
+    std::thread::sleep(Duration::from_millis(20));
+    handle_provisional_frame(&waiting, &pair_key, &cache, "");
+    assert_eq!(cache.peer_last_seen_unix(), seen);
+    assert_eq!(cache.peer_channel(), Some(149));
+    let payload = linked_peers_payload(&cache.linked_peers());
+    let rows = payload["peers"].as_array().unwrap();
+    let flag = |id: &str| {
+        rows.iter()
+            .find(|r| r["device_id"] == id)
+            .map(|r| r.get("provisional").cloned())
+    };
+    assert_eq!(flag("waiting-drone1"), Some(Some(serde_json::json!(true))));
+    assert_eq!(flag("linked-drone1"), Some(None), "absent on a linked peer");
+}

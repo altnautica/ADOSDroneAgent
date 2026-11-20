@@ -49,6 +49,7 @@ impl AuxCounters {
             app_command_unexpected: c.app_command_unexpected.load(Ordering::Relaxed),
             pilot_state: c.pilot_state.load(Ordering::Relaxed),
             pilot_state_undelivered: c.pilot_state_undelivered.load(Ordering::Relaxed),
+            provisional_dropped: c.provisional_dropped.load(Ordering::Relaxed),
             recv_errors: c.recv_errors.load(Ordering::Relaxed),
             bind_failures: c.bind_failures.load(Ordering::Relaxed),
         }
@@ -93,6 +94,7 @@ impl AuxCountersSnapshot {
             + self.app_stream
             + self.app_command_unexpected
             + self.pilot_state
+            + self.provisional_dropped
     }
 }
 

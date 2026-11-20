@@ -389,14 +389,17 @@ impl WfbRxManager {
     /// control (p1) keyed to `link_id(DEFAULT_FLEET_ID, FIRST_DRONE_SLOT)`.
     /// `None` on the default fleet, whose own first-slot receivers hear it.
     ///
-    /// They decode onto [`FIRST_DRONE_SLOT`]'s ports, which this ground always
-    /// binds (see [`super::fleet_slots`]): the presence listener records the
-    /// drone's beacon from there (enrolment reads it) and the aux consumer
-    /// hands the drone's relay answers to the proxy that asked. Both lanes
-    /// already serve more than one drone, since every frame on them names its
-    /// sender. No video receiver: nothing watches an unaddressed drone's video.
+    /// They decode onto their own ports, never slot 1's: a drone waiting there
+    /// is not the aircraft registered on this ground's slot 1. The provisional
+    /// aux consumer takes only its relay answers and identity from
+    /// [`PROVISIONAL_AUX_RX_PORT`] (its MAVLink is never republished), and the
+    /// provisional presence listener records its beacon from
+    /// [`PROVISIONAL_CONTROL_RX_PORT`] for enrolment without counting it as the
+    /// registered drone's presence. No video receiver: nothing watches an
+    /// unaddressed drone's video.
     ///
-    /// [`FIRST_DRONE_SLOT`]: super::FIRST_DRONE_SLOT
+    /// [`PROVISIONAL_AUX_RX_PORT`]: ados_radio::config::PROVISIONAL_AUX_RX_PORT
+    /// [`PROVISIONAL_CONTROL_RX_PORT`]: ados_radio::config::PROVISIONAL_CONTROL_RX_PORT
     pub async fn spawn_provisional_receivers(
         &self,
     ) -> std::io::Result<Option<ProvisionalReceivers>> {
@@ -405,16 +408,25 @@ impl WfbRxManager {
         };
         let rx = &self.rx_ifaces;
         let rx_key = rx_key_path();
-        let slot = super::FIRST_DRONE_SLOT;
         let aux = spawn_wfb(
             "wfb_rx",
-            &gs_aux_rx_args(rx, &rx_key, aux_rx_port(slot), links.drone),
+            &gs_aux_rx_args(
+                rx,
+                &rx_key,
+                ados_radio::config::PROVISIONAL_AUX_RX_PORT,
+                links.drone,
+            ),
             StdoutMode::Null,
             Some("/run/ados/wfb-gs-provisional-aux-rx.log"),
         )?;
         let control = spawn_wfb(
             "wfb_rx",
-            &gs_rx_control_args(rx, &rx_key, control_rx_port(slot), links.drone),
+            &gs_rx_control_args(
+                rx,
+                &rx_key,
+                ados_radio::config::PROVISIONAL_CONTROL_RX_PORT,
+                links.drone,
+            ),
             StdoutMode::Null,
             Some("/run/ados/wfb-gs-provisional-rx-control.log"),
         )?;

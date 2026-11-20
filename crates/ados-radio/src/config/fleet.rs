@@ -80,6 +80,19 @@ pub const fn is_fleet_rx_port(port: u16) -> bool {
 /// of and is no slot's receive port.
 pub const PROVISIONAL_UPLINK_PORT: u16 = VIDEO_RX_PORT_BASE + FLEET_MAX_SLOTS as u16 + 1;
 
+/// Loopback egress of a ground station's provisional aux receiver (`wfb_rx -p
+/// 2` on the default fleet's first slot, see [`provisional_fleet`]). Its own
+/// port, not slot 1's: a drone waiting there is not the aircraft registered
+/// on this ground's slot 1, and its MAVLink must never be republished as that
+/// aircraft's. Inside the reserved span, between the video and aux spans.
+pub const PROVISIONAL_AUX_RX_PORT: u16 = PROVISIONAL_UPLINK_PORT + 1;
+
+/// Loopback egress of a ground station's provisional control receiver (`wfb_rx
+/// -p 1` on the default fleet's first slot). Its own port for the same reason:
+/// a waiting drone's presence beacon must never count as the registered
+/// drone's presence.
+pub const PROVISIONAL_CONTROL_RX_PORT: u16 = PROVISIONAL_UPLINK_PORT + 2;
+
 /// Why a fleet identity is unusable. Each variant is a hard load-time refusal,
 /// never a silent fallback: a wrong slot is the FEC-thrash failure mode, which
 /// presents as unexplained link loss rather than as a config error.

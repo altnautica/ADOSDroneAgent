@@ -267,19 +267,9 @@ pub async fn handle_control_frame_on<P: ControlPort>(
             });
         }
         PRESENCE_FRAME_LEN => {
-            let Some(peer) = parse_presence_beacon(frame, pair_key) else {
+            let Some(peer) = verified_beacon(frame, pair_key, own_device_id) else {
                 return;
             };
-            // Self-pair guard: skip a beacon that carries our own device-id (the
-            // emit loop's frame can loop back via wfb_rx_control's re-emit). The
-            // Python listener compares against the first 16 chars (the beacon
-            // device-id field is 16 bytes).
-            if !own_device_id.is_empty() {
-                let own_trunc: String = own_device_id.chars().take(16).collect();
-                if peer.device_id == own_trunc {
-                    return;
-                }
-            }
             cache.record_peer(
                 peer.device_id,
                 peer.role,
@@ -289,5 +279,46 @@ pub async fn handle_control_frame_on<P: ControlPort>(
             );
         }
         _ => {}
+    }
+}
+
+/// A PresenceBeacon that verifies under `pair_key` and is not this node's
+/// own. The self-pair guard skips a beacon that carries our own device-id (the
+/// emit loop's frame can loop back via wfb_rx_control's re-emit), compared on
+/// the first 16 chars (the beacon device-id field is 16 bytes).
+fn verified_beacon(
+    frame: &[u8],
+    pair_key: &[u8; 32],
+    own_device_id: &str,
+) -> Option<ados_radio::hop::PeerPresence> {
+    let peer = parse_presence_beacon(frame, pair_key)?;
+    if !own_device_id.is_empty() {
+        let own_trunc: String = own_device_id.chars().take(16).collect();
+        if peer.device_id == own_trunc {
+            return None;
+        }
+    }
+    Some(peer)
+}
+
+/// Dispatch one frame decoded on the provisional lane (the default fleet's
+/// first slot, on a ground off the default fleet): only a verified
+/// PresenceBeacon is acted on, recorded as a provisional peer
+/// ([`GsPresenceCache::record_provisional_peer`]) so enrolment sees it while
+/// the watchdog's presence and channel-follow signal stay with the drone this
+/// ground links with. A HopAnnounce is ignored: a drone not yet on this
+/// ground's fleet does not hear its ack, and its hop is not this ground's to
+/// follow.
+pub fn handle_provisional_frame(
+    frame: &[u8],
+    pair_key: &[u8; 32],
+    cache: &GsPresenceCache,
+    own_device_id: &str,
+) {
+    if frame.len() != PRESENCE_FRAME_LEN {
+        return;
+    }
+    if let Some(peer) = verified_beacon(frame, pair_key, own_device_id) {
+        cache.record_provisional_peer(peer.device_id, peer.role, peer.channel, peer.rssi_dbm);
     }
 }

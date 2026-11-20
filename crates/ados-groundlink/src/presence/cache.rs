@@ -45,6 +45,7 @@ impl GsPresenceCache {
                 // Beacons carry no name; the auxiliary lane supplies it at read
                 // time, so this stays absent rather than being invented here.
                 name: None,
+                provisional: false,
             },
         );
         // The scalar fields track the FRESHEST peer (this beacon), the watchdog's
@@ -57,6 +58,39 @@ impl GsPresenceCache {
         if prev_channel != Some(channel) {
             Self::push_follow(&mut s, prev_channel, channel, "periodic");
         }
+    }
+
+    /// Record a verified beacon heard on the provisional lane (the default
+    /// fleet's first slot, on a ground off the default fleet): a drone this
+    /// ground paired but has not yet addressed.
+    ///
+    /// Only the multi-peer map is touched, with the entry marked provisional,
+    /// so enrolment sees the drone and the slot reconciler knows to reach it on
+    /// the provisional uplink. The scalar peer fields are left alone: they are
+    /// the watchdog's presence and channel-follow signal for the drone this
+    /// ground links with, and a waiting drone's beacon refreshing them would
+    /// hold the ground in paired-no-video while its registered drone is gone.
+    pub(super) fn record_provisional_peer(
+        &self,
+        device_id: String,
+        role: String,
+        channel: u8,
+        rssi_dbm: i8,
+    ) {
+        let mut s = self.state();
+        s.peers.insert(
+            device_id.clone(),
+            LinkedPeer {
+                device_id,
+                role,
+                channel,
+                rssi_dbm,
+                last_seen_unix: now_unix(),
+                slot: crate::wfb_rx::FIRST_DRONE_SLOT,
+                name: None,
+                provisional: true,
+            },
+        );
     }
 
     /// Replace the set of identities learned from the auxiliary lane.

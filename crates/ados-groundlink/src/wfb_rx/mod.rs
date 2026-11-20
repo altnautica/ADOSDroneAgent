@@ -36,7 +36,8 @@
 //! A ground on a fleet other than the default one also serves the default
 //! fleet's first slot, where a drone it auto-paired waits until it is told its
 //! address ([`provisional_links`]): an aux and a control receiver on
-//! `link_id(1, 1)` decoding onto slot 1's ports, and a provisional aux TX on
+//! `link_id(1, 1)` decoding onto their own ports (`PROVISIONAL_AUX_RX_PORT`,
+//! `PROVISIONAL_CONTROL_RX_PORT`, never slot 1's), and a provisional aux TX on
 //! `link_id(1, 0)` fed from `PROVISIONAL_UPLINK_PORT`, over which the control
 //! surface delivers that drone its fleet id and slot.
 //!

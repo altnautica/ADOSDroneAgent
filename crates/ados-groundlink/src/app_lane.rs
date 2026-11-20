@@ -109,7 +109,7 @@ mod tests {
         // this state registered as its application-stream sink.
         let rx_port = free_port().await;
         let consumer = tokio::spawn(run_aux_consumer(
-            1,
+            crate::AuxLane::Slot(1),
             rx_port,
             AuxSinksOwned {
                 mavlink: Arc::new(MavlinkIngest::new(dir.path().join("unused.sock"))),

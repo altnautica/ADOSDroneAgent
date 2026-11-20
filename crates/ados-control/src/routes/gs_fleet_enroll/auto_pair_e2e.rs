@@ -1,10 +1,11 @@
 //! An auto-paired drone, from the bind that gave it no address to flying on
 //! the fleet id and slot its ground's registry holds, through the production
 //! code at every hop: the bind's pair-state write, the ground's receive slots
-//! (and, off the default fleet, its provisional links), enrolment, the slot
-//! reconciler's decision and its relayed call (authorized by the drone's real
-//! relay check), the drone's config write, and the radio restart the address
-//! owes. Each hop's input is the previous hop's output.
+//! (and, off the default fleet, its provisional links and the provisional
+//! presence record its beacon lands in), enrolment, the slot reconciler's
+//! decision and its relayed call (authorized by the drone's real relay
+//! check), the drone's config write, and the radio restart the address owes.
+//! Each hop's input is the previous hop's output.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -94,7 +95,9 @@ async fn enrol_and_deliver(
     run_dir: &Path,
     cfg: &Path,
 ) -> u8 {
-    let issued = enrol_into(registry, &[(drone.to_string(), "drone".to_string())]);
+    let ground_dir = registry.parent().unwrap();
+    let (peers, waiting) = heard_by_ground(ground_fleet, drone, heard_on, ground_dir);
+    let issued = enrol_into(registry, &peers);
     let slot = issued
         .iter()
         .find(|(d, _)| d == drone)
@@ -127,7 +130,11 @@ async fn enrol_and_deliver(
         fleet,
         provisional: Some(provisional),
     };
-    deliver(uplinks.lanes(ground_fleet), &slots, &assignment)
+    deliver(
+        uplinks.lanes(ground_fleet, waiting.contains(drone)),
+        &slots,
+        &assignment,
+    )
         .await
         .expect("the drone admits the delivery");
     let seen = link

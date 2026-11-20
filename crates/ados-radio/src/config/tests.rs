@@ -595,18 +595,27 @@ fn fleet_receiver_ranges_do_not_overlap_each_other() {
 }
 
 #[test]
-fn the_provisional_uplink_port_is_reserved_and_no_slot_s() {
+fn the_provisional_ports_are_reserved_distinct_and_no_slot_s() {
     // Inside the span the aux-port guard keeps operators out of, so no
-    // operator-set aux port can land on it.
-    assert!(is_fleet_rx_port(PROVISIONAL_UPLINK_PORT));
-    assert!(!RESERVED_PLANE_PORTS.contains(&PROVISIONAL_UPLINK_PORT));
-    for s in 0..=FLEET_MAX_SLOTS {
-        for base in [VIDEO_RX_PORT_BASE, AUX_RX_PORT_BASE, CONTROL_RX_PORT_BASE] {
-            assert_ne!(base + s as u16, PROVISIONAL_UPLINK_PORT, "slot {s}");
+    // operator-set aux port can land on one, and none is a slot's port: a
+    // waiting drone's lanes never share a registered slot's.
+    let ports = [
+        PROVISIONAL_UPLINK_PORT,
+        PROVISIONAL_AUX_RX_PORT,
+        PROVISIONAL_CONTROL_RX_PORT,
+    ];
+    for (i, port) in ports.iter().enumerate() {
+        assert!(is_fleet_rx_port(*port), "{port}");
+        assert!(!RESERVED_PLANE_PORTS.contains(port));
+        assert!(!ports[i + 1..].contains(port), "{port} twice");
+        for s in 0..=FLEET_MAX_SLOTS {
+            for base in [VIDEO_RX_PORT_BASE, AUX_RX_PORT_BASE, CONTROL_RX_PORT_BASE] {
+                assert_ne!(base + s as u16, *port, "slot {s}");
+            }
         }
+        assert_ne!(*port, default_aux_tx_port());
+        assert_ne!(*port, default_aux_rx_port());
     }
-    assert_ne!(PROVISIONAL_UPLINK_PORT, default_aux_tx_port());
-    assert_ne!(PROVISIONAL_UPLINK_PORT, default_aux_rx_port());
 }
 
 #[test]
