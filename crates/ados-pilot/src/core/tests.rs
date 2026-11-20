@@ -4,6 +4,7 @@ mod airframe_health;
 mod airframe_world;
 mod battery;
 mod bore_return;
+mod brake_turn;
 mod closing;
 mod command_goal;
 mod confined;

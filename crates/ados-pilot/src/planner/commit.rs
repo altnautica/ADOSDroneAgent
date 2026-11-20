@@ -202,7 +202,15 @@ fn plan_held(
         if straight {
             return direct(grid, from, target, gc);
         }
-        return match detour(obs, goal, from, margin, Choose::Any { side: 0.0 }, &[]) {
+        return match detour(
+            obs,
+            goal,
+            from,
+            margin,
+            Choose::Any { side: 0.0 },
+            &[],
+            narrows,
+        ) {
             Some((plan, spot)) => {
                 held.hold(&plan, spot, target);
                 held.direct_clear = 0;
@@ -235,7 +243,15 @@ fn plan_held(
     // Blocked, the goal moved on or the vehicle stalled: choose again, near
     // the route flown and round the same side.
     let side = if spot.0 == 0.0 { 0.0 } else { spot.0.signum() };
-    match detour(obs, goal, from, margin, Choose::Any { side }, &prefer) {
+    match detour(
+        obs,
+        goal,
+        from,
+        margin,
+        Choose::Any { side },
+        &prefer,
+        narrows,
+    ) {
         Some((plan, spot)) => {
             held.hold(&plan, spot, target);
             plan

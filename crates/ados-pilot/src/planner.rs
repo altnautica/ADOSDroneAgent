@@ -12,7 +12,10 @@ use crate::geo::{self, V2};
 use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
 
 mod commit;
-pub use commit::{plan_committed, Commit, RECHOOSE_GOAL_M, RELEASE_PLANS, RELEASE_ROOM_M};
+pub use commit::{
+    plan_committed, Commit, Motion, Narrows, RECHOOSE_GOAL_M, RELEASE_PLANS, RELEASE_ROOM_M,
+    STALL_MPS, STALL_MS, STALL_PLANS, STALL_RADIUS_M,
+};
 
 /// Expansion budget per search.
 pub const MAX_EXPANSIONS: usize = 4000;
@@ -190,8 +193,15 @@ fn detour(
     prefer: &[V2],
     narrows: Option<&Narrows>,
 ) -> Option<(Plan, Spot)> {
-    route(obs, goal, from, margin + ROUTE_ROOM_M, choose, prefer)
-        .or_else(|| route(obs, goal, from, margin, choose, prefer))
+    let at = |m, n| route(obs, goal, from, m, choose, prefer, n);
+    let room = margin + ROUTE_ROOM_M;
+    let found = at(room, narrows).or_else(|| at(margin, narrows));
+    match narrows {
+        Some(_) => found
+            .or_else(|| at(room, None))
+            .or_else(|| at(margin, None)),
+        None => found,
+    }
 }
 
 /// [`detour`] at one routing margin.
@@ -223,8 +233,16 @@ fn route(
             }
         }
         let path = match grid.cell(cand) {
-            Some(cell) => search(grid, from, Some(cell), margin, MAX_EXPANSIONS, prefer)
-                .and_then(|f| f.path(grid, cand)),
+            Some(cell) => search(
+                grid,
+                from,
+                Some(cell),
+                margin,
+                MAX_EXPANSIONS,
+                prefer,
+                narrows,
+            )
+            .and_then(|f| f.path(grid, cand)),
             None => flooded
                 .get_or_insert_with(|| {
                     search(grid, from, None, margin, GRID_N * GRID_N, prefer, narrows)
