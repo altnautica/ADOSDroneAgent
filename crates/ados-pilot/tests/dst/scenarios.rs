@@ -136,6 +136,15 @@ pub fn energy_return(seed: u64) -> Sim {
     assert!(landed, "never landed: mode {} at {:?}", s.fc.mode, s.fc.pos);
     assert_eq!(s.mode_commands(copter::SMART_RTL).len(), 1);
     assert!(
+        s.mode_commands(copter::LAND).is_empty(),
+        "never lands in place"
+    );
+    assert!(
+        s.home_distance_m() < 1.5,
+        "landed home: {}",
+        s.home_distance_m()
+    );
+    assert!(
         s.fc.battery_pct >= 10.0,
         "landed at {}% (fired at {fired_pct}%, {out_m:.0} m out): under the critical level",
         s.fc.battery_pct
