@@ -34,6 +34,8 @@ mod presence;
 mod radio;
 mod sidecars;
 
+/// The attribute an implementation of [`ControlPlane`] / [`HopRadio`] needs.
+pub use async_trait::async_trait;
 use execute::*;
 pub use presence::emit_presence_beacons_on;
 use presence::*;

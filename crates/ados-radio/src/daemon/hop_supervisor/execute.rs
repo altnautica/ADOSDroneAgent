@@ -41,6 +41,15 @@ pub(super) async fn try_execute_hop<R: HopRadio>(
         return;
     }
     tokio::time::sleep_until(deadline).await;
+    // A bind that opened during the countdown owns the adapter now: the bind
+    // writes its sentinel seconds before it stops this unit, so the flip would
+    // retune under it. Stay; a ground station that followed finds no traffic
+    // on the target and reverts on its own.
+    if radio.bind_active() {
+        state.lock().await.record_hop(target, label, false);
+        tracing::warn!(channel = target, trigger = label, "hop_flip_refused_bind");
+        return;
+    }
     // A silent `iw set channel` failure makes the hop outcome false even when
     // the radio respawns cleanly: a hop that landed on the old channel is not a
     // successful hop. The radio is always respawned so the link is never left

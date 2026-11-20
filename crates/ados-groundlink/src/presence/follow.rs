@@ -98,6 +98,7 @@ impl HopFollower {
         cache: &GsPresenceCache,
     ) -> FollowOutcome {
         tokio::time::sleep(delay.min(MAX_FOLLOW_WAIT)).await;
+        let prev = self.setter.live_channel(iface).await.or(hint);
         if !self.setter.set_channel(iface, channel).await {
             tracing::warn!(interface = %iface, channel, "ground_hop_follow_retune_failed");
             self.revert(iface, prev, cache).await;
