@@ -117,6 +117,12 @@ fn fc_link(seed: u64) -> World {
                 "end state: {late} stream request bursts in the last 100 s of a healthy link"
             ));
         }
+        let unsupported = w.router.fc.fc_streams_unsupported();
+        if unsupported.is_empty() || unsupported.iter().any(|id| fc::STREAMABLE.contains(id)) {
+            w.fail(format_args!(
+                "end state: streams reported unsupported: {unsupported:?}"
+            ));
+        }
         w
     })
 }

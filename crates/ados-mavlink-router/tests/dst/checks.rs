@@ -204,6 +204,19 @@ impl World {
                 }
             }
         }
+        // A stream the FC cannot send is not asked for over and over.
+        let mut spam = None;
+        for (id, asks) in self.live.unsupported_asks.iter_mut() {
+            asks.retain(|t| now - t < 60_000);
+            if asks.len() > UNSUPPORTED_ASKS {
+                spam = Some((*id, asks.len()));
+            }
+        }
+        if let Some((id, n)) = spam {
+            self.fail(format_args!(
+                "stream {id} the FC cannot send was asked for {n} times in a minute"
+            ));
+        }
 
         self.check_gates();
         self.check_uploads();
