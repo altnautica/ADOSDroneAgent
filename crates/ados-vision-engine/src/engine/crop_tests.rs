@@ -820,3 +820,133 @@ async fn crop_misses_while_coasting_add_the_whole_frame_every_third_batch() {
     assert_eq!((c.subject_full_runs, c.subject_full_hits), (2, 0));
     assert!(c.crop_runs >= 8 && c.crop_hits >= 4, "{c:?}");
 }
+
+/// The detector's decode path maps a box the model reports in its
+/// letterboxed input back onto the person in the frame: on a whole 16:9
+/// frame (padded top and bottom), on a square crop window (no pad) and on a
+/// window the frame clamped to a non-square shape (padded), through the crop
+/// pass's mapping back to the frame.
+#[test]
+fn the_decode_path_maps_letterboxed_boxes_back_onto_the_frame() {
+    use ados_vision::yolo::{decode, Letterbox};
+    let truth = bbox([612.0, 321.0, 65.0, 124.0]);
+    // One YOLOv8 candidate (rows cx, cy, w, h, person) at `b` in input pixels.
+    let output = |b: BoundingBox| {
+        vec![
+            b.x + b.width / 2.0,
+            b.y + b.height / 2.0,
+            b.width,
+            b.height,
+            0.9,
+        ]
+    };
+    let close = |got: BoundingBox| {
+        let d = [
+            got.x - truth.x,
+            got.y - truth.y,
+            got.width - truth.width,
+            got.height - truth.height,
+        ];
+        assert!(d.iter().all(|v| v.abs() < 0.05), "{got:?} vs {truth:?}");
+    };
+    let meta = model("det", ModelKind::Detection, 640, 640);
+    let whole =
+        crate::backend::detector_decode_params(&meta, W, H, None, W, H, 0.25, 0.45).unwrap();
+    let lb = Letterbox::fit(W as f32, H as f32, 640, 640);
+    assert!((lb.pad_y - 140.0).abs() < 1e-3);
+    let found = decode(&output(lb.to_input(&truth)), 5, 1, &whole);
+    close(found[0].bbox.unwrap());
+
+    let crop_meta = model("det.crop", ModelKind::Detection, 320, 320);
+    for window in [
+        bbox([480.0, 220.0, 320.0, 320.0]),
+        bbox([200.0, 0.0, 1000.0, 720.0]),
+    ] {
+        let p = crate::backend::detector_decode_params(
+            &crop_meta,
+            W,
+            H,
+            Some(&window),
+            320,
+            320,
+            0.25,
+            0.45,
+        )
+        .unwrap();
+        let in_window = bbox([
+            truth.x - window.x,
+            truth.y - window.y,
+            truth.width,
+            truth.height,
+        ]);
+        let lb = Letterbox::fit(window.width, window.height, 320, 320);
+        let found = decode(&output(lb.to_input(&in_window)), 5, 1, &p);
+        let back = super::crop::crop_to_frame(found, &window, W, H, 320, 320, "person");
+        assert_eq!(back.len(), 1, "window {window:?}");
+        close(back[0].bbox.unwrap());
+    }
+}
+
+/// A detector reporting one person at 0.3 and one at 0.5 on whatever it is
+/// handed.
+struct TwoConfidences;
+
+impl LoadedModel for TwoConfidences {
+    fn infer(&self, _: &[u8], _: u32, _: u32, _: FrameFormat) -> Result<Vec<Detection>> {
+        Ok(vec![
+            person(bbox([10.0, 10.0, 20.0, 40.0]), 0.3),
+            person(bbox([60.0, 10.0, 20.0, 40.0]), 0.5),
+        ])
+    }
+}
+
+struct TwoConfidencesBackend;
+
+impl VisionBackend for TwoConfidencesBackend {
+    fn load(&self, _: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
+        Ok(Box::new(TwoConfidences))
+    }
+    fn name(&self) -> &str {
+        "two-confidences"
+    }
+    fn is_inference_capable(&self) -> bool {
+        true
+    }
+}
+
+/// A whole-frame pass keeps the boxes at `vision.whole_frame_conf` (0.45 by
+/// default) and up, a crop window those at `vision.confidence_threshold`
+/// (0.25), and a plugin's own inference the latter too.
+#[tokio::test]
+async fn each_pass_keeps_the_boxes_at_its_own_threshold() {
+    let e = VisionEngine::with_tracker_reid(
+        Box::new(TwoConfidencesBackend),
+        4,
+        false,
+        TrackerConfig::default(),
+        false,
+        None,
+        DetectionPolicy::default(),
+    );
+    e.register_model(model("det", ModelKind::Detection, MODEL_IN, MODEL_IN))
+        .await
+        .unwrap();
+    let frame = BACKGROUND.repeat((W * H) as usize);
+    let confs = |found: Vec<Detection>| found.iter().map(|d| d.confidence).collect::<Vec<_>>();
+    let whole = e
+        .run_pass("det", &frame, W, H, FrameFormat::Rgb24, None)
+        .await
+        .unwrap();
+    assert_eq!(confs(whole.result.unwrap()), vec![0.5]);
+    let window = bbox([400.0, 100.0, 400.0, 400.0]);
+    let crop = e
+        .run_pass("det", &frame, W, H, FrameFormat::Rgb24, Some(&window))
+        .await
+        .unwrap();
+    assert_eq!(confs(crop.result.unwrap()), vec![0.3, 0.5]);
+    let plugin = e
+        .run_model(None, "det", &frame, W, H, FrameFormat::Rgb24)
+        .await
+        .unwrap();
+    assert_eq!(confs(plugin), vec![0.3, 0.5]);
+}

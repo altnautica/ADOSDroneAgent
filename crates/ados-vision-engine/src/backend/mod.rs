@@ -176,6 +176,44 @@ pub trait VisionBackend: Send + Sync {
     }
 }
 
+/// The least confidence an in-process detector decodes: the engine keeps a
+/// pass's boxes at its own threshold above it (`vision.confidence_threshold`,
+/// `vision.whole_frame_conf`), which cannot go lower.
+pub const DETECTION_DECODE_FLOOR: f32 = 0.05;
+
+/// The decode parameters of one in-process detector pass of `meta` on
+/// `window` of a `width` x `height` frame (`None`: all of it), its input
+/// letterboxed from that window (`ados_vision::yolo::preprocess_rgb24_nchw_into`),
+/// its boxes back in an `out_w` x `out_h` image of the window: the frame's own
+/// pixels for a whole-frame pass, the window resized to the model input for
+/// [`LoadedModel::infer_window`]. `None` when the window holds no pixel.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+pub(crate) fn detector_decode_params<'a>(
+    meta: &'a ModelMetadata,
+    width: u32,
+    height: u32,
+    window: Option<&BoundingBox>,
+    out_w: u32,
+    out_h: u32,
+    conf_threshold: f32,
+    nms_iou: f32,
+) -> Option<ados_vision::yolo::DecodeParams<'a>> {
+    let (_, _, src_w, src_h) = ados_vision::yolo::window_region(width, height, window)?;
+    Some(ados_vision::yolo::DecodeParams {
+        head: meta.head,
+        labels: &meta.output_classes,
+        input_w: meta.input_width,
+        input_h: meta.input_height,
+        src_w,
+        src_h,
+        frame_w: out_w,
+        frame_h: out_h,
+        conf_threshold,
+        nms_iou,
+    })
+}
+
 // --- mock -----------------------------------------------------------------
 
 mod dense;

@@ -113,12 +113,9 @@ async fn main() {
         reid_model_id,
         config.detection_policy(),
     );
-    tracing::info!(
-        demand = config.detection_demand.as_str(),
-        designate_hold_s = config.designate_hold_s,
-        max_box_area_frac = config.max_box_area_frac,
-        "detection demand policy"
-    );
+    // The demand mode, designation hold, box cutoff and both confidence
+    // thresholds, as the engine applies them.
+    tracing::info!(policy = ?config.detection_policy(), "detection demand policy");
     if config.tracker_enabled {
         tracing::info!(reid = config.reid_enabled, "vision tracker enabled");
     }

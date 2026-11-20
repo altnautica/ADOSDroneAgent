@@ -105,8 +105,20 @@ fn frame(i: usize) -> (FrameDescriptor, Vec<u8>) {
 }
 
 async fn engine(moving: bool) -> Arc<VisionEngine> {
-    let e =
-        VisionEngine::with_tracker(Box::new(RecordedBackend), 4, true, TrackerConfig::default());
+    // The recorded batches are a whole-frame detector's output gated at 0.25
+    // (the flight's stretched input): replayed whole, they keep that gate.
+    let e = VisionEngine::with_tracker_reid(
+        Box::new(RecordedBackend),
+        4,
+        true,
+        TrackerConfig::default(),
+        false,
+        None,
+        DetectionPolicy {
+            whole_frame_conf: 0.25,
+            ..DetectionPolicy::default()
+        },
+    );
     e.register_model(ModelMetadata {
         id: "det".into(),
         kind: ModelKind::Detection,

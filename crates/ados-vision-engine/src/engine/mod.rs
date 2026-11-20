@@ -40,7 +40,10 @@ mod roster;
 mod tracking;
 
 pub use camera_motion::CameraMotionSetup;
-pub use demand::{DetectionDemandMode, DetectionPolicy, DESIGNATE_OWNER};
+pub use demand::{
+    DetectionDemandMode, DetectionPolicy, DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_WHOLE_FRAME_CONF,
+    DESIGNATE_OWNER,
+};
 pub use depth::{DepthModelState, DepthSetup, DEPTH_PERMIT_WAIT};
 pub use embeddings::{
     strip_embeddings, EmbeddingInterest, EMBEDDING_ATTR, EMBEDDING_MODEL_ATTR, HISTOGRAM_EMBEDDING,

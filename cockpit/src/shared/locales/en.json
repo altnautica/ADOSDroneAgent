@@ -1343,7 +1343,9 @@
         "mock": { "label": "Mock", "description": "Synthetic detections for bench tests." }
       },
       "confidenceLabel": "Confidence threshold",
-      "confidenceHint": "Minimum detection confidence to report, from 0 to 1. Higher drops weak detections.",
+      "confidenceHint": "Least confidence a detection keeps on the crop around a followed subject, from 0.05 to 1. Higher drops weak detections.",
+      "wholeFrameConfLabel": "Whole-frame confidence threshold",
+      "wholeFrameConfHint": "Least confidence a detection keeps when the detector looks at the whole picture, from 0.05 to 1. Kept higher than the crop's: the whole picture holds the scenery that reads as false people.",
       "cacheLabel": "Model cache cap (MB)",
       "cacheHint": "How much disk the downloaded-model cache may use before older models are pruned.",
       "modelsDir": "Models directory",

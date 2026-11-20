@@ -198,7 +198,8 @@ const CAMERA_ROWS: &[Row] = &[
 const VISION_ROWS: &[Row] = &[
     row("", "vision.enabled", "On-board detection engine", "Run the detection engine on this node so it can publish detections locally. Off by default; a fresh node runs no vision until this is on."),
     row("", "vision.backend", "Inference backend", "Which accelerator the engine runs on. Auto picks the best the board advertises; the explicit choices force a specific one."),
-    row("", "vision.confidence_threshold", "Confidence threshold", "Minimum detection confidence to report, from 0 to 1. Higher drops weak detections."),
+    row("", "vision.confidence_threshold", "Confidence threshold", "Least confidence a detection keeps on the crop around a followed subject, from 0.05 to 1. Higher drops weak detections."),
+    row("", "vision.whole_frame_conf", "Whole-frame confidence threshold", "Least confidence a detection keeps when the detector looks at the whole picture, from 0.05 to 1. Kept higher than the crop's: the whole picture holds the scenery that reads as false people."),
     row("", "vision.models_cache_max_mb", "Model cache cap (MB)", "How much disk the downloaded-model cache may use before older models are pruned."),
 ];
 

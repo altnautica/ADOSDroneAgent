@@ -94,7 +94,17 @@ export function VisionSettings() {
                 hint={t("settingsMore.vision.confidenceHint")}
                 value={vision.confidence_threshold}
                 integer={false}
-                min={0}
+                min={0.05}
+                max={1}
+              />
+              <ConfigNumberField
+                configKey="vision.whole_frame_conf"
+                id="vision-whole-frame-conf"
+                label={t("settingsMore.vision.wholeFrameConfLabel")}
+                hint={t("settingsMore.vision.wholeFrameConfHint")}
+                value={vision.whole_frame_conf}
+                integer={false}
+                min={0.05}
                 max={1}
               />
               <div className="border-t border-border pt-5">

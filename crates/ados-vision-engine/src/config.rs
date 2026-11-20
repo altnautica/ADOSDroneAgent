@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::engine::{DetectionDemandMode, DetectionPolicy};
 
 mod models;
+mod sockets;
 use models::default_threads;
 pub use models::{
     DepthConfig, DepthPlan, DetectorConfig, ReidConfig, DEFAULT_DEPTH_FILE_STEM,
@@ -46,6 +47,24 @@ fn default_designate_hold_s() -> f32 {
 
 fn default_max_box_area_frac() -> f32 {
     0.5
+}
+
+fn default_confidence_threshold() -> f32 {
+    crate::engine::DEFAULT_CONFIDENCE_THRESHOLD
+}
+
+fn default_whole_frame_conf() -> f32 {
+    crate::engine::DEFAULT_WHOLE_FRAME_CONF
+}
+
+/// A confidence threshold as the engine applies it: within the detector's
+/// decode floor and 1, the shipped `default` when not a number.
+fn confidence(v: f32, default: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(crate::backend::DETECTION_DECODE_FLOOR, 1.0)
+    } else {
+        default
+    }
 }
 
 fn default_models_dir() -> String {
@@ -158,6 +177,15 @@ pub struct VisionConfig {
     /// lens, never a follow target). Default 0.5; `1` keeps every box.
     #[serde(default = "default_max_box_area_frac")]
     pub max_box_area_frac: f32,
+    /// The least confidence a detection keeps on the crop pass around a
+    /// designated subject and on a plugin's own inference. Default 0.25.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f32,
+    /// The least confidence a detection keeps on a whole-frame pass. Default
+    /// 0.45: the letterboxed whole frame finds a person at 0.25 too, with ten
+    /// times the false boxes of the crop's scenery-free window.
+    #[serde(default = "default_whole_frame_conf")]
+    pub whole_frame_conf: f32,
     /// The depth model behind the depth and surfaces layers.
     #[serde(default)]
     pub depth: DepthConfig,
@@ -197,6 +225,8 @@ impl Default for VisionConfig {
             designate_hold_s: default_designate_hold_s(),
             decode_threads: default_threads(),
             max_box_area_frac: default_max_box_area_frac(),
+            confidence_threshold: default_confidence_threshold(),
+            whole_frame_conf: default_whole_frame_conf(),
             depth: DepthConfig::default(),
             models_dir: default_models_dir(),
             camera_mounts: std::collections::HashMap::new(),
@@ -274,6 +304,10 @@ impl VisionConfig {
             decode_threads: u32,
             #[serde(default = "default_max_box_area_frac")]
             max_box_area_frac: f32,
+            #[serde(default = "default_confidence_threshold")]
+            confidence_threshold: f32,
+            #[serde(default = "default_whole_frame_conf")]
+            whole_frame_conf: f32,
             #[serde(default)]
             depth: DepthConfig,
             #[serde(default = "default_models_dir")]
@@ -350,6 +384,8 @@ impl VisionConfig {
             designate_hold_s: v.designate_hold_s,
             decode_threads: v.decode_threads,
             max_box_area_frac: v.max_box_area_frac,
+            confidence_threshold: v.confidence_threshold,
+            whole_frame_conf: v.whole_frame_conf,
             depth: v.depth,
             models_dir: v.models_dir,
             camera_mounts,
@@ -358,7 +394,8 @@ impl VisionConfig {
 
     /// The engine's detection policy from the demand keys. A negative or
     /// non-finite designation hold grants nothing; a non-finite box cutoff
-    /// keeps every box.
+    /// keeps every box; a confidence threshold is held to the detector's
+    /// decode floor and 1.
     pub fn detection_policy(&self) -> DetectionPolicy {
         let hold_s = if self.designate_hold_s.is_finite() {
             self.designate_hold_s.max(0.0)
@@ -373,6 +410,11 @@ impl VisionConfig {
             } else {
                 1.0
             },
+            confidence_threshold: confidence(
+                self.confidence_threshold,
+                default_confidence_threshold(),
+            ),
+            whole_frame_conf: confidence(self.whole_frame_conf, default_whole_frame_conf()),
         }
     }
 
@@ -409,69 +451,9 @@ impl VisionConfig {
         self.shm_budget_mb.max(FLOOR_MB) as usize * 1024 * 1024
     }
 
-    /// The `vision.sock` path under the configured socket directory.
-    pub fn vision_socket_path(&self) -> String {
-        format!("{}/vision.sock", self.socket_dir.trim_end_matches('/'))
-    }
-
-    /// The `vision-detections.sock` path: a last-state broadcast socket the
-    /// API process subscribes to so the browser can receive live detection
-    /// batches over a WebSocket. Distinct from `vision.sock` (the request /
-    /// response plugin bridge) — this one is broadcast-only and carries
-    /// length-prefixed msgpack [`ados_protocol::framebus::DetectionBatch`].
-    pub fn detections_socket_path(&self) -> String {
-        format!(
-            "{}/vision-detections.sock",
-            self.socket_dir.trim_end_matches('/')
-        )
-    }
-
-    /// The `vision-frames.sock` path: a last-state broadcast socket that
-    /// re-publishes every frame descriptor so an on-box service (the world-model
-    /// capture service) can subscribe and map the ring the descriptor names.
-    /// Carries length-prefixed msgpack [`ados_protocol::framebus::FrameDescriptor`].
-    pub fn frames_socket_path(&self) -> String {
-        format!(
-            "{}/vision-frames.sock",
-            self.socket_dir.trim_end_matches('/')
-        )
-    }
-
-    /// The `vision-depth.sock` path: the broadcast of every depth grid and
-    /// landing-zone frame ([`ados_protocol::vision_depth::DepthRecord`]).
-    pub fn depth_socket_path(&self) -> String {
-        format!(
-            "{}/vision-depth.sock",
-            self.socket_dir.trim_end_matches('/')
-        )
-    }
-
-    /// The MAVLink broadcast socket the depth fit reads attitude and the
-    /// downward rangefinder from.
-    pub fn mavlink_socket_path(&self) -> String {
-        format!(
-            "{}/{}",
-            self.socket_dir.trim_end_matches('/'),
-            ados_protocol::paths::MAVLINK_SOCK
-        )
-    }
-
     /// The depth model's ONNX intra-op threads (at least one).
     pub fn depth_threads(&self) -> u32 {
         self.depth.threads.max(1)
-    }
-
-    /// The accelerator sidecar socket path the RKNN backend talks to.
-    pub fn rknn_socket_path(&self) -> String {
-        format!("{}/vision-rknn.sock", self.socket_dir.trim_end_matches('/'))
-    }
-
-    /// The accelerator sidecar socket path the Hailo backend talks to (Pi + AI HAT).
-    pub fn hailo_socket_path(&self) -> String {
-        format!(
-            "{}/vision-hailo.sock",
-            self.socket_dir.trim_end_matches('/')
-        )
     }
 
     /// Whether the engine has work: vision is enabled, or a camera is marked

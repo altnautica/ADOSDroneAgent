@@ -228,8 +228,11 @@ impl VisionEngine {
         height: u32,
         format: FrameFormat,
     ) -> Result<Vec<Detection>> {
+        let min_conf = self.policy.confidence_threshold;
         let pass = self
-            .run_model_core(caller, model_id, frame, width, height, format, None)
+            .run_model_core(
+                caller, model_id, frame, width, height, format, None, min_conf,
+            )
             .await?;
         if pass.result.is_ok() {
             let now_ms = (ados_protocol::framebus::mono_ns() / 1_000_000) as i64;
@@ -240,7 +243,9 @@ impl VisionEngine {
 
     /// One pass of an engine model inside a detector batch, on the whole
     /// frame or on `window` of it (see [`LoadedModel::infer_window`]), with no
-    /// timing record: the batch records its own.
+    /// timing record: the batch records its own. A whole-frame pass keeps the
+    /// boxes at `vision.whole_frame_conf` or above, a window (the crop around
+    /// a designated subject) those at `vision.confidence_threshold`.
     pub(super) async fn run_pass(
         &self,
         model_id: &str,
@@ -250,13 +255,20 @@ impl VisionEngine {
         format: FrameFormat,
         window: Option<&ados_protocol::framebus::BoundingBox>,
     ) -> Result<Pass> {
-        self.run_model_core(None, model_id, frame, width, height, format, window)
-            .await
+        let min_conf = match window {
+            None => self.policy.whole_frame_conf,
+            Some(_) => self.policy.confidence_threshold,
+        };
+        self.run_model_core(
+            None, model_id, frame, width, height, format, window, min_conf,
+        )
+        .await
     }
 
     /// Run the model under the accelerator lease, on the whole frame or on
-    /// `window` of it resized to the model's input. The outer error is a
-    /// refusal (unknown, plugin-side or unloaded model, closed lease).
+    /// `window` of it resized to the model's input, keeping the detections at
+    /// `min_conf` or above. The outer error is a refusal (unknown, plugin-side
+    /// or unloaded model, closed lease).
     #[allow(clippy::too_many_arguments)]
     async fn run_model_core(
         &self,
@@ -267,6 +279,7 @@ impl VisionEngine {
         height: u32,
         format: FrameFormat,
         window: Option<&ados_protocol::framebus::BoundingBox>,
+        min_conf: f32,
     ) -> Result<Pass> {
         // Acquire the accelerator lease for the duration of the inference so two
         // models never contend for the shared NPU. The permit is held across the
@@ -319,6 +332,12 @@ impl VisionEngine {
         let result = run_blocking(|| match window {
             None => loaded.infer(frame, width, height, format),
             Some(w) => loaded.infer_window(frame, width, height, format, w, input.0, input.1),
+        })
+        .map(|found| {
+            found
+                .into_iter()
+                .filter(|d| d.confidence >= min_conf)
+                .collect()
         });
         Ok(Pass {
             key,

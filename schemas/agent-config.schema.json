@@ -3641,7 +3641,9 @@
           "type": "string"
         },
         "confidence_threshold": {
-          "default": 0.5,
+          "default": 0.25,
+          "maximum": 1.0,
+          "minimum": 0.05,
           "title": "Confidence Threshold",
           "type": "number"
         },
@@ -3827,6 +3829,13 @@
           "default": false,
           "title": "Tracker Enabled",
           "type": "boolean"
+        },
+        "whole_frame_conf": {
+          "default": 0.45,
+          "maximum": 1.0,
+          "minimum": 0.05,
+          "title": "Whole Frame Conf",
+          "type": "number"
         }
       },
       "title": "VisionConfig",
@@ -5048,7 +5057,7 @@
       "$ref": "#/$defs/VisionConfig",
       "default": {
         "backend": "auto",
-        "confidence_threshold": 0.5,
+        "confidence_threshold": 0.25,
         "decode_threads": 1,
         "depth": {
           "enabled": true,
@@ -5079,7 +5088,8 @@
         "sim_latency_ms": null,
         "slot_count": 4,
         "socket_dir": "/run/ados",
-        "tracker_enabled": false
+        "tracker_enabled": false,
+        "whole_frame_conf": 0.45
       }
     }
   },

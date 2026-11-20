@@ -87,7 +87,12 @@ class VisionConfig(BaseModel):
     # Bench aid for the mock backend: emit one synthetic moving `person`
     # detection so detection consumers can be exercised without a model.
     mock_target: bool = False
-    confidence_threshold: float = 0.5
+    # The least confidence a detection keeps on the crop pass around a
+    # designated subject and on a plugin's own inference; a whole-frame pass
+    # keeps those at `whole_frame_conf` and up. 0.05 is the detector's decode
+    # floor.
+    confidence_threshold: float = Field(default=0.25, ge=0.05, le=1.0)
+    whole_frame_conf: float = Field(default=0.45, ge=0.05, le=1.0)
     models_dir: str = "/opt/ados/models/vision"
     models_cache_max_mb: int = Field(default=500, ge=0, le=U32_MAX)
     registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControlGCS/main/public/models/registry.json"

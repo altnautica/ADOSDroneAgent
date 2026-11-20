@@ -4304,12 +4304,12 @@
       "type": "string"
     },
     {
-      "default": 0.5,
+      "default": 0.25,
       "description": "Confidence Threshold",
       "enum": null,
       "key": "vision.confidence_threshold",
-      "maximum": null,
-      "minimum": null,
+      "maximum": 1.0,
+      "minimum": 0.05,
       "secret": false,
       "type": "number"
     },
@@ -4745,6 +4745,16 @@
       "minimum": null,
       "secret": false,
       "type": "boolean"
+    },
+    {
+      "default": 0.45,
+      "description": "Whole Frame Conf",
+      "enum": null,
+      "key": "vision.whole_frame_conf",
+      "maximum": 1.0,
+      "minimum": 0.05,
+      "secret": false,
+      "type": "number"
     }
   ],
   "schema": 1

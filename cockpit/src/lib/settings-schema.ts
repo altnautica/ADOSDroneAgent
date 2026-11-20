@@ -135,7 +135,8 @@ export interface NumberBound {
 
 export const NUMBER_BOUNDS: Record<string, NumberBound> = {
   "video.lcd_fps_cap": { min: 1, max: 60, int: true },
-  "vision.confidence_threshold": { min: 0, max: 1, step: 0.05 },
+  "vision.confidence_threshold": { min: 0.05, max: 1, step: 0.05 },
+  "vision.whole_frame_conf": { min: 0.05, max: 1, step: 0.05 },
   "video.wfb.tx_power_dbm": { min: 1, max: 30, int: true },
   "video.wfb.tx_power_max_dbm": { min: 1, max: 30, int: true },
   "video.wfb.mcs_index": { min: 0, max: 11, int: true },
@@ -364,6 +365,7 @@ export const CURATED_GROUPS: CuratedGroup[] = [
       "vision.enabled",
       "vision.backend",
       "vision.confidence_threshold",
+      "vision.whole_frame_conf",
     ],
   },
   {

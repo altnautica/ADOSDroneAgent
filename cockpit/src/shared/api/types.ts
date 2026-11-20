@@ -273,7 +273,10 @@ export interface AgentConfig {
   vision?: {
     enabled?: boolean;
     backend?: string;
+    // Least confidence kept on the crop around a designated subject; a
+    // whole-frame pass keeps those at `whole_frame_conf` and up.
     confidence_threshold?: number;
+    whole_frame_conf?: number;
     models_dir?: string;
     models_cache_max_mb?: number;
     // Detection runs on a camera only while a consumer holds a lease on it

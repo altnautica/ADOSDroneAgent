@@ -1,6 +1,7 @@
 // Vision: the on-board detection engine switch, its inference backend, the
-// confidence threshold (stored as a 0..1 fraction, edited as a percent) and
-// the model cache budget. Plain config-leaf writes.
+// confidence thresholds of the crop pass and the whole frame (stored as 0..1
+// fractions, edited as percents) and the model cache budget. Plain
+// config-leaf writes.
 
 import { useTranslation } from "react-i18next";
 
@@ -8,6 +9,7 @@ import { EmptyNote, Row } from "@/components/ui/data";
 import { SelectSettingRow, SwitchSettingRow } from "@/components/ui/setting-row";
 import {
   CACHE_BOUNDS,
+  CONFIDENCE_PCT_BOUNDS,
   VISION_BACKENDS,
   VISION_KEYS,
   confidenceToPct,
@@ -66,10 +68,20 @@ export function VisionSection() {
               summary={t("settingsMore.vision.confidenceHint")}
               value={confidenceToPct(vision.confidence_threshold ?? 0)}
               enabled={vision.confidence_threshold != null}
-              min={0}
-              max={100}
+              min={CONFIDENCE_PCT_BOUNDS.min}
+              max={CONFIDENCE_PCT_BOUNDS.max}
               format={(pct) => `${pct}%`}
               onCommit={(pct) => save(VISION_KEYS.confidence, pctToConfidence(pct))}
+            />
+            <LeafNumberRow
+              title={t("settingsMore.vision.wholeFrameConfLabel")}
+              summary={t("settingsMore.vision.wholeFrameConfHint")}
+              value={confidenceToPct(vision.whole_frame_conf ?? 0)}
+              enabled={vision.whole_frame_conf != null}
+              min={CONFIDENCE_PCT_BOUNDS.min}
+              max={CONFIDENCE_PCT_BOUNDS.max}
+              format={(pct) => `${pct}%`}
+              onCommit={(pct) => save(VISION_KEYS.wholeFrameConf, pctToConfidence(pct))}
             />
             <LeafNumberRow
               title={t("settingsMore.vision.cacheLabel")}

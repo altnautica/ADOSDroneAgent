@@ -5,8 +5,7 @@ use super::*;
 use ados_protocol::framebus::ModelKind;
 use ados_vision::yolo;
 
-/// Default detection thresholds, matching the Python sidecar's defaults.
-const ONNX_CONF_THRESHOLD: f32 = 0.25;
+/// Default non-maximum suppression overlap, matching the Python sidecar's.
 const ONNX_NMS_IOU: f32 = 0.45;
 
 /// ONNX Runtime backend. Loads `model_path` into an ORT session and runs it
@@ -148,9 +147,9 @@ impl VisionBackend for OnnxBackend {
 }
 
 impl OnnxModel {
-    /// One detector pass: `window` of the frame (`None`: all of it) resized
-    /// into the reused input tensor, run, and decoded to boxes in an
-    /// `out_w` x `out_h` image of that window.
+    /// One detector pass: `window` of the frame (`None`: all of it)
+    /// letterboxed into the reused input tensor, run, and decoded to boxes in
+    /// an `out_w` x `out_h` image of that window.
     #[allow(clippy::too_many_arguments)]
     fn detect(
         &self,
@@ -197,16 +196,17 @@ impl OnnxModel {
         let (shape, data) = value.try_extract_tensor::<f32>()?;
         let (rows, cols) = last_two_dims(shape);
 
-        let params = yolo::DecodeParams {
-            head: self.meta.head,
-            labels: &self.meta.output_classes,
-            input_w: iw,
-            input_h: ih,
-            frame_w: out_w,
-            frame_h: out_h,
-            conf_threshold: ONNX_CONF_THRESHOLD,
-            nms_iou: ONNX_NMS_IOU,
-        };
+        let params = super::detector_decode_params(
+            &self.meta,
+            w,
+            h,
+            window,
+            out_w,
+            out_h,
+            super::DETECTION_DECODE_FLOOR,
+            ONNX_NMS_IOU,
+        )
+        .ok_or_else(|| anyhow!("onnx decode: the window holds no pixel of the frame"))?;
         let found = yolo::decode(data, rows, cols, &params);
         let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f32() * 1000.0;
         if let Ok(mut s) = self.stages.lock() {

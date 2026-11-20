@@ -56,7 +56,20 @@ pub struct DetectionPolicy {
     /// dropped before tracking and publishing (`vision.max_box_area_frac`).
     /// `>= 1` keeps every box.
     pub max_box_area_frac: f32,
+    /// The least confidence a detection keeps on a crop pass around a
+    /// designated subject and on a plugin's own inference
+    /// (`vision.confidence_threshold`).
+    pub confidence_threshold: f32,
+    /// The least confidence a detection keeps on a whole-frame pass
+    /// (`vision.whole_frame_conf`): higher than the crop's, because the whole
+    /// frame holds the scenery the crop leaves out.
+    pub whole_frame_conf: f32,
 }
+
+/// Shipped `vision.confidence_threshold`.
+pub const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.25;
+/// Shipped `vision.whole_frame_conf`.
+pub const DEFAULT_WHOLE_FRAME_CONF: f32 = 0.45;
 
 impl Default for DetectionPolicy {
     /// The shipped defaults.
@@ -65,6 +78,8 @@ impl Default for DetectionPolicy {
             mode: DetectionDemandMode::OnDemand,
             designate_hold_ms: 30_000,
             max_box_area_frac: 0.5,
+            confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
+            whole_frame_conf: DEFAULT_WHOLE_FRAME_CONF,
         }
     }
 }

@@ -196,6 +196,34 @@ vision:
 }
 
 #[test]
+fn confidence_thresholds_ship_their_defaults_parse_and_clamp() {
+    let (_d0, p0) = write_tmp("vision:\n  enabled: true\n");
+    let policy = VisionConfig::load_from(&p0).detection_policy();
+    assert_eq!(
+        (policy.confidence_threshold, policy.whole_frame_conf),
+        (0.25, 0.45)
+    );
+    let (_d, p) = write_tmp(
+        "vision:\n  enabled: true\n  confidence_threshold: 0.3\n  whole_frame_conf: 0.6\n",
+    );
+    let policy = VisionConfig::load_from(&p).detection_policy();
+    assert_eq!(
+        (policy.confidence_threshold, policy.whole_frame_conf),
+        (0.3, 0.6)
+    );
+    // Below the detector's decode floor reads as the floor; above 1 as 1.
+    let (_d2, p2) = write_tmp(
+        "vision:\n  enabled: true\n  confidence_threshold: 0.0\n  whole_frame_conf: 1.5\n",
+    );
+    let policy = VisionConfig::load_from(&p2).detection_policy();
+    assert_eq!(
+        policy.confidence_threshold,
+        crate::backend::DETECTION_DECODE_FLOOR
+    );
+    assert_eq!(policy.whole_frame_conf, 1.0);
+}
+
+#[test]
 fn an_absent_detector_rate_is_ten_hz_and_an_explicit_zero_is_unpaced() {
     let (_d, p) = write_tmp("vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n");
     let c = VisionConfig::load_from(&p);
