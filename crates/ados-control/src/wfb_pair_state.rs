@@ -19,6 +19,7 @@
 
 use std::path::Path;
 
+use ados_protocol::pair_proof::{read_pair_proof_from, PAIR_PROOF_PATH};
 use ados_protocol::wfb_status::json_truthy;
 use serde_json::{json, Map, Value};
 
@@ -170,6 +171,60 @@ pub(crate) fn status(config_path: &Path, key_dir: &Path, role: &'static str) -> 
         auto_pair_enabled,
         role,
     }
+}
+
+/// The auto-pair re-arm the latch last took for the key on disk, served as
+/// `pair_rearm` on the radio status reads (`GET /api/wfb` and the ground-station
+/// `/status` `link` block):
+///
+/// `{cause, at, episodes, active}` — `cause` is `unproven` / `mis_keyed` /
+/// `forced` (null on a record written before the cause was kept), `at` the
+/// unix second of the re-arm, `episodes` how many this key has taken, and
+/// `active` true while the bind window it opened is still running.
+///
+/// `null` when the rig holds no complete key, the pair-proof record describes
+/// another key or role, or this key was never re-armed. A successful re-pair
+/// writes a new key, so the view clears itself the moment the re-pair lands.
+pub(crate) fn rearm_view(paths: &PairingPaths, role: &str) -> Value {
+    rearm_view_at(
+        Path::new(PAIR_PROOF_PATH),
+        &paths.bind_state,
+        &paths.wfb_key_dir,
+        role,
+    )
+}
+
+/// The path-injectable core of [`rearm_view`].
+pub(crate) fn rearm_view_at(proof: &Path, bind_state: &Path, key_dir: &Path, role: &str) -> Value {
+    let Some(fingerprint) = paired_key_fingerprint(key_dir, role) else {
+        return Value::Null;
+    };
+    let Some(proof) = read_pair_proof_from(proof).filter(|p| p.matches(role, &fingerprint)) else {
+        return Value::Null;
+    };
+    let Some(at) = proof.last_rearm_at else {
+        return Value::Null;
+    };
+    json!({
+        "cause": proof.last_rearm_cause,
+        "at": at,
+        "episodes": proof.rearm_episodes,
+        "active": auto_bind_running(bind_state),
+    })
+}
+
+/// Whether the bind-state sentinel reports a running bind that the auto-pair
+/// loop started. On a rig that holds a key the loop binds only when the re-arm
+/// latch opens a window, so that bind is the re-arm's.
+fn auto_bind_running(bind_state: &Path) -> bool {
+    let Some(v) = std::fs::read(bind_state)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    else {
+        return false;
+    };
+    v.get("active").and_then(Value::as_bool) == Some(true)
+        && v.get("source").and_then(Value::as_str) == Some("auto")
 }
 
 /// The `paired_at` value the snapshot reports.
@@ -473,5 +528,98 @@ mod tests {
         assert_eq!(paired_at_string(&json!(123)), Value::Null);
         assert_eq!(paired_at_string(&json!(true)), Value::Null);
         assert_eq!(paired_at_string(&Value::Null), Value::Null);
+    }
+
+    /// A ground station holding a key that worked, re-armed because its drone
+    /// is on the air with another key: the view names the cause while the
+    /// auto bind runs, and stays (inactive) once the window closes unpaired.
+    #[test]
+    fn rearm_view_names_the_cause_while_the_auto_bind_runs() {
+        use ados_protocol::pair_proof::{write_pair_proof_to, PairProof};
+        let dir = tempfile::tempdir().unwrap();
+        let key_dir = dir.path().join("wfb");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        std::fs::write(key_dir.join("rx.key"), [7u8; 64]).unwrap();
+        let fp = paired_key_fingerprint(&key_dir, "gs").unwrap();
+        let proof = dir.path().join("proof.json");
+        let sentinel = dir.path().join("bind-state.json");
+
+        // Never re-armed: nothing to show.
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
+            Value::Null
+        );
+        let mut p = PairProof::fresh("gs", &fp);
+        p.mark_proven(100);
+        write_pair_proof_to(&proof, &p).unwrap();
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
+            Value::Null
+        );
+
+        p.record_rearm(700);
+        write_pair_proof_to(&proof, &p).unwrap();
+        std::fs::write(
+            &sentinel,
+            r#"{"active":true,"source":"auto","state":"waiting_peer"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
+            json!({"cause": "mis_keyed", "at": 700, "episodes": 1, "active": true})
+        );
+
+        // An operator bind is not the re-arm's window.
+        std::fs::write(&sentinel, r#"{"active":true,"source":"operator"}"#).unwrap();
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs")["active"],
+            json!(false)
+        );
+        std::fs::write(
+            &sentinel,
+            r#"{"active":false,"source":"auto","state":"failed"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs")["active"],
+            json!(false)
+        );
+    }
+
+    /// The record belongs to one key and one role: a re-pair that wrote a new
+    /// key, or a record left by the other role, is not this key's re-arm.
+    #[test]
+    fn rearm_view_ignores_another_keys_record() {
+        use ados_protocol::pair_proof::{write_pair_proof_to, PairProof};
+        let dir = tempfile::tempdir().unwrap();
+        let key_dir = dir.path().join("wfb");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        std::fs::write(key_dir.join("rx.key"), [7u8; 64]).unwrap();
+        let fp = paired_key_fingerprint(&key_dir, "gs").unwrap();
+        let proof = dir.path().join("proof.json");
+        let sentinel = dir.path().join("bind-state.json");
+
+        let mut other = PairProof::fresh("gs", "0000000000000000");
+        other.record_rearm(5);
+        write_pair_proof_to(&proof, &other).unwrap();
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
+            Value::Null
+        );
+
+        let mut drone = PairProof::fresh("drone", &fp);
+        drone.record_rearm(5);
+        write_pair_proof_to(&proof, &drone).unwrap();
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
+            Value::Null
+        );
+
+        // No key on disk at all: an unpaired rig is not re-pairing.
+        std::fs::remove_file(key_dir.join("rx.key")).unwrap();
+        assert_eq!(
+            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
+            Value::Null
+        );
     }
 }

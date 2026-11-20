@@ -221,3 +221,29 @@ fn ground_station_card_shows_the_link_key_state() {
         "{text}"
     );
 }
+
+#[test]
+fn ground_station_re_pairing_a_mis_keyed_drone_says_so() {
+    const BANNER: &str =
+        "Ground station is re-pairing: its drone is on the air with a different key.";
+    let mut app = app_for("ground_station");
+    let gs = |rearm: Value| {
+        json!({"state": "searching", "interface": "wlan1", "profile": "ground_station",
+               "link_diag": "mis_keyed", "pair_rearm": rearm})
+    };
+    land(
+        &mut app,
+        ResourceId::Wfb,
+        gs(json!({"cause": "mis_keyed", "active": true, "at": 700, "episodes": 1})),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains(BANNER), "{text}");
+
+    land(
+        &mut app,
+        ResourceId::Wfb,
+        gs(json!({"cause": "mis_keyed", "active": false, "at": 700, "episodes": 1})),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(!text.contains(BANNER), "{text}");
+}

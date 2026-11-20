@@ -97,11 +97,25 @@ pub struct PairProof {
     /// survives a restart.
     #[serde(default)]
     pub last_rearm_at: Option<u64>,
+    /// Why the most recent re-arm opened a bind window: `unproven` (a key that
+    /// never worked), `mis_keyed` (a key that worked, its peer heard on the air
+    /// with another key) or `forced` (an operator asked). `None` before the
+    /// first re-arm, or on a record written before the cause was kept. The pair
+    /// status surfaces it so an operator sees why the rig is re-pairing.
+    #[serde(default)]
+    pub last_rearm_cause: Option<String>,
     /// An operator asked for one re-arm regardless of the latch. Self-clearing:
     /// consumed by the next arm.
     #[serde(default)]
     pub force_rearm: bool,
 }
+
+/// The bland `cause` of a re-arm: the operator asked.
+pub const REARM_CAUSE_FORCED: &str = "forced";
+/// The bland `cause` of a re-arm: a key that worked, its peer on the air re-keyed.
+pub const REARM_CAUSE_MIS_KEYED: &str = "mis_keyed";
+/// The bland `cause` of a re-arm: a key that has never once worked.
+pub const REARM_CAUSE_UNPROVEN: &str = "unproven";
 
 impl PairProof {
     /// A never-proven record for `role` + `fingerprint`.
@@ -113,6 +127,7 @@ impl PairProof {
             proven_at: None,
             rearm_episodes: 0,
             last_rearm_at: None,
+            last_rearm_cause: None,
             force_rearm: false,
         }
     }
@@ -145,10 +160,24 @@ impl PairProof {
         }
     }
 
+    /// Why a re-arm taken now opens its window. The latch arms a forced record
+    /// on the force alone, a proven key only on the mis-keyed hold and an
+    /// unproven key on its unproven hold, so the record itself names the cause.
+    pub fn rearm_cause(&self) -> &'static str {
+        if self.force_rearm {
+            REARM_CAUSE_FORCED
+        } else if self.is_proven() {
+            REARM_CAUSE_MIS_KEYED
+        } else {
+            REARM_CAUSE_UNPROVEN
+        }
+    }
+
     /// Consume one re-arm episode at `now_unix`: bump the budget, stamp the
-    /// wall-clock cooldown anchor, and clear any operator force (it is a
-    /// one-shot).
+    /// wall-clock cooldown anchor, keep the cause, and clear any operator force
+    /// (it is a one-shot).
     pub fn record_rearm(&mut self, now_unix: u64) {
+        self.last_rearm_cause = Some(self.rearm_cause().to_string());
         self.rearm_episodes = self.rearm_episodes.saturating_add(1);
         self.last_rearm_at = Some(now_unix);
         self.force_rearm = false;
@@ -308,6 +337,36 @@ mod tests {
         p.record_rearm(900);
         assert_eq!(p.rearm_episodes, 2);
         assert_eq!(p.last_rearm_at, Some(900));
+    }
+
+    #[test]
+    fn a_rearm_keeps_its_cause() {
+        let mut p = PairProof::fresh("gs", "1234");
+        assert_eq!(p.last_rearm_cause, None);
+        p.record_rearm(1);
+        assert_eq!(p.last_rearm_cause.as_deref(), Some(REARM_CAUSE_UNPROVEN));
+        p.mark_proven(2);
+        p.record_rearm(3);
+        assert_eq!(p.last_rearm_cause.as_deref(), Some(REARM_CAUSE_MIS_KEYED));
+        // The force wins over the proof, and is spent by the arm it caused.
+        p.force_rearm = true;
+        p.record_rearm(4);
+        assert_eq!(p.last_rearm_cause.as_deref(), Some(REARM_CAUSE_FORCED));
+        assert_eq!(p.rearm_cause(), REARM_CAUSE_MIS_KEYED);
+    }
+
+    #[test]
+    fn a_record_without_a_cause_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proof.json");
+        std::fs::write(
+            &path,
+            br#"{"version":1,"role":"gs","key_fingerprint":"k","last_rearm_at":9,"rearm_episodes":1}"#,
+        )
+        .unwrap();
+        let p = read_pair_proof_from(&path).unwrap();
+        assert_eq!(p.last_rearm_at, Some(9));
+        assert_eq!(p.last_rearm_cause, None);
     }
 
     #[test]

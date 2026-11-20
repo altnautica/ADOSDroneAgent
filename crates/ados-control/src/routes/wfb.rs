@@ -10,6 +10,9 @@
 //!   from the same config-seeded base block, merge the producer body over it,
 //!   re-assert the live regulatory domain, re-derive frequency/bandwidth from the
 //!   channel, and add the `bitrate_mbps` shim, so the two reads are byte-identical.
+//!   `pair_rearm` (`crate::wfb_pair_state::rearm_view`) rides on top: the
+//!   auto-pair re-arm this key last took, its cause, and whether its bind window
+//!   is still running.
 //! - **`GET /api/wfb/history`** — link-quality history for the last N seconds
 //!   (`?seconds=`, default 60, clamped 1..300), reshaped from the store's `link.*`
 //!   metric aggregate into `{samples, count}`. An unreachable store degrades to the
@@ -88,12 +91,22 @@ fn wfb_failover_path(run_dir: &Path) -> PathBuf {
 pub async fn get_wfb_status(State(state): State<AppState>) -> Json<Value> {
     let cfg = WfbStatusConfig::load(&status_config_path());
     let store = latest_wfb_status(&state).await;
-    Json(choose_wfb_status(
+    let mut body = choose_wfb_status(
         store,
         &cfg,
         &wfb_stats_path(&state.run_dir),
         now_unix_micros(),
-    ))
+    );
+    // Why the rig is re-pairing, if it is (`crate::wfb_pair_state::rearm_view`).
+    if let Some(obj) = body.as_object_mut() {
+        let paths = &state.pairing_paths;
+        let role = crate::wfb_pair_state::bind_role(paths);
+        obj.insert(
+            "pair_rearm".to_string(),
+            crate::wfb_pair_state::rearm_view(paths, role),
+        );
+    }
+    Json(body)
 }
 
 /// Pick the WFB status source.

@@ -13,6 +13,7 @@ use crate::keymap::{Command, Ctx};
 use crate::model::link::{
     feed_adapters, feed_combined, feed_lora, feed_relays, Counters, LinkHistory, Wfb,
 };
+use crate::model::spec_text::spec_text;
 use crate::poll::{ResourceId, Sub};
 use crate::ui::vehicle::chart::{line_chart, Trace};
 use crate::ui::widgets::{chip, kv, kv_text, panel, render_cells, Cell};
@@ -346,7 +347,14 @@ impl Tab for LinkTab {
             .and_then(Value::as_bool)
             == Some(true);
         let ground = Self::ground(core);
-        let mut constraints = vec![Constraint::Length(12)];
+        // A ground station re-pairing its mis-keyed drone says so across the
+        // whole tab, above the card whose diagnosis it explains.
+        let repairing = self.wfb.as_ref().is_some_and(|w| w.repairing);
+        let mut constraints = Vec::new();
+        if repairing {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Length(12));
         if ground {
             constraints.push(Constraint::Min(8));
         }
@@ -355,10 +363,20 @@ impl Tab for LinkTab {
         }
         constraints.push(Constraint::Length(0));
         let rows = Layout::vertical(constraints).split(area);
-        let top = Layout::horizontal([Constraint::Length(50), Constraint::Min(30)]).split(rows[0]);
+        let mut next = 0;
+        if repairing {
+            let line = Line::from(Span::styled(
+                spec_text("alert.gs_repairing", &[]),
+                Style::default().fg(core.theme.warning()),
+            ));
+            f.render_widget(Paragraph::new(line), rows[next]);
+            next += 1;
+        }
+        let top =
+            Layout::horizontal([Constraint::Length(50), Constraint::Min(30)]).split(rows[next]);
         self.card(f, top[0], core);
         self.trends(f, top[1], core);
-        let mut next = 1;
+        next += 1;
         if ground {
             tables::ground(f, rows[next], core, &self.counters);
             next += 1;

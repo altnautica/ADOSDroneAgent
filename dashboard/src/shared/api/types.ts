@@ -2,6 +2,8 @@
 // have no generated type yet. The setup-status types are generated from the
 // agent's response schemas into `@/shared/agent-api.generated`.
 
+import type { PairRearm } from "../hud/status-pill";
+
 export type Profile =
   | "drone"
   | "ground_station"
@@ -184,6 +186,9 @@ export interface WfbStatus {
   rssi_max?: number | null;
   profile?: string;
   bitrate_mbps?: number;
+  /** The auto-pair re-arm this key last took (cause, running window); null
+   *  when it was never re-armed or the rig holds no key. */
+  pair_rearm?: PairRearm | null;
 }
 
 // Loose shape — the agent returns a Pydantic dump with secrets redacted.

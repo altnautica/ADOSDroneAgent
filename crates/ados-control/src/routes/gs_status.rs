@@ -256,6 +256,17 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     let (recording_active, recording_filename) =
         crate::routes::gs_recording::recording_view(&crate::routes::gs_recording::recorder()).await;
 
+    // The radio link view, with why the ground station is re-pairing, if it is
+    // (`crate::wfb_pair_state::rearm_view`), beside the `link_diag` that names
+    // the fault the re-pair answers.
+    let mut link = link_view(&state.run_dir);
+    if let Some(obj) = link.as_object_mut() {
+        obj.insert(
+            "pair_rearm".to_string(),
+            crate::wfb_pair_state::rearm_view(&state.pairing_paths, "gs"),
+        );
+    }
+
     let body = json!({
         // The canonical hyphen form — the spelling `profile::current_profile_and_role_at`
         // resolves, the relay-proxy profile gate compares against
@@ -280,7 +291,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
             "battery_pct": Value::Null,
             "gps_sats": Value::Null,
         },
-        "link": link_view(&state.run_dir),
+        "link": link,
         // Whether this box transmits for its fleet or stands by while a phone
         // holds the uplink; null while the radio service is not reporting.
         "uplink": crate::routes::ground_station_uplink::uplink_view(&state.run_dir),

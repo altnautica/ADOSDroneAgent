@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import layout from "../cockpit-spec/layout.json";
 import type { BatteryHealthInput } from "./battery";
 import pillCases from "./fixtures/pill-cases.json";
-import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs, type PillInputs } from "./status-pill";
+import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, repairingMisKeyed, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs, type PairRearm, type PillInputs } from "./status-pill";
 
 function inputs(over: Partial<BaseAlertInputs> = {}): BaseAlertInputs {
   return { status: null, telemetry: null, battery: null, msSinceLive: 0, video: "live", ...over };
@@ -110,6 +110,19 @@ describe("base alerts: link, GNSS, video, uplink", () => {
       "video",
       "link",
     ]);
+  });
+
+  it("warns while the ground station re-pairs a drone on the air with a different key", () => {
+    const link = (pair_rearm: PairRearm | null) => ({ link: { pair_rearm } });
+    expect(baseAlerts(inputs({ status: link({ cause: "mis_keyed", active: true, at: 700, episodes: 1 }) }))).toEqual([
+      { id: "gs_repairing", level: "warning", title: "Ground station is re-pairing: its drone is on the air with a different key." },
+    ]);
+    // Another cause, a closed window, or no re-arm at all: nothing to say.
+    expect(baseAlerts(inputs({ status: link({ cause: "unproven", active: true }) }))).toEqual([]);
+    expect(baseAlerts(inputs({ status: link({ cause: "mis_keyed", active: false }) }))).toEqual([]);
+    expect(baseAlerts(inputs({ status: link(null) }))).toEqual([]);
+    expect(repairingMisKeyed(undefined)).toBe(false);
+    expect(alertSource("gs_repairing")).toBe("link");
   });
 });
 

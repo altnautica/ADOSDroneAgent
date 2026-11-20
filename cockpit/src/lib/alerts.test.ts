@@ -1,4 +1,4 @@
-import { BatteryLow, BatteryWarning, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
+import { BatteryLow, BatteryWarning, KeyRound, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
 import { describe, expect, it } from "vitest";
 
 import { computeAlerts, pillWiring, type AlertInputs } from "@/lib/alerts";
@@ -28,6 +28,14 @@ describe("cockpit alerts", () => {
     expect(
       computeAlerts(inputs({ telemetry: { battery: { voltage: 15, current: null, remaining: 18, temperature: null } } }))[0],
     ).toMatchObject({ id: "batt_low", icon: BatteryLow });
+  });
+
+  it("names the re-pair instead of asking for one while the ground station re-pairs a mis-keyed drone", () => {
+    const status = (pair_rearm: unknown) => ({ link: { link_diag: "mis_keyed", pair_rearm } }) as AlertInputs["status"];
+    expect(computeAlerts(inputs({ status: status({ cause: "mis_keyed", active: true }) })).map((a) => [a.id, a.icon])).toEqual([
+      ["gs_repairing", KeyRound],
+    ]);
+    expect(computeAlerts(inputs({ status: status(null) })).map((a) => a.id)).toEqual(["rf"]);
   });
 });
 

@@ -89,6 +89,10 @@ pub struct Wfb {
     pub fec_failed: Option<i64>,
     pub link_diag: Option<String>,
     pub ground: bool,
+    /// A ground station re-pairing because its drone is on the air with a
+    /// different key (`pair_rearm` running with cause `mis_keyed`): the
+    /// cockpit spec's `gs_repairing` alert.
+    pub repairing: bool,
 }
 
 impl Wfb {
@@ -119,8 +123,19 @@ impl Wfb {
             fec_failed: i(v, "fec_failed"),
             link_diag: s(v, "link_diag"),
             ground: v.get("profile").and_then(Value::as_str) == Some("ground_station"),
+            repairing: v.get("profile").and_then(Value::as_str) == Some("ground_station")
+                && repairing_mis_keyed(v.get("pair_rearm")),
         }
     }
+}
+
+/// A re-pair is running because the peer is on the air with a different key,
+/// as `web-shared/src/hud/status-pill.ts` `repairingMisKeyed` reads it.
+fn repairing_mis_keyed(rearm: Option<&Value>) -> bool {
+    rearm.is_some_and(|r| {
+        r.get("active").and_then(Value::as_bool) == Some(true)
+            && r.get("cause").and_then(Value::as_str) == Some("mis_keyed")
+    })
 }
 
 /// The 2 s trend rings.
@@ -263,6 +278,26 @@ mod tests {
         assert_eq!(w.chipset.as_deref(), Some("RTL8812AU"));
         assert_eq!(w.driver, None);
         assert_eq!(w.mcs_index, None);
+    }
+
+    #[test]
+    fn wfb_reads_a_ground_station_re_pairing_a_mis_keyed_drone() {
+        let read = |profile: &str, rearm: Value| {
+            Wfb::from_value(&json!({"state": "searching", "profile": profile, "pair_rearm": rearm}))
+                .repairing
+        };
+        let mis_keyed = json!({"cause": "mis_keyed", "active": true, "at": 700, "episodes": 1});
+        assert!(read("ground_station", mis_keyed.clone()));
+        assert!(!read("drone", mis_keyed));
+        assert!(!read(
+            "ground_station",
+            json!({"cause": "mis_keyed", "active": false})
+        ));
+        assert!(!read(
+            "ground_station",
+            json!({"cause": "unproven", "active": true})
+        ));
+        assert!(!read("ground_station", Value::Null));
     }
 
     #[test]

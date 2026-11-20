@@ -52,4 +52,15 @@ describe("buildBanners", () => {
       buildBanners({ agentUnreachable: false, profile: "ground_station", fcConnected: false, fcReachable: false }),
     ).toEqual([]);
   });
+
+  it("says a ground station is re-pairing a drone on the air with a different key", () => {
+    const base = { agentUnreachable: false, fcConnected: null, fcReachable: null };
+    const misKeyed = { cause: "mis_keyed", active: true, at: 700, episodes: 1 };
+    expect(buildBanners({ ...base, profile: "ground_station", pairRearm: misKeyed })).toEqual([
+      { id: "gs-repairing", severity: "warn", message: "Ground station is re-pairing: its drone is on the air with a different key." },
+    ]);
+    expect(buildBanners({ ...base, profile: "ground_station", pairRearm: { ...misKeyed, active: false } })).toEqual([]);
+    expect(buildBanners({ ...base, profile: "ground_station", pairRearm: { ...misKeyed, cause: "unproven" } })).toEqual([]);
+    expect(buildBanners({ ...base, profile: "drone", pairRearm: misKeyed })).toEqual([]);
+  });
 });

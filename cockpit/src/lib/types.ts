@@ -4,6 +4,7 @@
 // send as null are typed nullable; unknown extras are tolerated.
 
 import type { UplinkWire } from "@/shared/api/uplink-handover";
+import type { PairRearm } from "@/shared/hud/status-pill";
 
 /** The WFB radio link view (the `link` block of the GS status composite). */
 export interface LinkView {
@@ -30,6 +31,9 @@ export interface LinkView {
   packets_all?: number | null;
   /** Decrypt / session failures (wrong key or wrong link_id / channel_id). */
   decrypt_errors?: number | null;
+  /** The auto-pair re-arm this ground station's key last took (cause, running
+   *  window); null when it was never re-armed. Absent on older agents. */
+  pair_rearm?: PairRearm | null;
 }
 
 /** The distributed-RX role block. */

@@ -3,7 +3,7 @@
 // verdict, each with its icon.
 
 import type { LucideIcon } from "lucide-react";
-import { BatteryLow, BatteryWarning, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
+import { BatteryLow, BatteryWarning, KeyRound, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
 
 import { linkDiagView } from "@/lib/link-diag";
 import { preflightFailing, type PreflightCheck } from "@/shared/hud/preflight";
@@ -29,12 +29,17 @@ const ICONS: Readonly<Record<string, LucideIcon>> = {
   gps_no_3d: Satellite,
   video_frozen: VideoOff,
   uplink: WifiOff,
+  gs_repairing: KeyRound,
 };
 
 export function computeAlerts(i: AlertInputs): CockpitAlert[] {
   const out: CockpitAlert[] = baseAlerts(i).map((a) => ({ ...a, icon: ICONS[a.id] ?? BatteryWarning }));
   const rf = linkDiagView(i.status?.link?.link_diag);
-  if (rf?.actionable) {
+  // While the ground station is already re-pairing the mis-keyed drone, its
+  // "re-pair the drone" hint asks for what is under way: the re-pair alert
+  // speaks for the key mismatch instead.
+  const repairing = out.some((a) => a.id === "gs_repairing");
+  if (rf?.actionable && !(repairing && i.status?.link?.link_diag === "mis_keyed")) {
     out.push({ id: "rf", level: "warning", title: rf.title, detail: rf.hint, icon: rf.icon });
   }
   return sortAlerts(out);

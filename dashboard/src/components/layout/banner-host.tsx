@@ -4,6 +4,7 @@ import { useLocation } from "react-router-dom";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useSnapshot } from "@/hooks/use-snapshot";
+import { useWfb } from "@/hooks/use-wfb";
 import { buildBanners } from "@/shared/api/banners";
 import { cn } from "@/lib/utils";
 import { RestartBanner } from "@/components/layout/restart-banner";
@@ -22,12 +23,15 @@ export function BannerHost() {
   const restarting = useUiStore((s) => s.restartPending !== null);
   const onDroneHome = profile === "drone" && pathname === "/";
   const snapshot = useSnapshot({ intervalMs: BANNER_SNAPSHOT_MS, enabled: onDroneHome });
+  // A ground station re-pairing its drone says so on every page.
+  const wfb = useWfb({ enabled: profile === "ground_station" });
 
   const banners = buildBanners({
     agentUnreachable: heartbeat.isError && !restarting,
     profile,
     fcConnected: onDroneHome && snapshot.isSuccess ? (snapshot.data.fc?.connected ?? null) : null,
     fcReachable: heartbeat.data?.fcReachable,
+    pairRearm: wfb.data?.pair_rearm ?? null,
   });
 
   return (

@@ -3,6 +3,8 @@
 import i18n from "../i18n";
 
 import type { Severity } from "../format";
+import { repairingMisKeyed, type PairRearm } from "../hud/status-pill";
+import { specText } from "../hud/spec-text";
 import type { Profile } from "./types";
 
 export interface Banner {
@@ -20,6 +22,8 @@ export interface BannerInputs {
   fcConnected: boolean | null;
   /** Heartbeat `fcReachable` (covers MSP flight controllers too). */
   fcReachable: boolean | null | undefined;
+  /** `GET /api/wfb` `pair_rearm` on a ground station, or null when unread. */
+  pairRearm?: PairRearm | null;
 }
 
 export function buildBanners({
@@ -27,6 +31,7 @@ export function buildBanners({
   profile,
   fcConnected,
   fcReachable,
+  pairRearm,
 }: BannerInputs): Banner[] {
   const banners: Banner[] = [];
 
@@ -45,6 +50,15 @@ export function buildBanners({
       id: "fc-disconnected",
       severity: "warn",
       message: i18n.t("layout.banners.fcDisconnected"),
+    });
+  }
+
+  // The cockpit spec's `gs_repairing` alert, worded once for every surface.
+  if (profile === "ground_station" && repairingMisKeyed(pairRearm)) {
+    banners.push({
+      id: "gs-repairing",
+      severity: "warn",
+      message: specText("alert.gs_repairing"),
     });
   }
 
