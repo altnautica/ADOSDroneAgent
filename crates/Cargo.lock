@@ -160,7 +160,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.23.1",
- "blake2",
  "bytes",
  "getrandom 0.4.3",
  "hex",
@@ -655,6 +654,7 @@ name = "ados-protocol"
 version = "0.124.6"
 dependencies = [
  "base64 0.23.1",
+ "blake2",
  "bytes",
  "getrandom 0.4.3",
  "hex",
@@ -665,6 +665,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "rustls",
+ "schemars",
  "serde",
  "serde_json",
  "serde_norway",

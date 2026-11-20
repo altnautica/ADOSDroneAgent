@@ -141,7 +141,7 @@ pub async fn get_pairing_info(
 
     // Radio-pair signal: the same predicate `GET /api/wfb/pair` answers from —
     // this role's own key file, exactly 64 bytes, with a readable fingerprint.
-    let radio_paired = crate::wfb_pair_state::paired_key_fingerprint(
+    let radio_paired = ados_protocol::pair_proof::role_key_fingerprint(
         &paths.wfb_key_dir,
         crate::wfb_pair_state::bind_role_for(&profile),
     )

@@ -45,6 +45,12 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
+# blake2b-8 over a WFB key's public half: the key fingerprint the pair-proof
+# record is keyed on (`pair_proof::key_fingerprint`).
+blake2 = { workspace = true }
+# JSON Schema derives for the types a schema-checked payload embeds (the cloud
+# heartbeat's `pair_rearm`), behind the `schema` feature.
+schemars = { workspace = true, optional = true }
 thiserror = { workspace = true }
 getrandom = { workspace = true }
 tokio = { workspace = true }
@@ -92,3 +98,6 @@ tracing-layer = ["dep:tracing-subscriber"]
 # The process-default rustls crypto provider (`crypto::ensure_crypto_provider`)
 # for the crates that make TLS connections.
 tls = ["dep:rustls"]
+# `schemars::JsonSchema` on the shared status types a schema-checked payload
+# carries (`pair_proof::PairRearmView`).
+schema = ["dep:schemars"]

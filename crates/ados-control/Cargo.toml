@@ -107,9 +107,6 @@ getrandom = { workspace = true }
 # URL-safe base64 (no padding) for the API key body, mirroring Python
 # `secrets.token_urlsafe`.
 base64 = { workspace = true }
-# blake2b-8 over the WFB pair public-key half rendered as the 16-hex fingerprint
-# the pair-status read reports, matching the radio manager's fingerprint exactly.
-blake2 = { workspace = true }
 hex = { workspace = true }
 # sha256 for the signing-enroll key fingerprint (the first 8 hex of sha256(key)
 # the route returns; the raw key never leaves the route, only this digest does).

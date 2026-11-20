@@ -17,7 +17,7 @@ path = "src/bin/ados-cloud.rs"
 # Wire primitives + the frozen plugin-supervisor contract the command
 # dispatcher will drive (path deps; the supervisor consumer wiring lands with
 # the command-dispatcher task).
-ados-protocol = { workspace = true, features = ["tracing-layer", "tls"] }
+ados-protocol = { workspace = true, features = ["tracing-layer", "tls", "schema"] }
 # The canonical perception-tier decision (pick_tier) so the cloud beacon reports
 # the same tier the drone runs on, not a second implementation.
 ados-offload = { workspace = true }

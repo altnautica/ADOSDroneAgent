@@ -48,7 +48,7 @@ use ados_protocol::paths;
 use ados_protocol::sidecar::{file_age, read_fresh_at};
 
 use crate::state::AppState;
-use crate::wfb_pair_state::read_public_fingerprint;
+use ados_protocol::pair_proof::key_fingerprint;
 
 mod link;
 mod network;
@@ -335,7 +335,7 @@ fn pair_identity(state: &AppState) -> (Value, Value) {
         .unwrap_or(false);
     let mut fingerprint = Value::Null;
     if paired {
-        match read_public_fingerprint(&key_path) {
+        match key_fingerprint(&key_path) {
             Some(fp) => fingerprint = json!(fp),
             None => paired = false,
         }

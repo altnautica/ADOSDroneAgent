@@ -31,6 +31,26 @@ fn root_keys_are_camel_case_and_radio_is_snake_case() {
 }
 
 #[test]
+fn the_radio_block_carries_the_re_pair_only_when_there_is_one() {
+    // Never re-armed: the key is omitted, so the receiver keeps its optional
+    // column absent rather than reading a fabricated state.
+    let v = minimal_payload().to_value();
+    assert!(!v["radio"].as_object().unwrap().contains_key("pair_rearm"));
+
+    let mut p = minimal_payload();
+    p.radio.pair_rearm = Some(ados_protocol::pair_proof::PairRearmView {
+        cause: Some("mis_keyed".to_string()),
+        at: 700,
+        episodes: 1,
+        active: true,
+    });
+    assert_eq!(
+        p.to_value()["radio"]["pair_rearm"],
+        serde_json::json!({"cause": "mis_keyed", "at": 700, "episodes": 1, "active": true})
+    );
+}
+
+#[test]
 fn adapter_injection_verdict_defaults_to_unknown_never_false() {
     // With no radio view there is no injection verdict. BOTH the nested
     // block key and the hoisted root key read JSON null — never a fabricated

@@ -661,6 +661,41 @@
         "seenAtUnix"
       ]
     },
+    "PairRearmView": {
+      "description": "The auto-pair re-arm the latch last took for the key on disk, as the status\nsurfaces serve it (`pair_rearm`).",
+      "type": "object",
+      "properties": {
+        "active": {
+          "description": "The bind window the re-arm opened is still running.",
+          "type": "boolean"
+        },
+        "at": {
+          "description": "Unix seconds of the re-arm.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cause": {
+          "description": "`unproven`, `mis_keyed` or `forced`; null on a record written before\nthe cause was kept.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "episodes": {
+          "description": "How many re-arms this key has taken.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cause",
+        "at",
+        "episodes",
+        "active"
+      ]
+    },
     "Peripheral": {
       "description": "One attached-peripheral entry (the SPI LCD today). The `peripherals[]` array\nis omitted entirely when no peripheral is provisioned, so the model carries\nthe entry shape and the payload holds `Option<Vec<Peripheral>>`. The keys are\nsnake_case in the Python `collect_attached_display` output (it is consumed by\nthe infer-capabilities pipeline, which reads snake_case), so this struct\nkeeps snake_case field names with no rename. `extra` is an open map.",
       "type": "object",
@@ -857,6 +892,17 @@
           ],
           "format": "int64",
           "default": null
+        },
+        "pair_rearm": {
+          "description": "The auto-pair re-arm this rig's key last took (`cause`, `at`, `episodes`,\n`active`), from the same projection the LAN radio routes serve\n(`ados_protocol::pair_proof::rearm_view`). Not part of the radio's stats\nsidecar: the heartbeat loop sets it each tick, live radio view or not,\nsince the radio may be down for the very bind the re-arm opened. Omitted\nwhen the key on disk was never re-armed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PairRearmView"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "paired": {
           "type": "boolean",

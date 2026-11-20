@@ -54,7 +54,7 @@ use ados_groundlink::{FleetRegistry, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
 
 use crate::routes::gs_cmd::groundlink_cmd_roundtrip;
 use crate::state::AppState;
-use crate::wfb_pair_state::read_public_fingerprint;
+use ados_protocol::pair_proof::key_fingerprint;
 
 mod pair;
 
@@ -125,7 +125,7 @@ fn gs_pair_status() -> GsPairStatus {
     let mut paired = std::fs::metadata(&key)
         .map(|m| m.is_file() && m.len() == WFB_KEY_FILE_BYTES)
         .unwrap_or(false);
-    if paired && read_public_fingerprint(&key).is_none() {
+    if paired && key_fingerprint(&key).is_none() {
         // A 64-byte file whose fingerprint cannot be read reverts paired to false,
         // matching the Python `except (OSError, ValueError): paired = False`.
         paired = false;

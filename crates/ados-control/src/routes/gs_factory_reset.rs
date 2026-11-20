@@ -41,7 +41,7 @@ use ados_protocol::pairing_posture::CallerClass;
 
 use crate::routes::gs_cmd::groundlink_cmd_roundtrip;
 use crate::state::{AppState, PairingPaths};
-use crate::wfb_pair_state::read_public_fingerprint;
+use ados_protocol::pair_proof::key_fingerprint;
 
 /// The confirmation token on a station that holds no fleet key.
 const UNPAIRED_CONFIRM_TOKEN: &str = "factory-reset-unpaired";
@@ -163,7 +163,7 @@ impl ResetTargets {
             .map(|m| m.is_file() && m.len() == WFB_KEY_FILE_BYTES)
             .unwrap_or(false);
         installed
-            .then(|| read_public_fingerprint(&self.rx_key))
+            .then(|| key_fingerprint(&self.rx_key))
             .flatten()
             .unwrap_or_else(|| UNPAIRED_CONFIRM_TOKEN.to_owned())
     }

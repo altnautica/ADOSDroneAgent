@@ -184,6 +184,13 @@ pub fn build_payload(
             obj.insert(k.clone(), v.clone());
         }
     }
+    // The re-pair state comes from the pair-proof record, not the radio view,
+    // so a producer's whole `radio` block must not drop it.
+    if let Some(rearm) = native.pointer("/radio/pair_rearm") {
+        if let Some(radio) = obj.get_mut("radio").and_then(|r| r.as_object_mut()) {
+            radio.insert("pair_rearm".to_string(), rearm.clone());
+        }
+    }
 
     // Re-assert the required base identity so a producer cannot drop or diverge
     // it (the wire contract demands these three).
@@ -339,8 +346,14 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         // The live block when the radio's stats sidecar is fresh, else the honest
         // absent skeleton. This was hardcoded absent, so a cloud-relayed node
         // rendered an empty link card forever while the same data sat on disk and
-        // the LAN routes read it fine.
-        radio: read_radio_sidecar().unwrap_or_else(RadioBlock::absent),
+        // the LAN routes read it fine. The re-pair state rides on either: the
+        // radio may be down for the very bind a re-arm opened.
+        radio: RadioBlock {
+            pair_rearm: ados_protocol::pair_proof::rearm_view(&crate::daemon::pair_role_for(
+                base.profile.as_deref().unwrap_or_default(),
+            )),
+            ..read_radio_sidecar().unwrap_or_else(RadioBlock::absent)
+        },
         crsf,
         wfb_adapter_chipset: None,
         // The per-adapter stable-MAC verdicts, from the same projection the LAN

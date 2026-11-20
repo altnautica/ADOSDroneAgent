@@ -89,6 +89,14 @@ pub struct RadioBlock {
     pub tx_bytes_per_s: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart_count: Option<i64>,
+    /// The auto-pair re-arm this rig's key last took (`cause`, `at`, `episodes`,
+    /// `active`), from the same projection the LAN radio routes serve
+    /// (`ados_protocol::pair_proof::rearm_view`). Not part of the radio's stats
+    /// sidecar: the heartbeat loop sets it each tick, live radio view or not,
+    /// since the radio may be down for the very bind the re-arm opened. Omitted
+    /// when the key on disk was never re-armed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pair_rearm: Option<ados_protocol::pair_proof::PairRearmView>,
 }
 
 impl RadioBlock {
@@ -146,6 +154,7 @@ impl RadioBlock {
             tx_zombie_kills: None,
             tx_bytes_per_s: None,
             restart_count: None,
+            pair_rearm: None,
         }
     }
 }

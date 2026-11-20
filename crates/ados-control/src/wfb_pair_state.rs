@@ -6,9 +6,10 @@
 //!
 //! - [`bind_role`] resolves the bind-protocol role (`"drone"` / `"gs"`) off the
 //!   agent profile;
-//! - [`paired_key_fingerprint`] is the single paired predicate: the role's own
-//!   key file (`tx.key` on a drone, `rx.key` on a ground station), exactly 64
-//!   bytes, with a readable blake2b-8 fingerprint;
+//! - [`role_key_fingerprint`] (`ados_protocol::pair_proof`) is the single
+//!   paired predicate: the role's own key file (`tx.key` on a drone, `rx.key`
+//!   on a ground station), exactly 64 bytes, with a readable blake2b-8
+//!   fingerprint;
 //! - [`status`] is the full snapshot: that predicate plus the peer, `paired_at`
 //!   and the auto-pair flag off the config, with the legacy `ground_station.*`
 //!   fallback on the GS profile.
@@ -19,47 +20,11 @@
 
 use std::path::Path;
 
-use ados_protocol::pair_proof::{read_pair_proof_from, PAIR_PROOF_PATH};
+use ados_protocol::pair_proof::{rearm_view_at, role_key_fingerprint, PAIR_PROOF_PATH};
 use ados_protocol::wfb_status::json_truthy;
 use serde_json::{json, Map, Value};
 
 use crate::state::PairingPaths;
-
-/// The exact size of a complete WFB-ng key file. Mirrors
-/// `WFB_KEY_FILE_BYTES` in the Python key manager.
-const WFB_KEY_FILE_BYTES: usize = 64;
-
-/// The byte offset of the peer-public half (the second 32 bytes) inside a
-/// 64-byte WFB key file. Mirrors `WFB_PUBLIC_HALF_OFFSET`.
-const WFB_PUBLIC_HALF_OFFSET: usize = 32;
-
-/// The 16-hex-char public-key fingerprint of a WFB key file, or `None` when the
-/// file is absent or not exactly 64 bytes. The fingerprint is
-/// `blake2b(public_half, digest_size=8)` rendered as lowercase hex.
-pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{consts::U8, Digest};
-    use blake2::Blake2b;
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return None;
-    }
-    Some(hex::encode(Blake2b::<U8>::digest(
-        &data[WFB_PUBLIC_HALF_OFFSET..],
-    )))
-}
-
-/// The one radio-pair predicate: the role's own key file — `tx.key` on a drone,
-/// `rx.key` on a ground station — is exactly 64 bytes and yields a fingerprint.
-/// Returns that fingerprint when paired. A truncated key, or a key left over
-/// from the other role, is not a pairing.
-pub(crate) fn paired_key_fingerprint(key_dir: &Path, bind_role: &str) -> Option<String> {
-    let name = if bind_role == "drone" {
-        "tx.key"
-    } else {
-        "rx.key"
-    };
-    read_public_fingerprint(&key_dir.join(name))
-}
 
 /// The bind-protocol role for a resolved (hyphen-wire) profile: `"drone"` only
 /// for the drone profile, `"gs"` otherwise.
@@ -119,7 +84,7 @@ impl PairStatus {
 
 /// Compute the pair-status snapshot for `role` off the config and key dir.
 pub(crate) fn status(config_path: &Path, key_dir: &Path, role: &'static str) -> PairStatus {
-    let fingerprint = paired_key_fingerprint(key_dir, role);
+    let fingerprint = role_key_fingerprint(key_dir, role);
     let paired = fingerprint.is_some();
     let fingerprint = fingerprint.map_or(Value::Null, Value::String);
 
@@ -173,18 +138,12 @@ pub(crate) fn status(config_path: &Path, key_dir: &Path, role: &'static str) -> 
     }
 }
 
-/// The auto-pair re-arm the latch last took for the key on disk, served as
-/// `pair_rearm` on the radio status reads (`GET /api/wfb` and the ground-station
-/// `/status` `link` block):
-///
-/// `{cause, at, episodes, active}` — `cause` is `unproven` / `mis_keyed` /
-/// `forced` (null on a record written before the cause was kept), `at` the
-/// unix second of the re-arm, `episodes` how many this key has taken, and
-/// `active` true while the bind window it opened is still running.
-///
-/// `null` when the rig holds no complete key, the pair-proof record describes
-/// another key or role, or this key was never re-armed. A successful re-pair
-/// writes a new key, so the view clears itself the moment the re-pair lands.
+/// The auto-pair re-arm the latch last took for the key on disk
+/// (`ados_protocol::pair_proof::rearm_view_at`, the view the cloud heartbeat
+/// carries too), served as `pair_rearm` on the radio status reads (`GET
+/// /api/wfb` and the ground-station `/status` `link` block):
+/// `{cause, at, episodes, active}`, or `null` when this key was never
+/// re-armed.
 pub(crate) fn rearm_view(paths: &PairingPaths, role: &str) -> Value {
     rearm_view_at(
         Path::new(PAIR_PROOF_PATH),
@@ -192,39 +151,8 @@ pub(crate) fn rearm_view(paths: &PairingPaths, role: &str) -> Value {
         &paths.wfb_key_dir,
         role,
     )
-}
-
-/// The path-injectable core of [`rearm_view`].
-pub(crate) fn rearm_view_at(proof: &Path, bind_state: &Path, key_dir: &Path, role: &str) -> Value {
-    let Some(fingerprint) = paired_key_fingerprint(key_dir, role) else {
-        return Value::Null;
-    };
-    let Some(proof) = read_pair_proof_from(proof).filter(|p| p.matches(role, &fingerprint)) else {
-        return Value::Null;
-    };
-    let Some(at) = proof.last_rearm_at else {
-        return Value::Null;
-    };
-    json!({
-        "cause": proof.last_rearm_cause,
-        "at": at,
-        "episodes": proof.rearm_episodes,
-        "active": auto_bind_running(bind_state),
-    })
-}
-
-/// Whether the bind-state sentinel reports a running bind that the auto-pair
-/// loop started. On a rig that holds a key the loop binds only when the re-arm
-/// latch opens a window, so that bind is the re-arm's.
-fn auto_bind_running(bind_state: &Path) -> bool {
-    let Some(v) = std::fs::read(bind_state)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-    else {
-        return false;
-    };
-    v.get("active").and_then(Value::as_bool) == Some(true)
-        && v.get("source").and_then(Value::as_str) == Some("auto")
+    .and_then(|v| serde_json::to_value(v).ok())
+    .unwrap_or(Value::Null)
 }
 
 /// The `paired_at` value the snapshot reports.
@@ -371,51 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_is_16_hex_of_blake2b_8_over_the_public_half() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tx.key");
-        let mut bytes = vec![0u8; 64];
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        std::fs::write(&path, &bytes).unwrap();
-
-        // Python `hashlib.blake2b(bytes(range(32, 64)), digest_size=8)`.
-        let expected = "e054fa6440b441f9";
-        let got = read_public_fingerprint(&path).unwrap();
-        assert_eq!(got, expected);
-        assert_eq!(got.len(), 16);
-    }
-
-    #[test]
-    fn fingerprint_rejects_a_wrong_size_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rx.key");
-        std::fs::write(&path, vec![0u8; 32]).unwrap();
-        assert_eq!(read_public_fingerprint(&path), None);
-        assert_eq!(
-            read_public_fingerprint(&dir.path().join("absent.key")),
-            None
-        );
-    }
-
-    /// A truncated key, or a stale key of the other role, is not a radio pairing.
-    #[test]
-    fn paired_is_the_roles_own_complete_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let key_dir = dir.path().join("wfb");
-        std::fs::create_dir_all(&key_dir).unwrap();
-        assert!(paired_key_fingerprint(&key_dir, "drone").is_none());
-        std::fs::write(key_dir.join("tx.key"), b"x").unwrap();
-        assert!(paired_key_fingerprint(&key_dir, "drone").is_none());
-        std::fs::write(key_dir.join("rx.key"), [7u8; 64]).unwrap();
-        assert!(paired_key_fingerprint(&key_dir, "drone").is_none());
-        assert!(paired_key_fingerprint(&key_dir, "gs").is_some());
-        std::fs::write(key_dir.join("tx.key"), [7u8; 64]).unwrap();
-        assert!(paired_key_fingerprint(&key_dir, "drone").is_some());
-    }
-
-    #[test]
     fn role_is_drone_only_for_the_drone_profile() {
         let dir = tempfile::tempdir().unwrap();
         let paths = test_paths(dir.path());
@@ -493,7 +376,10 @@ mod tests {
         assert!(st.paired);
         assert_eq!(
             st.fingerprint,
-            json!(read_public_fingerprint(&paths.wfb_key_dir.join("tx.key")).unwrap())
+            json!(
+                ados_protocol::pair_proof::key_fingerprint(&paths.wfb_key_dir.join("tx.key"))
+                    .unwrap()
+            )
         );
     }
 
@@ -528,98 +414,5 @@ mod tests {
         assert_eq!(paired_at_string(&json!(123)), Value::Null);
         assert_eq!(paired_at_string(&json!(true)), Value::Null);
         assert_eq!(paired_at_string(&Value::Null), Value::Null);
-    }
-
-    /// A ground station holding a key that worked, re-armed because its drone
-    /// is on the air with another key: the view names the cause while the
-    /// auto bind runs, and stays (inactive) once the window closes unpaired.
-    #[test]
-    fn rearm_view_names_the_cause_while_the_auto_bind_runs() {
-        use ados_protocol::pair_proof::{write_pair_proof_to, PairProof};
-        let dir = tempfile::tempdir().unwrap();
-        let key_dir = dir.path().join("wfb");
-        std::fs::create_dir_all(&key_dir).unwrap();
-        std::fs::write(key_dir.join("rx.key"), [7u8; 64]).unwrap();
-        let fp = paired_key_fingerprint(&key_dir, "gs").unwrap();
-        let proof = dir.path().join("proof.json");
-        let sentinel = dir.path().join("bind-state.json");
-
-        // Never re-armed: nothing to show.
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
-            Value::Null
-        );
-        let mut p = PairProof::fresh("gs", &fp);
-        p.mark_proven(100);
-        write_pair_proof_to(&proof, &p).unwrap();
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
-            Value::Null
-        );
-
-        p.record_rearm(700);
-        write_pair_proof_to(&proof, &p).unwrap();
-        std::fs::write(
-            &sentinel,
-            r#"{"active":true,"source":"auto","state":"waiting_peer"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
-            json!({"cause": "mis_keyed", "at": 700, "episodes": 1, "active": true})
-        );
-
-        // An operator bind is not the re-arm's window.
-        std::fs::write(&sentinel, r#"{"active":true,"source":"operator"}"#).unwrap();
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs")["active"],
-            json!(false)
-        );
-        std::fs::write(
-            &sentinel,
-            r#"{"active":false,"source":"auto","state":"failed"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs")["active"],
-            json!(false)
-        );
-    }
-
-    /// The record belongs to one key and one role: a re-pair that wrote a new
-    /// key, or a record left by the other role, is not this key's re-arm.
-    #[test]
-    fn rearm_view_ignores_another_keys_record() {
-        use ados_protocol::pair_proof::{write_pair_proof_to, PairProof};
-        let dir = tempfile::tempdir().unwrap();
-        let key_dir = dir.path().join("wfb");
-        std::fs::create_dir_all(&key_dir).unwrap();
-        std::fs::write(key_dir.join("rx.key"), [7u8; 64]).unwrap();
-        let fp = paired_key_fingerprint(&key_dir, "gs").unwrap();
-        let proof = dir.path().join("proof.json");
-        let sentinel = dir.path().join("bind-state.json");
-
-        let mut other = PairProof::fresh("gs", "0000000000000000");
-        other.record_rearm(5);
-        write_pair_proof_to(&proof, &other).unwrap();
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
-            Value::Null
-        );
-
-        let mut drone = PairProof::fresh("drone", &fp);
-        drone.record_rearm(5);
-        write_pair_proof_to(&proof, &drone).unwrap();
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
-            Value::Null
-        );
-
-        // No key on disk at all: an unpaired rig is not re-pairing.
-        std::fs::remove_file(key_dir.join("rx.key")).unwrap();
-        assert_eq!(
-            rearm_view_at(&proof, &sentinel, &key_dir, "gs"),
-            Value::Null
-        );
     }
 }

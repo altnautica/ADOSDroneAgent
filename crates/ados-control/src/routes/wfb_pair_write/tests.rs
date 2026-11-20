@@ -1,5 +1,5 @@
 use super::*;
-use crate::wfb_pair_state::read_public_fingerprint;
+use ados_protocol::pair_proof::key_fingerprint;
 
 /// Read a response body as JSON.
 async fn body_json(resp: Response) -> Value {
@@ -18,7 +18,7 @@ fn write_key(dir: &Path, name: &str) -> String {
         *b = i as u8;
     }
     std::fs::write(&path, &bytes).unwrap();
-    read_public_fingerprint(&path).unwrap()
+    key_fingerprint(&path).unwrap()
 }
 
 // ── the disable path (enabled=false): always persists ─────────────────────

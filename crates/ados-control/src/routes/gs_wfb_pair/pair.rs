@@ -357,7 +357,7 @@ pub async fn post_wfb_pair(
         body.insert("role".to_string(), json!("gs"));
         body.insert(
             "fingerprint".to_string(),
-            json!(read_public_fingerprint(&rx_key_path())),
+            json!(key_fingerprint(&rx_key_path())),
         );
         body.insert("paired_at".to_string(), Value::Null);
     }
