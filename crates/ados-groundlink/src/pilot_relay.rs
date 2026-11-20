@@ -187,6 +187,9 @@ mod tests {
         let radio = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let out = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         out.connect(radio.local_addr().unwrap()).await.unwrap();
+        // Accept only the relay's egress: another test's stray datagram to a
+        // reused ephemeral port must not land here.
+        radio.connect(out.local_addr().unwrap()).await.unwrap();
         let relay = PilotRelay::new(Some(AuxEgress::connected_for_test(out)));
         let shutdown = Shutdown::new();
         {
