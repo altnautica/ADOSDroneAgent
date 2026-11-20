@@ -116,7 +116,11 @@ impl Barrier {
             return None;
         }
         let flags = self.flags();
-        if let Some(last) = self.last.as_mut().filter(|(a, to)| a.seq == tick.seq && *to == from) {
+        if let Some(last) = self
+            .last
+            .as_mut()
+            .filter(|(a, to)| a.seq == tick.seq && *to == from)
+        {
             last.0.flags = flags;
             return Some(*last);
         }

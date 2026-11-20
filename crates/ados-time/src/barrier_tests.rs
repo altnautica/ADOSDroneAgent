@@ -132,7 +132,10 @@ fn the_start_flags_follow_the_gates() {
     );
     // Every gate must be ready.
     assert_eq!(
-        start_flags([DONE_GATE | DONE_ATTACHED | DONE_READY, DONE_GATE | DONE_ATTACHED]),
+        start_flags([
+            DONE_GATE | DONE_ATTACHED | DONE_READY,
+            DONE_GATE | DONE_ATTACHED
+        ]),
         ACK_ATTACHED
     );
 }
@@ -145,14 +148,25 @@ fn a_held_start_sees_the_router_attach_and_hear_its_fc_on_the_resent_tick() {
     let router = b.join().unwrap();
     b.done(pilot, 2_000 * MS, 0, now);
     // The router lane is done but its FC target is closed (a detached agent).
-    assert!(b.done(router, 2_000 * MS, DONE_GATE, now).is_none(), "no tick waits yet");
+    assert!(
+        b.done(router, 2_000 * MS, DONE_GATE, now).is_none(),
+        "no tick waits yet"
+    );
     let (ack, _) = b.tick(&tick(1, 1_000), sim(), now).unwrap();
     assert_eq!(ack.flags, 0);
     // Configured: its FC transport opens while the simulator holds the tick.
     b.done(router, 2_000 * MS, DONE_GATE | DONE_ATTACHED, now);
-    assert_eq!(b.tick(&tick(1, 1_000), sim(), now).unwrap().0.flags, ACK_ATTACHED);
+    assert_eq!(
+        b.tick(&tick(1, 1_000), sim(), now).unwrap().0.flags,
+        ACK_ATTACHED
+    );
     // The FC's HEARTBEAT heard: the next ACK says ready.
-    b.done(router, 2_000 * MS, DONE_GATE | DONE_ATTACHED | DONE_READY, now);
+    b.done(
+        router,
+        2_000 * MS,
+        DONE_GATE | DONE_ATTACHED | DONE_READY,
+        now,
+    );
     let (ack, _) = b.tick(&tick(2, 1_020), sim(), now).unwrap();
     assert_eq!(ack.flags, ACK_ATTACHED | ACK_READY);
     // The router restarting drops the gate: not ready until it is back.

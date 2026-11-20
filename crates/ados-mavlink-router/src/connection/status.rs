@@ -65,10 +65,11 @@ impl FcConnection {
     }
 
     pub async fn heartbeat_age_s(&self) -> Option<f64> {
-        self.last_heartbeat_at
-            .lock()
-            .await
-            .map(|t| self.liveness_now().saturating_duration_since(t).as_secs_f64())
+        self.last_heartbeat_at.lock().await.map(|t| {
+            self.liveness_now()
+                .saturating_duration_since(t)
+                .as_secs_f64()
+        })
     }
     /// Whether a fresh HEARTBEAT has decoded within [`HEARTBEAT_TIMEOUT`] (on
     /// [`Self::liveness_now`]'s clock). The

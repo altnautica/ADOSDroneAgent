@@ -649,7 +649,11 @@ async fn the_start_gate_says_attached_on_an_open_transport_and_ready_once_the_fc
     let (mut s, _) = barrier.accept().await.unwrap();
     let c = test_connection();
     c.report_start_gate(&lane).await;
-    assert_eq!(next_done_flags(&mut s).await, DONE_GATE, "detached: neither");
+    assert_eq!(
+        next_done_flags(&mut s).await,
+        DONE_GATE,
+        "detached: neither"
+    );
     c.connected.store(true, Ordering::Relaxed);
     c.report_start_gate(&lane).await;
     assert_eq!(

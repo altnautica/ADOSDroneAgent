@@ -463,6 +463,12 @@ async fn on_the_sim_clock_a_held_run_keeps_the_fc_alive_and_a_sim_silence_drops_
     advance(&feed, 2, 5_000 + 3_900);
     assert!(c.connected().await);
     advance(&feed, 3, 5_000 + 4_100);
-    assert!(!c.connected().await, "4.1 s of sim time without a HEARTBEAT");
-    assert!(c.heartbeat_age_s().await.is_some_and(|a| (4.0..4.2).contains(&a)));
+    assert!(
+        !c.connected().await,
+        "4.1 s of sim time without a HEARTBEAT"
+    );
+    assert!(c
+        .heartbeat_age_s()
+        .await
+        .is_some_and(|a| (4.0..4.2).contains(&a)));
 }
