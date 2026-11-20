@@ -2,7 +2,7 @@
 
 use ados_protocol::framebus::{BoundingBox, LockState};
 
-use super::scoring::{reported, Decision};
+use super::scoring::{reported, similar_height, Decision};
 use super::{Candidate, SingleObjectTracker, Track, TrackState, TrackUpdate};
 
 /// The longest miss coast, in steps, that keeps a pending re-confirm: a
@@ -11,6 +11,16 @@ use super::{Candidate, SingleObjectTracker, Track, TrackState, TrackUpdate};
 /// association. A crop pass that misses one batch in two then still locks
 /// the subject; a longer miss, or an appearance-ambiguity hold, voids it.
 const RECONFIRM_MISS_STEPS: f32 = 3.0;
+
+/// The most a box completing a re-confirm may differ in height from the
+/// track's predicted box, either way. In recorded forest follows the boxes
+/// that re-locked the walker were within 1.32 of the prediction (a crop
+/// pass draws a box up to a quarter shorter than the whole frame's), and
+/// the false locks were a trunk and the walker in one box (1.59) and a box
+/// cut at the walker's waist (1.71). A lock is what a follow ranges on, and
+/// a box of the wrong height puts the subject metres off, so such a box is
+/// taken as a miss: it neither completes the re-confirm nor moves the track.
+const RECONFIRM_MAX_HEIGHT_RATIO: f32 = 1.5;
 
 impl SingleObjectTracker {
     /// A track exists: predict `dt` steps, score in-gate candidates by the
@@ -41,7 +51,21 @@ impl SingleObjectTracker {
             self.score_in_gate(&track, &predicted, gate, candidates)
         };
 
-        match self.decide(&track, &scored) {
+        // While a re-confirm is pending, a box of another height than the
+        // track predicts (`RECONFIRM_MAX_HEIGHT_RATIO`) is not the subject:
+        // it is not measured, and the track coasts as on a miss.
+        let decision = match self.decide(&track, &scored) {
+            Decision::Associate { idx, .. }
+                if track.reconfirming
+                    && scored[idx].cand.detection.bbox.as_ref().is_some_and(|b| {
+                        !similar_height(&predicted, b, RECONFIRM_MAX_HEIGHT_RATIO)
+                    }) =>
+            {
+                Decision::None
+            }
+            d => d,
+        };
+        match decision {
             Decision::Associate { idx, blend } => {
                 let cand = scored[idx].cand;
                 let det = &cand.detection;

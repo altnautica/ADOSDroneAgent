@@ -1390,3 +1390,58 @@ fn a_neighbour_on_the_reconfirm_frame_never_seeds_a_designation() {
     let b = u.detection.unwrap().bbox.unwrap();
     assert!(b.x > 115.0, "held on the subject, not the neighbour: {b:?}");
 }
+
+/// A walker about 10 m off among trees: locked, missed for two batches (crop
+/// passes that find nothing), then found by a whole-frame pass beside two
+/// larger, faint boxes of trunk and walker together (the re-confirm frame).
+/// The next pass holds only a box that also holds the walker: trunk and
+/// walker in one box beside it, 1.6x the walker's height, or a box cut at
+/// the walker's waist. A follow ranges on a locked box, and these put the
+/// walker metres off: neither locks nor moves the track (a miss), and the
+/// walker's own box on the pass after locks it where the walker is.
+#[test]
+fn a_reconfirm_never_completes_on_a_box_of_another_height() {
+    let walker = || cand(person([626.0, 300.0, 43.0, 117.0], 0.77), 0);
+    let reconfirming = || {
+        let mut t = SingleObjectTracker::new(TrackerConfig::default());
+        let id = t
+            .designate(&person([627.0, 298.0, 41.0, 114.0], 0.89))
+            .unwrap();
+        let mut locked = false;
+        for _ in 0..4 {
+            locked = lock(&t.update_with_appearance(&[walker()])) == Some(LockState::Locked);
+        }
+        assert!(locked);
+        t.update_with_appearance(&[]);
+        t.update_with_appearance(&[]);
+        let u = t.update_with_appearance(&[
+            walker(),
+            cand(person([571.0, 262.0, 77.0, 252.0], 0.32), 5),
+            cand(person([658.0, 290.0, 95.0, 221.0], 0.29), 6),
+        ]);
+        assert_eq!(lock(&u), Some(LockState::Uncertain), "the re-confirm frame");
+        (t, id)
+    };
+
+    for other in [[700.0, 282.0, 70.0, 186.0], [636.0, 300.0, 49.0, 66.0]] {
+        let (mut t, id) = reconfirming();
+        let u = t.update_with_appearance(&[cand(person(other, 0.30), 0)]);
+        assert_eq!(u.track_id, Some(id));
+        assert!(!u.measured, "measured {other:?}");
+        assert_eq!(lock(&u), Some(LockState::Uncertain), "locked on {other:?}");
+        let u = t.update_with_appearance(&[walker()]);
+        assert!(u.measured);
+        assert_eq!(lock(&u), Some(LockState::Locked), "after {other:?}");
+        let b = u.detection.and_then(|d| d.bbox).unwrap();
+        let on_walker = iou(&b, walker().detection.bbox.as_ref().unwrap());
+        assert!(
+            on_walker > 0.8,
+            "the track stayed on the walker: {b:?} (IoU {on_walker})"
+        );
+    }
+
+    // The walker's own box completes the re-confirm at once.
+    let (mut t, _) = reconfirming();
+    let u = t.update_with_appearance(&[walker()]);
+    assert_eq!(lock(&u), Some(LockState::Locked));
+}

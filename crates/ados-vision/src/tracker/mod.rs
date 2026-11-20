@@ -135,8 +135,10 @@ struct Track {
     /// for one transitional re-confirm frame instead of snapping to Confirmed;
     /// the next association clears this and confirms, when it follows at once
     /// or, if clean (the unambiguous appearance winner), after a miss coast of
-    /// up to `RECONFIRM_MISS_STEPS`. This makes a handover laundered during an
-    /// occlusion surface doubt for at least one frame.
+    /// up to `RECONFIRM_MISS_STEPS`; a box of another height than predicted
+    /// (`RECONFIRM_MAX_HEIGHT_RATIO`) counts as a miss meanwhile.
+    /// This makes a handover laundered during an occlusion surface doubt for
+    /// at least one frame.
     reconfirming: bool,
     /// True while the current coast is an APPEARANCE-AMBIGUITY hold (two
     /// indistinguishable candidates) rather than a genuine miss. An ambiguity
