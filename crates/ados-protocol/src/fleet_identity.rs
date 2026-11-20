@@ -9,7 +9,7 @@
 //! Read-only: nothing here issues or negotiates a slot. The ground station
 //! allocates slots at pair time and the value arrives in config.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The ground station's slot. Drones take 1..=N.
 pub const SLOT_GROUND: u8 = 0;
@@ -54,6 +54,39 @@ pub fn local_slot() -> Option<u8> {
     local_slot_from(&crate::aux_ports::config_path())
 }
 
+/// The run-directory record of a fleet address written to config that the
+/// radio has still to restart onto (ados-control's `radio_fleet_apply` writes
+/// it). The radio reads the address only when it comes up, so a delivered slot
+/// takes effect on a radio restart, which waits for the vehicle to disarm.
+pub const RADIO_FLEET_APPLY_JSON: &str = "radio-fleet-apply.json";
+
+/// The fleet-address restart as the status surfaces serve it (the full status
+/// `radioFleetApply`, the cloud heartbeat's `radio.fleet_apply`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FleetApplyView {
+    /// `pending` (recorded, not yet judged), `deferred_armed` (waiting for the
+    /// vehicle to disarm), `applied`, or `restart_failed` (retried).
+    pub outcome: String,
+    pub fleet_id: Option<u16>,
+    pub fleet_slot: Option<u8>,
+    /// Unix milliseconds the address was written.
+    pub since_ms: Option<u64>,
+    /// Unix milliseconds of the last outcome change.
+    pub at_ms: Option<u64>,
+}
+
+/// The record at `path`, `None` when absent, unreadable or without an outcome.
+pub fn fleet_apply_view_at(path: &std::path::Path) -> Option<FleetApplyView> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// [`fleet_apply_view_at`] on `<run dir>/radio-fleet-apply.json`.
+pub fn fleet_apply_view() -> Option<FleetApplyView> {
+    fleet_apply_view_at(&crate::paths::run_dir().join(RADIO_FLEET_APPLY_JSON))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +126,29 @@ mod tests {
             local_slot_from(std::path::Path::new("/nonexistent/ados/config.yaml")),
             None
         );
+    }
+
+    #[test]
+    fn the_fleet_apply_record_reads_as_its_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RADIO_FLEET_APPLY_JSON);
+        assert_eq!(fleet_apply_view_at(&path), None);
+        std::fs::write(
+            &path,
+            br#"{"version":1,"outcome":"deferred_armed","fleet_id":7,"fleet_slot":3,"unit":"ados-wfb-drone","since_ms":10,"at_ms":20}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            fleet_apply_view_at(&path),
+            Some(FleetApplyView {
+                outcome: "deferred_armed".into(),
+                fleet_id: Some(7),
+                fleet_slot: Some(3),
+                since_ms: Some(10),
+                at_ms: Some(20),
+            })
+        );
+        std::fs::write(&path, b"{}").unwrap();
+        assert_eq!(fleet_apply_view_at(&path), None);
     }
 }

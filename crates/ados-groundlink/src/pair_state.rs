@@ -9,9 +9,8 @@
 //!
 //! The wire format wfb-ng requires is the 64-byte libsodium crypto_box keypair
 //! file (`gs.key` from `wfb_keygen`); the GS persists those bytes at
-//! `/etc/ados/wfb/rx.key`. The public-key fingerprint is `blake2b(pub_half,
-//! digest_size=8)` rendered as 16 lowercase hex chars, byte-identical to the
-//! radio manager's `read_public_fingerprint`.
+//! `/etc/ados/wfb/rx.key`. Its fingerprint is the shared
+//! `ados_protocol::pair_proof::key_fingerprint`.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -25,10 +24,6 @@ use crate::paths::{CONFIG_YAML, SETUP_COMPLETE_PATH};
 
 /// The 64-byte wfb-ng key file size. Mirrors `key_mgr.WFB_KEY_FILE_BYTES`.
 const WFB_KEY_FILE_BYTES: usize = 64;
-
-/// The offset of the peer-public half within a 64-byte key file. Mirrors
-/// `key_mgr.WFB_PUBLIC_HALF_OFFSET`.
-const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 
 /// A pair-key install failure, mapped to the FastAPI error codes by the caller.
 #[derive(Debug)]
@@ -95,23 +90,6 @@ fn pair_paths() -> PairPaths {
     }
 }
 
-/// Compute the 16-hex public-key fingerprint of a key file, or `None` when the
-/// file is absent / not exactly 64 bytes. The peer-public half is the second 32
-/// bytes; the fingerprint is `blake2b(pub, digest_size=8)` rendered as 16
-/// lowercase hex chars. Byte-identical to `key_mgr.read_public_fingerprint` and
-/// the native `wfb` read route's fingerprint.
-fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{consts::U8, Digest};
-    use blake2::Blake2b;
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return None;
-    }
-    Some(hex::encode(Blake2b::<U8>::digest(
-        &data[WFB_PUBLIC_HALF_OFFSET..],
-    )))
-}
-
 /// The current UTC timestamp in ISO 8601 form (seconds resolution), matching the
 /// Python `datetime.now(UTC).isoformat(timespec="seconds")`.
 fn iso_now() -> String {
@@ -165,7 +143,7 @@ async fn apply_keypair_gs_at(
 
     let rx = paths.rx_key();
     atomic_write(&rx, &blob, 0o600).map_err(PairError::Io)?;
-    let fingerprint = read_public_fingerprint(&rx);
+    let fingerprint = ados_protocol::pair_proof::key_fingerprint(&rx);
     let paired_at = iso_now();
 
     // A real pair: disarm auto_pair regardless of whether a peer device-id was
@@ -396,29 +374,6 @@ mod tests {
 
     fn b64_64_bytes(byte: u8) -> String {
         base64::engine::general_purpose::STANDARD.encode([byte; 64])
-    }
-
-    #[test]
-    fn fingerprint_matches_the_blake2b8_of_the_public_half() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = dir.path().join("rx.key");
-        // First 32 bytes = secret half, last 32 = public half. The fingerprint is
-        // over the public half only.
-        let mut bytes = vec![1u8; 32];
-        bytes.extend(std::iter::repeat_n(7u8, 32));
-        std::fs::write(&key, &bytes).unwrap();
-        let fp = read_public_fingerprint(&key).unwrap();
-        // 16 lowercase hex chars.
-        assert_eq!(fp.len(), 16);
-        assert!(fp
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        // Python `hashlib.blake2b(bytes([7] * 32), digest_size=8)` over the
-        // public half (bytes 32..64 = all 7s).
-        assert_eq!(fp, "0574f1613c2bca8f");
-        // A short file has no fingerprint.
-        std::fs::write(&key, b"short").unwrap();
-        assert!(read_public_fingerprint(&key).is_none());
     }
 
     #[tokio::test]

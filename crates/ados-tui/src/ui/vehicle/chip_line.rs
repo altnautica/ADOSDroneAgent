@@ -77,6 +77,7 @@ impl VehicleTab {
                 .live_at
                 .map(|at| core.now.saturating_duration_since(at).as_millis() as u64),
             armed_at_last_live: self.armed_at_live,
+            fleet_apply: core.dash().and_then(|d| d.fleet_apply.as_ref()),
         });
         // The arm state: the pilot's when it publishes, else the FC's.
         let armed = pilot.map_or(tel.and_then(|t| t.armed), |p| p.armed);

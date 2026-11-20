@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import layout from "../cockpit-spec/layout.json";
 import type { BatteryHealthInput } from "./battery";
 import pillCases from "./fixtures/pill-cases.json";
-import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, repairingMisKeyed, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs, type PairRearm, type PillInputs } from "./status-pill";
+import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, radioFleetApplyOf, repairingMisKeyed, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs, type PairRearm, type PillInputs } from "./status-pill";
 
 function inputs(over: Partial<BaseAlertInputs> = {}): BaseAlertInputs {
   return { status: null, telemetry: null, battery: null, msSinceLive: 0, video: "live", ...over };
@@ -123,6 +123,33 @@ describe("base alerts: link, GNSS, video, uplink", () => {
     expect(baseAlerts(inputs({ status: link(null) }))).toEqual([]);
     expect(repairingMisKeyed(undefined)).toBe(false);
     expect(alertSource("gs_repairing")).toBe("link");
+  });
+
+  it("says a delivered fleet slot waits for landing, and when the restart onto it fails", () => {
+    const fleet = (outcome: string, fleetSlot: number | null = 3) => ({ radioFleetApply: { outcome, fleetId: 7, fleetSlot } });
+    const pending = baseAlerts(inputs({ status: fleet("deferred_armed") }));
+    expect(pending).toEqual([{ id: "fleet_slot_pending", level: "advisory", title: "New fleet slot 3 applies after landing." }]);
+    // An advisory: never in the pill.
+    expect(pillAlerts({ ...none, alerts: pending })).toEqual([]);
+    expect(baseAlerts(inputs({ status: fleet("restart_failed") }))).toEqual([
+      { id: "fleet_slot_failed", level: "warning", title: "Radio restart onto fleet slot 3 failed. Retrying." },
+    ]);
+    // Applied, not yet judged, or no slot to name: nothing to say.
+    expect(baseAlerts(inputs({ status: fleet("applied") }))).toEqual([]);
+    expect(baseAlerts(inputs({ status: fleet("pending") }))).toEqual([]);
+    expect(baseAlerts(inputs({ status: fleet("deferred_armed", null) }))).toEqual([]);
+    expect(alertSource("fleet_slot_failed")).toBe("link");
+  });
+
+  it("reads the full status's fleet-apply block, typed fields only", () => {
+    expect(radioFleetApplyOf({ outcome: "deferred_armed", fleetId: 7, fleetSlot: 3, unit: "ados-wfb-drone" })).toEqual({
+      outcome: "deferred_armed",
+      fleetId: 7,
+      fleetSlot: 3,
+    });
+    expect(radioFleetApplyOf({ outcome: 1, fleetSlot: "3" })).toEqual({ outcome: null, fleetId: null, fleetSlot: null });
+    expect(radioFleetApplyOf(null)).toBeNull();
+    expect(radioFleetApplyOf([])).toBeNull();
   });
 });
 

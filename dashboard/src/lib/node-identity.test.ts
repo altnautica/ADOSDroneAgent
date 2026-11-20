@@ -63,4 +63,17 @@ describe("buildBanners", () => {
     expect(buildBanners({ ...base, profile: "ground_station", pairRearm: { ...misKeyed, cause: "unproven" } })).toEqual([]);
     expect(buildBanners({ ...base, profile: "drone", pairRearm: misKeyed })).toEqual([]);
   });
+
+  it("says a drone's delivered fleet slot applies after landing, and when the restart onto it fails", () => {
+    const base = { agentUnreachable: false, fcConnected: null, fcReachable: null };
+    const fleet = (outcome: string) => ({ outcome, fleetId: 7, fleetSlot: 3 });
+    expect(buildBanners({ ...base, profile: "drone", fleetApply: fleet("deferred_armed") })).toEqual([
+      { id: "fleet-slot-pending", severity: "warn", message: "New fleet slot 3 applies after landing." },
+    ]);
+    expect(buildBanners({ ...base, profile: "drone", fleetApply: fleet("restart_failed") })).toEqual([
+      { id: "fleet-slot-failed", severity: "err", message: "Radio restart onto fleet slot 3 failed. Retrying." },
+    ]);
+    expect(buildBanners({ ...base, profile: "drone", fleetApply: fleet("applied") })).toEqual([]);
+    expect(buildBanners({ ...base, profile: "ground_station", fleetApply: fleet("deferred_armed") })).toEqual([]);
+  });
 });

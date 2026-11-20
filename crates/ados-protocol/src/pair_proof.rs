@@ -287,26 +287,30 @@ pub fn take_local_retry_request_at(path: &Path) -> bool {
 /// The WFB key directory (`tx.key` on a drone, `rx.key` on a ground station).
 pub const WFB_KEY_DIR: &str = "/etc/ados/wfb";
 
-/// The exact size of a complete WFB-ng key file.
+/// The exact size of a complete WFB-ng key file. Mirrors
+/// `WFB_KEY_FILE_BYTES` in the Python key manager.
 const WFB_KEY_FILE_BYTES: usize = 64;
 
 /// The byte offset of the peer-public half (the second 32 bytes) inside a
-/// 64-byte WFB key file.
+/// 64-byte WFB key file. Mirrors `WFB_PUBLIC_HALF_OFFSET`.
 const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 
 /// The 16-hex-char public-key fingerprint of a WFB key file, or `None` when the
 /// file is absent or not exactly 64 bytes: `blake2b(public_half,
-/// digest_size=8)` as lowercase hex.
+/// digest_size=8)` as lowercase hex. The one fingerprint reader: the radio,
+/// ground link, supervisor and status routes all read keys through it.
+/// Mirrors `read_public_fingerprint` in the Python key manager.
 pub fn key_fingerprint(path: &Path) -> Option<String> {
+    blob_fingerprint(&std::fs::read(path).ok()?)
+}
+
+/// [`key_fingerprint`] of an in-memory key file: `None` unless `blob` is
+/// exactly a 64-byte key.
+pub fn blob_fingerprint(blob: &[u8]) -> Option<String> {
     use blake2::digest::{consts::U8, Digest};
     use blake2::Blake2b;
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return None;
-    }
-    Some(hex::encode(Blake2b::<U8>::digest(
-        &data[WFB_PUBLIC_HALF_OFFSET..],
-    )))
+    (blob.len() == WFB_KEY_FILE_BYTES)
+        .then(|| hex::encode(Blake2b::<U8>::digest(&blob[WFB_PUBLIC_HALF_OFFSET..])))
 }
 
 /// The radio-pair predicate: the bind role's own key file (`tx.key` for
@@ -580,14 +584,25 @@ mod tests {
         assert!(!take_local_retry_request_at(&path));
     }
 
+    /// The vectors the radio's, ground link's and supervisor's own readers were
+    /// pinned to before they were folded into this one, so every caller reads
+    /// the same fingerprint it always did, from the file and from a blob alike.
     #[test]
     fn fingerprint_is_16_hex_of_blake2b_8_over_the_public_half() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tx.key");
-        let bytes: Vec<u8> = (0u8..64).collect();
-        std::fs::write(&path, &bytes).unwrap();
         // Python `hashlib.blake2b(bytes(range(32, 64)), digest_size=8)`.
-        assert_eq!(key_fingerprint(&path).as_deref(), Some("e054fa6440b441f9"));
+        let ranged: Vec<u8> = (0u8..64).collect();
+        // Python `hashlib.blake2b(bytes([7] * 32), digest_size=8)`.
+        let mut sevens = vec![1u8; 32];
+        sevens.extend([7u8; 32]);
+        for (bytes, want) in [(ranged, "e054fa6440b441f9"), (sevens, "0574f1613c2bca8f")] {
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(key_fingerprint(&path).as_deref(), Some(want));
+            assert_eq!(blob_fingerprint(&bytes).as_deref(), Some(want));
+        }
+        assert_eq!(blob_fingerprint(&[0u8; 63]), None);
+        assert_eq!(blob_fingerprint(&[0u8; 65]), None);
     }
 
     #[test]

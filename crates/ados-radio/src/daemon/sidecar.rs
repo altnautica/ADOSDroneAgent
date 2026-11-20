@@ -157,27 +157,6 @@ pub(crate) fn write_adapters_sidecar(adapters: &[crate::adapter::WifiAdapterInfo
     let _ = write_sidecar(&run_path("wfb-adapters.json"), &v);
 }
 
-/// Compute the 16-hex-char public-key fingerprint of the drone TX key, or `None`
-/// when the key is absent or not exactly 64 bytes. The peer-public half is the
-/// second 32 bytes of the WFB key file; the fingerprint is `blake2b(pub,
-/// digest_size=8)` rendered as 16 lowercase hex chars. Both rigs of a pair
-/// compute the same value from their respective key files, so heartbeat
-/// cross-checks reduce to a string compare. Byte-identical to
-/// `key_mgr.read_public_fingerprint`.
-pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{consts::U8, Digest};
-    use blake2::Blake2b;
-    const WFB_KEY_FILE_BYTES: usize = 64;
-    const WFB_PUBLIC_HALF_OFFSET: usize = 32;
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return None;
-    }
-    Some(hex::encode(Blake2b::<U8>::digest(
-        &data[WFB_PUBLIC_HALF_OFFSET..],
-    )))
-}
-
 /// Build the `wfb-stats.json` Contract E body (the full schema the REST handler
 /// at `api/routes/wfb.py` merges over its base, so the GCS/LCD/dashboard radio
 /// panel renders correctly). The link-quality fields (rssi/snr/packets/loss/
@@ -224,7 +203,7 @@ pub(crate) fn build_stats_value(
     let adapter_usb_degraded = adapter.and_then(|a| a.usb_speed_mbps.map(|_| a.usb_degraded));
     // Pair identity: the fingerprint + paired flag come from the TX key on disk,
     // the peer id / paired-at / auto-pair flag from the persisted config block.
-    let fingerprint = read_public_fingerprint(Path::new(WFB_TX_KEY));
+    let fingerprint = ados_protocol::pair_proof::key_fingerprint(Path::new(WFB_TX_KEY));
     let paired = fingerprint.is_some();
     // A real return-signal measurement requires a decoded packet. Without one
     // the signal-strength fields are the default sentinel (rssi -100), not a

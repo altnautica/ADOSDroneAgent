@@ -3,7 +3,7 @@
 import i18n from "../i18n";
 
 import type { Severity } from "../format";
-import { repairingMisKeyed, type PairRearm } from "../hud/status-pill";
+import { fleetSlotAlert, repairingMisKeyed, type PairRearm, type RadioFleetApply } from "../hud/status-pill";
 import { specText } from "../hud/spec-text";
 import type { Profile } from "./types";
 
@@ -24,6 +24,8 @@ export interface BannerInputs {
   fcReachable: boolean | null | undefined;
   /** `GET /api/wfb` `pair_rearm` on a ground station, or null when unread. */
   pairRearm?: PairRearm | null;
+  /** `GET /api/status/full` `radioFleetApply` on a drone, or null when unread. */
+  fleetApply?: RadioFleetApply | null;
 }
 
 export function buildBanners({
@@ -32,6 +34,7 @@ export function buildBanners({
   fcConnected,
   fcReachable,
   pairRearm,
+  fleetApply,
 }: BannerInputs): Banner[] {
   const banners: Banner[] = [];
 
@@ -59,6 +62,17 @@ export function buildBanners({
       id: "gs-repairing",
       severity: "warn",
       message: specText("alert.gs_repairing"),
+    });
+  }
+
+  // A delivered fleet slot waiting for the vehicle to land, or a radio
+  // restart onto it failing: the cockpit spec's fleet slot alerts.
+  const fleetSlot = profile === "drone" ? fleetSlotAlert(fleetApply) : null;
+  if (fleetSlot) {
+    banners.push({
+      id: fleetSlot.id === "fleet_slot_failed" ? "fleet-slot-failed" : "fleet-slot-pending",
+      severity: fleetSlot.level === "warning" ? "err" : "warn",
+      message: fleetSlot.title,
     });
   }
 

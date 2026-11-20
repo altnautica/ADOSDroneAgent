@@ -1,5 +1,5 @@
-//! WFB key-apply + persisted pair-state, plus the key fingerprint that
-//! `wfb/key_mgr.py` also computes.
+//! WFB key-apply + persisted pair-state. The key fingerprint is the shared
+//! `ados_protocol::pair_proof` reader.
 //!
 //! Parity-critical, called once at `RESTARTING_SERVICES`:
 //!   1. validate the inbound blob is exactly 64 bytes (libsodium crypto_box);
@@ -36,8 +36,6 @@ pub use cameras::{apply_video_cameras, persist_video_cameras, CamerasPersist, OP
 
 /// libsodium crypto_box key-file size: 32-byte secret + 32-byte peer-public.
 pub const WFB_KEY_FILE_BYTES: usize = 64;
-/// Offset of the peer-public half used for the fingerprint.
-pub const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 
 /// The fleet addressing a bind assigns, persisted alongside the pair state.
 ///
@@ -75,28 +73,18 @@ pub fn validate_blob(blob: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// blake2b-8 fingerprint (16 lowercase hex chars) of the peer-public half.
-/// Both rigs of a pair compute the same value, so a heartbeat cross-check is a
-/// string compare. Mirrors `read_public_fingerprint`.
+/// The key file's fingerprint (`ados_protocol::pair_proof::blob_fingerprint`),
+/// with the reason when there is none: the bind stages report it. Mirrors
+/// `read_public_fingerprint` in the Python key manager, which raises with it.
 pub fn read_public_fingerprint(path: &Path) -> Result<String, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
-    blob_fingerprint(&data).ok_or_else(|| {
+    ados_protocol::pair_proof::blob_fingerprint(&data).ok_or_else(|| {
         format!(
             "key file at {} is {} bytes, expected {WFB_KEY_FILE_BYTES}",
             path.display(),
             data.len()
         )
     })
-}
-
-/// The fingerprint of an in-memory key file, `None` unless it is exactly a
-/// 64-byte key. Same value [`read_public_fingerprint`] gives for the file.
-pub fn blob_fingerprint(blob: &[u8]) -> Option<String> {
-    use blake2::digest::{consts::U8, Digest};
-    use blake2::Blake2b;
-
-    (blob.len() == WFB_KEY_FILE_BYTES)
-        .then(|| hex::encode(Blake2b::<U8>::digest(&blob[WFB_PUBLIC_HALF_OFFSET..])))
 }
 
 /// Load the config mapping for a WRITE, distinguishing an absent file (a fresh

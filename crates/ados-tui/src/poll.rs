@@ -354,6 +354,7 @@ impl AgentView {
                 if let Some(full) = &result.status_full {
                     dash.merge_services(full);
                     dash.merge_telemetry(full);
+                    dash.merge_fleet_apply(full);
                 }
                 dash.merge_profile(&result.profile);
                 self.history.record(&dash);

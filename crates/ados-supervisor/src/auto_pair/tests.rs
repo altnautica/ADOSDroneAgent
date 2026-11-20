@@ -34,6 +34,10 @@ fn should_attempt_gate() {
     assert!(!should_attempt(true, true)); // already paired
 }
 
+// The loop reads its role's key through the shared reader; these pin the
+// completeness and identity contract the latch relies on.
+use ados_protocol::pair_proof::key_fingerprint;
+
 #[test]
 fn key_completeness_rejects_half_written_key() {
     // A complete 64-byte key counts as paired; a short (half-written, e.g.
@@ -42,18 +46,18 @@ fn key_completeness_rejects_half_written_key() {
     let dir = tempfile::tempdir().unwrap();
     let good = dir.path().join("drone.key");
     std::fs::write(&good, [7u8; 64]).unwrap();
-    assert!(key_fingerprint_at(&good).is_some());
+    assert!(key_fingerprint(&good).is_some());
 
     let half = dir.path().join("half.key");
     std::fs::write(&half, [7u8; 32]).unwrap(); // truncated write
-    assert!(key_fingerprint_at(&half).is_none());
+    assert!(key_fingerprint(&half).is_none());
 
     let empty = dir.path().join("empty.key");
     std::fs::write(&empty, []).unwrap();
-    assert!(key_fingerprint_at(&empty).is_none());
+    assert!(key_fingerprint(&empty).is_none());
 
     // A path that does not exist is not paired.
-    assert!(key_fingerprint_at(&dir.path().join("missing.key")).is_none());
+    assert!(key_fingerprint(&dir.path().join("missing.key")).is_none());
 }
 
 #[test]
@@ -66,9 +70,9 @@ fn the_fingerprint_is_stable_and_distinguishes_two_keys() {
     let b = dir.path().join("b.key");
     std::fs::write(&a, [3u8; 64]).unwrap();
     std::fs::write(&b, [4u8; 64]).unwrap();
-    let fa = key_fingerprint_at(&a).unwrap();
-    assert_eq!(Some(&fa), key_fingerprint_at(&a).as_ref());
-    assert_ne!(Some(fa), key_fingerprint_at(&b));
+    let fa = key_fingerprint(&a).unwrap();
+    assert_eq!(Some(&fa), key_fingerprint(&a).as_ref());
+    assert_ne!(Some(fa), key_fingerprint(&b));
 }
 
 #[test]

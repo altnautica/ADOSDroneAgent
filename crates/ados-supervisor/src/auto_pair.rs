@@ -198,21 +198,15 @@ fn read_armed() -> bool {
 /// key.
 ///
 /// This answers BOTH questions the loop asks about the key, from one read.
-/// `Some` means paired: `read_public_fingerprint` succeeds only on a file that
-/// is exactly 64 bytes (the libsodium crypto_box size) with a hashable
-/// peer-public half, so a half-written key (power loss mid-bind, a truncated
-/// copy) reads as unpaired and the rig re-runs its own auto-bind instead of
-/// skipping forever on a torn file. And the value itself is the identity the
-/// re-arm latch keys its proof record on, so the two can never disagree about
-/// which key is on disk.
+/// `Some` means paired: the shared reader
+/// (`ados_protocol::pair_proof::key_fingerprint`) answers only for a file that
+/// is exactly 64 bytes (the libsodium crypto_box size), so a half-written key
+/// (power loss mid-bind, a truncated copy) reads as unpaired and the rig re-runs
+/// its own auto-bind instead of skipping forever on a torn file. And the value
+/// itself is the identity the re-arm latch keys its proof record on, so the two
+/// can never disagree about which key is on disk.
 fn key_fingerprint(role: BindRole) -> Option<String> {
-    key_fingerprint_at(Path::new(role.key_path()))
-}
-
-/// [`key_fingerprint`] against an explicit path, so the completeness contract is
-/// unit-testable against a temp file without a real role key path.
-fn key_fingerprint_at(path: &Path) -> Option<String> {
-    crate::bind::keys::read_public_fingerprint(path).ok()
+    ados_protocol::pair_proof::key_fingerprint(Path::new(role.key_path()))
 }
 
 /// Wall-clock seconds, for the latch's reboot-surviving cooldown anchor.

@@ -184,11 +184,13 @@ pub fn build_payload(
             obj.insert(k.clone(), v.clone());
         }
     }
-    // The re-pair state comes from the pair-proof record, not the radio view,
-    // so a producer's whole `radio` block must not drop it.
-    if let Some(rearm) = native.pointer("/radio/pair_rearm") {
-        if let Some(radio) = obj.get_mut("radio").and_then(|r| r.as_object_mut()) {
-            radio.insert("pair_rearm".to_string(), rearm.clone());
+    // The re-pair and fleet-address states come from their own records, not
+    // the radio view, so a producer's whole `radio` block must not drop them.
+    for key in ["pair_rearm", "fleet_apply"] {
+        if let Some(value) = native.get("radio").and_then(|r| r.get(key)) {
+            if let Some(radio) = obj.get_mut("radio").and_then(|r| r.as_object_mut()) {
+                radio.insert(key.to_string(), value.clone());
+            }
         }
     }
 
@@ -352,6 +354,9 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
             pair_rearm: ados_protocol::pair_proof::rearm_view(&crate::daemon::pair_role_for(
                 base.profile.as_deref().unwrap_or_default(),
             )),
+            // A delivered fleet slot waits for the vehicle to disarm before
+            // the radio restarts onto it; the record says where that stands.
+            fleet_apply: ados_protocol::fleet_identity::fleet_apply_view(),
             ..read_radio_sidecar().unwrap_or_else(RadioBlock::absent)
         },
         crsf,

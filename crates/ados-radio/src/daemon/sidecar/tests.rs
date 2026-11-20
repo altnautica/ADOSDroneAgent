@@ -74,36 +74,6 @@ fn reg_posture_new_reflects_mode() {
 }
 
 #[test]
-fn fingerprint_none_when_key_absent_or_wrong_size() {
-    let dir = tempfile::tempdir().unwrap();
-    // Missing file → None.
-    assert!(read_public_fingerprint(&dir.path().join("nope.key")).is_none());
-    // Wrong size (not 64 bytes) → None.
-    let short = dir.path().join("short.key");
-    std::fs::write(&short, vec![0u8; 32]).unwrap();
-    assert!(read_public_fingerprint(&short).is_none());
-}
-
-#[test]
-fn fingerprint_is_16_hex_of_blake2b_8_over_public_half() {
-    let dir = tempfile::tempdir().unwrap();
-    let key = dir.path().join("tx.key");
-    // 64-byte key: first 32 are the secret half, second 32 the public half.
-    let mut data = vec![0u8; 64];
-    for (i, b) in data.iter_mut().enumerate() {
-        *b = i as u8;
-    }
-    std::fs::write(&key, &data).unwrap();
-    let got = read_public_fingerprint(&key).unwrap();
-    // Python `hashlib.blake2b(bytes(range(32, 64)), digest_size=8)`.
-    assert_eq!(got, "e054fa6440b441f9");
-    assert_eq!(got.len(), 16);
-    assert!(got
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-}
-
-#[test]
 fn channel_truth_configured_reports_rendezvous_for_all_channels() {
     // Before the interface exists, the truth reports the rendezvous home for
     // actual/rendezvous/operating, with the link not proven and no tx.

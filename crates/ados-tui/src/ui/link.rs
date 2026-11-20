@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
+use crate::model::base_alerts::Level;
 use crate::model::link::{
     feed_adapters, feed_combined, feed_lora, feed_relays, Counters, LinkHistory, Wfb,
 };
@@ -348,10 +349,27 @@ impl Tab for LinkTab {
             == Some(true);
         let ground = Self::ground(core);
         // A ground station re-pairing its mis-keyed drone says so across the
-        // whole tab, above the card whose diagnosis it explains.
-        let repairing = self.wfb.as_ref().is_some_and(|w| w.repairing);
+        // whole tab, above the card whose diagnosis it explains; so does a
+        // drone whose delivered fleet slot waits for landing, or whose radio
+        // failed to restart onto it.
+        let notice = if self.wfb.as_ref().is_some_and(|w| w.repairing) {
+            Some((spec_text("alert.gs_repairing", &[]), core.theme.warning()))
+        } else {
+            core.dash()
+                .filter(|_| !ground)
+                .and_then(|d| d.fleet_apply.as_ref())
+                .and_then(|f| f.alert())
+                .map(|a| {
+                    let color = if a.level == Level::Warning {
+                        core.theme.error()
+                    } else {
+                        core.theme.warning()
+                    };
+                    (a.title, color)
+                })
+        };
         let mut constraints = Vec::new();
-        if repairing {
+        if notice.is_some() {
             constraints.push(Constraint::Length(1));
         }
         constraints.push(Constraint::Length(12));
@@ -364,11 +382,8 @@ impl Tab for LinkTab {
         constraints.push(Constraint::Length(0));
         let rows = Layout::vertical(constraints).split(area);
         let mut next = 0;
-        if repairing {
-            let line = Line::from(Span::styled(
-                spec_text("alert.gs_repairing", &[]),
-                Style::default().fg(core.theme.warning()),
-            ));
+        if let Some((text, color)) = notice {
+            let line = Line::from(Span::styled(text, Style::default().fg(color)));
             f.render_widget(Paragraph::new(line), rows[next]);
             next += 1;
         }

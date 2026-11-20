@@ -164,6 +164,9 @@ pub struct Dashboard {
     /// Percent of on-board storage used (`/api/status/full`
     /// `health.disk_percent`, a ground station's `system.disk_pct`).
     pub storage_pct: Option<f64>,
+    /// A delivered fleet slot and the radio restart it is owed
+    /// (`/api/status/full` `radioFleetApply`).
+    pub fleet_apply: Option<fleet_apply::FleetApply>,
 
     /// `hub.connected` / `fc.connected` from `/api/v1/sensors` (`None` when the
     /// route was not polled, absent, or the block is not configured).
@@ -191,6 +194,7 @@ pub fn state_label(value: &str) -> String {
 
 pub mod autonomy;
 pub mod base_alerts;
+pub mod fleet_apply;
 pub mod flight_state;
 pub mod mission_stall;
 pub mod nav_source;

@@ -97,6 +97,13 @@ pub struct RadioBlock {
     /// when the key on disk was never re-armed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pair_rearm: Option<ados_protocol::pair_proof::PairRearmView>,
+    /// A fleet address written to config and the radio restart it is owed
+    /// (`outcome` `deferred_armed` while the vehicle is armed), from the same
+    /// record the LAN full status serves as `radioFleetApply`
+    /// (`ados_protocol::fleet_identity::fleet_apply_view`). Set by the heartbeat
+    /// loop each tick; omitted when no address was ever written this boot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fleet_apply: Option<ados_protocol::fleet_identity::FleetApplyView>,
 }
 
 impl RadioBlock {
@@ -155,6 +162,7 @@ impl RadioBlock {
             tx_bytes_per_s: None,
             restart_count: None,
             pair_rearm: None,
+            fleet_apply: None,
         }
     }
 }

@@ -51,6 +51,25 @@ fn the_radio_block_carries_the_re_pair_only_when_there_is_one() {
 }
 
 #[test]
+fn the_radio_block_carries_the_fleet_apply_only_when_there_is_one() {
+    let v = minimal_payload().to_value();
+    assert!(!v["radio"].as_object().unwrap().contains_key("fleet_apply"));
+
+    let mut p = minimal_payload();
+    p.radio.fleet_apply = Some(ados_protocol::fleet_identity::FleetApplyView {
+        outcome: "deferred_armed".to_string(),
+        fleet_id: Some(7),
+        fleet_slot: Some(3),
+        since_ms: Some(10),
+        at_ms: Some(20),
+    });
+    assert_eq!(
+        p.to_value()["radio"]["fleet_apply"],
+        serde_json::json!({"outcome": "deferred_armed", "fleet_id": 7, "fleet_slot": 3, "since_ms": 10, "at_ms": 20})
+    );
+}
+
+#[test]
 fn adapter_injection_verdict_defaults_to_unknown_never_false() {
     // With no radio view there is no injection verdict. BOTH the nested
     // block key and the hoisted root key read JSON null — never a fabricated

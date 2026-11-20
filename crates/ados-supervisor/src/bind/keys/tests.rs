@@ -9,16 +9,19 @@ fn validate_rejects_non_64() {
 }
 
 #[test]
-fn blob_fingerprint_matches_the_file_fingerprint() {
+fn the_bind_fingerprint_is_the_shared_reader() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tx.key");
     let blob: Vec<u8> = (0u8..64).collect();
     std::fs::write(&path, &blob).unwrap();
     assert_eq!(
-        blob_fingerprint(&blob),
+        ados_protocol::pair_proof::key_fingerprint(&path),
         Some(read_public_fingerprint(&path).unwrap())
     );
-    assert_eq!(blob_fingerprint(&blob[..63]), None);
+    std::fs::write(&path, &blob[..63]).unwrap();
+    assert!(read_public_fingerprint(&path)
+        .unwrap_err()
+        .contains("63 bytes"));
 }
 
 #[tokio::test]

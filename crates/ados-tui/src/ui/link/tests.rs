@@ -247,3 +247,41 @@ fn ground_station_re_pairing_a_mis_keyed_drone_says_so() {
     let text = draw(&mut app, 120, 40);
     assert!(!text.contains(BANNER), "{text}");
 }
+
+#[test]
+fn a_drone_says_its_delivered_fleet_slot_applies_after_landing() {
+    let mut app = app_for("drone");
+    let status = |outcome: &str| crate::poll::PollResult {
+        setup: Ok(
+            json!({"version": "0.99.108", "device_name": "ados-x", "profile": "drone",
+                         "paired": true, "mavlink": {"connected": false}}),
+        ),
+        fc_status: None,
+        status_full: Some(json!({"radioFleetApply": {
+            "outcome": outcome, "fleetId": 7, "fleetSlot": 3, "unit": "ados-wfb-drone"}})),
+        profile: ProfileRoutes::default(),
+    };
+    app.core
+        .view
+        .apply(status("deferred_armed"), Instant::now(), "12:00:00".into());
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        text.contains("New fleet slot 3 applies after landing."),
+        "{text}"
+    );
+
+    app.core
+        .view
+        .apply(status("restart_failed"), Instant::now(), "12:00:01".into());
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        text.contains("Radio restart onto fleet slot 3 failed. Retrying."),
+        "{text}"
+    );
+
+    app.core
+        .view
+        .apply(status("applied"), Instant::now(), "12:00:02".into());
+    let text = draw(&mut app, 120, 40);
+    assert!(!text.contains("fleet slot"), "{text}");
+}

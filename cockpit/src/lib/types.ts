@@ -4,7 +4,7 @@
 // send as null are typed nullable; unknown extras are tolerated.
 
 import type { UplinkWire } from "@/shared/api/uplink-handover";
-import type { PairRearm } from "@/shared/hud/status-pill";
+import type { PairRearm, RadioFleetApply } from "@/shared/hud/status-pill";
 
 /** The WFB radio link view (the `link` block of the GS status composite). */
 export interface LinkView {
@@ -127,6 +127,9 @@ export interface GsStatus {
    *  a phone holding the uplink. Null while the radio service is not
    *  reporting; absent on a drone and on older agents. */
   uplink?: UplinkWire | null;
+  /** A fleet slot delivered to this drone and the radio restart it is owed
+   *  (`radioFleetApply` on `/api/status/full`); absent on a ground station. */
+  radioFleetApply?: RadioFleetApply | null;
 }
 
 /** One concurrent video leg from `/api/status/full` `video.streams[]`. */

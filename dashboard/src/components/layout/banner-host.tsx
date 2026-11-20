@@ -1,12 +1,15 @@
+import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, AlertTriangle } from "lucide-react";
 import { useLocation } from "react-router-dom";
 
 import { useHeartbeat } from "@/hooks/use-heartbeat";
+import { resourceQueryOptions } from "@/hooks/use-resource";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useWfb } from "@/hooks/use-wfb";
 import { buildBanners } from "@/shared/api/banners";
 import { cn } from "@/lib/utils";
+import { radioFleetApplyOf } from "@/shared/hud/status-pill";
 import { RestartBanner } from "@/components/layout/restart-banner";
 import { SetupNeededBanner } from "@/components/layout/setup-needed-banner";
 import { useUiStore } from "@/stores/ui-store";
@@ -14,6 +17,10 @@ import { useUiStore } from "@/stores/ui-store";
 /** The FC-link banner reads the snapshot, so it polls (every 3 s) only on the
  *  drone Home page; every other page shows just the agent-offline banner. */
 const BANNER_SNAPSHOT_MS = 3_000;
+
+/** A delivered fleet slot waiting for the drone to land shows on every drone
+ *  page: the banner reads the full status (the cache entry the Home tiles use). */
+const BANNER_STATUS_FULL_MS = 5_000;
 
 export function BannerHost() {
   const { profile } = useNodeIdentity();
@@ -25,6 +32,10 @@ export function BannerHost() {
   const snapshot = useSnapshot({ intervalMs: BANNER_SNAPSHOT_MS, enabled: onDroneHome });
   // A ground station re-pairing its drone says so on every page.
   const wfb = useWfb({ enabled: profile === "ground_station" });
+  const statusFull = useQuery({
+    ...resourceQueryOptions<{ radioFleetApply?: unknown }>("status-full", "/api/status/full", BANNER_STATUS_FULL_MS),
+    enabled: profile === "drone",
+  });
 
   const banners = buildBanners({
     agentUnreachable: heartbeat.isError && !restarting,
@@ -32,6 +43,7 @@ export function BannerHost() {
     fcConnected: onDroneHome && snapshot.isSuccess ? (snapshot.data.fc?.connected ?? null) : null,
     fcReachable: heartbeat.data?.fcReachable,
     pairRearm: wfb.data?.pair_rearm ?? null,
+    fleetApply: radioFleetApplyOf(statusFull.data?.radioFleetApply),
   });
 
   return (

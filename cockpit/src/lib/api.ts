@@ -3,6 +3,7 @@
 
 import type { StatusFull } from "@/shared/agent-api.generated";
 import { apiFetch } from "@/shared/api-fetch";
+import { radioFleetApplyOf } from "@/shared/hud/status-pill";
 import { LEASE_OWNER } from "@/lib/lease-owner";
 import { fcFamilyOf } from "@/nav/navigator";
 import type {
@@ -145,6 +146,7 @@ export function droneStatusFromFull(full: StatusFull, diag: LinkDiagnosis | null
     },
     role: { current: "", configured: "", supported: [], mesh_capable: false },
     mesh: { up: false, peer_count: 0, selected_gateway: null, partition: false, mesh_id: null },
+    radioFleetApply: radioFleetApplyOf(asRecord(full).radioFleetApply),
   };
 }
 

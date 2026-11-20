@@ -1,7 +1,9 @@
-import { BatteryLow, BatteryWarning, KeyRound, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
+import { BatteryLow, BatteryWarning, KeyRound, RadioTower, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
 import { describe, expect, it } from "vitest";
 
+import { droneStatusFromFull } from "@/lib/api";
 import { computeAlerts, pillWiring, type AlertInputs } from "@/lib/alerts";
+import type { StatusFull } from "@/shared/agent-api.generated";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { pillAlerts } from "@/shared/hud/status-pill";
 
@@ -36,6 +38,16 @@ describe("cockpit alerts", () => {
       ["gs_repairing", KeyRound],
     ]);
     expect(computeAlerts(inputs({ status: status(null) })).map((a) => a.id)).toEqual(["rf"]);
+  });
+
+  it("tells a drone's operator its delivered fleet slot applies after landing", () => {
+    const full = (outcome: string) =>
+      ({ radio: {}, radioFleetApply: { outcome, fleetId: 7, fleetSlot: 3, unit: "ados-wfb-drone" } }) as unknown as StatusFull;
+    expect(computeAlerts(inputs({ status: droneStatusFromFull(full("deferred_armed"), null) })).map((a) => [a.id, a.level, a.title, a.icon])).toEqual([
+      ["fleet_slot_pending", "advisory", "New fleet slot 3 applies after landing.", RadioTower],
+    ]);
+    expect(computeAlerts(inputs({ status: droneStatusFromFull(full("restart_failed"), null) })).map((a) => a.id)).toEqual(["fleet_slot_failed"]);
+    expect(computeAlerts(inputs({ status: droneStatusFromFull(full("applied"), null) }))).toEqual([]);
   });
 });
 

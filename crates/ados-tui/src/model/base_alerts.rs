@@ -1,8 +1,9 @@
 //! The alert rules every surface shares, as `web-shared/src/hud/status-pill.ts`
 //! `baseAlerts` words them: the vehicle link going quiet, the battery low or
-//! critical (`battery.ts` `batteryReading`), pack anomalies, and a GPS fix
-//! below 3D while armed. The terminal mounts no video and its pill drops
-//! advisories, so the frozen-video and uplink rules have nothing to read here.
+//! critical (`battery.ts` `batteryReading`), pack anomalies, a GPS fix below
+//! 3D while armed, and a delivered fleet slot (`fleetSlotAlert`). The terminal
+//! mounts no video and its pill drops advisories, so the frozen-video and
+//! uplink rules have nothing to read here.
 
 use std::sync::LazyLock;
 
@@ -45,9 +46,7 @@ pub const LINK_LOST_MS: u64 = 10_000;
 pub enum Level {
     Critical,
     Warning,
-    /// Never raised here (the terminal has no uplink rule); the shared
-    /// golden cases carry it, and the pill drops it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// A delivered fleet slot waiting for landing; the pill drops it.
     Advisory,
 }
 
@@ -82,6 +81,8 @@ pub struct BaseInputs<'a> {
     pub ms_since_live: Option<u64>,
     /// The arm state at the last live sample.
     pub armed_at_last_live: Option<bool>,
+    /// The full status's fleet slot restart (`radioFleetApply`).
+    pub fleet_apply: Option<&'a super::fleet_apply::FleetApply>,
 }
 
 /// Whether a pack voltage is a real measurement: MAVLink sends 65535 mV
@@ -188,6 +189,7 @@ pub fn base_alerts(i: &BaseInputs) -> Vec<BaseAlert> {
             spec_text("alert.gps_no_3d", &[]),
         ));
     }
+    out.extend(i.fleet_apply.and_then(|f| f.alert()));
     // A stable sort: equal levels keep their source order.
     out.sort_by_key(|a| a.level as u8);
     out

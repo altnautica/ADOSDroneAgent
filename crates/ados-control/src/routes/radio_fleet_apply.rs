@@ -29,8 +29,9 @@ use serde_json::{json, Value};
 
 use crate::state::AppState;
 
-/// The sidecar file name under the run directory.
-pub const SIDECAR_FILE: &str = "radio-fleet-apply.json";
+/// The sidecar file name under the run directory, named once with the view the
+/// cloud heartbeat reads (`ados_protocol::fleet_identity`).
+pub const SIDECAR_FILE: &str = ados_protocol::fleet_identity::RADIO_FLEET_APPLY_JSON;
 
 /// Version of the sidecar body.
 pub const SIDECAR_VERSION: u32 = 1;

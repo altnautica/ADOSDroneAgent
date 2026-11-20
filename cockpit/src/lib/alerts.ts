@@ -3,7 +3,7 @@
 // verdict, each with its icon.
 
 import type { LucideIcon } from "lucide-react";
-import { BatteryLow, BatteryWarning, KeyRound, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
+import { BatteryLow, BatteryWarning, KeyRound, RadioTower, Satellite, SignalZero, VideoOff, WifiOff } from "lucide-react";
 
 import { linkDiagView } from "@/lib/link-diag";
 import { preflightFailing, type PreflightCheck } from "@/shared/hud/preflight";
@@ -30,6 +30,8 @@ const ICONS: Readonly<Record<string, LucideIcon>> = {
   video_frozen: VideoOff,
   uplink: WifiOff,
   gs_repairing: KeyRound,
+  fleet_slot_pending: RadioTower,
+  fleet_slot_failed: RadioTower,
 };
 
 export function computeAlerts(i: AlertInputs): CockpitAlert[] {
