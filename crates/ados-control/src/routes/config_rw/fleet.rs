@@ -41,17 +41,30 @@ fn fleet_address(config: &Value) -> (u16, u8) {
 /// the written half is judged, so a node can still be provisioned one key at a
 /// time, and an unchanged value is never refused.
 ///
-/// This is where a slot the ground station's registry issued lands on the
-/// drone (its slot reconciler writes `video.wfb.fleet_slot` here), so it is
-/// written the way the bind writes one: both halves, together, under the
-/// config lock, and the radio restart it owes is recorded.
+/// `with_fleet_id` is the fleet id a slot write carries beside it: the whole
+/// address, judged as the radio would read it and written as one, so a drone
+/// never comes up on the new slot of its old fleet. It rides only with
+/// `video.wfb.fleet_slot`; with any other key it is refused.
+///
+/// This is where the address the ground station's registry holds lands on
+/// the drone (its slot reconciler writes `video.wfb.fleet_slot` here with the
+/// ground's fleet id), so it is written the way the bind writes one: both
+/// halves, together, under the config lock, and the radio restart it owes is
+/// recorded.
 pub(super) fn fleet_write(
     config_path: &Path,
     key: &str,
+    with_fleet_id: Option<u16>,
     current: &Value,
     candidate: &Value,
 ) -> Result<Option<FleetWrite>, String> {
     use ados_radio::config::{fleet_identity_error, FIRST_DRONE_SLOT, SLOT_GROUND};
+    if with_fleet_id.is_some() && key != FLEET_KEYS[1] {
+        return Err(format!(
+            "fleet_id is written only together with {}",
+            FLEET_KEYS[1]
+        ));
+    }
     if !FLEET_KEYS.contains(&key) {
         return Ok(None);
     }
@@ -59,8 +72,15 @@ pub(super) fn fleet_write(
         config_path,
         Path::new(ados_radio::config::PROFILE_CONF),
     );
-    let (fleet_id, fleet_slot) = fleet_address(candidate);
-    if fleet_address(current) != (fleet_id, fleet_slot) {
+    let (candidate_id, fleet_slot) = fleet_address(candidate);
+    let fleet_id = with_fleet_id.unwrap_or(candidate_id);
+    if with_fleet_id.is_some() {
+        // Both halves are being written: the address as a whole must be one
+        // the radio comes up on.
+        if let Some(e) = fleet_identity_error(fleet_id, fleet_slot, ground_station) {
+            return Err(e.to_string());
+        }
+    } else if fleet_address(current) != (fleet_id, fleet_slot) {
         // The other half replaced by one the radio accepts, so only this
         // write's own value can be the reason for a refusal.
         let good_slot = if ground_station {

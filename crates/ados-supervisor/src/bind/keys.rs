@@ -263,15 +263,17 @@ pub fn apply_fleet_fields(root: &mut Mapping, fleet: FleetIdentity) {
 /// The addressing a drone takes when it records a pair but holds none its
 /// radio accepts, `None` when it already holds a usable one.
 ///
-/// An auto-pair bind carries no fleet assignment: the device id that the
-/// ground's registry issues slots against is not known to the ground until the
-/// drone's presence beacon is decoded. A drone left on slot 0 (every fresh
-/// install's value) parks its radio, so that beacon is never sent and the slot
-/// is never issued. Instead it takes [`FIRST_DRONE_SLOT`], the slot every
-/// ground listens on for a drone it has not registered (and the registry's
-/// first issue, so the lone drone of a fresh pair usually keeps it). The
-/// ground enrols it from that beacon and its slot reconciler delivers the slot
-/// the registry holds, which replaces this one.
+/// An auto-pair bind carries no fleet assignment, neither slot nor fleet id:
+/// the device id that the ground's registry issues slots against is not known
+/// to the ground until the drone's presence beacon is decoded. A drone left on
+/// slot 0 (every fresh install's value) parks its radio, so that beacon is
+/// never sent and the slot is never issued. Instead it takes
+/// [`FIRST_DRONE_SLOT`] of the default fleet, which every ground listens on
+/// for a drone it has not registered (a ground on another fleet through its
+/// provisional link; the slot is also the registry's first issue, so the lone
+/// drone of a fresh pair usually keeps it). The ground enrols it from that
+/// beacon and its slot reconciler delivers the slot the registry holds
+/// together with the ground's own fleet id, which replace these.
 ///
 /// Only the unusable half is replaced: a reserved fleet id 0 becomes the
 /// radio's default fleet, an unusable slot becomes the first slot, and a

@@ -251,6 +251,21 @@ impl AuxRpcProxy {
         }
     }
 
+    /// A proxy that sends over `egress` and shares this one's pending calls,
+    /// request ids, counters and timeout, so the response listener this proxy
+    /// runs answers the new proxy's calls too.
+    ///
+    /// For a second uplink into one response path: a ground station's
+    /// transmitter keyed to another fleet's ground `link_id` reaches drones
+    /// the first uplink cannot, and their answers come back through the same
+    /// aux consumer and response socket.
+    pub fn over_egress(&self, egress: AuxEgress) -> Self {
+        Self {
+            egress: Arc::new(egress),
+            ..self.clone()
+        }
+    }
+
     /// Drop every pending caller. Used on shutdown so a caller awaiting a
     /// response whose consumer is gone does not wait the full timeout.
     pub async fn reset(&self) {

@@ -33,6 +33,13 @@
 //!   - **aux TX** `wfb_tx -p 3 -i <link> -u 5602 …` carries the uplink half of
 //!     the aux pair.
 //!
+//! A ground on a fleet other than the default one also serves the default
+//! fleet's first slot, where a drone it auto-paired waits until it is told its
+//! address ([`provisional_links`]): an aux and a control receiver on
+//! `link_id(1, 1)` decoding onto slot 1's ports, and a provisional aux TX on
+//! `link_id(1, 0)` fed from `PROVISIONAL_UPLINK_PORT`, over which the control
+//! surface delivers that drone its fleet id and slot.
+//!
 //! Every child runs as an `ados_proc::GroupChild` (its own process group,
 //! killed as a group on teardown or drop), so the orphan-child bug class is
 //! structurally impossible here; the GS-specific arg sets live in `args`.
@@ -89,7 +96,7 @@ pub use seams::{
     DataRxHandle, GroupChannelSetter, IwChannelSetter, RadioGroup, SharedValidCounter, SystemClock,
 };
 pub(crate) use spawn::spawn_wfb;
-pub use spawn::{GroundTx, PrimaryChain, SlotReceivers, TxStdout};
+pub use spawn::{GroundTx, PrimaryChain, ProvisionalReceivers, SlotReceivers, TxStdout};
 pub use stats::{
     build_gs_stats, write_blocked_unpaired_sidecar, write_no_adapter_sidecar,
     write_no_injection_sidecar, write_reg_blocked_sidecar, GsAdapterInfo, GsChannelTruth,
@@ -136,6 +143,34 @@ pub fn hop_fleet_size(registry: &crate::fleet::FleetRegistry, slot: u8) -> usize
 /// The slot `FleetRegistry::allocate` issues first, the slot an empty registry
 /// falls back to, and the provisional slot an unissued drone transmits on.
 pub use ados_radio::config::FIRST_DRONE_SLOT;
+
+/// The default-fleet addresses a ground station off the default fleet serves
+/// beside its own: where a drone it paired but has not yet addressed
+/// transmits, and the ground `link_id` that drone's uplink receivers key to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProvisionalLinks {
+    /// `link_id(DEFAULT_FLEET_ID, FIRST_DRONE_SLOT)`: the aux and control
+    /// receivers listen here.
+    pub drone: u32,
+    /// `link_id(DEFAULT_FLEET_ID, SLOT_GROUND)`: the provisional aux uplink
+    /// transmits here.
+    pub ground: u32,
+}
+
+/// [`ProvisionalLinks`] for a ground on `fleet_id`, `None` on the default
+/// fleet (its own first slot and uplink already are those addresses).
+///
+/// An auto-pair bind carries no fleet id, so the drone it pairs comes up on
+/// the default fleet's first slot; a ground on another fleet hears it only
+/// here, enrols it from its beacon, and delivers it the fleet id and slot to
+/// move onto over the provisional uplink.
+pub fn provisional_links(fleet_id: u16) -> Option<ProvisionalLinks> {
+    use ados_radio::config::{link_id, provisional_fleet, SLOT_GROUND};
+    provisional_fleet(fleet_id).map(|fleet| ProvisionalLinks {
+        drone: link_id(fleet, FIRST_DRONE_SLOT),
+        ground: link_id(fleet, SLOT_GROUND),
+    })
+}
 
 /// The receive manager. Holds the config + the shared liveness state the run
 /// loop wires together.
@@ -429,5 +464,22 @@ mod tests {
             assert!(seen.insert(control_rx_port(slot)));
         }
         assert_eq!(seen.len(), ados_radio::config::FLEET_MAX_SLOTS as usize * 3);
+    }
+
+    #[test]
+    fn a_ground_off_the_default_fleet_also_serves_the_default_first_slot() {
+        use ados_radio::config::{link_id, DEFAULT_FLEET_ID, SLOT_GROUND};
+        // On the default fleet its own first slot and uplink are already the
+        // addresses an unaddressed drone uses: nothing extra runs.
+        assert_eq!(provisional_links(DEFAULT_FLEET_ID), None);
+        // On any other fleet the ground receives where that drone transmits
+        // and transmits where that drone's uplink receivers listen.
+        let links = provisional_links(7).expect("fleet 7 serves the default fleet too");
+        assert_eq!(links.drone, link_id(DEFAULT_FLEET_ID, FIRST_DRONE_SLOT));
+        assert_eq!(links.ground, link_id(DEFAULT_FLEET_ID, SLOT_GROUND));
+        assert_ne!(links.drone, link_id(7, FIRST_DRONE_SLOT));
+        assert_ne!(links.ground, link_id(7, SLOT_GROUND));
+        // Its frames decode onto a port this ground always binds.
+        assert!(fleet_slots(&crate::fleet::FleetRegistry::default()).contains(&FIRST_DRONE_SLOT));
     }
 }

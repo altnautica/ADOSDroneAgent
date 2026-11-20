@@ -595,6 +595,40 @@ fn fleet_receiver_ranges_do_not_overlap_each_other() {
 }
 
 #[test]
+fn the_provisional_uplink_port_is_reserved_and_no_slot_s() {
+    // Inside the span the aux-port guard keeps operators out of, so no
+    // operator-set aux port can land on it.
+    assert!(is_fleet_rx_port(PROVISIONAL_UPLINK_PORT));
+    assert!(!RESERVED_PLANE_PORTS.contains(&PROVISIONAL_UPLINK_PORT));
+    for s in 0..=FLEET_MAX_SLOTS {
+        for base in [VIDEO_RX_PORT_BASE, AUX_RX_PORT_BASE, CONTROL_RX_PORT_BASE] {
+            assert_ne!(base + s as u16, PROVISIONAL_UPLINK_PORT, "slot {s}");
+        }
+    }
+    assert_ne!(PROVISIONAL_UPLINK_PORT, default_aux_tx_port());
+    assert_ne!(PROVISIONAL_UPLINK_PORT, default_aux_rx_port());
+}
+
+#[test]
+fn only_a_ground_off_the_default_fleet_serves_the_default_fleet_too() {
+    assert_eq!(WfbConfig::default().fleet_id, DEFAULT_FLEET_ID);
+    // A ground on the default fleet hears an unaddressed drone on its own
+    // first slot; one on any other fleet must listen for it there as well.
+    assert_eq!(provisional_fleet(DEFAULT_FLEET_ID), None);
+    assert_eq!(provisional_fleet(7), Some(DEFAULT_FLEET_ID));
+    assert_eq!(provisional_fleet(u16::MAX), Some(DEFAULT_FLEET_ID));
+    // The two addresses it adds are not its own fleet's.
+    assert_ne!(
+        link_id(DEFAULT_FLEET_ID, FIRST_DRONE_SLOT),
+        link_id(7, FIRST_DRONE_SLOT)
+    );
+    assert_ne!(
+        link_id(DEFAULT_FLEET_ID, SLOT_GROUND),
+        link_id(7, SLOT_GROUND)
+    );
+}
+
+#[test]
 fn config_slice_conforms() {
     ados_config::schema::assert_slice_conforms::<WfbConfig>(CONFIG_POINTER);
 }

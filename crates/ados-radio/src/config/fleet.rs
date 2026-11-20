@@ -15,6 +15,30 @@ pub const SLOT_GROUND: u8 = 0;
 /// that ground can hear it, enrol it and deliver that slot.
 pub const FIRST_DRONE_SLOT: u8 = 1;
 
+/// The fleet an unconfigured node lands in. A single-drone rig never has to
+/// think about fleets, so it is fleet 1 rather than the reserved 0. It is also
+/// the fleet a drone that holds a pair key but no issued address transmits on
+/// (an auto-paired drone: the bind carries no fleet id), until its ground
+/// station delivers the fleet id and slot its registry holds for it.
+pub const DEFAULT_FLEET_ID: u16 = 1;
+
+/// The other fleet a ground station on `fleet_id` serves: the default fleet,
+/// where a drone it paired but has not yet addressed waits on
+/// [`FIRST_DRONE_SLOT`]. `None` for a ground on the default fleet, which hears
+/// that drone on its own fleet's first slot already.
+///
+/// Such a ground receives on `link_id(DEFAULT_FLEET_ID, FIRST_DRONE_SLOT)` and
+/// transmits its aux uplink on `link_id(DEFAULT_FLEET_ID, SLOT_GROUND)` as
+/// well as on its own fleet's, so it can enrol that drone from its beacon and
+/// deliver it the fleet id and slot to move onto.
+pub const fn provisional_fleet(fleet_id: u16) -> Option<u16> {
+    if fleet_id == DEFAULT_FLEET_ID {
+        None
+    } else {
+        Some(DEFAULT_FLEET_ID)
+    }
+}
+
 /// wfb-ng `link_id` for a fleet slot. 16 bits of fleet plus 8 bits of slot
 /// fills the 24-bit `link_id` space exactly, so two fleets can operate side by
 /// side on one channel with no `channel_id` collision
@@ -48,6 +72,13 @@ pub const FLEET_RX_PORT_LAST: u16 = CONTROL_RX_PORT_BASE + FLEET_MAX_SLOTS as u1
 pub const fn is_fleet_rx_port(port: u16) -> bool {
     port >= FLEET_RX_PORT_FIRST && port <= FLEET_RX_PORT_LAST
 }
+
+/// Loopback ingress of a ground station's second aux uplink transmitter, the
+/// one keyed to the default fleet's ground `link_id` (see
+/// [`provisional_fleet`]). It sits in the gap between the per-slot video and
+/// aux spans, so it is inside the span the aux-port guard keeps operators out
+/// of and is no slot's receive port.
+pub const PROVISIONAL_UPLINK_PORT: u16 = VIDEO_RX_PORT_BASE + FLEET_MAX_SLOTS as u16 + 1;
 
 /// Why a fleet identity is unusable. Each variant is a hard load-time refusal,
 /// never a silent fallback: a wrong slot is the FEC-thrash failure mode, which

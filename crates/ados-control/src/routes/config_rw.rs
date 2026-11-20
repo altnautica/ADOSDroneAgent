@@ -19,10 +19,11 @@
 //!   0600 mode. A write that landed then runs the config side effects (enable
 //!   markers, unit kicks; [`ados_config::side_effects`]).
 //! * **Fleet address.** `video.wfb.fleet_id` / `fleet_slot` (where the ground
-//!   station's slot reconciler delivers the slot its registry issued) are
-//!   judged by the radio's fleet-identity rule for this profile, written as a
-//!   pair the way a bind writes them, and a radio restart onto the new address
-//!   is recorded and performed once the vehicle is disarmed
+//!   station's slot reconciler delivers the address its registry holds: the
+//!   slot with a `fleet_id` beside it in the body, the two applied as one)
+//!   are judged by the radio's fleet-identity rule for this profile, written
+//!   as a pair the way a bind writes them, and a radio restart onto the new
+//!   address is recorded and performed once the vehicle is disarmed
 //!   ([`crate::routes::radio_fleet_apply`]); the answer then carries
 //!   `radio_restart: "pending"`.
 //!
@@ -221,10 +222,17 @@ fn read_config_at(config_path: &Path) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 /// The `PUT /api/config` body: a dotted key and a scalar value.
+///
+/// `fleet_id` rides only with `video.wfb.fleet_slot`: the two make one fleet
+/// address, judged and written together (how a ground station delivers the
+/// address its registry holds for a drone it paired). With any other key it
+/// is refused.
 #[derive(Debug, Deserialize)]
 pub struct ConfigUpdate {
     pub key: String,
     pub value: Value,
+    #[serde(default)]
+    pub fleet_id: Option<u16>,
 }
 
 /// `PUT /api/config` → `{status, key, value, persisted[, persist_error]}`.
@@ -340,7 +348,7 @@ pub(crate) fn put_config_at(
         )
             .into_response();
     }
-    let fleet = match fleet_write(config_path, key, &config, &next) {
+    let fleet = match fleet_write(config_path, key, update.fleet_id, &config, &next) {
         Ok(fleet) => fleet,
         Err(message) => {
             return (
@@ -373,6 +381,9 @@ pub(crate) fn put_config_at(
     match persisted {
         Ok(write) => {
             let mut body = json!({ "status": "ok", "key": key, "value": value, "persisted": true });
+            if let Some(fleet_id) = update.fleet_id {
+                body["fleet_id"] = json!(fleet_id);
+            }
             if write.wrote {
                 let (before, after) = write.value;
                 run_side_effects(config_path, before, after, run);

@@ -234,8 +234,11 @@ pub fn finish(
                     origin[DRONE], origin[GS]
                 ));
             }
-            // A bound pair flies: the radio accepts both configs, and the
-            // drone's slot is the one the ground station's registry holds.
+            // A bound pair flies: the radio accepts both configs, the drone's
+            // slot is the one the ground station's registry holds, and the
+            // ground hears it: on its own fleet, or (an auto-paired drone,
+            // whose bind carries no fleet id) on the default fleet the ground
+            // also listens on when it is on another.
             for r in &g.rigs {
                 if let Err(e) = radio_accepts(r) {
                     breaks.push(format!(
@@ -246,7 +249,16 @@ pub fn finish(
             }
             let (drone, gs) = (fleet_of(&g.rigs[DRONE]), fleet_of(&g.rigs[GS]));
             let registry = u64::from(issued[DRONE].fleet_slot);
-            if drone.map(|f| f.1) != Some(registry) || drone.map(|f| f.0) != gs.map(|f| f.0) {
+            let heard = match (drone, gs.and_then(|f| u16::try_from(f.0).ok())) {
+                (Some((fleet, slot)), Some(ground)) => {
+                    fleet == u64::from(ground)
+                        || (ados_radio::config::provisional_fleet(ground).map(u64::from)
+                            == Some(fleet)
+                            && slot == u64::from(ados_radio::config::FIRST_DRONE_SLOT))
+                }
+                _ => false,
+            };
+            if drone.map(|f| f.1) != Some(registry) || !heard {
                 breaks.push(format!(
                     "bound drone holds fleet/slot {drone:?}; the ground holds fleet {:?}, slot {registry}",
                     gs.map(|f| f.0)

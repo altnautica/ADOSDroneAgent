@@ -15,6 +15,7 @@ fn update(key: &str, value: Value) -> ConfigUpdate {
     ConfigUpdate {
         key: key.to_string(),
         value,
+        fleet_id: None,
     }
 }
 
@@ -418,4 +419,86 @@ async fn a_node_can_be_provisioned_one_half_at_a_time() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["radio_restart"], json!("pending"));
     assert_eq!(on_disk_fleet(&cfg), (Some(7), Some(4)));
+}
+
+/// A slot write carrying the fleet id beside it, as the ground's reconciler
+/// sends one.
+fn put_address(cfg: &Path, fleet_id: u16, slot: u8) -> Response {
+    let update = ConfigUpdate {
+        key: "video.wfb.fleet_slot".to_string(),
+        value: json!(slot),
+        fleet_id: Some(fleet_id),
+    };
+    put_config_at(cfg, cfg.parent().unwrap(), &update, &no_run)
+}
+
+#[tokio::test]
+async fn a_delivered_fleet_id_and_slot_land_together_and_owe_one_restart() {
+    // An auto-paired drone waits on the default fleet's first slot; its
+    // ground on fleet 7 delivers the whole address. Even the slot it already
+    // holds moves it, because the fleet changed.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fleet_config(dir.path(), "drone", 1);
+    let (status, body) = body_of(put_address(&cfg, 7, 1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["fleet_id"], json!(7));
+    assert_eq!(body["radio_restart"], json!("pending"));
+    assert_eq!(on_disk_fleet(&cfg), (Some(7), Some(1)));
+    let owed = crate::routes::radio_fleet_apply::read_status(dir.path());
+    assert_eq!(owed["fleet_id"], json!(7));
+    assert_eq!(owed["fleet_slot"], json!(1));
+
+    // Restated as it stands: nothing new owed.
+    std::fs::remove_file(
+        dir.path()
+            .join(crate::routes::radio_fleet_apply::SIDECAR_FILE),
+    )
+    .unwrap();
+    let (status, body) = body_of(put_address(&cfg, 7, 1)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("radio_restart").is_none(), "{body}");
+
+    // Both halves at once to another address.
+    let (status, _) = body_of(put_address(&cfg, 9, 4)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(on_disk_fleet(&cfg), (Some(9), Some(4)));
+}
+
+#[tokio::test]
+async fn a_delivered_address_is_judged_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fleet_config(dir.path(), "drone", 2);
+    // A reserved fleet id, or a slot a drone cannot hold, refuses the pair:
+    // neither half lands.
+    for (fleet_id, slot) in [(0u16, 3u8), (7, 0), (7, 25)] {
+        let (status, body) = body_of(put_address(&cfg, fleet_id, slot)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{fleet_id}/{slot}"
+        );
+        assert_eq!(body["error"], json!("E_INVALID"));
+    }
+    assert_eq!(on_disk_fleet(&cfg), (Some(1), Some(2)), "nothing changed");
+    assert!(crate::routes::radio_fleet_apply::read_status(dir.path()).is_null());
+}
+
+#[tokio::test]
+async fn a_fleet_id_rides_only_with_the_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fleet_config(dir.path(), "drone", 2);
+    for (key, value) in [
+        ("video.wfb.fleet_id", json!(7)),
+        ("video.wfb.auto_pair_enabled", json!(false)),
+    ] {
+        let update = ConfigUpdate {
+            key: key.to_string(),
+            value,
+            fleet_id: Some(7),
+        };
+        let (status, body) = body_of(put_config_at(&cfg, dir.path(), &update, &no_run)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{key}");
+        assert_eq!(body["field"], json!(key));
+    }
+    assert_eq!(on_disk_fleet(&cfg), (Some(1), Some(2)));
 }

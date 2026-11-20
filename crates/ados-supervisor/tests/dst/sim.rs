@@ -46,8 +46,9 @@ pub struct Plan {
     /// converges, within [`reconcile::bound`].
     pub reconcile: bool,
     /// The drone's binds carry no fleet assignment, as an auto-pair bind's
-    /// never does: it must come out holding the provisional first slot, which
-    /// is the slot a fresh ground's registry issues it, and its radio must
+    /// never does: it must come out holding the default fleet's provisional
+    /// first slot, which is the slot a fresh ground's registry issues it,
+    /// whatever fleet the ground is on (drawn per seed), and its radio must
     /// accept it.
     pub unissued_drone: bool,
 }
@@ -173,25 +174,31 @@ async fn reconcile_pair(
 /// holding the key of an earlier pairing that worked (disarmed, fleet slot
 /// 0). Returns the fleet addressing each rig's operator passes: the ground
 /// station's registry issues the drone a slot, the ground station itself takes
-/// slot 0. An `unissued` drone is told nothing, so both rigs run the radio's
-/// default fleet and the slot the drone must end on is the registry's first.
+/// slot 0. An `unissued` drone is told nothing, so it must end on the radio's
+/// default fleet and the registry's first slot, whatever fleet the ground is
+/// on (drawn: the default fleet on about half the seeds, another on the rest);
+/// a ground on another fleet hears it there through its provisional link.
 fn setup(w: &Shared, unissued: bool) -> [FleetIdentity; 2] {
+    use ados_radio::config::{DEFAULT_FLEET_ID, FIRST_DRONE_SLOT};
     let mut g = lock(w);
-    let (fleet_id, slot) = if unissued {
-        (1, ados_radio::config::FIRST_DRONE_SLOT)
+    let (ground_fleet, drone) = if unissued {
+        let ground_fleet = if g.rng.next_u64().is_multiple_of(2) {
+            DEFAULT_FLEET_ID
+        } else {
+            2 + (g.rng.next_u64() % 199) as u16
+        };
+        (ground_fleet, (DEFAULT_FLEET_ID, FIRST_DRONE_SLOT))
     } else {
-        (
-            1 + (g.rng.next_u64() % 200) as u16,
-            1 + (g.rng.next_u64() % 7) as u8,
-        )
+        let fleet_id = 1 + (g.rng.next_u64() % 200) as u16;
+        (fleet_id, (fleet_id, 1 + (g.rng.next_u64() % 7) as u8))
     };
     let ground = FleetIdentity {
-        fleet_id,
+        fleet_id: ground_fleet,
         fleet_slot: 0,
     };
     let mtime = g.wall_now();
-    let drone = &mut g.rigs[DRONE];
-    apply_pair_fields(&mut drone.config, drone.role, None, None, Some(true), None);
+    let rig = &mut g.rigs[DRONE];
+    apply_pair_fields(&mut rig.config, rig.role, None, None, Some(true), None);
     let gs = &mut g.rigs[GS];
     apply_pair_fields(
         &mut gs.config,
@@ -208,11 +215,14 @@ fn setup(w: &Shared, unissued: bool) -> [FleetIdentity; 2] {
             mtime,
         },
     );
-    g.log(format!("fleet {fleet_id}, drone slot {slot}"));
+    g.log(format!(
+        "ground fleet {ground_fleet}, drone fleet {} slot {}",
+        drone.0, drone.1
+    ));
     [
         FleetIdentity {
-            fleet_id,
-            fleet_slot: slot,
+            fleet_id: drone.0,
+            fleet_slot: drone.1,
         },
         ground,
     ]

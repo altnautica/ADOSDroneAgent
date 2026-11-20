@@ -238,15 +238,35 @@ where
                     Arc::clone(&proxy),
                     state.swarm.clone(),
                 ));
-                // Fleet slot delivery: the ground station allocates a slot at
+                // Fleet address delivery: the ground station allocates a slot at
                 // pair time and, until now, told only the caller. A drone
                 // learned its own fleet address only from a hand-edit or a
                 // cloud push. Reachable even when the drone holds the wrong
                 // slot, because the aux uplink is addressed on the ground
-                // station's link id rather than the drone's. Idle once the
-                // fleet agrees.
+                // station's link id rather than the drone's; and, through the
+                // provisional uplink (the default fleet's ground link id, which
+                // the receive unit transmits on when this ground is on another
+                // fleet), even when it is still on the default fleet an
+                // auto-pair bind leaves it on. That proxy shares this one's
+                // pending calls, so the listener above answers it too. Idle
+                // once the fleet agrees.
+                let provisional = match ados_protocol::aux_egress::AuxEgress::connected_to_udp(
+                    ados_radio::config::PROVISIONAL_UPLINK_PORT,
+                )
+                .await
+                {
+                    Ok(egress) => Some(Arc::new(proxy.over_egress(egress))),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "provisional_uplink_unavailable");
+                        None
+                    }
+                };
                 tokio::spawn(crate::routes::gs_fleet_slot::run_slot_reconciler(
-                    Arc::clone(&proxy),
+                    crate::routes::gs_fleet_slot::Uplinks {
+                        fleet: Arc::clone(&proxy),
+                        provisional,
+                    },
+                    paths.config_path.clone(),
                 ));
                 // Fleet enrolment: a slot was only ever issued by the pair
                 // route, but the unattended auto-bind that pairs a rig in the

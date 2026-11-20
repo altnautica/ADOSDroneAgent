@@ -33,15 +33,18 @@
 //! decoded beacon is therefore not a weaker admission than the pair route — it
 //! is the same evidence, arriving over the radio instead of over HTTP.
 //!
-//! An auto-bound drone has no issued slot to beacon on, and the radio refuses
-//! slot 0 on a drone, so its bind gives it the first slot
-//! (`ados_supervisor::bind::keys::unissued_drone_fleet`) and every ground
-//! receives on that slot beside its registered ones
-//! (`ados_groundlink::wfb_rx::fleet_slots`). Enrolment issues the registry's
-//! own slot; the slot reconciler delivers it, and the drone's radio moves onto
-//! it once disarmed (`crate::routes::radio_fleet_apply`). Two drones beaconing
-//! on the first slot at once carry different device ids and are issued
-//! different slots.
+//! An auto-bound drone has no issued address to beacon on, and the radio
+//! refuses slot 0 on a drone, so its bind gives it the first slot of the
+//! default fleet (`ados_supervisor::bind::keys::unissued_drone_fleet`): the
+//! bind carries no fleet id either. Every ground receives on that slot beside
+//! its registered ones (`ados_groundlink::wfb_rx::fleet_slots`), and a ground
+//! on another fleet receives on the default fleet's first slot as well
+//! (`ados_groundlink::wfb_rx::provisional_links`). Enrolment issues the
+//! registry's own slot; the slot reconciler delivers it together with the
+//! ground's fleet id (over the provisional uplink to a drone still on the
+//! default fleet), and the drone's radio moves onto both once disarmed
+//! (`crate::routes::radio_fleet_apply`). Two drones beaconing on the first
+//! slot at once carry different device ids and are issued different slots.
 //!
 //! ## Shape
 //!

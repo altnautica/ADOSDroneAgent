@@ -35,6 +35,10 @@ pub struct PrimaryChain {
 
 /// The fleet's two ground transmitters: `tx_control` (`wfb_tx -p 1`, HopAck
 /// and presence) and `aux_tx` (`wfb_tx -p 3`, the whole ground→drone uplink).
+/// A ground off the default fleet runs a third, `provisional_aux_tx`: the aux
+/// uplink keyed to the default fleet's ground `link_id`, the only uplink a
+/// drone it paired but has not yet addressed can hear (see
+/// [`ados_radio::config::provisional_fleet`]).
 ///
 /// Stopped and started on their own, without touching a receiver, so the box
 /// can stand by while a phone holds the uplink. Built with its arguments
@@ -42,8 +46,18 @@ pub struct PrimaryChain {
 pub struct GroundTx {
     control_args: Vec<String>,
     aux_args: Vec<String>,
-    /// `(tx_control, aux_tx)` while running; dropping them killpg's both.
-    running: Option<(GroupChild, GroupChild)>,
+    /// The provisional aux transmitter's arguments, `None` on the default
+    /// fleet.
+    provisional_aux_args: Option<Vec<String>>,
+    /// The transmitters while running; dropping them killpg's each.
+    running: Option<Running>,
+}
+
+/// The running ground transmitters.
+struct Running {
+    control: GroupChild,
+    aux: GroupChild,
+    provisional_aux: Option<GroupChild>,
 }
 
 /// Each running transmitter's per-second `PKT` stats stream.
@@ -53,10 +67,15 @@ pub struct TxStdout {
 }
 
 impl GroundTx {
-    pub fn new(control_args: Vec<String>, aux_args: Vec<String>) -> Self {
+    pub fn new(
+        control_args: Vec<String>,
+        aux_args: Vec<String>,
+        provisional_aux_args: Option<Vec<String>>,
+    ) -> Self {
         Self {
             control_args,
             aux_args,
+            provisional_aux_args,
             running: None,
         }
     }
@@ -65,13 +84,18 @@ impl GroundTx {
         self.running.is_some()
     }
 
-    /// Spawn both transmitters (a no-op returning no streams while they run).
+    /// Spawn the transmitters (a no-op returning no streams while they run).
     ///
     /// stdout PIPED, not discarded: the per-second `PKT` stats line is the only
     /// per-transmitter proof that bytes offered to this `wfb_tx` actually
     /// reached the radio. See [`ados_radio::tx_liveness`]. The caller MUST
     /// drain both streams — an unread 64 KiB pipe blocks the transmitter in
     /// `fprintf(stdout)`.
+    ///
+    /// The provisional aux transmitter's stdout is discarded: it carries only
+    /// the address deliveries to a drone not yet on this fleet, so its silence
+    /// says nothing about the link this box serves and must not end the
+    /// generation the way a stalled fleet transmitter does.
     pub fn start(&mut self) -> std::io::Result<TxStdout> {
         if self.running.is_some() {
             return Ok(TxStdout {
@@ -91,21 +115,44 @@ impl GroundTx {
             StdoutMode::Piped,
             Some("/run/ados/wfb-gs-aux-tx.log"),
         )?;
+        let provisional_aux = match &self.provisional_aux_args {
+            Some(args) => Some(spawn_wfb(
+                "wfb_tx",
+                args,
+                StdoutMode::Null,
+                Some("/run/ados/wfb-gs-provisional-aux-tx.log"),
+            )?),
+            None => None,
+        };
         let streams = TxStdout {
             control: control.take_stdout(),
             aux: aux.take_stdout(),
         };
-        self.running = Some((control, aux));
+        self.running = Some(Running {
+            control,
+            aux,
+            provisional_aux,
+        });
         Ok(streams)
     }
 
-    /// Stop both transmitters and return only after both exited: `SIGTERM`
+    /// Stop the transmitters and return only after every one exited: `SIGTERM`
     /// each group, wait up to 2 s, then `SIGKILL`. Receivers are untouched.
     pub async fn stop(&mut self) {
-        if let Some((mut control, mut aux)) = self.running.take() {
+        if let Some(Running {
+            mut control,
+            mut aux,
+            mut provisional_aux,
+        }) = self.running.take()
+        {
             tokio::join!(
                 control.terminate(TX_STOP_GRACE),
-                aux.terminate(TX_STOP_GRACE)
+                aux.terminate(TX_STOP_GRACE),
+                async {
+                    if let Some(p) = provisional_aux.as_mut() {
+                        p.terminate(TX_STOP_GRACE).await;
+                    }
+                }
             );
         }
     }
@@ -128,6 +175,14 @@ pub struct SlotReceivers {
     /// The video receiver (p0), or `None` when this slot is not the hero and its
     /// video port is therefore unwatched. Dropping a set receiver killpg's it.
     pub video: Option<GroupChild>,
+    pub aux: GroupChild,
+    pub control: GroupChild,
+}
+
+/// The receivers a ground off the default fleet runs for a drone it paired but
+/// has not yet addressed (see [`WfbRxManager::spawn_provisional_receivers`]).
+/// Held for the generation; dropping them killpg's both.
+pub struct ProvisionalReceivers {
     pub aux: GroupChild,
     pub control: GroupChild,
 }
@@ -220,7 +275,17 @@ impl WfbRxManager {
         // the half that made the lane one-directional before it existed: the
         // drone has always listened on radio_id 3. `tx_control` carries HopAck
         // and the presence beacon. Both are idle-cheap, so whenever this box
-        // holds the uplink both run.
+        // holds the uplink both run. Off the default fleet, the provisional
+        // aux uplink runs beside them (idle until a delivery is offered).
+        let provisional_aux = super::provisional_links(fleet).map(|links| {
+            gs_aux_tx_args(
+                tx_iface,
+                &rx_key,
+                self.config.mcs_index,
+                links.ground,
+                ados_radio::config::PROVISIONAL_UPLINK_PORT,
+            )
+        });
         let tx = GroundTx::new(
             gs_tx_control_args(tx_iface, &rx_key, self.config.mcs_index, ground),
             gs_aux_tx_args(
@@ -230,6 +295,7 @@ impl WfbRxManager {
                 ground,
                 self.config.aux_tx_port,
             ),
+            provisional_aux,
         );
         Ok(PrimaryChain {
             slot: primary_slot,
@@ -316,6 +382,43 @@ impl WfbRxManager {
             aux,
             control,
         })
+    }
+
+    /// Spawn the receivers for a drone this ground paired but has not yet
+    /// addressed, when this ground is off the default fleet: aux (p2) and
+    /// control (p1) keyed to `link_id(DEFAULT_FLEET_ID, FIRST_DRONE_SLOT)`.
+    /// `None` on the default fleet, whose own first-slot receivers hear it.
+    ///
+    /// They decode onto [`FIRST_DRONE_SLOT`]'s ports, which this ground always
+    /// binds (see [`super::fleet_slots`]): the presence listener records the
+    /// drone's beacon from there (enrolment reads it) and the aux consumer
+    /// hands the drone's relay answers to the proxy that asked. Both lanes
+    /// already serve more than one drone, since every frame on them names its
+    /// sender. No video receiver: nothing watches an unaddressed drone's video.
+    ///
+    /// [`FIRST_DRONE_SLOT`]: super::FIRST_DRONE_SLOT
+    pub async fn spawn_provisional_receivers(
+        &self,
+    ) -> std::io::Result<Option<ProvisionalReceivers>> {
+        let Some(links) = super::provisional_links(self.config.fleet_id) else {
+            return Ok(None);
+        };
+        let rx = &self.rx_ifaces;
+        let rx_key = rx_key_path();
+        let slot = super::FIRST_DRONE_SLOT;
+        let aux = spawn_wfb(
+            "wfb_rx",
+            &gs_aux_rx_args(rx, &rx_key, aux_rx_port(slot), links.drone),
+            StdoutMode::Null,
+            Some("/run/ados/wfb-gs-provisional-aux-rx.log"),
+        )?;
+        let control = spawn_wfb(
+            "wfb_rx",
+            &gs_rx_control_args(rx, &rx_key, control_rx_port(slot), links.drone),
+            StdoutMode::Null,
+            Some("/run/ados/wfb-gs-provisional-rx-control.log"),
+        )?;
+        Ok(Some(ProvisionalReceivers { aux, control }))
     }
 
     /// Bring the video receiver (p0) up for a slot, the bring-back half of the

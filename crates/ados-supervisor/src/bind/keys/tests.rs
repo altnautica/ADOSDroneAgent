@@ -246,6 +246,35 @@ fn an_auto_paired_drone_takes_the_first_slot_instead_of_parking() {
 }
 
 #[test]
+fn an_auto_paired_drone_waits_where_a_ground_on_any_fleet_listens() {
+    // The bind carries no fleet id, so a ground on another fleet cannot hear
+    // the drone on that fleet's first slot. It hears the default fleet's first
+    // slot instead, and that is exactly the address the drone takes.
+    use ados_radio::config::{link_id, provisional_fleet, DEFAULT_FLEET_ID, FIRST_DRONE_SLOT};
+    let mut root = Mapping::new();
+    apply_pair_fields(
+        &mut root,
+        BindRole::Drone,
+        None,
+        Some("2026-11-20T00:00:00+00:00"),
+        Some(false),
+        None,
+    );
+    let taken = link_id(
+        wfb_u64(&root, "fleet_id").unwrap() as u16,
+        wfb_u64(&root, "fleet_slot").unwrap() as u8,
+    );
+    for ground_fleet in [DEFAULT_FLEET_ID, 7, u16::MAX] {
+        let listens_on = provisional_fleet(ground_fleet).unwrap_or(ground_fleet);
+        assert_eq!(
+            taken,
+            link_id(listens_on, FIRST_DRONE_SLOT),
+            "ground on {ground_fleet}"
+        );
+    }
+}
+
+#[test]
 fn only_the_unusable_half_of_an_identity_is_replaced() {
     let cases: [(u64, u64, u64, u64); 4] = [
         // An operator's fleet with no slot keeps its fleet.

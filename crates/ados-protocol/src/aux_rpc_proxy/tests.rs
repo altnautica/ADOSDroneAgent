@@ -167,6 +167,41 @@ async fn a_call_round_trips_through_egress_and_a_dispatched_response() {
 }
 
 #[tokio::test]
+async fn a_proxy_over_a_second_egress_is_answered_through_the_first() {
+    // A second uplink sends on its own egress, but its answers arrive on the
+    // one response path the first proxy listens on.
+    let (first_egress, mut first_sent) = loopback_egress().await;
+    let (second_egress, mut second_sent) = loopback_egress().await;
+    let first = AuxRpcProxy::with_timeout(first_egress, Duration::from_millis(500));
+    let second = first.over_egress(second_egress);
+
+    let listener = first.clone();
+    let consumer = tokio::spawn(async move {
+        let (channel, payload) = second_sent.recv().await.expect("sent on the second egress");
+        assert_eq!(channel, AuxChannel::Request);
+        let fragment = aux_rpc::decode_request_fragment(&payload).unwrap();
+        let aux_rpc::ReassemblyOutcome::Complete(request) =
+            aux_rpc::RequestReassembler::new().push(&fragment, std::time::Instant::now())
+        else {
+            panic!("a one-fragment request completes on arrival");
+        };
+        deliver_body(&listener, DRONE, request.id, 200, b"ok").await;
+    });
+
+    let result = second
+        .call(DRONE, RpcMethod::Get, b"/api/pairing/info", &[])
+        .await
+        .expect("answered through the first proxy's response path");
+    consumer.await.unwrap();
+    assert_eq!(result.status, 200);
+    assert_eq!(result.body, b"ok");
+    assert!(
+        first_sent.try_recv().is_err(),
+        "nothing went out on the first egress"
+    );
+}
+
+#[tokio::test]
 async fn a_multi_fragment_response_completes_on_its_systematic_symbols_alone() {
     let (egress, mut sent) = loopback_egress().await;
     let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(500));

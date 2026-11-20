@@ -19,10 +19,10 @@ fn slot(device_id: &str, slot: u8) -> FleetSlot {
 #[test]
 fn a_drone_that_has_never_acknowledged_is_told_its_slot() {
     let slots = vec![slot("aaaa", 1), slot("bbbb", 2)];
-    let got = decide_tick(&slots, &BTreeMap::new());
+    let got = decide_tick(&slots, 7, &BTreeMap::new());
     assert_eq!(got.len(), 2);
-    assert_eq!(got[0].slot, 1);
-    assert_eq!(got[1].slot, 2);
+    assert_eq!((got[0].fleet_id, got[0].slot), (7, 1));
+    assert_eq!((got[1].fleet_id, got[1].slot), (7, 2));
 }
 
 #[test]
@@ -30,8 +30,8 @@ fn a_fleet_that_already_agrees_costs_nothing() {
     // The reconciler runs forever, so the steady state has to be silent —
     // otherwise it is a standing airtime cost on a shared radio.
     let slots = vec![slot("aaaa", 1), slot("bbbb", 2)];
-    let confirmed = BTreeMap::from([("aaaa".into(), 1u8), ("bbbb".into(), 2u8)]);
-    assert!(decide_tick(&slots, &confirmed).is_empty());
+    let confirmed = BTreeMap::from([("aaaa".into(), (7, 1u8)), ("bbbb".into(), (7, 2u8))]);
+    assert!(decide_tick(&slots, 7, &confirmed).is_empty());
 }
 
 #[test]
@@ -40,15 +40,127 @@ fn a_drone_holding_the_wrong_slot_is_corrected() {
     // other's FEC decoder, and the symptom is unexplained link loss on
     // both. A stale acknowledgement must not read as agreement.
     let slots = vec![slot("aaaa", 1)];
-    let confirmed = BTreeMap::from([("aaaa".into(), 3u8)]);
-    let got = decide_tick(&slots, &confirmed);
+    let confirmed = BTreeMap::from([("aaaa".into(), (7, 3u8))]);
+    let got = decide_tick(&slots, 7, &confirmed);
     assert_eq!(
         got,
         vec![SlotAssignment {
             device_id: "aaaa".into(),
+            fleet_id: 7,
             slot: 1
         }]
     );
+}
+
+#[test]
+fn a_drone_that_acknowledged_another_fleet_is_told_this_one() {
+    // The ground's fleet id changed (an operator moved it), or the drone
+    // took its slot on the default fleet: the slot alone agreeing is not the
+    // address agreeing, and a drone on another fleet hears nothing from here.
+    let slots = vec![slot("aaaa", 1)];
+    let confirmed = BTreeMap::from([("aaaa".into(), (1, 1u8))]);
+    let got = decide_tick(&slots, 7, &confirmed);
+    assert_eq!(
+        got,
+        vec![SlotAssignment {
+            device_id: "aaaa".into(),
+            fleet_id: 7,
+            slot: 1
+        }]
+    );
+}
+
+#[test]
+fn the_ground_s_fleet_id_is_read_as_its_radio_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    std::fs::write(&cfg, "video:\n  wfb:\n    fleet_id: 7\n").unwrap();
+    assert_eq!(ground_fleet_id(&cfg), Some(7));
+    // An absent key is the radio's default fleet.
+    std::fs::write(&cfg, "agent:\n  profile: ground_station\n").unwrap();
+    assert_eq!(
+        ground_fleet_id(&cfg),
+        Some(ados_radio::config::DEFAULT_FLEET_ID)
+    );
+    // The reserved 0 parks the ground's radio: there is no address to give.
+    std::fs::write(&cfg, "video:\n  wfb:\n    fleet_id: 0\n").unwrap();
+    assert_eq!(ground_fleet_id(&cfg), None);
+}
+
+#[tokio::test]
+async fn a_ground_off_the_default_fleet_offers_on_both_uplinks() {
+    let uplinks = Uplinks {
+        fleet: test_drone::unheard_lane().await,
+        provisional: Some(test_drone::unheard_lane().await),
+    };
+    assert_eq!(uplinks.lanes(ados_radio::config::DEFAULT_FLEET_ID).len(), 1);
+    let lanes = uplinks.lanes(7);
+    assert_eq!(lanes.len(), 2);
+    assert!(Arc::ptr_eq(&lanes[0], &uplinks.fleet));
+    let without = Uplinks {
+        provisional: None,
+        ..uplinks
+    };
+    assert_eq!(without.lanes(7).len(), 1);
+}
+
+#[tokio::test]
+async fn an_address_reaches_a_drone_that_hears_only_the_provisional_uplink() {
+    // The drone an auto-pair bind left on the default fleet: the ground's
+    // own uplink is never answered, the provisional one is, and the delivery
+    // carries the ground's fleet id beside the slot.
+    const DRONE: &str = "provisional0a";
+    let drone = test_drone::spawn(DRONE, Some(test_drone::SECRET)).await;
+    let uplinks = Uplinks {
+        fleet: test_drone::unheard_lane().await,
+        provisional: Some(Arc::clone(&drone.proxy)),
+    };
+    let slots = vec![slot_with_secret(DRONE, 2, test_drone::SECRET)];
+    let assignment = decide_tick(&slots, 7, &BTreeMap::new()).remove(0);
+    deliver(uplinks.lanes(7), &slots, &assignment)
+        .await
+        .expect("answered on the provisional uplink");
+    let seen = drone
+        .seen
+        .lock()
+        .last()
+        .cloned()
+        .expect("the drone was called");
+    assert_eq!(seen.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+    assert_eq!(body["key"], "video.wfb.fleet_slot");
+    assert_eq!(body["value"], 2);
+    assert_eq!(body["fleet_id"], 7);
+
+    // The relay secret offer reaches it the same way. (This stand-in drone
+    // runs only the relay ticket check, which refuses the ticketless offer:
+    // an answer at all is the proof it heard the provisional uplink.)
+    let secret = SecretDelivery {
+        device_id: DRONE.into(),
+        secret: test_drone::SECRET.into(),
+    };
+    assert_eq!(
+        deliver_secret(uplinks.lanes(7), &secret).await,
+        Err("drone answered HTTP 401".to_string())
+    );
+    let seen = drone
+        .seen
+        .lock()
+        .last()
+        .cloned()
+        .expect("the drone was called");
+    assert_eq!(seen.method, RpcMethod::Post);
+    assert_eq!(seen.path, DRONE_RELAY_SECRET_PATH);
+
+    // A ground on the default fleet does not use the provisional uplink, so
+    // this drone (not on its fleet lane) is not reached and is retried.
+    assert!(deliver(
+        uplinks.lanes(ados_radio::config::DEFAULT_FLEET_ID),
+        &slots,
+        &assignment
+    )
+    .await
+    .is_err());
 }
 
 fn slot_with_secret(device_id: &str, slot: u8, secret: &str) -> FleetSlot {
@@ -101,8 +213,8 @@ fn a_departed_drone_is_not_offered_a_credential() {
 fn a_drone_that_left_the_fleet_is_not_chased() {
     // Only the registry decides who is in the fleet; a leftover
     // acknowledgement must not resurrect a departed drone.
-    let confirmed = BTreeMap::from([("ghost".into(), 7u8)]);
-    assert!(decide_tick(&[], &confirmed).is_empty());
+    let confirmed = BTreeMap::from([("ghost".into(), (7, 7u8))]);
+    assert!(decide_tick(&[], 7, &confirmed).is_empty());
 }
 
 #[test]

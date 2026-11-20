@@ -1,4 +1,4 @@
-//! Tell each drone the fleet slot the ground station issued it.
+//! Tell each drone the fleet address (fleet id and slot) its ground station holds for it.
 //!
 //! The ground station allocates a slot at pair time and returns it in the pair
 //! response — to the CALLER. Nothing ever carried it to the aircraft, so a
@@ -29,6 +29,13 @@
 //! drone's radio restarts onto it, which waits for the vehicle to disarm
 //! (`radio_fleet_apply`).
 //!
+//! A drone on the wrong FLEET does not hear its ground's uplink, and an
+//! auto-paired drone is on the default fleet whatever fleet its ground is on
+//! (the bind carries no fleet id). So the ground's fleet id travels with the
+//! slot, as one address the drone writes and restarts onto together, and a
+//! ground off the default fleet offers it on a provisional uplink keyed to the
+//! default fleet's ground `link_id` as well as on its own ([`uplinks`]).
+//!
 //! ## Shape
 //!
 //! A reconciler, not a one-shot at pair time. A one-shot loses the race with a
@@ -47,6 +54,10 @@ use ados_protocol::aux_rpc::RpcMethod;
 use ados_protocol::aux_rpc_proxy::AuxRpcProxy;
 use ados_protocol::relay_ticket::{RelayTicketIssuer, RequestBinding};
 use serde_json::json;
+
+pub mod uplinks;
+pub use uplinks::Uplinks;
+use uplinks::{call_on_lanes, LaneRequest};
 
 /// How often the ground station restates the fleet's slot assignments.
 ///
@@ -103,37 +114,53 @@ pub fn decide_secret_tick(
         .collect()
 }
 
-/// One drone that should be told its slot.
+/// One drone that should be told its address: the ground's fleet id and the
+/// slot its registry issued.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotAssignment {
     pub device_id: String,
+    pub fleet_id: u16,
     pub slot: u8,
 }
 
-/// Which drones still need telling.
+/// Which drones still need telling, by a ground on `fleet_id`.
 ///
 /// Pure over its inputs so the decision is testable without a registry file or
-/// a radio. `confirmed` maps device id to the slot that drone has acknowledged;
-/// a drone missing from it, or acknowledging a different slot, is restated.
-pub fn decide_tick(slots: &[FleetSlot], confirmed: &BTreeMap<String, u8>) -> Vec<SlotAssignment> {
+/// a radio. `confirmed` maps device id to the `(fleet_id, slot)` that drone
+/// has acknowledged; a drone missing from it, or acknowledging another
+/// address (another slot, or this ground's previous fleet id), is restated.
+pub fn decide_tick(
+    slots: &[FleetSlot],
+    fleet_id: u16,
+    confirmed: &BTreeMap<String, (u16, u8)>,
+) -> Vec<SlotAssignment> {
     slots
         .iter()
-        .filter(|s| confirmed.get(&s.device_id) != Some(&s.slot))
+        .filter(|s| confirmed.get(&s.device_id) != Some(&(fleet_id, s.slot)))
         .map(|s| SlotAssignment {
             device_id: s.device_id.clone(),
+            fleet_id,
             slot: s.slot,
         })
         .collect()
 }
 
-/// Send one drone its slot. Returns `Ok` only on a 2xx, so a drone that
-/// answered with an error is retried rather than recorded as agreeing.
+/// Send one drone its address, on every lane in `lanes` at once (see
+/// [`uplinks`]). The slot write carries the fleet id beside it, so the drone
+/// writes both halves together and restarts onto them once. Returns `Ok` only
+/// on a 2xx, so a drone that answered with an error is retried rather than
+/// recorded as agreeing.
 pub async fn deliver(
-    proxy: &Arc<AuxRpcProxy>,
+    lanes: Vec<Arc<AuxRpcProxy>>,
     slots: &[FleetSlot],
     assignment: &SlotAssignment,
 ) -> Result<(), String> {
-    let body = json!({ "key": FLEET_SLOT_KEY, "value": assignment.slot }).to_string();
+    let body = json!({
+        "key": FLEET_SLOT_KEY,
+        "value": assignment.slot,
+        "fleet_id": assignment.fleet_id,
+    })
+    .to_string();
     let Some(ticket) = mint_ticket(
         slots,
         &assignment.device_id,
@@ -143,22 +170,17 @@ pub async fn deliver(
     ) else {
         return Err("no relay secret on file for this drone".to_string());
     };
-    match proxy
-        .call_request(
-            assignment.device_id.as_bytes(),
-            RpcMethod::Put,
-            &ados_protocol::aux_rpc::RequestParts {
-                path: DRONE_CONFIG_PATH,
-                content_type: b"application/json",
-                ticket: ticket.as_bytes(),
-                body: body.as_bytes(),
-            },
-        )
-        .await
-    {
-        Ok(resp) if (200..300).contains(&resp.status) => Ok(()),
-        Ok(resp) => Err(format!("drone answered HTTP {}", resp.status)),
-        Err(e) => Err(format!("{e}")),
+    let request = LaneRequest {
+        device_id: assignment.device_id.clone(),
+        method: RpcMethod::Put,
+        path: DRONE_CONFIG_PATH,
+        content_type: b"application/json",
+        ticket: ticket.into_bytes(),
+        body: body.into_bytes(),
+    };
+    match call_on_lanes(lanes, request).await? {
+        status if (200..300).contains(&status) => Ok(()),
+        status => Err(format!("drone answered HTTP {status}")),
     }
 }
 
@@ -279,7 +301,8 @@ fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Offer one drone the relay secret its ground station issued it.
+/// Offer one drone the relay secret its ground station issued it, on every
+/// lane in `lanes` at once (see [`uplinks`]).
 ///
 /// Sent WITHOUT a ticket, necessarily: the drone cannot verify one until it
 /// holds the secret this call is delivering. That is the trust-on-first-use
@@ -287,37 +310,48 @@ fn now_unix_secs() -> i64 {
 /// first-write-wins rule -- a drone that already holds a secret answers 409 and
 /// keeps what it has.
 pub async fn deliver_secret(
-    proxy: &Arc<AuxRpcProxy>,
+    lanes: Vec<Arc<AuxRpcProxy>>,
     delivery: &SecretDelivery,
 ) -> Result<SecretOutcome, String> {
     let body = json!({ "secret": delivery.secret }).to_string();
-    match proxy
-        .call(
-            delivery.device_id.as_bytes(),
-            RpcMethod::Post,
-            DRONE_RELAY_SECRET_PATH,
-            body.as_bytes(),
-        )
-        .await
-    {
-        // 200 covers both "accepted" and "already held" -- the drone treats a
-        // restatement as a no-op, and so does this; 409 is a settled conflict.
-        Ok(resp) => secret_outcome(resp.status),
-        Err(e) => Err(format!("{e}")),
-    }
+    let request = LaneRequest {
+        device_id: delivery.device_id.clone(),
+        method: RpcMethod::Post,
+        path: DRONE_RELAY_SECRET_PATH,
+        content_type: b"",
+        ticket: Vec::new(),
+        body: body.into_bytes(),
+    };
+    // 200 covers both "accepted" and "already held" -- the drone treats a
+    // restatement as a no-op, and so does this; 409 is a settled conflict.
+    secret_outcome(call_on_lanes(lanes, request).await?)
+}
+
+/// This ground station's own fleet id, as its radio reads it from
+/// `config_path`. `None` when the radio would refuse it (the reserved 0, or a
+/// config that will not load): that ground's radio is parked, and every drone
+/// would refuse an address on it.
+pub(crate) fn ground_fleet_id(config_path: &std::path::Path) -> Option<u16> {
+    let config = ados_config::schema::effective(config_path).ok()?;
+    let fleet_id = config
+        .pointer("/video/wfb/fleet_id")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u16::try_from(v).ok())?;
+    (fleet_id != 0).then_some(fleet_id)
 }
 
 /// Run the slot reconciler until the process exits. Ground-station profile
 /// only; spawned once at startup beside the hero reconciler that shares its
-/// relay proxy.
-pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
+/// relay proxy. The ground's fleet id is read from `config_path` every tick,
+/// so an operator's change of it is restated to the whole fleet.
+pub async fn run_slot_reconciler(uplinks: Uplinks, config_path: std::path::PathBuf) {
     let mut tick = tokio::time::interval(SLOT_RECONCILE_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // What each drone has acknowledged. Held in memory only: on restart the
-    // ground station restates every slot once, which is one cheap tick and
-    // strictly safer than trusting a persisted claim about a drone that may
-    // have been re-flashed while we were down.
-    let mut confirmed: BTreeMap<String, u8> = BTreeMap::new();
+    // What each drone has acknowledged, as `(fleet_id, slot)`. Held in memory
+    // only: on restart the ground station restates every address once, which
+    // is one cheap tick and strictly safer than trusting a persisted claim
+    // about a drone that may have been re-flashed while we were down.
+    let mut confirmed: BTreeMap<String, (u16, u8)> = BTreeMap::new();
     // Which drones have taken the relay secret. In memory for the same reason
     // the slot acknowledgements are: on restart the ground station re-offers
     // once, which the drone answers as already-held at no cost, and that is
@@ -327,6 +361,10 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
     loop {
         tick.tick().await;
         let slots = registered_slots();
+        let fleet_id = ground_fleet_id(&config_path);
+        // A ground whose own fleet id its radio refuses offers on its fleet
+        // lane alone, and delivers no address below.
+        let lanes = || uplinks.lanes(fleet_id.unwrap_or(ados_radio::config::DEFAULT_FLEET_ID));
 
         // The secret goes first. Slot delivery now carries a ticket, and the
         // drone cannot verify one until it holds the secret -- so offering the
@@ -337,7 +375,7 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
         secret_acked.retain(|device_id| present_ids.contains(device_id.as_str()));
         forget_departed_relay_secret_states(&present_ids);
         for delivery in decide_secret_tick(&slots, &secret_acked) {
-            match deliver_secret(&proxy, &delivery).await {
+            match deliver_secret(lanes(), &delivery).await {
                 Ok(SecretOutcome::Held) => {
                     tracing::info!(device_id = %delivery.device_id, "relay_secret_delivered");
                     record_relay_secret_state(&delivery.device_id, RelaySecretState::Held);
@@ -370,21 +408,30 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
             slots.iter().map(|s| s.device_id.as_str()).collect();
         confirmed.retain(|device_id, _| present.contains(device_id.as_str()));
 
-        for assignment in decide_tick(&slots, &confirmed) {
-            match deliver(&proxy, &slots, &assignment).await {
+        let Some(fleet_id) = fleet_id else {
+            tracing::warn!(
+                config = %config_path.display(),
+                "fleet_address_delivery_skipped: this ground's own fleet id is unusable"
+            );
+            continue;
+        };
+        for assignment in decide_tick(&slots, fleet_id, &confirmed) {
+            match deliver(lanes(), &slots, &assignment).await {
                 Ok(()) => {
                     tracing::info!(
                         device_id = %assignment.device_id,
+                        fleet_id = assignment.fleet_id,
                         slot = assignment.slot,
                         "fleet_slot_delivered"
                     );
-                    confirmed.insert(assignment.device_id, assignment.slot);
+                    confirmed.insert(assignment.device_id, (assignment.fleet_id, assignment.slot));
                 }
                 Err(e) => {
                     // Not an error state: a drone that is off, rebooting or out
                     // of range is the ordinary case this reconciler exists for.
                     tracing::debug!(
                         device_id = %assignment.device_id,
+                        fleet_id = assignment.fleet_id,
                         slot = assignment.slot,
                         error = %e,
                         "fleet_slot_delivery_deferred"
@@ -508,6 +555,25 @@ pub(crate) mod test_drone {
             }
         });
         TestDrone { proxy, seen }
+    }
+
+    /// An uplink no drone answers on: a drone on another fleet's ground
+    /// `link_id` never hears it. Short call timeout; nothing reads the far
+    /// end, which stays bound so a send never fails outright.
+    pub async fn unheard_lane() -> Arc<AuxRpcProxy> {
+        let far_end = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = far_end.local_addr().unwrap().port();
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(("127.0.0.1", port)).await.unwrap();
+        tokio::spawn(async move {
+            // Held, never read, for the life of the runtime.
+            let _far_end = far_end;
+            std::future::pending::<()>().await;
+        });
+        Arc::new(AuxRpcProxy::with_timeout(
+            AuxEgress::connected_for_test(sock),
+            Duration::from_millis(300),
+        ))
     }
 }
 

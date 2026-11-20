@@ -207,6 +207,17 @@ pub(super) async fn receive_loop(
                 Err(e) => tracing::error!(error = %e, slot, "ground_slot_rx_failed_to_start"),
             }
         }
+        // Off the default fleet, the receivers for a drone this ground paired
+        // but has not yet addressed (it waits on the default fleet's first
+        // slot). Held for the generation; best-effort like a secondary slot,
+        // and the next generation retries a failed spawn.
+        let _provisional = match manager.spawn_provisional_receivers().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "ground_provisional_rx_failed_to_start");
+                None
+            }
+        };
         tracing::info!(
             fleet_id = manager.fleet_id(),
             primary_slot,

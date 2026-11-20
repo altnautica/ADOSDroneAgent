@@ -21,10 +21,9 @@ pub use regulatory::{RegulatoryConfig, RegulatoryMode};
 fn default_channel() -> u8 {
     149
 }
-/// Default fleet. A single-drone rig never has to think about fleets, so the
-/// unconfigured node lands in fleet 1 rather than the reserved 0.
+/// Default fleet ([`DEFAULT_FLEET_ID`]).
 fn default_fleet_id() -> u16 {
-    1
+    DEFAULT_FLEET_ID
 }
 fn default_band() -> String {
     "u-nii-3".to_string()
