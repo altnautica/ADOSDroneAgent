@@ -270,10 +270,10 @@ fn a_source_deeper_than_the_deepest_never_holds_the_run_for_good() {
     assert!(reached >= 5_000 * MS, "stalled at {} ms", reached / MS);
 }
 
-/// The target that counted one frame of source delay (the film take's
-/// stall) never lets the frame it waits for be rendered from a two-frame-deep
-/// source: the run holds for good (in the film take only the silence drop
-/// moved it, 1.25 s of wall time a frame).
+/// The target that counted one frame of source delay never lets the frame it
+/// waits for be rendered from a two-frame-deep source: the run holds for good
+/// (in a rendered lockstep run only the silence drop moved it, 1.25 s of wall
+/// time a frame).
 #[test]
 fn one_frame_of_source_delay_deadlocks_a_two_frame_deep_source() {
     for (fps, grant_ms) in [(30, 20), (60, 20)] {

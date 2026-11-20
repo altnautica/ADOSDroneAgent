@@ -5,8 +5,8 @@
 //! and nothing holds height or position. So outside a pitch doublet the
 //! generator pitches toward the loiter height, and it turns back toward the
 //! centre whenever it is heading away from it past a quarter of the box
-//! (a straight downwind leg crossed the whole 400 m box in 17 s, run
-//! 20261108-133713).
+//! (a straight downwind leg crossed the whole 400 m box in 17 s in
+//! simulation).
 
 /// Roll doublet: ±45° bank demand for 2 s each way.
 pub const ROLL_BANK_DEG: f32 = 45.0;
