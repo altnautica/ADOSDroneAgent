@@ -625,6 +625,59 @@
         "fc_command_down_gated"
       ]
     },
+    "FleetApplyView": {
+      "description": "The fleet-address restart as the status surfaces serve it (the full status\n`radioFleetApply`, the cloud heartbeat's `radio.fleet_apply`).",
+      "type": "object",
+      "properties": {
+        "at_ms": {
+          "description": "Unix milliseconds of the last outcome change.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fleet_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "fleet_slot": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "outcome": {
+          "description": "`pending` (recorded, not yet judged), `deferred_armed` (waiting for the\nvehicle to disarm), `applied`, or `restart_failed` (retried).",
+          "type": "string"
+        },
+        "since_ms": {
+          "description": "Unix milliseconds the address was written.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "outcome",
+        "fleet_id",
+        "fleet_slot",
+        "since_ms",
+        "at_ms"
+      ]
+    },
     "LinkedPeerHb": {
       "description": "One WFB peer a ground station reports it relays, folded from the\n`/run/ados/linked-peers.json` sidecar the receive-side presence listener\nwrites. A ground station can relay more than one drone, so the payload\ncarries a LIST; each entry is exactly what the PresenceBeacon + the listener\ndecode (device-id, role, channel, RSSI, last-seen), no richer identity than\nthe wire itself provides. `rename_all = \"camelCase\"` maps the snake fields to\nthe `deviceId`/`rssiDbm`/`seenAtUnix` wire keys the GCS `LinkedPeer` consumes\nand the strict cloud validator declares. Absent on a drone / a peerless\nground node so the heartbeat stays byte-identical.",
       "type": "object",
@@ -845,6 +898,17 @@
           ],
           "format": "int64",
           "default": null
+        },
+        "fleet_apply": {
+          "description": "A fleet address written to config and the radio restart it is owed\n(`outcome` `deferred_armed` while the vehicle is armed), from the same\nrecord the LAN full status serves as `radioFleetApply`\n(`ados_protocol::fleet_identity::fleet_apply_view`). Set by the heartbeat\nloop each tick; omitted when no address was ever written this boot.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FleetApplyView"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "freq_mhz": {
           "type": [

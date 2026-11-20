@@ -276,7 +276,7 @@ impl BindOrchestrator {
         // commits to goes into the session record (and the sentinel, with the
         // transition below) first, so a supervisor killed from here on finishes
         // it at restart instead of leaving the peer paired alone.
-        if let Some(fingerprint) = keys::blob_fingerprint(&blob) {
+        if let Some(fingerprint) = ados_protocol::pair_proof::blob_fingerprint(&blob) {
             self.set_pending_apply(PendingApply { fingerprint, fleet })
                 .await;
         }

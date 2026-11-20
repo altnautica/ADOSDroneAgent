@@ -183,7 +183,12 @@ impl BindOrchestrator {
     ) {
         let upstream = role.upstream_key();
         let blob = match self.host.read_file(upstream) {
-            Ok(b) if keys::blob_fingerprint(&b).as_deref() == Some(&pending.fingerprint) => b,
+            Ok(b)
+                if ados_protocol::pair_proof::blob_fingerprint(&b).as_deref()
+                    == Some(&pending.fingerprint) =>
+            {
+                b
+            }
             _ => {
                 tracing::warn!(
                     upstream,
