@@ -67,7 +67,7 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
     "logging",
 ] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 # Sync HTTP client for the oneshot update poll over HTTPS, on the no-provider
 # rustls path; the preconfigured rustls ClientConfig carries the ring provider.
 reqwest = { version = "0.12", default-features = false, features = [
