@@ -208,14 +208,13 @@ pub(super) fn spawn_command_poll(
     })
 }
 
-/// One command-poll pass: GET the queue, dispatch each command for real, ACK the
-/// real result. Plugin lifecycle commands run in-process against the held
-/// supervisor; service/peripheral/fleet/log/WFB-pair commands forward to the
-/// local API over loopback and carry back the route's real ok/failed result; any
-/// command with no handler acks an honest `failed("not implemented: …")` rather
-/// than fabricating success. A command id already in the executed record is
-/// answered with its stored ack and not run again. Best-effort: any transport
-/// failure is logged, not fatal.
+/// One command-poll pass over HTTPS ([`command_poll::poll_once`]): GET the
+/// queue, dispatch each command for real, ACK the real result. Plugin lifecycle
+/// commands run in-process against the held supervisor;
+/// service/peripheral/fleet/log/WFB-pair commands forward to the local API over
+/// loopback and carry back the route's real ok/failed result; any command with
+/// no handler acks an honest `failed("not implemented: …")` rather than
+/// fabricating success.
 pub(super) async fn poll_commands_once(
     http: &reqwest::Client,
     convex_url: &str,
@@ -225,102 +224,76 @@ pub(super) async fn poll_commands_once(
     download: &SharedDownload,
     executed: &mut dispatch::executed_commands::ExecutedCommands,
 ) {
-    use dispatch::executed_commands::Precheck;
-
-    let url = format!("{}/agent/commands", convex_url.trim_end_matches('/'));
-    let resp = match http
-        .get(&url)
-        .query(&[("deviceId", device_id)])
-        .header("X-ADOS-Key", api_key)
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        Ok(_) | Err(_) => {
-            tracing::debug!("cloud command poll failed");
-            return;
-        }
+    let base = convex_url.trim_end_matches('/');
+    let link = HttpCommandLink {
+        http,
+        claim_url: format!("{base}/agent/commands"),
+        ack_url: format!("{base}/agent/commands/ack"),
+        api_key,
+        device_id,
     };
-    let body: serde_json::Value = match resp.json().await {
-        Ok(b) => b,
-        Err(_) => return,
+    let runner = LocalRunner {
+        http,
+        supervisor,
+        download,
     };
-    let ack_url = format!("{}/agent/commands/ack", convex_url.trim_end_matches('/'));
-    for cmd in command_poll::parse_commands(&body) {
-        let cmd_id = command_poll::command_id(&cmd).to_string();
-        let name = command_poll::command_name(&cmd).to_string();
-
-        let ack = match executed.precheck(&cmd) {
-            Precheck::Replay(ack) => {
-                tracing::info!(command = %name, id = %cmd_id, "cloud command already executed; re-sending its ack");
-                ack
-            }
-            Precheck::Refuse(result) => {
-                tracing::warn!(command = %name, id = %cmd_id, "cloud command redelivered without an execution record; refused");
-                let ack = command_poll::build_ack(&cmd_id, device_id, &result);
-                if let Err(e) = executed.record(&cmd_id, ack.clone()) {
-                    tracing::warn!(error = %e, "executed-command record write failed");
-                }
-                ack
-            }
-            Precheck::Execute => {
-                tracing::info!(command = %name, id = %cmd_id, "cloud command executing");
-                let seen = dispatch::seen_jobs::default_path();
-                let result = dispatch_command(http, &name, &cmd, supervisor, download, &seen).await;
-                if result.status == dispatch::CommandStatus::Failed {
-                    tracing::warn!(
-                        command = %name,
-                        id = %cmd_id,
-                        message = %result.result.get("message").and_then(|v| v.as_str()).unwrap_or(""),
-                        "cloud command failed"
-                    );
-                }
-                let ack = command_poll::build_ack(&cmd_id, device_id, &result);
-                if let Err(e) = executed.record(&cmd_id, ack.clone()) {
-                    tracing::warn!(error = %e, "executed-command record write failed");
-                }
-                ack
-            }
-        };
-        post_ack(http, &ack_url, api_key, &ack).await;
-    }
+    command_poll::poll_once(&link, &runner, device_id, executed).await;
 }
 
-/// Delays before each ack attempt: one immediate try, then two retries.
-pub(super) const ACK_RETRY_DELAYS: [std::time::Duration; 3] = [
-    std::time::Duration::ZERO,
-    std::time::Duration::from_millis(500),
-    std::time::Duration::from_secs(2),
-];
+/// The cloud command queue over HTTPS, authenticated by `X-ADOS-Key`.
+pub(super) struct HttpCommandLink<'a> {
+    http: &'a reqwest::Client,
+    claim_url: String,
+    ack_url: String,
+    api_key: &'a str,
+    device_id: &'a str,
+}
 
-/// POST one command ack, retrying a transport error or a non-2xx answer. An
-/// ack that still fails leaves the row leased; the queue redelivers it and the
-/// executed record answers it without running the command again.
-pub(super) async fn post_ack(
-    http: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    ack: &serde_json::Value,
-) {
-    for delay in ACK_RETRY_DELAYS {
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
-        match http
-            .post(url)
-            .header("X-ADOS-Key", api_key)
+impl command_poll::CommandLink for HttpCommandLink<'_> {
+    async fn claim(&self) -> Option<serde_json::Value> {
+        let resp = self
+            .http
+            .get(&self.claim_url)
+            .query(&[("deviceId", self.device_id)])
+            .header("X-ADOS-Key", self.api_key)
+            .send()
+            .await
+            .ok()
+            .filter(|r| r.status().is_success())?;
+        resp.json().await.ok()
+    }
+
+    async fn ack(&self, ack: &serde_json::Value) -> command_poll::AckAttempt {
+        match self
+            .http
+            .post(&self.ack_url)
+            .header("X-ADOS-Key", self.api_key)
             .json(ack)
             .send()
             .await
         {
-            Ok(r) if r.status().is_success() => return,
-            Ok(r) => tracing::debug!(status = %r.status(), "cloud command ack refused"),
-            Err(e) => tracing::debug!(error = %e, "cloud command ack failed"),
+            Ok(r) if r.status().is_success() => command_poll::AckAttempt::Delivered,
+            Ok(r) => command_poll::AckAttempt::Refused(r.status().as_u16()),
+            Err(e) => {
+                tracing::debug!(error = %e, "cloud command ack failed");
+                command_poll::AckAttempt::Unanswered
+            }
         }
     }
-    tracing::warn!(
-        "cloud command ack not delivered; a redelivery is answered from the executed record"
-    );
+}
+
+/// The node's real command handlers ([`dispatch_command`]).
+pub(super) struct LocalRunner<'a> {
+    http: &'a reqwest::Client,
+    supervisor: &'a SharedSupervisor,
+    download: &'a SharedDownload,
+}
+
+impl command_poll::CommandRunner for LocalRunner<'_> {
+    async fn run(&self, name: &str, cmd: &serde_json::Value) -> dispatch::CommandResult {
+        let seen = dispatch::seen_jobs::default_path();
+        dispatch_command(self.http, name, cmd, self.supervisor, self.download, &seen).await
+    }
 }
 
 /// Dispatch a single cloud command to its real handler and return the result.

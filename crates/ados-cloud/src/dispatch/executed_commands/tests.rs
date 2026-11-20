@@ -64,3 +64,45 @@ fn a_corrupt_record_loads_empty() {
     let record = ExecutedCommands::load(&path);
     assert!(record.stored_ack("anything").is_none());
 }
+
+/// A command a restart cut short is answered failed and never run again.
+#[test]
+fn a_command_cut_short_by_a_restart_is_refused_not_run_again() {
+    let (_dir, path) = record_path();
+    let mut record = ExecutedCommands::load(&path);
+    record.begin("cmd-4").unwrap();
+    let reloaded = ExecutedCommands::load(&path);
+    assert_eq!(reloaded.interrupted(), vec!["cmd-4".to_string()]);
+    let redelivered = json!({"_id": "cmd-4", "command": "restart_service", "attempts": 2});
+    assert!(matches!(
+        reloaded.precheck(&redelivered),
+        Precheck::Refuse(r) if r.result["message"] == INTERRUPTED
+    ));
+    assert!(reloaded.undelivered().is_empty(), "no ack yet to send");
+}
+
+/// An ack stays in the outbox, across a restart, until it is delivered.
+#[test]
+fn an_ack_stays_undelivered_until_the_queue_has_it() {
+    let (_dir, path) = record_path();
+    let mut record = ExecutedCommands::load(&path);
+    record.begin("cmd-5").unwrap();
+    let ack = json!({"commandId": "cmd-5", "status": "completed"});
+    record.record("cmd-5", ack.clone()).unwrap();
+    assert!(record.interrupted().is_empty());
+    let mut reloaded = ExecutedCommands::load(&path);
+    assert_eq!(reloaded.undelivered(), vec![ack]);
+    reloaded.delivered("cmd-5").unwrap();
+    assert!(ExecutedCommands::load(&path).undelivered().is_empty());
+}
+
+/// A record written before the outbox holds only acks already sent.
+#[test]
+fn a_record_from_before_the_outbox_has_nothing_to_resend() {
+    let (_dir, path) = record_path();
+    std::fs::write(&path, br#"[{"id":"cmd-6","ack":{"commandId":"cmd-6"}}]"#).unwrap();
+    let record = ExecutedCommands::load(&path);
+    assert!(record.undelivered().is_empty());
+    assert!(record.interrupted().is_empty());
+    assert!(record.stored_ack("cmd-6").is_some());
+}
