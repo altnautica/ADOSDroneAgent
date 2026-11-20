@@ -112,6 +112,7 @@ pub(super) async fn listen_return<R: HopRadio>(
                     // A verified ack from the peer is received-side proof, and
                     // proof the peer is present on this channel.
                     rx_proof.observe(Instant::now(), proof_reference);
+                    state.lock().await.on_peer_ack();
                     let _ = ack_tx.try_send(target);
                 } else if let Some(p) = parse_presence_beacon(pkt, &pair_key) {
                     // Drop this rig's own beacon (a loopback race can deliver
