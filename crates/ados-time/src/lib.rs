@@ -105,6 +105,15 @@ pub fn participant(socket: Option<&Path>) -> Option<Participant> {
     socket.map(|p| Participant::connect(p.to_path_buf()))
 }
 
+/// A steady wall-time ticker (missed ticks skipped), for work that must go
+/// on while sim time is held: a lockstep lane reporting its start readiness
+/// ([`Participant::gate`]), which the simulator holds its start for.
+pub fn steady_interval(period: std::time::Duration) -> tokio::time::Interval {
+    let mut iv = tokio::time::interval(period);
+    iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    iv
+}
+
 /// A clock that follows the plugin relay under `run_dir` on a node running
 /// on the simulator's clock, wall otherwise (an agent service that ticks with
 /// its plugins, such as the plugin host). Needs a Tokio runtime.
@@ -140,8 +149,8 @@ async fn accept_on(
     }
 }
 
-/// One participant's reports, `None` when it left.
-type Report = (u64, Option<u64>);
+/// One participant's reports (`done_ns` and its flags), `None` when it left.
+type Report = (u64, Option<wire::Done>);
 
 /// Read one participant's `DONE` frames until it disconnects or sends
 /// anything else.
@@ -154,7 +163,7 @@ async fn read_participant(
     while s.read_exact(&mut buf).await.is_ok() {
         match wire::Done::decode(&buf) {
             Some(d) => {
-                if tx.send((id, Some(d.done_ns))).is_err() {
+                if tx.send((id, Some(d))).is_err() {
                     return;
                 }
             }
@@ -208,7 +217,15 @@ pub async fn relay(
                 None
             }
             Some((id, report)) = reports.recv() => match report {
-                Some(done_ns) => barrier.done(id, done_ns, Instant::now()),
+                Some(d) => {
+                    let before = barrier.flags();
+                    let r = barrier.done(id, d.done_ns, d.flags, Instant::now());
+                    let after = barrier.flags();
+                    if after != before {
+                        tracing::info!(id, flags = after, "simclock_start_flags");
+                    }
+                    r
+                }
                 None => {
                     let r = barrier.leave(id, Instant::now());
                     tracing::info!(id, parts = barrier.parts(), "simclock_participant_left");

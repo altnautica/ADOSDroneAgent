@@ -439,3 +439,30 @@ async fn an_unproven_link_that_shows_a_heartbeat_is_kept() {
     assert!(!expiry.is_finished(), "a proven link is never released");
     expiry.abort();
 }
+
+/// On a node following the simulator, FC liveness counts the FC's (sim)
+/// clock: a lockstep run held at a grant for longer than the heartbeat
+/// timeout of wall time (the FC silent because it is not stepped) keeps the
+/// link up, and 4 s of sim time without a HEARTBEAT drops it.
+#[tokio::test]
+async fn on_the_sim_clock_a_held_run_keeps_the_fc_alive_and_a_sim_silence_drops_it() {
+    use crate::clock::tests::{advance, sim_clock};
+    let (clock, feed) = sim_clock();
+    let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+    let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
+        "/tmp/ados-liveness-sim-params.json",
+    )));
+    let c = FcConnection::with_clock(MavlinkConfig::default(), state, params, clock);
+    c.connected.store(true, Ordering::Relaxed);
+    advance(&feed, 1, 5_000);
+    *c.last_heartbeat_at.lock().await = Some(c.liveness_now());
+    assert!(c.connected().await);
+    // Held: more than HEARTBEAT_TIMEOUT of wall time with no tick.
+    tokio::time::sleep(HEARTBEAT_TIMEOUT + Duration::from_millis(300)).await;
+    assert!(c.connected().await, "a held run is not a lost FC");
+    advance(&feed, 2, 5_000 + 3_900);
+    assert!(c.connected().await);
+    advance(&feed, 3, 5_000 + 4_100);
+    assert!(!c.connected().await, "4.1 s of sim time without a HEARTBEAT");
+    assert!(c.heartbeat_age_s().await.is_some_and(|a| (4.0..4.2).contains(&a)));
+}

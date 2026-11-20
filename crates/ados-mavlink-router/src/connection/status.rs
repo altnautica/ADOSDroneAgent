@@ -2,15 +2,28 @@
 
 use super::*;
 
-/// Steady time for FC heartbeat liveness: wall time, read through Tokio's
-/// clock. In a service it is `Instant::now()`; under the in-process
-/// simulation's paused runtime (`tests/dst`) it advances with the simulated
-/// time, so a heartbeat timeout is exercised without waiting it out.
+/// Steady time for FC heartbeat liveness on a wall-clock node: wall time,
+/// read through Tokio's clock. In a service it is `Instant::now()`; under the
+/// in-process simulation's paused runtime (`tests/dst`) it advances with the
+/// simulated time, so a heartbeat timeout is exercised without waiting it out.
 pub(super) fn steady_now() -> Instant {
     tokio::time::Instant::now().into_std()
 }
 
 impl FcConnection {
+    /// Now on the clock FC heartbeat liveness counts: the FC's own on a node
+    /// following the simulator (`simulation.clock: sim`, the router's ADOS
+    /// time), so a lockstep run held at a grant (its FC silent because it is
+    /// not stepped) does not read as a lost link while a real silence of
+    /// [`HEARTBEAT_TIMEOUT`] of sim time does; [`steady_now`] otherwise.
+    pub(super) fn liveness_now(&self) -> Instant {
+        if self.clock.source() == "sim" {
+            self.clock.now()
+        } else {
+            steady_now()
+        }
+    }
+
     /// Cumulative MAVLink frames decoded off the flight-controller link since
     /// the process started. Never reset, so a consumer takes deltas.
     pub fn frames_decoded(&self) -> u64 {
@@ -55,9 +68,10 @@ impl FcConnection {
         self.last_heartbeat_at
             .lock()
             .await
-            .map(|t| steady_now().saturating_duration_since(t).as_secs_f64())
+            .map(|t| self.liveness_now().saturating_duration_since(t).as_secs_f64())
     }
-    /// Whether a fresh HEARTBEAT has decoded within [`HEARTBEAT_TIMEOUT`]. The
+    /// Whether a fresh HEARTBEAT has decoded within [`HEARTBEAT_TIMEOUT`] (on
+    /// [`Self::liveness_now`]'s clock). The
     /// demo loop has no real HEARTBEAT clock but drives synthetic telemetry, so
     /// it reports alive whenever the transport is open (the port label `demo`).
     pub async fn mavlink_alive(&self) -> bool {
@@ -65,7 +79,7 @@ impl FcConnection {
             return self.connected.load(Ordering::Relaxed);
         }
         match *self.last_heartbeat_at.lock().await {
-            Some(t) => steady_now().saturating_duration_since(t) < HEARTBEAT_TIMEOUT,
+            Some(t) => self.liveness_now().saturating_duration_since(t) < HEARTBEAT_TIMEOUT,
             None => false,
         }
     }

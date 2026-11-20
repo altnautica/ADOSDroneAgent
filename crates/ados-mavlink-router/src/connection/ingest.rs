@@ -166,7 +166,7 @@ impl FcConnection {
                         .await;
                     }
                     self.link_proven.store(true, Ordering::Relaxed);
-                    *self.last_heartbeat_at.lock().await = Some(steady_now());
+                    *self.last_heartbeat_at.lock().await = Some(self.liveness_now());
                     // A real FC HEARTBEAT clears any MSP suspicion so a link
                     // that started noisy (or recovered) reads as healthy at
                     // once, and re-arms the once-per-episode warning for any

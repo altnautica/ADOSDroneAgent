@@ -633,3 +633,46 @@ async fn a_concatenated_buffer_crosses_whole() {
         "the buffer must cross whole, not be split or filtered"
     );
 }
+
+/// The lockstep start gate a simulator holds its start for: a detached
+/// router (FC transport closed) reports neither attached nor ready, an open
+/// transport attached, and a fresh FC HEARTBEAT ready.
+#[tokio::test]
+async fn the_start_gate_says_attached_on_an_open_transport_and_ready_once_the_fc_is_heard() {
+    use ados_protocol::simclock::wire::{DONE_ATTACHED, DONE_GATE, DONE_READY};
+    use std::sync::atomic::Ordering;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("participants.sock");
+    let barrier = tokio::net::UnixListener::bind(&path).unwrap();
+    let lane = ados_time::Participant::connect(path);
+    let (mut s, _) = barrier.accept().await.unwrap();
+    let c = test_connection();
+    c.report_start_gate(&lane).await;
+    assert_eq!(next_done_flags(&mut s).await, DONE_GATE, "detached: neither");
+    c.connected.store(true, Ordering::Relaxed);
+    c.report_start_gate(&lane).await;
+    assert_eq!(
+        next_done_flags(&mut s).await,
+        DONE_GATE | DONE_ATTACHED,
+        "transport open, FC not heard"
+    );
+    *c.last_heartbeat_at.lock().await = Some(std::time::Instant::now());
+    c.report_start_gate(&lane).await;
+    assert_eq!(
+        next_done_flags(&mut s).await,
+        DONE_GATE | DONE_ATTACHED | DONE_READY
+    );
+}
+
+/// The flags of the next `DONE` frame a fake barrier reads.
+async fn next_done_flags(s: &mut tokio::net::UnixStream) -> u8 {
+    use ados_protocol::simclock::wire::{Done, DONE_LEN};
+    use tokio::io::AsyncReadExt;
+    let mut b = [0u8; DONE_LEN];
+    tokio::time::timeout(std::time::Duration::from_secs(2), s.read_exact(&mut b))
+        .await
+        .expect("a DONE frame")
+        .unwrap();
+    Done::decode(&b).unwrap().flags
+}

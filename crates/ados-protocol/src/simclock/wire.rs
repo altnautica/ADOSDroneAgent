@@ -3,12 +3,13 @@
 //! Simulator to agent, `TICK` (32 bytes):
 //! `u8 v=1, u8 kind=1, u8 flags, u8 rsv, u32 seq, u64 sim_ns, u64 grant_ns, f64 speed`.
 //! Agent to simulator, `ACK` (24 bytes):
-//! `u8 v=1, u8 kind=2, u16 parts, u32 seq, u64 done_ns, u32 lag_wall_us, u32 rsv`.
+//! `u8 v=1, u8 kind=2, u16 parts, u32 seq, u64 done_ns, u32 lag_wall_us,
+//! u8 flags, u8 rsv[3]`.
 //! The agent's local relay passes each `TICK` on to its followers unchanged,
 //! as the 32 bytes on a Unix stream socket.
 //! A lockstep participant to the agent's barrier, `DONE` (16 bytes, on the
 //! Unix stream socket beside the relay's, [`super::PARTICIPANTS_SOCKET`]):
-//! `u8 v=1, u8 kind=3, u16 rsv, u32 rsv, u64 done_ns`.
+//! `u8 v=1, u8 kind=3, u8 flags, u8 rsv, u32 rsv, u64 done_ns`.
 //!
 //! Lockstep: the simulator sends a `TICK` at each grant boundary and steps no
 //! further until the agent's `ACK` carries `done_ns >= grant_ns`. A
@@ -16,6 +17,15 @@
 //! time `done_ns` (a periodic lane reports its next due time). The agent's
 //! barrier acknowledges a tick, with `done_ns` = the tick's `grant_ns`, once
 //! every registered participant reported `done_ns` past the tick's `sim_ns`.
+//!
+//! Start readiness: a participant whose `DONE` sets [`DONE_GATE`] is one the
+//! run's start waits on (the router's FC link), reporting [`DONE_ATTACHED`]
+//! (its FC transport is open) and [`DONE_READY`] (it has heard the FC's
+//! HEARTBEAT). Every `ACK` carries [`ACK_ATTACHED`] / [`ACK_READY`] when at
+//! least one gate is registered and every gate is attached / ready; a
+//! simulator with `[clock] start_ready` holds its start until they are.
+//! Frames without flags (byte 2 of `DONE`, byte 20 of `ACK` zero) are
+//! unchanged from before.
 
 /// The contract version every datagram and frame carries in its first byte.
 pub const SIMCLOCK_V1_VERSION: u8 = 1;
@@ -31,6 +41,15 @@ pub const FLAG_PAUSED: u8 = 1 << 0;
 pub const FLAG_REALTIME: u8 = 1 << 1;
 pub const FLAG_FINAL: u8 = 1 << 2;
 pub const FLAG_LOCKSTEP: u8 = 1 << 3;
+
+/// `DONE` flag bits.
+pub const DONE_GATE: u8 = 1 << 0;
+pub const DONE_ATTACHED: u8 = 1 << 1;
+pub const DONE_READY: u8 = 1 << 2;
+
+/// `ACK` flag bits.
+pub const ACK_READY: u8 = 1 << 0;
+pub const ACK_ATTACHED: u8 = 1 << 1;
 
 /// One simulator time broadcast.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +111,8 @@ pub struct Ack {
     pub done_ns: u64,
     /// Wall time from the tick's arrival to the acknowledgement, µs.
     pub lag_wall_us: u32,
+    /// [`ACK_READY`], [`ACK_ATTACHED`].
+    pub flags: u8,
 }
 
 impl Ack {
@@ -103,6 +124,7 @@ impl Ack {
         b[4..8].copy_from_slice(&self.seq.to_le_bytes());
         b[8..16].copy_from_slice(&self.done_ns.to_le_bytes());
         b[16..20].copy_from_slice(&self.lag_wall_us.to_le_bytes());
+        b[20] = self.flags;
         b
     }
 
@@ -115,6 +137,7 @@ impl Ack {
             seq: u32::from_le_bytes(b[4..8].try_into().ok()?),
             done_ns: u64::from_le_bytes(b[8..16].try_into().ok()?),
             lag_wall_us: u32::from_le_bytes(b[16..20].try_into().ok()?),
+            flags: b[20],
         })
     }
 }
@@ -124,6 +147,8 @@ impl Ack {
 pub struct Done {
     /// Every piece of the participant's work due before this sim time is done.
     pub done_ns: u64,
+    /// [`DONE_GATE`], [`DONE_ATTACHED`], [`DONE_READY`].
+    pub flags: u8,
 }
 
 impl Done {
@@ -131,6 +156,7 @@ impl Done {
         let mut b = [0u8; DONE_LEN];
         b[0] = SIMCLOCK_V1_VERSION;
         b[1] = KIND_DONE;
+        b[2] = self.flags;
         b[8..16].copy_from_slice(&self.done_ns.to_le_bytes());
         b
     }
@@ -141,6 +167,7 @@ impl Done {
         }
         Some(Done {
             done_ns: u64::from_le_bytes(b[8..16].try_into().ok()?),
+            flags: b[2],
         })
     }
 }
@@ -185,9 +212,30 @@ mod tests {
             seq: 7,
             done_ns: 1_520_000_000,
             lag_wall_us: 250,
+            flags: 0,
         };
         assert_eq!(a.encode(), GOLDEN_ACK);
         assert_eq!(Ack::decode(&GOLDEN_ACK), Some(a));
+    }
+
+    /// The bytes the simulator's `participant` decode test reads back with
+    /// the FC links attached and heard (`ACK_READY | ACK_ATTACHED`).
+    const GOLDEN_ACK_READY: [u8; ACK_LEN] = [
+        0x01, 0x02, 0x02, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0xf7, 0xcb, 0x3c, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_ready_ack_matches_the_golden_bytes() {
+        let a = Ack {
+            parts: 2,
+            seq: 9,
+            done_ns: 1_020_000_000,
+            lag_wall_us: 0,
+            flags: ACK_READY | ACK_ATTACHED,
+        };
+        assert_eq!(a.encode(), GOLDEN_ACK_READY);
+        assert_eq!(Ack::decode(&GOLDEN_ACK_READY), Some(a));
     }
 
     /// The bytes the Python SDK's participant writes for `done(1.54)`.
@@ -200,11 +248,19 @@ mod tests {
     fn done_matches_the_golden_bytes() {
         let d = Done {
             done_ns: 1_540_000_000,
+            flags: 0,
         };
         assert_eq!(d.encode(), GOLDEN_DONE);
         assert_eq!(Done::decode(&GOLDEN_DONE), Some(d));
         assert!(Done::decode(&GOLDEN_DONE[..15]).is_none());
         assert!(Done::decode(&GOLDEN_ACK).is_none());
+        let gate = Done {
+            done_ns: 1_540_000_000,
+            flags: DONE_GATE | DONE_ATTACHED,
+        };
+        let b = gate.encode();
+        assert_eq!(b[2], 0b011);
+        assert_eq!(Done::decode(&b), Some(gate));
     }
 
     #[test]

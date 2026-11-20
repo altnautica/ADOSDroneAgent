@@ -295,19 +295,37 @@ impl FcConnection {
 
     /// Run [`Self::request_tick`] once a second of ADOS time until `cancel`.
     /// Under lockstep the lane reports done until its next tick once a
-    /// tick's FC writes are sent.
+    /// tick's FC writes are sent, and it gates the run's start
+    /// ([`Self::report_start_gate`]).
     pub async fn run_request_ticks(&self, cancel: Shutdown) {
         let lane = self.clock.lane();
         let mut tick = self.clock.interval(Duration::from_secs(1));
+        // The gate is read on wall time: the simulator holds sim time (and
+        // the sim interval above) while it waits for it.
+        let mut gate = ados_time::steady_interval(START_GATE_EVERY);
         loop {
             if let Some(l) = &lane {
                 l.done_until(&tick);
             }
             tokio::select! {
                 _ = tick.tick() => self.request_tick().await,
+                _ = gate.tick(), if lane.is_some() => {
+                    if let Some(l) = &lane {
+                        self.report_start_gate(l).await;
+                    }
+                }
                 _ = cancel.wait() => break,
             }
         }
+    }
+
+    /// The FC link as the gate of a lockstep run's start (`simclock.v1`
+    /// `DONE_GATE`): attached while the FC transport is open, ready once a
+    /// fresh HEARTBEAT has been heard on it (`fc_connected`, what the bench
+    /// waits for before it flies). A detached agent (its FC target a closed
+    /// port) is neither, so the run holds its start.
+    pub async fn report_start_gate(&self, lane: &ados_time::Participant) {
+        lane.gate(self.transport_open(), self.connected().await);
     }
 
     /// One request tick: the stream cadence, banner, landed-state and
@@ -319,3 +337,6 @@ impl FcConnection {
         self.tick_param_sweep().await;
     }
 }
+
+/// Wall time between start-gate reports.
+const START_GATE_EVERY: Duration = Duration::from_millis(100);
