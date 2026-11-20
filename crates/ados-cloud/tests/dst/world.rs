@@ -52,6 +52,19 @@ pub struct Faults {
     pub install_ms: (u64, u64),
     /// A local handler that fails.
     pub p_handler_fails: f32,
+    /// The node goes away for days: killed at `at_ms`, it comes back after
+    /// the backend's clock moved `server_ms` on.
+    pub away: Option<Away>,
+    /// A pending row must be claimed within [`crate::check::CLAIM_WITHIN_MS`]
+    /// while the node and the backend are both up (scenarios with no loss).
+    pub live_claims: bool,
+}
+
+/// A node away far longer than the run: the backend's sweeps run meanwhile.
+#[derive(Clone, Copy, Debug)]
+pub struct Away {
+    pub at_ms: u64,
+    pub server_ms: u64,
 }
 
 /// One command an operator queues.
@@ -61,6 +74,8 @@ pub struct Enqueue {
     pub command: &'static str,
     pub args: serde_json::Value,
     pub ttl_ms: Option<u64>,
+    /// The backend's ack mutation fails on this row every time (500).
+    pub poisoned: bool,
 }
 
 /// The verdict the node put in an ack.
@@ -113,8 +128,19 @@ pub struct World {
     pub started: BTreeSet<String>,
     /// The verdict the node acked per id (the first it sent).
     pub verdicts: BTreeMap<String, Verdict>,
-    /// Ids an ack of reached the backend.
+    /// Ids the backend answered an ack of for good (2xx, or 404 for a row
+    /// that is gone).
     pub landed: BTreeSet<String>,
+    /// Acks answered 404.
+    pub not_found: u32,
+    /// Claim-response copies of each row not yet answered by the node.
+    pub copies: BTreeMap<String, u32>,
+    /// Rows whose ack the node heard the queue settle.
+    pub answered: BTreeSet<String>,
+    /// How far the backend's clock ran ahead while the node was away.
+    pub server_offset_ms: u64,
+    /// Since when (server ms) the node and the backend have both been up.
+    pub both_up_since: Option<u64>,
     /// The node's cloud-link tracker (process memory: a restart resets it).
     pub link: CloudLinkTracker,
     /// When the live process last sent a heartbeat.
@@ -140,6 +166,11 @@ impl World {
             started: BTreeSet::new(),
             verdicts: BTreeMap::new(),
             landed: BTreeSet::new(),
+            not_found: 0,
+            copies: BTreeMap::new(),
+            answered: BTreeSet::new(),
+            server_offset_ms: 0,
+            both_up_since: None,
             link: CloudLinkTracker::default(),
             hb_sent_ms: None,
             up_ms: 0,
@@ -152,7 +183,7 @@ impl World {
 
     /// The backend's clock (ms since the Unix epoch).
     pub fn server_ms(&self) -> u64 {
-        EPOCH_MS + self.now_ms()
+        EPOCH_MS + self.server_offset_ms + self.now_ms()
     }
 
     pub fn log(&mut self, line: impl AsRef<str>) {
@@ -190,11 +221,13 @@ impl World {
         p > 0.0 && self.rng.unit() < p
     }
 
-    /// Acks the node holds that never reached the backend.
+    /// Acks the node holds that never reached the backend (a row whose ack
+    /// mutation always fails is the backend's fault, not the network's).
     pub fn held(&self) -> Vec<String> {
         self.verdicts
             .keys()
             .filter(|id| !self.landed.contains(*id))
+            .filter(|id| !self.queue.any_row(id).is_some_and(|r| r.poisoned))
             .cloned()
             .collect()
     }

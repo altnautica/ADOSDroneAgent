@@ -37,6 +37,8 @@ pub struct Run {
     /// Rows the node acked `failed` without running them (refused, expired,
     /// interrupted).
     pub refused: usize,
+    /// Acks the backend answered 404 (their row was gone).
+    pub not_found: u32,
 }
 
 /// Run `plan` under `faults` on `seed`.
@@ -66,7 +68,8 @@ pub fn simulate(seed: u64, faults: Faults, plan: Plan) -> Run {
             .iter()
             .filter(|(id, v)| v.status == "failed" && !g.started.contains(*id))
             .count();
-        let (commands, kills) = (g.queue.rows.len(), g.kills);
+        let commands = g.queue.rows.len() + g.queue.pruned.len();
+        let (kills, not_found) = (g.kills, g.not_found);
         g.log(format!(
             "end: {commands} commands, {ran} ran, {refused} refused unrun, {kills} kills"
         ));
@@ -78,6 +81,7 @@ pub fn simulate(seed: u64, faults: Faults, plan: Plan) -> Run {
             ran,
             kills,
             refused,
+            not_found,
         }
     })
 }

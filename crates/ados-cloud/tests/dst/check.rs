@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use ados_cloud::loops::heartbeat::HEARTBEAT_INTERVAL;
 
-use crate::queue::{Status, EPOCH_MS};
+use crate::queue::Status;
 use crate::world::{Shared, REQUEST_TIMEOUT};
 
 /// The longest gap between two heartbeats: a heartbeat that times out holds
@@ -27,16 +27,23 @@ use crate::world::{Shared, REQUEST_TIMEOUT};
 const HEARTBEAT_GAP: Duration = Duration::from_millis(10_500);
 const _: () = assert!(HEARTBEAT_INTERVAL.as_millis() < HEARTBEAT_GAP.as_millis());
 
+/// How long a row queued while the node and the backend are both up may wait
+/// for a claim: a few polls behind a slow batch, never an ack's whole hold.
+pub const CLAIM_WITHIN_MS: u64 = 90_000;
+
 /// The per-tick checks.
 pub async fn monitor(w: Shared) {
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     loop {
         tick.tick().await;
         let mut g = w.borrow_mut();
+        let now = g.now_ms();
+        if g.faults.live_claims {
+            claims_live(&mut g, now);
+        }
         if !g.alive {
             continue;
         }
-        let now = g.now_ms();
         let up_for = now - g.up_ms;
         let gap = HEARTBEAT_GAP.as_millis() as u64;
         match g.hb_sent_ms {
@@ -55,8 +62,9 @@ pub async fn monitor(w: Shared) {
             let away_for = now - o.start_ms.max(g.up_ms);
             let settle = gap + REQUEST_TIMEOUT.as_millis() as u64 + 1_000;
             if away_for > settle {
-                let link = g.link.link(true, true, None, (EPOCH_MS + now) as i64);
-                let newest_ok = (EPOCH_MS + o.start_ms + g.faults.latency_ms.1) as i64;
+                let server = g.server_ms();
+                let link = g.link.link(true, true, None, server as i64);
+                let newest_ok = (server - (now - o.start_ms) + g.faults.latency_ms.1) as i64;
                 if link.last_heartbeat_error.is_none()
                     || link.last_heartbeat_ok_ms.is_some_and(|ok| ok > newest_ok)
                 {
@@ -73,7 +81,7 @@ pub async fn monitor(w: Shared) {
 pub fn finish(w: &Shared) {
     let mut g = w.borrow_mut();
     let mut breaks = Vec::new();
-    for row in &g.queue.rows {
+    for row in g.queue.rows.iter().chain(&g.queue.pruned) {
         let id = &row.id;
         let message = row.message.as_deref().unwrap_or("");
         if !row.status.terminal() || message.is_empty() {
@@ -88,6 +96,11 @@ pub fn finish(w: &Shared) {
         } else {
             "failed"
         };
+        // A row the backend closed itself (swept while the node was away, or
+        // one whose ack mutation always fails) cannot hold the node's verdict.
+        if row.swept || row.poisoned {
+            continue;
+        }
         if let Some(v) = g.verdicts.get(id) {
             if v.status != status || v.message != message {
                 breaks.push(format!(

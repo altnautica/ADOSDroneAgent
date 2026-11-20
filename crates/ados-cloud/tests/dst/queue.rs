@@ -1,10 +1,13 @@
-//! The simulated cloud command queue: the backend's claim and ack mutations,
-//! transcribed rule for rule. A claim leases each deliverable row (pending, or
-//! delivering past its lease) oldest first, at most a batch at a time, with a
-//! fresh `claimedAt` and one more attempt; a row past its delivery window is
-//! failed as expired instead, and one past its attempt budget as
-//! undeliverable. An ack closes a row still awaiting its verdict; a terminal
-//! row keeps the verdict it has and the late ack is answered `ignored`.
+//! The simulated cloud command queue: the backend's claim and ack mutations
+//! and its two sweeps, transcribed rule for rule. A claim leases each
+//! deliverable row (pending, or delivering past its lease) oldest first, at
+//! most a batch at a time, with a fresh `claimedAt` and one more attempt; a
+//! row past its delivery window is failed as expired instead, and one past its
+//! attempt budget as undeliverable. An ack closes a row still awaiting its
+//! verdict; a terminal row keeps the verdict it has and the late ack is
+//! answered `ignored`; a row that is gone, or another device's, answers 404.
+//! The stuck sweep fails a row an hour old that never got a verdict, and the
+//! retention sweep deletes a terminal row a week after its verdict.
 
 use serde_json::{json, Value};
 
@@ -21,6 +24,10 @@ pub const FLIGHT_COMMAND_TTL_MS: u64 = 10_000;
 /// Bounds a queued TTL is clamped to.
 pub const MIN_COMMAND_TTL_MS: u64 = 1_000;
 pub const MAX_COMMAND_TTL_MS: u64 = 60_000;
+/// Age at which the stuck sweep fails a row with no verdict.
+pub const COMMAND_STUCK_MS: u64 = 60 * 60 * 1000;
+/// How long a terminal row is kept before the retention sweep deletes it.
+pub const COMMAND_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// The server clock's epoch at simulated time zero (ms).
 pub const EPOCH_MS: u64 = 1_763_600_000_000;
@@ -56,8 +63,13 @@ pub struct Row {
     pub delivered_at: Option<u64>,
     /// The verdict's message once terminal.
     pub message: Option<String>,
+    pub completed_at: Option<u64>,
     /// Whether an agent ack set the verdict (else the queue did).
     pub closed_by_ack: bool,
+    /// The stuck sweep set the verdict.
+    pub swept: bool,
+    /// The ack mutation fails on this row (500) every time.
+    pub poisoned: bool,
 }
 
 impl Row {
@@ -65,6 +77,12 @@ impl Row {
     pub fn deadline(&self) -> u64 {
         self.expires_at
             .unwrap_or(self.created_at + DEFAULT_DELIVERY_WINDOW_MS)
+    }
+
+    fn fail(&mut self, now: u64, reason: &str) {
+        self.status = Status::Failed;
+        self.message = Some(reason.to_string());
+        self.completed_at = Some(now);
     }
 
     fn wire(&self) -> Value {
@@ -98,6 +116,8 @@ pub fn is_flight(command: &str) -> bool {
 #[derive(Default)]
 pub struct Queue {
     pub rows: Vec<Row>,
+    /// Rows the retention sweep deleted.
+    pub pruned: Vec<Row>,
 }
 
 impl Queue {
@@ -108,8 +128,9 @@ impl Queue {
         command: &'static str,
         args: Value,
         ttl_ms: Option<u64>,
+        poisoned: bool,
     ) -> String {
-        let id = format!("c{:03}", self.rows.len() + 1);
+        let id = format!("c{:03}", self.rows.len() + self.pruned.len() + 1);
         let window = ttl_ms.or(is_flight(command).then_some(FLIGHT_COMMAND_TTL_MS));
         let expires_at = window.map(|w| now + w.clamp(MIN_COMMAND_TTL_MS, MAX_COMMAND_TTL_MS));
         self.rows.push(Row {
@@ -123,13 +144,23 @@ impl Queue {
             attempts: 0,
             delivered_at: None,
             message: None,
+            completed_at: None,
             closed_by_ack: false,
+            swept: false,
+            poisoned,
         });
         id
     }
 
+    /// A row still in the table.
     pub fn row(&self, id: &str) -> Option<&Row> {
         self.rows.iter().find(|r| r.id == id)
+    }
+
+    /// A row, deleted or not.
+    pub fn any_row(&self, id: &str) -> Option<&Row> {
+        self.row(id)
+            .or_else(|| self.pruned.iter().find(|r| r.id == id))
     }
 
     /// The claim mutation at server time `now`: the rows leased, and the
@@ -155,16 +186,14 @@ impl Queue {
                 } else {
                     "command expired: claimed by the node but never acknowledged"
                 };
-                r.status = Status::Failed;
-                r.message = Some(reason.to_string());
+                r.fail(now, reason);
                 failed.push((r.id.clone(), reason.to_string()));
                 continue;
             }
             let attempts = r.attempts + 1;
             if attempts > MAX_DELIVERY_ATTEMPTS {
                 let reason = "command undeliverable: delivery attempts exhausted";
-                r.status = Status::Failed;
-                r.message = Some(reason.to_string());
+                r.fail(now, reason);
                 failed.push((r.id.clone(), reason.to_string()));
                 continue;
             }
@@ -177,9 +206,9 @@ impl Queue {
         (leased, failed)
     }
 
-    /// The ack route and mutation: the HTTP status, and whether the ack set
-    /// the row's verdict.
-    pub fn ack(&mut self, body: &Value) -> (u16, bool) {
+    /// The ack route and mutation at server time `now`: the HTTP status, and
+    /// whether the ack set the row's verdict.
+    pub fn ack(&mut self, now: u64, body: &Value) -> (u16, bool) {
         let id = body.get("commandId").and_then(Value::as_str).unwrap_or("");
         let device = body.get("deviceId").and_then(Value::as_str).unwrap_or("");
         let status = match body.get("status").and_then(Value::as_str) {
@@ -187,12 +216,18 @@ impl Queue {
             Some("failed") => Status::Failed,
             _ => return (400, false),
         };
-        if id.is_empty() || device != DEVICE {
+        if id.is_empty() || device.is_empty() {
             return (400, false);
         }
         let Some(r) = self.rows.iter_mut().find(|r| r.id == id) else {
-            return (500, false);
+            return (404, false);
         };
+        if device != DEVICE {
+            return (404, false);
+        }
+        if r.poisoned {
+            return (500, false);
+        }
         if r.status.terminal() {
             return (200, false);
         }
@@ -204,6 +239,7 @@ impl Queue {
             .to_string();
         r.status = status;
         r.message = Some(message);
+        r.completed_at = Some(now);
         r.closed_by_ack = true;
         (200, true)
     }

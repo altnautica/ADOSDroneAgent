@@ -77,20 +77,23 @@ impl CommandLink for Answers {
     }
 }
 
-/// An ack is settled by a 2xx or a refusal no retry changes; a transport
-/// failure, a 5xx, a 408 or a 429 keeps it for the next pass.
+/// An ack is settled by a 2xx or at once by a refusal no retry changes (a
+/// gone row's 404 among them); a 5xx, a 408 or a 429 is a refusal and a
+/// transport failure goes unanswered, both kept for the next pass.
 #[tokio::test(start_paused = true)]
 async fn an_ack_is_kept_until_the_queue_answers_it_for_good() {
     let ack = serde_json::json!({"commandId": "c1"});
-    for (answer, settled, tries) in [
-        (AckAttempt::Delivered, true, 1),
-        (AckAttempt::Refused(400), true, 3),
-        (AckAttempt::Refused(429), false, 3),
-        (AckAttempt::Refused(503), false, 3),
-        (AckAttempt::Unanswered, false, 3),
+    for (answer, fate, tries) in [
+        (AckAttempt::Delivered, AckFate::Settled, 1),
+        (AckAttempt::Refused(404), AckFate::Settled, 1),
+        (AckAttempt::Refused(400), AckFate::Settled, 1),
+        (AckAttempt::Refused(429), AckFate::Refused, 3),
+        (AckAttempt::Refused(408), AckFate::Refused, 3),
+        (AckAttempt::Refused(503), AckFate::Refused, 3),
+        (AckAttempt::Unanswered, AckFate::Unanswered, 3),
     ] {
         let link = Answers(answer, std::cell::Cell::new(0));
-        assert_eq!(post_ack(&link, &ack).await, settled, "{answer:?}");
+        assert_eq!(post_ack(&link, &ack).await, fate, "{answer:?}");
         assert_eq!(link.1.get(), tries, "{answer:?}");
     }
 }

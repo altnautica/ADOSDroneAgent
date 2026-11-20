@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::rng::Rng;
 use crate::sim::{simulate, Plan, Run};
-use crate::world::{Enqueue, Faults, Outage};
+use crate::world::{Away, Enqueue, Faults, Outage};
 
 pub type Scenario = fn(u64) -> Run;
 
@@ -17,6 +17,8 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("restart", restart),
     ("slow_batch", slow_batch),
     ("storm", storm),
+    ("long_offline", long_offline),
+    ("poisoned_ack", poisoned_ack),
 ];
 
 /// Operators are active for this long.
@@ -97,6 +99,7 @@ fn operators(r: &mut Rng, bursts: usize, self_restart: bool) -> Vec<Enqueue> {
                 command,
                 ttl_ms: ttl(r, command),
                 args,
+                poisoned: false,
             });
         }
     }
@@ -138,11 +141,15 @@ fn plan(enqueues: Vec<Enqueue>) -> Plan {
     }
 }
 
-/// No faults: every command runs once and is acked.
+/// No faults: every command runs once and is acked, and is claimed promptly.
 fn clean(seed: u64) -> Run {
     let mut r = Rng::new(seed ^ 0xC1EA);
     let ops = operators(&mut r, 30, false);
-    simulate(seed, base(), plan(ops))
+    let faults = Faults {
+        live_claims: true,
+        ..base()
+    };
+    simulate(seed, faults, plan(ops))
 }
 
 /// Lost requests and answers, slow links, rows duplicated and reordered in a
@@ -196,6 +203,7 @@ fn slow_batch(seed: u64) -> Run {
             command: "plugin.install",
             args: json!({"pluginId": "com.example.dst", "jobId": format!("j-{n}")}),
             ttl_ms: None,
+            poisoned: false,
         });
         for k in 0..(1 + r.next_u64() % 3) {
             ops.push(Enqueue {
@@ -203,6 +211,7 @@ fn slow_batch(seed: u64) -> Run {
                 command: "send_command",
                 args: json!({"cmd": "land", "args": []}),
                 ttl_ms: None,
+                poisoned: false,
             });
         }
     }
@@ -228,6 +237,67 @@ fn storm(seed: u64) -> Run {
         restart_ms: (1_000, 75_000),
         install_ms: (2_000, 60_000),
         p_handler_fails: 0.1,
+        away: None,
+        live_claims: false,
     };
     simulate(seed, faults, plan(operators(&mut r, 40, true)))
+}
+
+/// A node that goes away for 8 days holding undelivered acks: the backend
+/// loses it mid-batch (refusing every request), it dies, and while it is
+/// away the stuck sweep fails its rows and the retention sweep deletes them.
+/// Back, its held acks answer 404 and it takes new commands at once.
+fn long_offline(seed: u64) -> Run {
+    let mut r = Rng::new(seed ^ 0x0FF1);
+    let at = 8 * 60_000 + r.next_u64() % 60_000;
+    let mut ops: Vec<Enqueue> = operators(&mut r, 25, false)
+        .into_iter()
+        .filter(|e| e.command != "plugin.install")
+        .filter(|e| e.at_ms + 90_000 < at || e.at_ms > at + 60_000)
+        .collect();
+    // One batch whose acks land in the outage: claimed within a poll of
+    // at - 60 s, its install runs at least 30 s, past the outage's start at
+    // at - 40 s, and the two after it follow.
+    for (k, command) in ["plugin.install", "get_services", "scan_peripherals"]
+        .into_iter()
+        .enumerate()
+    {
+        ops.push(Enqueue {
+            at_ms: at - 60_000 + k as u64,
+            command,
+            args: json!({"pluginId": "com.example.dst", "jobId": "j-away"}),
+            ttl_ms: None,
+            poisoned: false,
+        });
+    }
+    let faults = Faults {
+        outages: vec![Outage {
+            start_ms: at - 40_000,
+            end_ms: at + 5_000,
+            blackhole: false,
+        }],
+        away: Some(Away {
+            at_ms: at,
+            server_ms: 8 * 24 * 60 * 60 * 1000,
+        }),
+        install_ms: (30_000, 35_000),
+        live_claims: true,
+        ..base()
+    };
+    simulate(seed, faults, plan(ops))
+}
+
+/// One command in ten has an ack the backend fails on every time (500): those
+/// acks are given up on, and never hold the other commands' claims for long.
+fn poisoned_ack(seed: u64) -> Run {
+    let mut r = Rng::new(seed ^ 0x9015);
+    let mut ops = operators(&mut r, 30, false);
+    for e in &mut ops {
+        e.poisoned = r.unit() < 0.1;
+    }
+    let faults = Faults {
+        live_claims: true,
+        ..base()
+    };
+    simulate(seed, faults, plan(ops))
 }

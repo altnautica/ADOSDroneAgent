@@ -48,14 +48,22 @@ struct Entry {
     /// The ack the command produced; `None` while it runs.
     #[serde(default)]
     ack: Option<serde_json::Value>,
-    /// Whether the queue has the ack. A record written before the outbox
-    /// existed holds only acks it already sent.
+    /// Whether the queue has the ack (or the node gave up on it). A record
+    /// written before the outbox existed holds only acks it already sent.
     #[serde(default = "sent_before")]
     delivered: bool,
+    /// Delivery passes the queue answered with a retryable error (5xx, 408,
+    /// 429).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    refusals: u32,
 }
 
 fn sent_before() -> bool {
     true
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// What the poll loop does with one leased command.
@@ -156,6 +164,7 @@ impl ExecutedCommands {
             id: id.to_string(),
             ack,
             delivered: false,
+            refusals: 0,
         });
         while self.entries.len() > EXECUTED_COMMANDS_MAX {
             self.entries.pop_front();
@@ -181,13 +190,26 @@ impl ExecutedCommands {
             .collect()
     }
 
-    /// Mark an id's ack delivered (no-op for an id not in the record).
+    /// Mark an id's ack delivered, or given up on (no-op for an id not in the
+    /// record).
     pub fn delivered(&mut self, id: &str) -> std::io::Result<()> {
         match self.entries.iter_mut().find(|e| e.id == id) {
             Some(e) if !e.delivered => e.delivered = true,
             _ => return Ok(()),
         }
         self.save()
+    }
+
+    /// Count one delivery pass the queue answered with a retryable error;
+    /// returns the passes counted so far.
+    pub fn refused(&mut self, id: &str) -> std::io::Result<u32> {
+        let Some(e) = self.entries.iter_mut().find(|e| e.id == id) else {
+            return Ok(0);
+        };
+        e.refusals += 1;
+        let n = e.refusals;
+        self.save()?;
+        Ok(n)
     }
 
     /// Stop holding every undelivered ack.

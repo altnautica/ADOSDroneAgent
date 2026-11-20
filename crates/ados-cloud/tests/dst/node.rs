@@ -151,6 +151,10 @@ fn process(g: &mut crate::world::World, req: Req) -> Answer {
                     )
                 })
                 .collect();
+            for r in &rows {
+                let id = r["_id"].as_str().unwrap_or("").to_string();
+                *g.copies.entry(id).or_insert(0) += 1;
+            }
             g.log(format!("queue: claim -> [{}]", ids.join(" ")));
             Answer::Claim(json!({ "commands": rows }))
         }
@@ -159,15 +163,19 @@ fn process(g: &mut crate::world::World, req: Req) -> Answer {
             let copies = if g.chance(g.faults.p_dup_ack) { 2 } else { 1 };
             let mut status = 0;
             for _ in 0..copies {
-                let (s, set) = g.queue.ack(&body);
+                let now = g.server_ms();
+                let (s, set) = g.queue.ack(now, &body);
                 status = s;
                 g.log(format!(
                     "queue: ack {id} {} -> {s}{}",
                     body["status"].as_str().unwrap_or("?"),
                     if set { "" } else { " (ignored)" }
                 ));
-                if s == 200 {
+                if s == 200 || s == 404 {
                     g.landed.insert(id.clone());
+                }
+                if s == 404 {
+                    g.not_found += 1;
                 }
             }
             Answer::Ack(status)
@@ -216,16 +224,35 @@ impl CommandLink for SimLink {
                     g.verdicts.insert(id.clone(), verdict.clone());
                 }
             }
+            // Once the node has heard the queue settle an ack (2xx, or 404
+            // for a gone row), it sends it again only to answer another copy
+            // of the row (a duplicate, or a redelivery) it has not heard
+            // settled yet.
+            if g.answered.contains(&id) && g.copies.get(&id).copied().unwrap_or(0) == 0 {
+                g.violate(format!(
+                    "{id}: the node re-sent an ack the queue had answered, with no new delivery"
+                ));
+            }
             g.log(format!(
                 "node: ack {id} {} \"{}\"",
                 verdict.status, verdict.message
             ));
         }
-        match exchange(&self.w, Req::Ack(ack.clone())).await {
+        let attempt = match exchange(&self.w, Req::Ack(ack.clone())).await {
             Some(Answer::Ack(s)) if (200..300).contains(&s) => AckAttempt::Delivered,
             Some(Answer::Ack(s)) => AckAttempt::Refused(s),
             _ => AckAttempt::Unanswered,
+        };
+        if matches!(attempt, AckAttempt::Delivered | AckAttempt::Refused(404)) {
+            let mut g = self.w.borrow_mut();
+            let id = ack["commandId"].as_str().unwrap_or("").to_string();
+            g.answered.insert(id.clone());
+            // The copy this ack answered is spent.
+            if let Some(n) = g.copies.get_mut(&id) {
+                *n = n.saturating_sub(1);
+            }
         }
+        attempt
     }
 }
 
@@ -364,7 +391,9 @@ pub async fn life(w: Shared, record: PathBuf, end_ms: u64) {
     let kill = Rc::new(Notify::new());
     let t0 = w.borrow().t0;
     let end = t0 + Duration::from_millis(end_ms);
+    let away = w.borrow().faults.away;
     let mut planned: Vec<u64> = w.borrow().faults.kills.clone();
+    planned.extend(away.map(|a| a.at_ms));
     planned.sort_unstable();
     let mut planned = planned.into_iter().peekable();
     let mut tasks = boot(&w, &kill, &record);
@@ -378,8 +407,12 @@ pub async fn life(w: Shared, record: PathBuf, end_ms: u64) {
                 if Instant::now() >= end {
                     break;
                 }
-                planned.next();
-                w.borrow_mut().log("node: killed (planned)");
+                let at = planned.next();
+                let mut g = w.borrow_mut();
+                g.log("node: killed (planned)");
+                if let Some(a) = away.filter(|a| Some(a.at_ms) == at) {
+                    go_away(&mut g, a);
+                }
             }
             _ = kill.notified() => {
                 let mut g = w.borrow_mut();
@@ -406,4 +439,20 @@ pub async fn life(w: Shared, record: PathBuf, end_ms: u64) {
         t.abort();
     }
     w.borrow_mut().alive = false;
+}
+
+/// The node stays away while the backend's clock runs `a.server_ms` on: the
+/// stuck sweep runs an hour or two in, the retention sweep at the end.
+fn go_away(g: &mut crate::world::World, a: crate::world::Away) {
+    let before = g.server_ms();
+    let swept = g.queue.sweep_stuck(before + 2 * 60 * 60 * 1000);
+    g.server_offset_ms += a.server_ms;
+    let now = g.server_ms();
+    let pruned = g.queue.prune(now);
+    g.log(format!(
+        "node: away {} h; queue swept [{}], pruned {} rows",
+        a.server_ms / 3_600_000,
+        swept.join(" "),
+        pruned.len()
+    ));
 }

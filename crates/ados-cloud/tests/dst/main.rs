@@ -39,20 +39,24 @@ fn seeds() -> std::ops::RangeInclusive<u64> {
     }
 }
 
-fn matrix(name: &str) {
-    run_seeds(name, seeds().collect());
+/// Run `name` on the matrix seeds; per seed, the acks answered 404.
+fn matrix(name: &str) -> Vec<u32> {
+    run_seeds(name, seeds().collect())
 }
 
-/// Run `name` on `list`; fail with a reproducer on any break.
-fn run_seeds(name: &str, list: Vec<u64>) {
+/// Run `name` on `list`; fail with a reproducer on any break. Returns, per
+/// seed, the acks the backend answered 404.
+fn run_seeds(name: &str, list: Vec<u64>) -> Vec<u32> {
     let (_, scenario) = ALL
         .iter()
         .find(|(n, _)| *n == name)
         .expect("a scenario of that name");
     let wall = Instant::now();
     let (mut sim_s, mut commands, mut ran, mut refused, mut kills) = (0.0, 0, 0, 0, 0);
+    let mut not_found = Vec::new();
     for &seed in &list {
         let run = scenario(seed);
+        not_found.push(run.not_found);
         sim_s += run.sim_s;
         commands += run.commands;
         ran += run.ran;
@@ -82,6 +86,7 @@ fn run_seeds(name: &str, list: Vec<u64>) {
         list.len(),
         sim_s / wall_s
     );
+    not_found
 }
 
 #[test]
@@ -112,6 +117,24 @@ fn dst_slow_batch() {
 #[test]
 fn dst_storm() {
     matrix("storm");
+}
+
+/// A node back after 8 days drops the acks whose rows the retention sweep
+/// deleted (404) and takes new commands at once.
+#[test]
+fn dst_long_offline() {
+    let not_found = matrix("long_offline");
+    assert!(
+        not_found.iter().all(|&n| n > 0),
+        "every seed returns holding an ack for a deleted row: {not_found:?}"
+    );
+}
+
+/// An ack the backend fails on every time is given up on and holds the
+/// other commands' claims back only briefly.
+#[test]
+fn dst_poisoned_ack() {
+    matrix("poisoned_ack");
 }
 
 /// The seeds that found the bugs this simulation fixed, pinned whatever
