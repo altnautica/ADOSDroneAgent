@@ -202,6 +202,87 @@ pub fn brake_limit(
             near[sector] = Some((dir, d));
         }
     }
+    // Inside the margin of something (drift carried it in), every path along
+    // it would read blocked at once: the brake caps every point radially
+    // instead, as it always has, so the vehicle slides along what it is
+    // inside of and never deeper, and the push moves it out. Between the
+    // margin and the keep-out (the creep slack and a cell's quantisation), a
+    // path caps only for the points it passes nearer than the vehicle is now
+    // to anything, so flying on along a trunk row it drifted toward is not
+    // flying into it; a point the path meets still stops it short of the
+    // keep-out.
+    let inside_at = margin + crate::obstacles::CELL_M / 2.0;
+    let inside = r_min < inside_at;
+    let pass = (r_min - SWEEP_DEPTH_SLACK_M).max(inside_at);
+    let mut sweep = Sweep::new(a_h, keep_out, pass);
+    sweep.add(v, 0.0);
+    // The flown path as long as the stop from the speed the scans see the
+    // vehicle close along it, when that is faster than the estimate: an
+    // estimate lagging the real motion must not shorten it.
+    sweep.add(
+        vel,
+        closing_along(geo::scale(vel, 1.0 / geo::norm(vel).max(1e-6))).0,
+    );
+    // The caps (unit direction, most speed along it): one per sector for the
+    // radial caps, then one per stop path; and what set each ([`limit`]
+    // bits).
+    let mut caps: [Option<(V2, f32)>; BRAKE_CAPS] = [None; BRAKE_CAPS];
+    let mut tags = [0u16; BRAKE_CAPS];
+    let mut out = v;
+    for round in 0..=SWEEP_ROUNDS {
+        let every = inside || round == SWEEP_ROUNDS;
+        caps = [None; BRAKE_CAPS];
+        tags = [0u16; BRAKE_CAPS];
+        let along: [(f32, bool); SWEEP_PATHS] =
+            std::array::from_fn(|k| closing_along(sweep.paths[k].0));
+        for (rel, _, dir, d, obstacle) in points() {
+            // The seen space's edge caps radially, as it always has: what
+            // lies beyond it is unknown in every direction.
+            if every || !obstacle {
+                let (closing, by_scan) = closing_along(dir);
+                let cap = stop_cap(d, closing, a_h, margin);
+                let sector = sector_of(dir);
+                if caps[sector].is_none_or(|(_, c)| cap < c) {
+                    caps[sector] = Some((dir, cap));
+                    tags[sector] = tag(obstacle, by_scan);
+                }
+            }
+            if !obstacle || inside {
+                continue;
+            }
+            for (k, &(closing, by_scan)) in along.iter().enumerate().take(sweep.n) {
+                let Some(room) = sweep.room(k, rel) else {
+                    continue;
+                };
+                let cap = room_cap(room, closing, a_h);
+                let slot = BRAKE_SECTORS + k;
+                if caps[slot].is_none_or(|(_, c)| cap < c) {
+                    caps[slot] = Some((sweep.paths[k].0, cap));
+                    tags[slot] = tag(true, by_scan);
+                }
+            }
+        }
+        if close {
+            break;
+        }
+        out = nearest_within(v, &caps);
+        if every || !sweep.add(out, 0.0) {
+            break;
+        }
+        // The answer's own stop path: solved again while the answer breaks
+        // that path's cap.
+        let k = sweep.n - 1;
+        let (e, _) = sweep.paths[k];
+        let closing = closing_along(e).0;
+        let breaks = points().filter(|p| p.4).any(|(rel, ..)| {
+            sweep
+                .room(k, rel)
+                .is_some_and(|room| geo::dot(e, out) > room_cap(room, closing, a_h) + 1e-3)
+        });
+        if !breaks {
+            break;
+        }
+    }
     let out = if close {
         let n = geo::norm(away);
         if n > 1e-3 {
@@ -241,7 +322,6 @@ pub fn brake_limit(
         by: if cut || close { by } else { 0 },
     }
 }
-
 
 /// Room the brake keeps beyond the margin for a creep it cannot see, metres:
 /// a vehicle drifting at under the stopped speed reads as still to the
@@ -328,4 +408,3 @@ pub fn geofence(pos: V2, home: V2, max_dist: f32, v: V2) -> V2 {
         v
     }
 }
-
