@@ -165,7 +165,7 @@ fn barrier_run(
         }
         if let Some(done) = target(&p) {
             let id = *id.get_or_insert_with(|| b.join().unwrap());
-            b.done(id, done, now);
+            b.done(id, done, 0, now);
         }
         seq += 1;
         let tick = wire::Tick {
