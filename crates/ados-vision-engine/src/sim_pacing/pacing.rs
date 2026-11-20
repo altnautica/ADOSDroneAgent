@@ -10,12 +10,13 @@ use super::{
 };
 
 /// One simulated camera's lane.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct Lane {
     last_ns: Option<u64>,
     period_ns: Option<u64>,
-    /// Frames taken and not yet finished (in inference, or about to be).
-    busy: u32,
+    /// Sim times of the frames taken and not yet finished (in inference, or
+    /// about to be).
+    inflight: Vec<u64>,
     /// Wall time, ms, since which the simulator is past the time this lane's
     /// next frame should have arrived by.
     overdue_since_ms: Option<u64>,
@@ -68,13 +69,15 @@ impl Pacing {
         }
         lane.last_ns = Some(lane.last_ns.map_or(sim_ns, |l| l.max(sim_ns)));
         lane.overdue_since_ms = None;
-        lane.busy += 1;
+        lane.inflight.push(sim_ns);
     }
 
-    /// One frame [`Self::frame`] took is finished.
-    pub fn free(&mut self, camera: &str) {
+    /// The frame at sim time `sim_ns` [`Self::frame`] took is finished.
+    pub fn free(&mut self, camera: &str, sim_ns: u64) {
         if let Some(lane) = self.lanes.get_mut(camera) {
-            lane.busy = lane.busy.saturating_sub(1);
+            if let Some(i) = lane.inflight.iter().position(|t| *t == sim_ns) {
+                lane.inflight.swap_remove(i);
+            }
         }
     }
 
@@ -98,21 +101,30 @@ impl Pacing {
         Some(lane.last_ns? + period * (1 + depth))
     }
 
-    /// What `camera` reports done to the barrier: half a period past the time
-    /// its next frame reaches the engine, never past one of its held batches.
-    /// `None` while a frame of it is busy or before its period is known.
-    pub fn done_target(&self, camera: &str) -> Option<u64> {
+    /// What `camera` reports done to the barrier, with results released
+    /// `latency_ns` after their frame. With a frame in flight: that frame's
+    /// release time (its result is published then, so the simulator may run
+    /// on while it is inferred, never past it). Otherwise the later of half a
+    /// period past the time its next frame reaches the engine and that next
+    /// frame's release time. Never past one of its held batches. `None`
+    /// before its period is known.
+    pub fn done_target(&self, camera: &str, latency_ns: u64) -> Option<u64> {
         let lane = self.lanes.get(camera)?;
-        if lane.busy > 0 {
-            return None;
-        }
-        let next = Self::expected_ns(lane, self.depth(camera))? + lane.period_ns? / 2;
+        let period = lane.period_ns?;
+        let last = lane.last_ns?;
+        let target = match lane.inflight.iter().min() {
+            Some(oldest) => oldest + latency_ns,
+            None => {
+                let arrives = Self::expected_ns(lane, self.depth(camera))? + period / 2;
+                arrives.max(last + period + latency_ns)
+            }
+        };
         let held = self
             .held
             .iter()
             .find(|(_, b)| b.camera_id == camera)
             .map(|((at, _), _)| *at);
-        Some(held.map_or(next, |at| at.min(next)))
+        Some(held.map_or(target, |at| at.min(target)))
     }
 
     /// At sim time `sim_now_ns` and wall time `wall_ms`: each lane past its
@@ -127,8 +139,8 @@ impl Pacing {
                 .get(camera)
                 .copied()
                 .unwrap_or(SOURCE_DEPTH_FRAMES);
-            let late =
-                lane.busy == 0 && Self::expected_ns(lane, depth).is_some_and(|e| sim_now_ns > e);
+            let late = lane.inflight.is_empty()
+                && Self::expected_ns(lane, depth).is_some_and(|e| sim_now_ns > e);
             if !late {
                 lane.overdue_since_ms = None;
                 continue;

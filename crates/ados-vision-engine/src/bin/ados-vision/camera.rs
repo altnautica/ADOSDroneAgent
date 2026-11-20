@@ -178,7 +178,7 @@ pub(super) async fn run_camera(
                                     // frame clock (a simulated frame's sim time).
                                     let now_ms = mono_ns() / 1_000_000;
                                     let frame_ms = frame_clock_ns(&desc).map_or(now_ms, |ns| ns / 1_000_000);
-                                    let lane = pacing.as_ref().filter(|p| p.frame(&camera_id, &desc)).cloned();
+                                    let lane = pacing.as_ref().and_then(|p| p.frame(&camera_id, &desc).map(|ns| (p.clone(), ns)));
                                     let mut spawned = false;
                                     depth.offer(&engine, &desc, now_ms);
                                     if !paces.is_empty() && engine.detection_wanted(&camera_id, now_ms) {
@@ -209,8 +209,8 @@ pub(super) async fn run_camera(
                                                         }
                                                     }
                                                     back.give(data);
-                                                    if let Some(p) = lane {
-                                                        p.free(&cam);
+                                                    if let Some((p, ns)) = lane {
+                                                        p.free(&cam, ns);
                                                     }
                                                 });
                                             }
@@ -218,8 +218,8 @@ pub(super) async fn run_camera(
                                             // model was due this frame.
                                         }
                                     }
-                                    if let Some(p) = lane.filter(|_| !spawned) {
-                                        p.free(&camera_id);
+                                    if let Some((p, ns)) = lane.filter(|_| !spawned) {
+                                        p.free(&camera_id, ns);
                                     }
                                 }
                                 Err(e) => {

@@ -27,16 +27,19 @@
 //! ffmpeg 8.0.1 with x264 and NVENC streams: one frame held even when fed a
 //! whole access unit and an access unit delimiter, any thread count,
 //! `low_delay`). A lane expects its next frame by the time the frame `depth`
-//! after it is rendered, and reports done to half a period past that, never
-//! past a held batch's release time, and nothing more while a frame of it is
-//! in inference: the simulator steps no further until the next frame was
-//! decoded and inferred, and every batch is published at its own sim time.
-//! This holds for any `grant_ms`: the barrier acknowledges a boundary while
-//! every report is past it, so the run holds only at the first boundary at or
-//! past the lane's target, after drawing every frame before it, the
-//! releasing frame included (the half period is the margin for the step that
-//! draws it); a coarser grant only lets the run go up to one grant past the
-//! target.
+//! after it is rendered, and reports done to the later of half a period past
+//! that and the next frame's release time (its sim time plus the modelled
+//! latency), never past a held batch's release time. While a frame of it is
+//! in inference it reports that frame's release time: the simulator runs on
+//! (rendering, flying) while the detector works, up to the moment its result
+//! is due, and waits there if the result is not ready. So every batch is
+//! published at its own release time, and inference shows as wall time only
+//! where it outlasts the sim time to its release. This holds for any
+//! `grant_ms`: the barrier acknowledges a boundary while every report is past
+//! it, so the run holds only at the first boundary at or past the lane's
+//! target, after drawing every frame before it, the releasing frame included
+//! (the half period is the margin for the step that draws it); a coarser
+//! grant only lets the run go up to one grant past the target.
 //!
 //! The depth is learned per camera: it starts at [`SOURCE_DEPTH_FRAMES`], and
 //! a lane held past its expected time with no frame for [`LANE_PROBE_MS`] of
@@ -247,19 +250,20 @@ impl SimPacing {
     }
 
     /// A frame was taken off `camera`'s source. A simulated one keeps the
-    /// lane busy until [`Self::free`] (one call per frame).
-    pub fn frame(&self, camera: &str, desc: &FrameDescriptor) -> bool {
-        let Some(ns) = frame_clock_ns(desc) else {
-            return false;
-        };
+    /// lane busy until [`Self::free`] with its frame time (one call per
+    /// frame), and lets the simulator run on to its result's release time.
+    /// Returns the frame time, `None` for a host-clock frame.
+    pub fn frame(&self, camera: &str, desc: &FrameDescriptor) -> Option<u64> {
+        let ns = frame_clock_ns(desc)?;
         self.lock().frame(camera, ns);
-        true
+        self.report(camera);
+        Some(ns)
     }
 
-    /// The frame [`Self::frame`] took is finished: its batches are published
-    /// or held.
-    pub fn free(&self, camera: &str) {
-        self.lock().free(camera);
+    /// The frame at sim time `frame_ns` [`Self::frame`] took is finished: its
+    /// batches are published or held.
+    pub fn free(&self, camera: &str, frame_ns: u64) {
+        self.lock().free(camera, frame_ns);
         self.report(camera);
     }
 
@@ -326,8 +330,9 @@ impl SimPacing {
         let Some(socket) = &self.lockstep else {
             return;
         };
+        let latency = self.latency_ns();
         let s = self.lock();
-        let Some(done) = s.done_target(camera) else {
+        let Some(done) = s.done_target(camera, latency) else {
             return;
         };
         self.parts_lock()
