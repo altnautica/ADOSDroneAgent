@@ -18,6 +18,7 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("cancel", cancel),
     ("concurrent", concurrent),
     ("slow_systemd", slow_systemd),
+    ("ground_misses_ok", ground_misses_ok),
 ];
 
 /// A fault-free run binds or, with no peer, aborts.
@@ -27,10 +28,12 @@ const ANY: &[Outcome] = &[Outcome::Bound, Outcome::Aborted];
 /// the other not, which no protocol can rule out: the drone commits on the
 /// ground station's close, the ground station on the drone's `OK`, and the
 /// last of those can be lost, cut by a cancel or a kill before the gate, or
-/// outlive the sender's tunnel. These scenarios then run both rigs' auto-pair
-/// loops (the re-arm latch included), and the pair must end bound within the
-/// latch's bound; the matrix line counts the splits reconciled.
-const RECONCILED: &[Outcome] = &[Outcome::Bound];
+/// outlive the sender's tunnel. Every two-rig scenario then runs both rigs'
+/// auto-pair loops (the re-arm latch included) for the latch's bound: a split
+/// must end bound, a bound pair must stay bound with no window opened on it,
+/// and an aborted bind may stay aborted (the station keeps the pairing it had,
+/// with its drone away). The matrix line counts the splits reconciled.
+const RECONCILED: &[Outcome] = &[Outcome::Bound, Outcome::Aborted];
 
 /// Both rigs bind at about the same time over a clean link: they bind.
 fn clean(seed: u64) -> (Run, &'static [Outcome]) {
@@ -38,6 +41,7 @@ fn clean(seed: u64) -> (Run, &'static [Outcome]) {
         gs_present: true,
         first_bind_s: [(0.0, 5.0), (0.0, 5.0)],
         attempts: [3, 3],
+        reconcile: true,
         ..Plan::default()
     };
     (simulate(seed, Faults::clean(), plan), &[Outcome::Bound])
@@ -126,6 +130,7 @@ fn concurrent(seed: u64) -> (Run, &'static [Outcome]) {
         first_bind_s: [(0.0, 2.0), (0.0, 2.0)],
         attempts: [3, 3],
         second_bind: Some((rig, (0.5, 5.0))),
+        reconcile: true,
         ..Plan::default()
     };
     (simulate(seed, Faults::clean(), plan), &[Outcome::Bound])
@@ -142,7 +147,32 @@ fn slow_systemd(seed: u64) -> (Run, &'static [Outcome]) {
         gs_present: true,
         first_bind_s: [(0.0, 5.0), (0.0, 5.0)],
         attempts: [2, 2],
+        reconcile: true,
         ..Plan::default()
     };
     (simulate(seed, faults, plan), ANY)
+}
+
+/// The ground station dies between sending the drone its key and reading the
+/// drone's `OK`: the drone commits, the station restarts on the key of its
+/// earlier pairing, which once carried a link. Auto-pair must reconcile it
+/// with no operator: the drone's new key never works, and the station hears
+/// its drone on the air with a key it cannot decode.
+fn ground_misses_ok(seed: u64) -> (Run, &'static [Outcome]) {
+    let plan = Plan {
+        gs_present: true,
+        first_bind_s: [(0.0, 5.0), (0.0, 5.0)],
+        attempts: [1, 1],
+        kill_ground_awaiting_ok: true,
+        reconcile: true,
+        ..Plan::default()
+    };
+    let mut run = simulate(seed, Faults::clean(), plan);
+    if run.before_reconcile != Outcome::Split {
+        run.violations.push(format!(
+            "the operators left {:?}, not the drone-ahead split this scenario sets up",
+            run.before_reconcile
+        ));
+    }
+    (run, &[Outcome::Bound])
 }

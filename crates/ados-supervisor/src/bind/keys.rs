@@ -180,16 +180,9 @@ pub fn apply_pair_fields(
                 Value::Bool(b),
             );
         }
-        if let Some(f) = fleet {
-            wfb.insert(
-                Value::String("fleet_id".to_string()),
-                Value::Number(f.fleet_id.into()),
-            );
-            wfb.insert(
-                Value::String("fleet_slot".to_string()),
-                Value::Number(f.fleet_slot.into()),
-            );
-        }
+    }
+    if let Some(f) = fleet {
+        apply_fleet_fields(root, f);
     }
 
     if role == BindRole::Gs {
@@ -245,6 +238,44 @@ pub fn persist_pair_state(
     auto_pair_enabled: Option<bool>,
     fleet: Option<FleetIdentity>,
 ) -> bool {
+    rewrite_config(config_path, lock_path, |root| {
+        apply_pair_fields(
+            root,
+            role,
+            peer_device_id,
+            paired_at,
+            auto_pair_enabled,
+            fleet,
+        )
+    })
+}
+
+/// Write the fleet addressing a ground station issued into
+/// `video.wfb.fleet_id` / `fleet_slot`. Pure.
+pub fn apply_fleet_fields(root: &mut Mapping, fleet: FleetIdentity) {
+    let wfb = ensure_map(ensure_map(root, "video"), "wfb");
+    wfb.insert(
+        Value::String("fleet_id".to_string()),
+        Value::Number(fleet.fleet_id.into()),
+    );
+    wfb.insert(
+        Value::String("fleet_slot".to_string()),
+        Value::Number(fleet.fleet_slot.into()),
+    );
+}
+
+/// Persist only the fleet addressing, under the same lock, root gate and
+/// atomic rewrite as [`persist_pair_state`].
+pub fn persist_fleet(config_path: &Path, lock_path: &Path, fleet: FleetIdentity) -> bool {
+    rewrite_config(config_path, lock_path, |root| {
+        apply_fleet_fields(root, fleet)
+    })
+}
+
+/// Load → `mutate` → atomically rewrite the config, serialised by an flock and
+/// gated on euid 0 (the file is 0600 root). False (no write) for a non-root
+/// caller on Linux or a present config that will not parse.
+fn rewrite_config(config_path: &Path, lock_path: &Path, mutate: impl FnOnce(&mut Mapping)) -> bool {
     #[cfg(target_os = "linux")]
     {
         if !nix::unistd::geteuid().is_root() {
@@ -269,14 +300,7 @@ pub fn persist_pair_state(
             return false;
         }
     };
-    apply_pair_fields(
-        &mut root,
-        role,
-        peer_device_id,
-        paired_at,
-        auto_pair_enabled,
-        fleet,
-    );
+    mutate(&mut root);
 
     let body = match serde_norway::to_string(&Value::Mapping(root)) {
         Ok(s) => s,

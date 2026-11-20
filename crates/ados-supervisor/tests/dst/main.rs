@@ -156,6 +156,11 @@ fn dst_slow_systemd() {
     matrix("slow_systemd");
 }
 
+#[test]
+fn dst_ground_misses_ok() {
+    matrix("ground_misses_ok");
+}
+
 /// One seed replays byte for byte.
 #[test]
 fn dst_same_seed_replays_byte_identical() {

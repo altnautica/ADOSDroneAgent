@@ -113,11 +113,54 @@ pub fn classify(g: &World, before: &Snapshot) -> Outcome {
     }
 }
 
+/// The rig's fleet addressing as written, `None` when it carries none.
+fn fleet_of(r: &Rig) -> Option<(u64, u64)> {
+    Some((
+        wfb(r, "fleet_id").and_then(Value::as_u64)?,
+        wfb(r, "fleet_slot").and_then(Value::as_u64)?,
+    ))
+}
+
+/// The config without its fleet addressing, which a keyless rig takes the
+/// moment it is issued, bound or not.
+fn pair_fields(config: &Mapping) -> Mapping {
+    let mut c = config.clone();
+    if let Some(Value::Mapping(wfb)) = c
+        .get_mut("video")
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|v| v.get_mut("wfb"))
+    {
+        wfb.remove("fleet_id");
+        wfb.remove("fleet_slot");
+    }
+    c
+}
+
+/// Whether the radio service would bring this rig's link up: its `video.wfb`
+/// block read as `ados_radio`'s config, then the radio's own fleet-identity
+/// rule. `Err` names the refusal.
+fn radio_accepts(r: &Rig) -> Result<(), String> {
+    let wfb = r
+        .config
+        .get("video")
+        .and_then(|v| v.get("wfb"))
+        .cloned()
+        .unwrap_or(Value::Mapping(Mapping::new()));
+    let cfg: ados_radio::config::WfbConfig =
+        serde_norway::from_value(wfb).map_err(|e| format!("video.wfb does not parse: {e}"))?;
+    let ground = r.role == ados_supervisor::bind::BindRole::Gs;
+    match ados_radio::config::fleet_identity_error(cfg.fleet_id, cfg.fleet_slot, ground) {
+        None => Ok(()),
+        Some(e) => Err(e.to_string()),
+    }
+}
+
 /// The end-state check: classify the outcome and record every break.
+/// `issued` is the addressing the ground station's registry issued each rig.
 pub fn finish(
     w: &Shared,
     before: &Snapshot,
-    drone_fleet: FleetIdentity,
+    issued: [FleetIdentity; 2],
     gs_present: bool,
 ) -> Outcome {
     let mut breaks = Vec::new();
@@ -134,64 +177,81 @@ pub fn finish(
         let changed = [DRONE, GS].map(|i| g.rigs[i].key().map(<[u8]>::to_vec) != before.keys[i]);
         for i in [DRONE, GS] {
             let r = &g.rigs[i];
-            // A rig whose last attempt never reported (its supervisor was
-            // killed) reports its pair state from config.
-            let paired = match r.last_state.as_deref() {
-                Some(s) => s == "paired",
-                None => !armed(r),
-            };
-            if paired != changed[i] {
-                breaks.push(format!(
-                    "{}: last bind reports {:?} but the key {}",
-                    r.name,
-                    r.last_state,
-                    if changed[i] {
-                        "changed"
-                    } else {
-                        "did not change"
-                    }
-                ));
+            // A rig's last reported bind says paired exactly when the rig's
+            // key now differs from the key it held when that bind started (a
+            // key landing after a failed report is the status lie). A rig
+            // whose last attempt never reported (its supervisor was killed, or
+            // it never bound) is judged by its enrolment below.
+            if let Some(state) = r.last_state.as_deref() {
+                let took = r.key() != r.last_bind_key.as_deref();
+                if (state == "paired") != took {
+                    breaks.push(format!(
+                        "{}: last bind reports {state} but its key {}",
+                        r.name,
+                        if took { "changed" } else { "did not change" }
+                    ));
+                }
             }
-            if !changed[i] && r.config != before.config[i] {
+            if !changed[i] && pair_fields(&r.config) != pair_fields(&before.config[i]) {
                 breaks.push(format!("{}: pair config changed without a new key", r.name));
+            }
+            // Whatever addressing a rig holds is the one it was issued.
+            let want = (
+                u64::from(issued[i].fleet_id),
+                u64::from(issued[i].fleet_slot),
+            );
+            if let Some(have) = fleet_of(r).filter(|have| *have != want) {
+                breaks.push(format!(
+                    "{}: holds fleet/slot {have:?}, was issued {want:?}",
+                    r.name
+                ));
             }
         }
         let origin = [DRONE, GS].map(|i| g.rigs[i].key().and_then(key_origin));
-        let drone = &g.rigs[DRONE];
-        // The issued slot, or none at all when the drone's key came from an
-        // auto-pair bind (which carries no fleet assignment by design).
-        let slot_ok = match (
-            wfb(drone, "fleet_id").and_then(Value::as_u64),
-            wfb(drone, "fleet_slot").and_then(Value::as_u64),
-        ) {
-            (Some(id), Some(slot)) => {
-                id == u64::from(drone_fleet.fleet_id) && slot == u64::from(drone_fleet.fleet_slot)
-            }
-            (None, None) => drone.auto_paired,
-            _ => false,
-        };
         // A rig that took a key holds a whole enrolment: its half of a
-        // generated pair, auto-pair disarmed, and on the drone the issued slot.
+        // generated pair, auto-pair disarmed, and fleet addressing.
         let whole = [
-            matches!(origin[DRONE], Some((_, 0))) && slot_ok && !armed(drone),
-            matches!(origin[GS], Some((_, 1))) && !armed(&g.rigs[GS]),
+            matches!(origin[DRONE], Some((_, 0))),
+            matches!(origin[GS], Some((_, 1))),
         ];
         for i in [DRONE, GS] {
-            if changed[i] && !whole[i] {
+            let r = &g.rigs[i];
+            if changed[i] && (!whole[i] || armed(r) || fleet_of(r).is_none()) {
                 breaks.push(format!(
-                    "{}: partial enrolment: key {:?}, slot ok {slot_ok}, armed {}",
-                    g.rigs[i].name,
+                    "{}: partial enrolment: key {:?}, fleet {:?}, armed {}",
+                    r.name,
                     origin[i],
-                    armed(&g.rigs[i])
+                    fleet_of(r),
+                    armed(r)
                 ));
             }
         }
         let outcome = classify(&g, before);
-        if outcome == Outcome::Bound && !matches!(origin, [Some((a, 0)), Some((b, 1))] if a == b) {
-            breaks.push(format!(
-                "the rigs took keys of different pairs: drone {:?}, gs {:?}",
-                origin[DRONE], origin[GS]
-            ));
+        if outcome == Outcome::Bound {
+            if !matches!(origin, [Some((a, 0)), Some((b, 1))] if a == b) {
+                breaks.push(format!(
+                    "the rigs took keys of different pairs: drone {:?}, gs {:?}",
+                    origin[DRONE], origin[GS]
+                ));
+            }
+            // A bound pair flies: the radio accepts both configs, and the
+            // drone's slot is the one the ground station's registry holds.
+            for r in &g.rigs {
+                if let Err(e) = radio_accepts(r) {
+                    breaks.push(format!(
+                        "{}: the radio refuses the bound config: {e}",
+                        r.name
+                    ));
+                }
+            }
+            let (drone, gs) = (fleet_of(&g.rigs[DRONE]), fleet_of(&g.rigs[GS]));
+            let registry = u64::from(issued[DRONE].fleet_slot);
+            if drone.map(|f| f.1) != Some(registry) || drone.map(|f| f.0) != gs.map(|f| f.0) {
+                breaks.push(format!(
+                    "bound drone holds fleet/slot {drone:?}; the ground holds fleet {:?}, slot {registry}",
+                    gs.map(|f| f.0)
+                ));
+            }
         }
         outcome
     };

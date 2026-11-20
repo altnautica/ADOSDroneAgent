@@ -58,3 +58,6 @@ parking_lot = { workspace = true }
 # real 75 s stall budget. Dev-only: resolver 2 keeps test-util out of the
 # shipped binary's features.
 tokio = { workspace = true, features = ["test-util"] }
+# The bind simulation checks a bound pair's config the way the radio service
+# reads it: `ados_radio`'s `video.wfb` model and its fleet-identity rule.
+ados-radio = { path = "../ados-radio" }

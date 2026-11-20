@@ -47,14 +47,28 @@ pub const DEFAULT_REARM_COOLDOWN_S: u64 = 1800;
 /// would arm against a radio that is not even running.
 pub const STATS_FRESH_CEILING: Duration = Duration::from_secs(30);
 
-/// What the radio's sidecar says about this key, reduced to the two questions
-/// the latch asks. Never both true.
+/// What the radio's sidecar says about this key, reduced to the questions the
+/// latch asks. `proven` excludes both others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RearmSignals {
     /// The key is in use and is demonstrably not working.
     pub unproven: bool,
     /// The key has just been observed carrying a link.
     pub proven: bool,
+    /// A peer is on the air but nothing it sends decodes: frames arrive and
+    /// fail decryption (`link_diag` `mis_keyed`), so the peer holds another
+    /// key or link id. The one signal that may re-arm a key that once worked,
+    /// since it says the peer is present yet re-keyed, not merely away.
+    pub mis_keyed: bool,
+}
+
+impl RearmSignals {
+    /// Fold in the radio's one-glance verdict (`link_diag`). A decoding link
+    /// is never mis-keyed, whatever the verdict string says.
+    pub fn with_link_diag(mut self, link_diag: Option<&str>) -> Self {
+        self.mis_keyed = !self.proven && link_diag == Some("mis_keyed");
+        self
+    }
 }
 
 /// Derive the drone-side signals.
@@ -71,6 +85,7 @@ pub fn drone_signals(rf_unverified: Option<bool>, channel_locked: Option<bool>) 
         // whatever a same-tick transmit-side verdict says.
         unproven: !proven && rf_unverified == Some(true),
         proven,
+        mis_keyed: false,
     }
 }
 
@@ -92,6 +107,7 @@ pub fn gs_signals(state: &str, packets_received: u64) -> RearmSignals {
     RearmSignals {
         unproven: !proven && state == "searching",
         proven,
+        mis_keyed: false,
     }
 }
 
@@ -100,9 +116,9 @@ pub fn gs_signals(state: &str, packets_received: u64) -> RearmSignals {
 pub enum RearmStep {
     /// Nothing to do.
     Idle,
-    /// This key has been confirmed to work at least once. It is never re-armed
-    /// again, however long it has been down. Distinct from [`RearmStep::Idle`]
-    /// so a log says why nothing happened.
+    /// This key has been confirmed to work at least once, and its peer is not
+    /// on the air re-keyed. It is not re-armed for being down, however long.
+    /// Distinct from [`RearmStep::Idle`] so a log says why nothing happened.
     Proven,
     /// Open a bind window now.
     Arm {
@@ -125,6 +141,9 @@ pub struct RearmInput {
     pub forced: bool,
     /// The unproven condition has held for the full confirm window.
     pub hold_armed: bool,
+    /// The peer was first heard on the air mis-keyed at least the confirm
+    /// window ago, and not one frame has decoded since.
+    pub mis_keyed_armed: bool,
     pub episodes: u32,
     /// Wall clock of the last episode, from the persisted record.
     pub last_rearm_at: Option<u64>,
@@ -132,14 +151,17 @@ pub struct RearmInput {
     pub now_unix: u64,
 }
 
-/// The one rule: re-arm only a key that has never once been confirmed to work.
+/// Re-arm a key that has never once been confirmed to work, or a key that did
+/// work whose peer has been on the air re-keyed for the whole confirm window.
 ///
 /// Precedence matters. The operator force runs first because it exists to
 /// override exactly this machine. The proven latch runs next, ahead of the
-/// hold and the cooldown, so no combination of inputs can re-bind a pair that
-/// has worked — that path is closed by construction rather than by every later
-/// branch happening to decline. A never-proven key is re-armed for as long as
-/// the fault persists, one episode per cooldown.
+/// hold and the cooldown: a proven key is never re-armed for being down, so a
+/// multi-day dropout or a peer that is simply off cannot re-bind a pair that
+/// has worked. The only way past it is the mis-keyed hold, which a single
+/// decoded frame resets: the peer is present and transmitting on another key
+/// (it took a new key in a bind this rig missed), so waiting will never bring
+/// the link back. Either fault re-arms one episode per cooldown.
 pub fn decide_rearm(input: RearmInput) -> RearmStep {
     if input.forced {
         return RearmStep::Arm {
@@ -147,10 +169,10 @@ pub fn decide_rearm(input: RearmInput) -> RearmStep {
             forced: true,
         };
     }
-    if input.proven {
+    if input.proven && !input.mis_keyed_armed {
         return RearmStep::Proven;
     }
-    if !input.hold_armed {
+    if !input.hold_armed && !input.mis_keyed_armed {
         return RearmStep::Idle;
     }
     if let Some(last) = input.last_rearm_at {

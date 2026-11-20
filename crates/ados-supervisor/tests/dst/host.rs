@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use ados_protocol::logd::emitter::EventEmitter;
-use ados_supervisor::bind::keys::{apply_pair_fields, FleetIdentity};
+use ados_supervisor::bind::keys::{apply_fleet_fields, apply_pair_fields, FleetIdentity};
 use ados_supervisor::bind::orchestrator::{BindHost, InjectionPrepOutcome, SocatFailure};
 use ados_supervisor::bind::{BindRole, TUNNEL_POLL_INTERVAL, UPSTREAM_DRONE_KEY, UPSTREAM_GS_KEY};
 use ados_supervisor::process_manager::ProcessManager;
@@ -207,6 +207,21 @@ impl BindHost for SimHost {
         true
     }
 
+    fn persist_fleet(&self, fleet: FleetIdentity) -> bool {
+        if !self.alive() {
+            return false;
+        }
+        let mut g = lock(&self.w);
+        let rig = &mut g.rigs[self.rig];
+        apply_fleet_fields(&mut rig.config, fleet);
+        let name = rig.name;
+        g.log(format!(
+            "{name} keeps the issued slot {} of fleet {}",
+            fleet.fleet_slot, fleet.fleet_id
+        ));
+        true
+    }
+
     fn write_setup_complete(&self, _body: &[u8]) -> Result<(), String> {
         if self.alive() {
             lock(&self.w).rigs[self.rig].setup_complete = true;
@@ -216,7 +231,7 @@ impl BindHost for SimHost {
 
     fn write_sentinel(&self, body: &[u8]) {
         if self.alive() {
-            lock(&self.w).rigs[self.rig].sentinel = Some(body.to_vec());
+            lock(&self.w).rigs[self.rig].set_sentinel(body);
         }
     }
 

@@ -507,6 +507,39 @@ fn fleet_identity_is_profile_aware() {
 }
 
 #[test]
+fn a_drone_bound_by_auto_pair_keeps_a_flyable_identity() {
+    // The `video.wfb` block a drone holds after the supervisor's bind: its
+    // issued fleet addressing written when the ground station issued it, the
+    // pair fields written by the key apply of a later auto-pair bind (which
+    // carries no addressing of its own). The radio must bring that link up.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    std::fs::write(
+        &cfg,
+        "video:\n  wfb:\n    fleet_id: 7\n    fleet_slot: 3\n    \
+         paired_at: '2026-11-20T10:00:00+00:00'\n    auto_pair_enabled: false\n",
+    )
+    .unwrap();
+    let c = WfbConfig::load_from(&cfg);
+    assert_eq!((c.fleet_id, c.fleet_slot), (7, 3));
+    assert!(!c.auto_pair_enabled);
+    assert_eq!(fleet_identity_error(c.fleet_id, c.fleet_slot, false), None);
+
+    // The same pairing without the addressing is the drone that parks: the
+    // rule is right to refuse it, which is why the bind keeps the slot.
+    std::fs::write(
+        &cfg,
+        "video:\n  wfb:\n    paired_at: '2026-11-20T10:00:00+00:00'\n    auto_pair_enabled: false\n",
+    )
+    .unwrap();
+    let bare = WfbConfig::load_from(&cfg);
+    assert_eq!(
+        fleet_identity_error(bare.fleet_id, bare.fleet_slot, false),
+        Some(FleetIdentityError::DroneWithoutSlot)
+    );
+}
+
+#[test]
 fn aux_ports_may_not_land_in_the_fleet_receiver_span() {
     // A fleet receiver decoding into the aux transmit ingress would radiate
     // every decoded downlink frame straight back over the air.

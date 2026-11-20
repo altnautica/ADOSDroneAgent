@@ -18,6 +18,18 @@ impl BindOrchestrator {
         peer_device_id: Option<String>,
         fleet: Option<keys::FleetIdentity>,
     ) -> Result<(), BindError> {
+        // A rig holding no key keeps the fleet addressing the ground station's
+        // registry issued it, from the moment it is issued: whether or not this
+        // bind lands, the slot is this device's, and a later auto-pair bind
+        // (which carries none) must find it in config, or the radio parks the
+        // pair it completes on slot 0. A rig that holds a key takes new
+        // addressing only with its new key, so a failed re-pair never moves a
+        // working link to another slot.
+        if let Some(f) = fleet {
+            if self.host.read_public_fingerprint(role.key_path()).is_err() {
+                self.host.persist_fleet(f);
+            }
+        }
         // Pre-flight: every external dep must be present BEFORE we touch the
         // radio so a missing artifact fails fast with a structured error.
         for path in [UPSTREAM_BIND_KEY, UPSTREAM_BIND_YAML] {

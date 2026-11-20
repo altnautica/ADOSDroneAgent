@@ -64,6 +64,8 @@ pub struct Rig {
     pub setup_complete: bool,
     /// The bind-state sentinel as last written.
     pub sentinel: Option<Vec<u8>>,
+    /// Its `active` flag, read once per write (absent or garbled: false).
+    pub sentinel_active: bool,
     /// The drone's socat listener is waiting for a connection.
     pub listening: bool,
     /// Live socat processes.
@@ -74,10 +76,10 @@ pub struct Rig {
     pub settled: bool,
     /// The state the last bind call that returned reported.
     pub last_state: Option<String>,
+    /// The key the rig held when its last reported bind started.
+    pub last_bind_key: Option<Vec<u8>>,
     /// The sequence number of the last `systemctl` job issued per unit.
     pub jobs: BTreeMap<String, u64>,
-    /// An auto-pair bind (which carries no fleet assignment) paired this rig.
-    pub auto_paired: bool,
 }
 
 impl Rig {
@@ -85,13 +87,18 @@ impl Rig {
         self.units.get(unit).copied().unwrap_or(false)
     }
 
-    /// The sentinel's `active` flag (absent or garbled: false).
-    pub fn sentinel_active(&self) -> bool {
-        self.sentinel
-            .as_deref()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+    /// Write the sentinel and read its `active` flag.
+    pub fn set_sentinel(&mut self, body: &[u8]) {
+        self.sentinel_active = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
             .and_then(|v| v.get("active").and_then(serde_json::Value::as_bool))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.sentinel = Some(body.to_vec());
+    }
+
+    /// The sentinel's `active` flag.
+    pub fn sentinel_active(&self) -> bool {
+        self.sentinel_active
     }
 
     /// The key file this rig's radio runs on.
@@ -196,6 +203,8 @@ pub struct World {
     /// Each supervisor kill: the rig, and whether its bind had passed the
     /// peer-evidence gate when it died.
     pub kills: Vec<(usize, bool)>,
+    /// The ground station has sent the drone its key (`BIND`) at least once.
+    pub bind_sent: bool,
 }
 
 impl World {
@@ -212,6 +221,7 @@ impl World {
             trace: Trace::default(),
             violations: Vec::new(),
             kills: Vec::new(),
+            bind_sent: false,
         }
     }
 
@@ -243,7 +253,7 @@ impl World {
     }
 
     /// Whether the air is out right now.
-    fn outage(&self) -> bool {
+    pub fn outage(&self) -> bool {
         let now = Instant::now();
         self.faults.outages.iter().any(|(start, len)| {
             let s = self.t0 + *start;
@@ -291,13 +301,14 @@ fn rig(role: BindRole, name: &'static str) -> Rig {
         config: Mapping::new(),
         setup_complete: false,
         sentinel: None,
+        sentinel_active: false,
         listening: false,
         socats: 0,
         busy: false,
         settled: true,
         last_state: None,
+        last_bind_key: None,
         jobs: BTreeMap::new(),
-        auto_paired: false,
     }
 }
 

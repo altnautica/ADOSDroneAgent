@@ -12,15 +12,24 @@ const OTHER_FP: &str = "9988776655443322";
 fn unproven() -> Option<RearmSignals> {
     Some(RearmSignals {
         unproven: true,
-        proven: false,
+        ..RearmSignals::default()
     })
 }
 
 /// Signals for a rig whose key was just seen carrying a link.
 fn proven() -> Option<RearmSignals> {
     Some(RearmSignals {
-        unproven: false,
         proven: true,
+        ..RearmSignals::default()
+    })
+}
+
+/// Signals for a rig hearing its peer on the air with another key.
+fn mis_keyed() -> Option<RearmSignals> {
+    Some(RearmSignals {
+        unproven: true,
+        mis_keyed: true,
+        ..RearmSignals::default()
     })
 }
 
@@ -153,6 +162,114 @@ fn healthy_link_is_never_rearmed() {
 }
 
 #[test]
+fn a_proven_key_rearms_when_its_peer_is_on_the_air_re_keyed() {
+    // A ground station kept its proven key while its drone took a new one in a
+    // bind the station missed. The drone is on the air, every frame fails
+    // decryption: waiting will never bring the link back, so after the full
+    // confirm hold the station opens one window, and no sooner.
+    let mut rig = Rig::new(BindRole::Gs);
+    let mut seed = PairProof::fresh("gs", FP);
+    seed.mark_proven(rig.unix0 - 5_000);
+    write_pair_proof_to(&rig.path, &seed).unwrap();
+    let hold = rig.cfg.confirm_hold.as_secs();
+    let mut t = 0;
+    while t < hold {
+        let out = rig.tick(t, mis_keyed());
+        assert!(!out.rearm, "{t} s: not before the hold is served");
+        t += 60;
+    }
+    let out = rig.tick(hold, mis_keyed());
+    assert!(out.rearm);
+    assert_eq!(
+        out.event,
+        Some(RearmEvent::Armed {
+            episode: 1,
+            forced: false,
+            mis_keyed: true,
+        })
+    );
+    // The same fault keeps holding: the next window waits out the cooldown.
+    let next = rig.tick(hold + 60, mis_keyed());
+    assert!(matches!(next.step, RearmStep::Cooldown { .. }));
+    assert!(rig.stored().unwrap().is_proven(), "the proof is kept");
+}
+
+#[test]
+fn one_decoded_frame_resets_the_mis_keyed_hold() {
+    // The link decoding even once inside the window is a working pair; the
+    // hold starts over, so an intermittent mis-key on a healthy link (a
+    // neighbour's drone, a moment of interference) never re-arms.
+    let mut rig = Rig::new(BindRole::Gs);
+    let mut seed = PairProof::fresh("gs", FP);
+    seed.mark_proven(rig.unix0 - 5_000);
+    write_pair_proof_to(&rig.path, &seed).unwrap();
+    let hold = rig.cfg.confirm_hold.as_secs();
+    for minute in 0..(24 * 60u64) {
+        let t = minute * 60;
+        // Mis-keyed for just under the hold, then one decoded frame.
+        let sig = if t % hold == hold - 60 {
+            proven()
+        } else {
+            mis_keyed()
+        };
+        let out = rig.tick(t, sig);
+        assert!(
+            !out.rearm,
+            "minute {minute} must not re-arm a decoding link"
+        );
+    }
+    assert_eq!(rig.stored().unwrap().rearm_episodes, 0);
+}
+
+#[test]
+fn a_re_keyed_peer_going_quiet_keeps_the_clock_and_one_never_heard_starts_none() {
+    let hold = PairRearmConfig::default().confirm_hold.as_secs();
+    // Heard mis-keyed, then quiet (it stopped to open its own bind window):
+    // the clock keeps running, so this rig's window lines up with the peer's.
+    let mut rig = Rig::new(BindRole::Gs);
+    let mut seed = PairProof::fresh("gs", FP);
+    seed.mark_proven(rig.unix0 - 5_000);
+    write_pair_proof_to(&rig.path, &seed).unwrap();
+    assert!(!rig.tick(0, mis_keyed()).rearm);
+    assert!(!rig.tick(hold / 2, quiet_signals()).rearm);
+    assert!(rig.tick(hold, quiet_signals()).rearm);
+
+    // A proven key whose peer is merely away (never heard mis-keyed) stays
+    // latched for a day.
+    let mut away = Rig::new(BindRole::Gs);
+    write_pair_proof_to(&away.path, &seed).unwrap();
+    for minute in 0..(24 * 60u64) {
+        assert!(!away.tick(minute * 60, quiet_signals()).rearm);
+    }
+}
+
+#[test]
+fn the_radio_verdict_names_a_mis_keyed_peer() {
+    let body = serde_json::json!({
+        "profile": "ground_station",
+        "state": "searching",
+        "packets_received": 0,
+        "link_diag": "mis_keyed",
+    });
+    assert!(parse_signals(BindRole::Gs, &body).unwrap().mis_keyed);
+    // A decoding link is never mis-keyed, whatever the verdict says.
+    let decoding = serde_json::json!({
+        "profile": "ground_station",
+        "state": "receiving",
+        "packets_received": 9,
+        "link_diag": "mis_keyed",
+    });
+    assert!(!parse_signals(BindRole::Gs, &decoding).unwrap().mis_keyed);
+    let deaf = serde_json::json!({
+        "profile": "drone",
+        "rf_unverified": true,
+        "channel_locked": false,
+        "link_diag": "deaf",
+    });
+    assert!(!parse_signals(BindRole::Drone, &deaf).unwrap().mis_keyed);
+}
+
+#[test]
 fn one_proof_tick_locks_out_rearm_permanently_for_that_key() {
     // The transition itself: a key that was arming its way toward a re-bind is
     // seen working ONCE, and is never re-armed again.
@@ -212,7 +329,8 @@ fn a_never_proven_key_arms_exactly_once_at_the_hold_boundary() {
         out.event,
         Some(RearmEvent::Armed {
             episode: 1,
-            forced: false
+            forced: false,
+            mis_keyed: false,
         })
     );
 
@@ -519,7 +637,8 @@ fn force_arms_once_then_self_clears() {
         out.event,
         Some(RearmEvent::Armed {
             episode: 8,
-            forced: true
+            forced: true,
+            mis_keyed: false,
         })
     );
 
@@ -583,6 +702,7 @@ fn the_event_detail_is_bland_and_carries_the_episode() {
         &RearmEvent::Armed {
             episode: 2,
             forced: false,
+            mis_keyed: false,
         },
         "drone",
         FP,
@@ -591,13 +711,28 @@ fn the_event_detail_is_bland_and_carries_the_episode() {
     assert_eq!(d.get("role").and_then(|v| v.as_str()), Some("drone"));
     assert_eq!(d.get("episode").and_then(|v| v.as_u64()), Some(2));
     assert_eq!(d.get("forced").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(d.get("cause").and_then(|v| v.as_str()), Some("unproven"));
+    let mis_keyed = rearm_detail(
+        &RearmEvent::Armed {
+            episode: 3,
+            forced: false,
+            mis_keyed: true,
+        },
+        "gs",
+        FP,
+    );
+    assert_eq!(
+        mis_keyed.get("cause").and_then(|v| v.as_str()),
+        Some("mis_keyed")
+    );
 
     // Opening a bind window on a rig that believed it was paired is something
     // an operator should see.
     assert_eq!(
         RearmEvent::Armed {
             episode: 1,
-            forced: false
+            forced: false,
+            mis_keyed: false,
         }
         .level(),
         Level::Warn

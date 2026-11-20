@@ -214,6 +214,7 @@ async fn gs_client(w: &Shared, socket: &Socket) -> (i32, Vec<u8>) {
             .map(|f| f.data.clone())
             .unwrap_or_default();
         send(&mut g, GS, id, Msg::Bind(blob));
+        g.bind_sent = true;
     }
     if !matches!(recv(w, GS, id).await, Msg::BindOk) {
         return (1, b"Bind failed".to_vec());

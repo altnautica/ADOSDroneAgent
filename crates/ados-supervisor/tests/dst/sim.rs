@@ -9,13 +9,14 @@ use std::time::Duration;
 use ados_protocol::logd::emitter::EventEmitter;
 use ados_supervisor::bind::keys::{apply_pair_fields, FleetIdentity};
 use ados_supervisor::bind::orchestrator::{BindOrchestrator, BindStartError};
+use ados_supervisor::bind::BindRole;
 use ados_supervisor::process_manager::ProcessManager;
 use tokio::task::JoinHandle;
 
 use crate::check;
 use crate::host::boot_handles;
 use crate::reconcile;
-use crate::world::{lock, Faults, Shared, Trace, World, DRONE, GS};
+use crate::world::{key_blob, lock, Faults, File, Shared, Trace, World, DRONE, GS};
 
 /// How long a killed supervisor stays down (`RestartSec=3`).
 const RESTART_SEC: Duration = Duration::from_secs(3);
@@ -37,6 +38,10 @@ pub struct Plan {
     pub cancel: Option<(usize, (f32, f32))>,
     /// Start a second bind on this rig once, in this window.
     pub second_bind: Option<(usize, (f32, f32))>,
+    /// Kill the ground station's supervisor the moment it has sent the drone
+    /// its key, before the drone's `OK` arrives: the drone commits, the ground
+    /// station keeps the key it had.
+    pub kill_ground_awaiting_ok: bool,
     /// After the operators, run both rigs' auto-pair loops until the pair
     /// converges, within [`reconcile::bound`].
     pub reconcile: bool,
@@ -102,11 +107,11 @@ pub fn simulate(seed: u64, faults: Faults, plan: Plan) -> Run {
             }
         }
         if plan.reconcile {
-            reconcile_pair(&w, orchs).await;
+            reconcile_pair(&w, orchs, before_reconcile).await;
         }
         tokio::time::sleep(SETTLE).await;
         monitor.abort();
-        let outcome = check::finish(&w, &before, fleet[DRONE], plan.gs_present);
+        let outcome = check::finish(&w, &before, fleet, plan.gs_present);
         let mut g = lock(&w);
         let sim_s = g.now_ms() as f64 / 1000.0;
         g.log(format!("outcome {outcome:?}"));
@@ -121,15 +126,25 @@ pub fn simulate(seed: u64, faults: Faults, plan: Plan) -> Run {
     })
 }
 
-/// Run both rigs' auto-pair loops until the pair converges; a pair still
-/// apart after [`reconcile::bound`] is a break.
-async fn reconcile_pair(w: &Shared, orchs: Vec<(usize, Arc<BindOrchestrator>)>) {
+/// Run both rigs' auto-pair loops for [`reconcile::bound`]. A pair the
+/// operators left split must have converged by then; a pair they left bound
+/// stays bound with no bind window opened on it (the loops check every tick).
+async fn reconcile_pair(
+    w: &Shared,
+    orchs: Vec<(usize, Arc<BindOrchestrator>)>,
+    before: check::Outcome,
+) {
     let records = tempfile::tempdir().expect("a pair-proof record dir");
     let deadline = tokio::time::Instant::now() + reconcile::bound();
     let loops: Vec<_> = orchs
         .into_iter()
         .map(|(rig, orch)| {
             let record = records.path().join(format!("pair-proof-{rig}.json"));
+            if rig == GS {
+                // The station's original key carried its earlier pairing.
+                let fp = reconcile::key_fingerprint(&key_blob(0, 1));
+                reconcile::seed_proven(&record, BindRole::Gs, &fp, 1_600_000_000);
+            }
             tokio::spawn(reconcile::auto_pair(w.clone(), rig, orch, record, deadline))
         })
         .collect();
@@ -137,37 +152,57 @@ async fn reconcile_pair(w: &Shared, orchs: Vec<(usize, Arc<BindOrchestrator>)>) 
         l.await.expect("an auto-pair loop ends");
     }
     let mut g = lock(w);
-    if reconcile::converged(&g) {
-        g.log("pair converged");
-    } else {
+    let converged = reconcile::converged(&g);
+    g.log(format!(
+        "auto-pair horizon over, pair converged: {converged}"
+    ));
+    if matches!(before, check::Outcome::Split | check::Outcome::Bound) && !converged {
         let bound = reconcile::bound().as_secs();
         g.violations.push(format!(
-            "the pair did not converge within {bound} s of the operators"
+            "a pair the operators left {before:?} did not converge within {bound} s"
         ));
     }
 }
 
-/// A freshly flashed drone and a new ground station: no keys, auto-pair
-/// armed. Returns the fleet addressing each rig's operator passes: the ground
+/// A freshly flashed drone (no key, auto-pair armed) and a ground station
+/// holding the key of an earlier pairing that worked (disarmed, fleet slot
+/// 0). Returns the fleet addressing each rig's operator passes: the ground
 /// station's registry issues the drone a slot, the ground station itself takes
 /// slot 0.
 fn setup(w: &Shared) -> [FleetIdentity; 2] {
     let mut g = lock(w);
     let fleet_id = 1 + (g.rng.next_u64() % 200) as u16;
     let slot = 1 + (g.rng.next_u64() % 7) as u8;
-    for r in &mut g.rigs {
-        apply_pair_fields(&mut r.config, r.role, None, None, Some(true), None);
-    }
+    let ground = FleetIdentity {
+        fleet_id,
+        fleet_slot: 0,
+    };
+    let mtime = g.wall_now();
+    let drone = &mut g.rigs[DRONE];
+    apply_pair_fields(&mut drone.config, drone.role, None, None, Some(true), None);
+    let gs = &mut g.rigs[GS];
+    apply_pair_fields(
+        &mut gs.config,
+        gs.role,
+        Some("earlier-drone-01"),
+        Some("2026-01-01T00:00:00+00:00"),
+        Some(false),
+        Some(ground),
+    );
+    gs.files.insert(
+        gs.role.key_path().to_string(),
+        File {
+            data: key_blob(0, 1),
+            mtime,
+        },
+    );
     g.log(format!("fleet {fleet_id}, drone slot {slot}"));
     [
         FleetIdentity {
             fleet_id,
             fleet_slot: slot,
         },
-        FleetIdentity {
-            fleet_id,
-            fleet_slot: 0,
-        },
+        ground,
     ]
 }
 
@@ -234,6 +269,7 @@ async fn life(
     let mut orch = boot(&w, rig, &events).await;
     let first = at(&w, plan.first_bind_s[rig]);
     let attempts = plan.attempts[rig];
+    let start_key = lock(&w).rigs[rig].key().map(<[u8]>::to_vec);
     if let Some((r, window)) = plan.cancel.filter(|(r, _)| *r == rig) {
         let (o, when) = (orch.clone(), at(&w, window));
         let w = w.clone();
@@ -255,15 +291,31 @@ async fn life(
         fleet,
         first,
         attempts,
+        start_key.clone(),
     ));
-    let Some((_, window)) = plan.kill.filter(|(r, _)| *r == rig) else {
+    let at_ok = plan.kill_ground_awaiting_ok && rig == GS;
+    let window = plan.kill.filter(|(r, _)| *r == rig).map(|(_, w)| w);
+    if window.is_none() && !at_ok {
         driver.await.expect("the operator ends");
         return orch;
+    }
+    let when = window.map(|win| at(&w, win));
+    let trigger = {
+        let w = w.clone();
+        async move {
+            match when {
+                Some(when) => tokio::time::sleep_until(when).await,
+                None => {
+                    while !lock(&w).bind_sent {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                }
+            }
+        }
     };
-    let when = at(&w, window);
     tokio::select! {
         r = &mut driver => r.expect("the operator ends"),
-        _ = tokio::time::sleep_until(when) => {
+        _ = trigger => {
             kill(&w, rig);
             driver.abort();
             let _ = driver.await;
@@ -271,14 +323,15 @@ async fn life(
             orch = boot(&w, rig, &events).await;
             // Auto-pair's settle delay before the first attempt after a boot.
             let now = tokio::time::Instant::now() + ados_supervisor::auto_pair::START_DELAY;
-            operator(w.clone(), rig, orch.clone(), fleet, now, attempts).await;
+            operator(w.clone(), rig, orch.clone(), fleet, now, attempts, start_key).await;
         }
     }
     orch
 }
 
-/// The operator (or auto-pair) on one rig: bind until paired, with the
-/// auto-pair backoff between attempts, while the rig is still armed.
+/// The operator on one rig, pairing it from the ground station's surface:
+/// bind until the rig holds a new key, with the auto-pair backoff between
+/// attempts. `start_key` is the key the rig held when the operator began.
 async fn operator(
     w: Shared,
     rig: usize,
@@ -286,15 +339,17 @@ async fn operator(
     fleet: FleetIdentity,
     first: tokio::time::Instant,
     attempts: u32,
+    start_key: Option<Vec<u8>>,
 ) {
     tokio::time::sleep_until(first).await;
     for attempt in 1..=attempts {
         let role = {
             let mut g = lock(&w);
-            if !check::armed(&g.rigs[rig]) {
+            if g.rigs[rig].key() != start_key.as_deref() {
                 return;
             }
             g.rigs[rig].busy = true;
+            g.rigs[rig].last_bind_key = g.rigs[rig].key().map(<[u8]>::to_vec);
             let name = g.rigs[rig].name;
             g.log(format!("{name} bind attempt {attempt}"));
             g.rigs[rig].role

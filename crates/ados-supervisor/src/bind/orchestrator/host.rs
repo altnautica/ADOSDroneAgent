@@ -93,6 +93,10 @@ pub trait BindHost: Send + Sync {
         fleet: Option<FleetIdentity>,
     ) -> bool;
 
+    /// Persist only the fleet addressing (see [`keys::persist_fleet`]). False
+    /// when nothing was written.
+    fn persist_fleet(&self, fleet: FleetIdentity) -> bool;
+
     /// Write the setup-complete sentinel.
     fn write_setup_complete(&self, body: &[u8]) -> Result<(), String>;
 
@@ -216,6 +220,14 @@ impl BindHost for SystemHost {
             peer_device_id,
             paired_at,
             auto_pair_enabled,
+            fleet,
+        )
+    }
+
+    fn persist_fleet(&self, fleet: FleetIdentity) -> bool {
+        keys::persist_fleet(
+            Path::new(crate::bind::CONFIG_YAML),
+            Path::new(crate::bind::CONFIG_LOCK_PATH),
             fleet,
         )
     }

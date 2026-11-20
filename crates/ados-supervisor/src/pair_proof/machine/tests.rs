@@ -6,11 +6,40 @@ fn base() -> RearmInput {
         proven: false,
         forced: false,
         hold_armed: true,
+        mis_keyed_armed: false,
         episodes: 0,
         last_rearm_at: None,
         cooldown_s: DEFAULT_REARM_COOLDOWN_S,
         now_unix: 1_000_000,
     }
+}
+
+#[test]
+fn a_proven_key_rearms_only_on_the_mis_keyed_hold() {
+    // Down for any reason other than a re-keyed peer: latched.
+    let down = RearmInput {
+        proven: true,
+        ..base()
+    };
+    assert_eq!(decide_rearm(down), RearmStep::Proven);
+    // The peer on the air with another key for the whole hold: one window,
+    // still paced by the cooldown.
+    let mis_keyed = RearmInput {
+        mis_keyed_armed: true,
+        hold_armed: false,
+        ..down
+    };
+    assert!(matches!(
+        decide_rearm(mis_keyed),
+        RearmStep::Arm { forced: false, .. }
+    ));
+    assert!(matches!(
+        decide_rearm(RearmInput {
+            last_rearm_at: Some(mis_keyed.now_unix - 60),
+            ..mis_keyed
+        }),
+        RearmStep::Cooldown { .. }
+    ));
 }
 
 // ── the headline rule ─────────────────────────────────────────────────────

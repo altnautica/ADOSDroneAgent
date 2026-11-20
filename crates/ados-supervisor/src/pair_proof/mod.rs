@@ -145,8 +145,13 @@ pub fn read_config_from(text: &str) -> PairRearmConfig {
 /// stays pure and a test can assert that a healthy rig produces NOTHING.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RearmEvent {
-    /// A bind window is being opened for a key that has never worked.
-    Armed { episode: u32, forced: bool },
+    /// A bind window is being opened: for a key that has never worked, or
+    /// (`mis_keyed`) for a key that worked whose peer is on the air re-keyed.
+    Armed {
+        episode: u32,
+        forced: bool,
+        mis_keyed: bool,
+    },
     /// This key was confirmed working for the first time; it is latched now.
     Proven,
     /// The record was discarded because the key on disk changed.
@@ -214,6 +219,14 @@ pub struct PairProofLatch {
     role: BindRole,
     path: PathBuf,
     trigger: HoldTrigger,
+    /// When the peer was first seen on the air mis-keyed with no decoded frame
+    /// since. Unlike the unproven hold it is not reset by the peer going
+    /// quiet: a re-keyed peer that stops to open its own bind window, or flies
+    /// out of range for a while, is still re-keyed, and resetting on that
+    /// silence would keep this rig's window permanently out of phase with the
+    /// peer's. Only a decoded frame, a key change, this rig's own bind or a
+    /// radio with no fresh verdict resets it.
+    mis_keyed_since: Option<Instant>,
     hold: Duration,
 }
 
@@ -229,17 +242,29 @@ impl PairProofLatch {
             role,
             path,
             trigger: HoldTrigger::with_hold(REARM_CONFIRM_HOLD),
+            mis_keyed_since: None,
             hold: REARM_CONFIRM_HOLD,
         }
     }
 
-    /// Reset the debounce. Used whenever there is no verdict to accumulate: a
+    /// Reset the debounces. Used whenever there is no verdict to accumulate: a
     /// stale sidecar, a bind in flight, a proof, a key swap. A stale read must
-    /// RESET the hold, never freeze it part-way, or a radio that flaps in and out
+    /// RESET a hold, never freeze it part-way, or a radio that flaps in and out
     /// of reporting would eventually accumulate a full window it never actually
     /// held.
     fn release(&mut self, now: Instant) {
         self.trigger.observe(false, now);
+        self.mis_keyed_since = None;
+    }
+
+    /// Feed one verdict to the mis-keyed clock; whether it has run the full
+    /// confirm hold.
+    fn observe_mis_keyed(&mut self, mis_keyed: bool, now: Instant) -> bool {
+        if mis_keyed && self.mis_keyed_since.is_none() {
+            self.mis_keyed_since = Some(now);
+        }
+        self.mis_keyed_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= self.hold)
     }
 
     /// One decision. Reads and writes only the record file; `now` / `now_unix`
@@ -283,12 +308,13 @@ impl PairProofLatch {
         }
 
         let mut event = None;
-        let hold_armed = match inputs.signals {
+        let (hold_armed, mis_keyed_armed) = match inputs.signals {
             // No fresh verdict: nothing to accumulate.
             None => {
                 self.release(now);
-                false
+                (false, false)
             }
+            // A decoded frame resets both holds: the link works on this key.
             Some(sig) if sig.proven => {
                 self.release(now);
                 match proof.mark_proven(now_unix) {
@@ -299,15 +325,20 @@ impl PairProofLatch {
                     ProofStamp::Refreshed => self.save(&proof),
                     ProofStamp::Unchanged => {}
                 }
-                false
+                (false, false)
             }
-            Some(sig) => self.trigger.observe(sig.unproven, now),
+            Some(sig) => (
+                self.trigger.observe(sig.unproven, now),
+                self.observe_mis_keyed(sig.mis_keyed, now),
+            ),
         };
 
+        let proven = proof.is_proven();
         let step = decide_rearm(RearmInput {
-            proven: proof.is_proven(),
+            proven,
             forced: proof.force_rearm,
             hold_armed,
+            mis_keyed_armed,
             episodes: proof.rearm_episodes,
             last_rearm_at: proof.last_rearm_at,
             cooldown_s: inputs.cfg.cooldown_s,
@@ -322,7 +353,12 @@ impl PairProofLatch {
             proof.record_rearm(now_unix);
             self.save(&proof);
             rearm = true;
-            event = Some(RearmEvent::Armed { episode, forced });
+            event = Some(RearmEvent::Armed {
+                episode,
+                forced,
+                // A proven key arms only on the mis-keyed hold.
+                mis_keyed: !forced && proven,
+            });
         }
 
         LatchOutcome { rearm, step, event }
@@ -344,11 +380,31 @@ pub fn rearm_detail(event: &RearmEvent, role: &str, fingerprint: &str) -> Fields
     d.insert("state".to_string(), Value::from(event.state()));
     d.insert("role".to_string(), Value::from(role));
     d.insert("key_fingerprint".to_string(), Value::from(fingerprint));
-    if let RearmEvent::Armed { episode, forced } = event {
+    if let RearmEvent::Armed {
+        episode,
+        forced,
+        mis_keyed,
+    } = event
+    {
         d.insert("episode".to_string(), Value::from(*episode as u64));
         d.insert("forced".to_string(), Value::from(*forced));
+        d.insert(
+            "cause".to_string(),
+            Value::from(rearm_cause(*forced, *mis_keyed)),
+        );
     }
     d
+}
+
+/// Why a re-arm opened a window, the bland `cause` field of an `armed` event:
+/// `forced` (the operator asked), `mis_keyed` (a key that worked, its peer on
+/// the air with another key) or `unproven` (a key that never worked).
+pub fn rearm_cause(forced: bool, mis_keyed: bool) -> &'static str {
+    match (forced, mis_keyed) {
+        (true, _) => "forced",
+        (false, true) => "mis_keyed",
+        (false, false) => "unproven",
+    }
 }
 
 /// Ship one re-arm transition to the logging store. Best-effort: an absent
@@ -396,20 +452,21 @@ pub async fn read_signals_default(role: BindRole, fresh_ceiling: Duration) -> Op
 /// all rather than a misread one.
 pub fn parse_signals(role: BindRole, value: &serde_json::Value) -> Option<RearmSignals> {
     let profile = value.get("profile").and_then(|v| v.as_str())?;
-    match (role, profile) {
-        (BindRole::Drone, "drone") => Some(drone_signals(
+    let sig = match (role, profile) {
+        (BindRole::Drone, "drone") => drone_signals(
             value.get("rf_unverified").and_then(|v| v.as_bool()),
             value.get("channel_locked").and_then(|v| v.as_bool()),
-        )),
-        (BindRole::Gs, "ground_station") => Some(gs_signals(
+        ),
+        (BindRole::Gs, "ground_station") => gs_signals(
             value.get("state").and_then(|v| v.as_str()).unwrap_or(""),
             value
                 .get("packets_received")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
-        )),
-        _ => None,
-    }
+        ),
+        _ => return None,
+    };
+    Some(sig.with_link_diag(value.get("link_diag").and_then(|v| v.as_str())))
 }
 
 #[cfg(test)]

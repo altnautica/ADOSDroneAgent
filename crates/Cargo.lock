@@ -790,6 +790,7 @@ dependencies = [
  "ados-macpin",
  "ados-proc",
  "ados-protocol",
+ "ados-radio",
  "anyhow",
  "async-trait",
  "blake2",
