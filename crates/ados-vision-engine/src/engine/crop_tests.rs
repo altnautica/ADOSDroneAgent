@@ -451,7 +451,8 @@ async fn crop_pass_runs_only_while_designated() {
 fn crop_window_scales_the_subject_to_the_target_height() {
     /// The vertical scale of the whole-frame pass beside the crop.
     const WHOLE: Option<f32> = Some(MODEL_IN as f32 / H as f32);
-    use super::crop::{crop_window, CROP_SUBJECT_MODEL_HEIGHT};
+    use super::crop::crop_window;
+    use super::crop::window::{CROP_COAST_SHRINK, CROP_MAX_UPSCALE, CROP_SUBJECT_MODEL_HEIGHT};
     // An 80 px subject: a 400 px square window puts it 128 px tall in a 640
     // input, centred on the box.
     let w = crop_window(
@@ -495,7 +496,7 @@ fn crop_window_scales_the_subject_to_the_target_height() {
         WHOLE,
     )
     .unwrap();
-    assert!((w.height - MODEL_IN as f32 / super::crop::CROP_MAX_UPSCALE).abs() < 0.01);
+    assert!((w.height - MODEL_IN as f32 / CROP_MAX_UPSCALE).abs() < 0.01);
 
     // A measured subject the whole-frame pass already sees at the target size:
     // no crop beside a whole-frame pass.
@@ -507,7 +508,7 @@ fn crop_window_scales_the_subject_to_the_target_height() {
     // a subject that is receding: the crop runs, scaled for the shrunken
     // subject.
     let w = crop_window(&large, 2.0, W, H, MODEL_IN, MODEL_IN, WHOLE).unwrap();
-    let expected = 150.0 * super::crop::CROP_COAST_SHRINK.powi(2);
+    let expected = 150.0 * CROP_COAST_SHRINK.powi(2);
     assert!((expected * MODEL_IN as f32 / w.height - CROP_SUBJECT_MODEL_HEIGHT).abs() < 0.01);
     // A non-square input keeps its aspect.
     let w = crop_window(
