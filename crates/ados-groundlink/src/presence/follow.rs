@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use super::*;
 
 /// Longest wait honoured before a follow. The drone's countdown is three
@@ -78,15 +81,20 @@ impl HopFollower {
         }
     }
 
-    /// Retune `iface` to `channel` after `delay`, then verify. `prev` is the
-    /// channel to go back to when the follow does not hold; with none known the
-    /// radio stays and the valid-packet watchdog owns recovery.
+    /// Retune `iface` to `channel` after `delay`, then verify. A follow that
+    /// does not hold goes back to the channel the radio was on just before the
+    /// retune, read live; `hint` (the presence cache's peer channel) stands in
+    /// only when that read fails. The hint is where the drone was last heard or
+    /// announced, not where this radio is: a watchdog sweep or a drone beacon
+    /// can have moved it, and a revert to it landed on a channel nobody was on.
+    /// With neither known the radio stays and the valid-packet watchdog owns
+    /// recovery.
     pub(super) async fn follow(
         &self,
         iface: &str,
         channel: u8,
         delay: Duration,
-        prev: Option<u8>,
+        hint: Option<u8>,
         cache: &GsPresenceCache,
     ) -> FollowOutcome {
         tokio::time::sleep(delay.min(MAX_FOLLOW_WAIT)).await;
@@ -128,14 +136,53 @@ impl HopFollower {
     }
 }
 
+/// What dispatching a control frame needs from outside: the path a HopAck echo
+/// takes back to the drone, and the channels the receive adapter may tune.
+/// The listener's is loopback UDP to `wfb_tx_control` plus the adapter's
+/// regulatory list; the radio's hop simulation (`tests/hop_dst`) supplies its
+/// own and drives this follower unchanged.
+pub trait ControlPort: Send + Sync {
+    /// Echo `frame` back as the HopAck. Best effort.
+    fn send_ack<'a>(&'a self, frame: &'a [u8]) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+    /// The channels `iface` may tune; empty when they cannot be read (does not
+    /// restrict).
+    fn permitted<'a>(
+        &'a self,
+        iface: &'a str,
+    ) -> Pin<Box<dyn Future<Output = std::collections::BTreeSet<u8>> + Send + 'a>>;
+}
+
+/// The listener's control port: the HopAck goes from the listener socket to
+/// `wfb_tx_control`'s loopback ingress.
+struct UdpControlPort<'s> {
+    sock: &'s UdpSocket,
+    ack_target: (std::net::Ipv4Addr, u16),
+}
+
+impl ControlPort for UdpControlPort<'_> {
+    fn send_ack<'a>(&'a self, frame: &'a [u8]) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Err(e) = self.sock.send_to(frame, self.ack_target).await {
+                tracing::debug!(error = %e, "ground_hop_ack_send_failed");
+            } else {
+                tracing::info!(channel = frame[17], "ground_hop_ack_echoed");
+            }
+        })
+    }
+
+    fn permitted<'a>(
+        &'a self,
+        iface: &'a str,
+    ) -> Pin<Box<dyn Future<Output = std::collections::BTreeSet<u8>> + Send + 'a>> {
+        Box::pin(ados_radio::adapter::enabled_channels(iface))
+    }
+}
+
 /// Dispatch one inbound control frame: length-gate, verify, then either handle
 /// a 51-byte HopAnnounce or record the peer (68-byte PresenceBeacon).
 /// Extracted from `listen_loop` so the dispatch is unit-testable over real
 /// loopback sockets. `sock` is the listener socket the HopAck echo is sent
-/// from; `ack_target` is `wfb_tx_control`'s loopback ingress. A HopAnnounce is
-/// acked only when `follower` can carry it out (see [`hop_follow_refusal`]);
-/// otherwise no ack is sent, so the drone stays where it is, and the reason is
-/// recorded on the hop snapshot.
+/// from; `ack_target` is `wfb_tx_control`'s loopback ingress.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_control_frame(
     sock: &UdpSocket,
@@ -144,6 +191,23 @@ pub(super) async fn handle_control_frame(
     cache: &GsPresenceCache,
     own_device_id: &str,
     ack_target: (std::net::Ipv4Addr, u16),
+    follower: Option<&HopFollower>,
+    ctx: ControlContext,
+) {
+    let port = UdpControlPort { sock, ack_target };
+    handle_control_frame_on(&port, frame, pair_key, cache, own_device_id, follower, ctx).await;
+}
+
+/// [`handle_control_frame`] over any [`ControlPort`]. A HopAnnounce is acked
+/// only when `follower` can carry it out (see [`hop_follow_refusal`]);
+/// otherwise no ack is sent, so the drone stays where it is, and the reason is
+/// recorded on the hop snapshot.
+pub async fn handle_control_frame_on<P: ControlPort>(
+    port: &P,
+    frame: &[u8],
+    pair_key: &[u8; 32],
+    cache: &GsPresenceCache,
+    own_device_id: &str,
     follower: Option<&HopFollower>,
     ctx: ControlContext,
 ) {
@@ -163,7 +227,7 @@ pub(super) async fn handle_control_frame(
             };
             let iface = follower.iface().await;
             let permitted = match iface.as_deref() {
-                Some(i) => ados_radio::adapter::enabled_channels(i).await,
+                Some(i) => port.permitted(i).await,
                 None => std::collections::BTreeSet::new(),
             };
             if let Some(reason) =
@@ -184,16 +248,12 @@ pub(super) async fn handle_control_frame(
             // The ack commits both sides, so it goes only after the checks
             // above. It is repeated for every announce of the same hop: the
             // drone keeps announcing until one ack gets through.
-            if let Err(e) = sock.send_to(frame, ack_target).await {
-                tracing::debug!(error = %e, "ground_hop_ack_send_failed");
-            } else {
-                tracing::info!(channel, trigger, "ground_hop_ack_echoed");
-            }
+            port.send_ack(frame).await;
             if !follower.claim(channel) {
                 return;
             }
-            // The channel being left, for the revert, read before the cache
-            // moves its hint to the new one.
+            // The cache's hint, for a revert whose live channel read fails;
+            // read before the cache moves it to the new channel.
             let prev = cache.peer_channel();
             cache.record_hop_announce(channel, trigger);
             // Spawned so the listener's recv loop keeps feeding the presence

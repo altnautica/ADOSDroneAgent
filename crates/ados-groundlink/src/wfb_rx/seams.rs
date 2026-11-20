@@ -82,6 +82,13 @@ impl ChannelSetter for IwChannelSetter {
             run_retune_bounded(cmd, channel, SET_CHANNEL_TIMEOUT).await
         })
     }
+
+    fn live_channel<'a>(
+        &'a self,
+        interface: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<u8>> + Send + 'a>> {
+        Box::pin(live_channel(interface))
+    }
 }
 
 /// The WFB interfaces of the running receive plane, transmit adapter first. The
@@ -130,6 +137,14 @@ impl ChannelSetter for GroupChannelSetter {
             }
             ok
         })
+    }
+
+    /// The requested interface's channel: the group follows it.
+    fn live_channel<'a>(
+        &'a self,
+        interface: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<u8>> + Send + 'a>> {
+        self.inner.live_channel(interface)
     }
 }
 

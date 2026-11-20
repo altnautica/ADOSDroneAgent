@@ -101,6 +101,15 @@ pub trait ChannelSetter: Send + Sync {
         interface: &'a str,
         channel: u8,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+    /// The channel `interface` is tuned to now, `None` when it cannot be read
+    /// (the default). The hop follower reverts a failed follow to it.
+    fn live_channel<'a>(
+        &'a self,
+        _interface: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<u8>> + Send + 'a>> {
+        Box::pin(async { None })
+    }
 }
 
 /// Channel numbers to sweep for `band`, current-config-first order.

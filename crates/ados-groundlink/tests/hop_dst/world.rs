@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use ados_groundlink::wfb_rx::SharedValidCounter;
 use ados_radio::hop::{derive_pair_key, parse_hop_announce};
 use ados_radio::radio_cmd::ManualHopRequest;
 use tokio::sync::mpsc;
@@ -128,24 +129,23 @@ pub struct DroneRf {
     pub gen_started_ms: u64,
 }
 
-/// One ground station: its radio and the follow and watchdog state that
-/// production keeps in its presence cache, follower and watchdog.
+/// One ground station's radio as the air sees it, and the facts its
+/// simulated surroundings keep (the production follower, cache and watchdog
+/// hold the rest).
 pub struct GroundRf {
     pub name: &'static str,
     /// The receive radio's channel; 0 while retuning.
     pub channel: u8,
     pub inbox: mpsc::UnboundedSender<Vec<u8>>,
-    /// The receive generation's valid-decode counter.
-    pub valid: u64,
+    /// The receive chain is up (between a generation's start and the
+    /// watchdog terminating it): it decodes frames and video.
+    pub rx_alive: bool,
+    /// The current receive generation's valid-decode counter.
+    pub counter: Option<SharedValidCounter>,
     /// The adapter's permitted channel set.
     pub permitted: BTreeSet<u8>,
-    /// The presence cache's peer channel hint (beacon channel or announced
-    /// target).
-    pub peer_channel: Option<u8>,
     /// When a drone beacon was last decoded, ms.
     pub peer_seen_ms: Option<u64>,
-    /// The channel a follow is scheduled toward.
-    pub pending: Option<u8>,
     /// When the current drone/ground split began, ms.
     pub split_since: Option<u64>,
     /// When a retune of this radio last failed, ms.
@@ -197,8 +197,12 @@ pub struct Stats {
     pub own_channel_announces: u32,
     pub drone_retune_fails: u32,
     pub follows: u32,
-    pub reverts: u32,
-    pub sweeps: u32,
+    /// Receive restarts after a watchdog's failed reacquire.
+    pub rx_restarts: u32,
+    /// Drone/ground splits that ended with the pair together again.
+    pub splits_healed: u32,
+    /// Hops acked but never heard by the drone, checked after the window.
+    pub unheard_checked: u32,
     pub crashes: u32,
     pub bringups: u32,
     pub return_homes: u32,
@@ -258,11 +262,10 @@ impl World {
                     name: names[i],
                     channel: HOME,
                     inbox,
-                    valid: 0,
+                    rx_alive: false,
+                    counter: None,
                     permitted,
-                    peer_channel: None,
                     peer_seen_ms: None,
-                    pending: None,
                     split_since: None,
                     retune_failed_ms: None,
                 }
@@ -387,7 +390,9 @@ pub fn transmit(w: &Shared, g: &mut World, from: Node, pkt: &[u8]) {
     };
     let is_ack = matches!(from, Node::Ground(_)) && pkt.len() == 51;
     for to in receivers {
-        let mut loss = if g.faults_on { g.f.loss } else { 0.01 };
+        // The quiet tail is lossless: a late double beacon loss there would
+        // start a legitimate return home with no time left to settle.
+        let mut loss = if g.faults_on { g.f.loss } else { 0.0 };
         if is_ack && g.faults_on {
             loss += g.f.ack_loss;
         }
@@ -431,7 +436,7 @@ fn deliver(w: &Shared, to: Node, channel: u8, pkt: Vec<u8>) {
             }
         }
         Node::Ground(i) => {
-            if g.grounds[i].channel == channel {
+            if g.grounds[i].rx_alive && g.grounds[i].channel == channel {
                 let _ = g.grounds[i].inbox.send(pkt);
             }
         }

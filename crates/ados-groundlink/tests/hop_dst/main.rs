@@ -1,26 +1,31 @@
-//! In-process deterministic simulation (DST) of the radio's frequency-hop
-//! supervisor and its process respawn.
+//! In-process deterministic simulation (DST) of the coordinated channel hop:
+//! the radio's frequency-hop supervisor and process respawn on the drone, the
+//! hop follower and valid-packet watchdog on one or two ground stations.
 //!
 //! The drone runs the real hop supervisor ([`ados_radio::daemon::hop_supervisor::run_hop_loop`]),
 //! its presence beacon emitter, its `HopState` and the respawn-channel rule
 //! over a simulated radio ([`drone::SimRadio`]), inside a model of the radio
-//! service's respawn loop. One or two ground stations ([`ground`]) follow its
-//! announces the way `ados-groundlink` does. They meet over a simulated air
-//! link that carries the real 51-byte announces and acks and 68-byte beacons
-//! on whichever channel each side is tuned to, with loss, delay, reordering and
-//! duplication. Everything runs in one thread on tokio's paused clock, so a
-//! 16-minute run takes a fraction of a second, and every loss, delay, crash,
-//! failed retune, blackout, bind window and operator request is drawn from
-//! one seeded generator ([`rng`]): a seed names a run exactly, and the
-//! meta-tests check that one seed replays byte for byte.
+//! service's respawn loop. Each ground station ([`ground`]) runs this crate's
+//! real control-frame dispatch, hop follower, presence cache and valid-packet
+//! watchdog with its channel acquirer over a simulated receive radio, inside a
+//! model of the receive loop's generations. It lives here, not in `ados-radio`,
+//! because this crate depends on the radio and so can drive both sides. They
+//! meet over a simulated air link that carries the real 51-byte announces and
+//! acks and 68-byte beacons on whichever channel each side is tuned to, with
+//! loss, delay, reordering and duplication. Everything runs in one thread on
+//! tokio's paused clock, so a 16-minute run takes a fraction of a second, and
+//! every loss, delay, crash, failed retune, blackout, bind window and operator
+//! request is drawn from one seeded generator ([`rng`]): a seed names a run
+//! exactly, and the meta-tests check that one seed replays byte for byte.
 //!
 //! The matrix ([`scenarios`]) proves logic and coverage, not RF timing. The
 //! invariants live in [`check`].
 //!
-//! Every test name starts `dst_`: `cargo test -p ados-radio --test dst` runs
-//! them. `DST_SEED=<n>` runs seed `n` alone, `DST_SEEDS=<n>` widens a sweep to
-//! seeds `1..=n`, `DST_TRACE=1` prints a failing run's whole trace and
-//! `DST_DUMP=<dir>` writes every run's trace to `<dir>/<scenario>-<seed>.log`.
+//! Every test name starts `dst_`: `cargo test -p ados-groundlink --test
+//! hop_dst` runs them. `DST_SEED=<n>` runs seed `n` alone, `DST_SEEDS=<n>`
+//! widens a sweep to seeds `1..=n`, `DST_TRACE=1` prints a failing run's whole
+//! trace and `DST_DUMP=<dir>` writes every run's trace to
+//! `<dir>/<scenario>-<seed>.log`.
 
 mod check;
 mod drone;
@@ -76,7 +81,7 @@ fn run_seeds(name: &str, list: Vec<u64>) {
             panic!(
                 "dst hop scenario `{name}` seed {seed} broke:\n  {}\n\
                  reproduce: DST_SEED={seed} DST_TRACE=1 \
-                 cargo test -p ados-radio --test dst dst_{name}\n\
+                 cargo test -p ados-groundlink --test hop_dst dst_{name}\n\
                  trace tail:\n{tail}",
                 run.violations.join("\n  ")
             );
@@ -104,8 +109,9 @@ fn add(t: &mut world::Stats, s: &world::Stats) {
     t.own_channel_announces += s.own_channel_announces;
     t.drone_retune_fails += s.drone_retune_fails;
     t.follows += s.follows;
-    t.reverts += s.reverts;
-    t.sweeps += s.sweeps;
+    t.rx_restarts += s.rx_restarts;
+    t.splits_healed += s.splits_healed;
+    t.unheard_checked += s.unheard_checked;
     t.crashes += s.crashes;
     t.bringups += s.bringups;
     t.return_homes += s.return_homes;
@@ -168,9 +174,11 @@ fn dst_chaos() {
     matrix("chaos");
 }
 
-/// Seeds the wide sweeps found: a bring-up on home that left the hop record on
-/// the old hop channel, which a failed hop's call-back then named (and a later
-/// respawn would have tuned).
+/// Seeds the wide sweeps found: a bring-up on home that left the drone's hop
+/// record on the old hop channel, which a failed hop's call-back then named.
+/// (A ground follow reverting to the presence cache's hint instead of the
+/// channel it left breaks `bind_windows` seed 2 and `chaos` seed 4 of the
+/// matrix itself.)
 #[test]
 fn dst_regression_seeds() {
     run_seeds("retune_faults", vec![222]);

@@ -40,8 +40,8 @@ pub const ALL: &[Scenario] = &[
         },
         covers: |s| {
             need(
-                s.acked_unheard > 0 && s.reverts > 0 && s.hop_checks > 0,
-                "a hop acked but never heard, its ground's revert, and a checked hop",
+                s.acked_unheard > 0 && s.unheard_checked > 0,
+                "a hop acked but never heard, its ground back with the drone after the window",
             )
         },
     },
@@ -55,8 +55,8 @@ pub const ALL: &[Scenario] = &[
         },
         covers: |s| {
             need(
-                s.drone_retune_fails > 0 && s.own_channel_announces > 0 && s.reverts > 0,
-                "a failed drone retune, its call-back and a ground revert",
+                s.drone_retune_fails > 0 && s.own_channel_announces > 0 && s.hop_checks > 0,
+                "a failed drone retune, its call-back and checked hops",
             )
         },
     },
@@ -96,8 +96,8 @@ pub const ALL: &[Scenario] = &[
         },
         covers: |s| {
             need(
-                s.hops_executed > 0 && s.sweeps > 0,
-                "hops and a stranded ground's sweep",
+                s.hops_executed > 0 && s.splits_healed > 0,
+                "hops and a stranded ground that found the drone again",
             )
         },
     },

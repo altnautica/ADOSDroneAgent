@@ -360,7 +360,9 @@ pub async fn run_hop_loop<R: HopRadio>(
                     let s = state.lock().await;
                     (s.should_return_home(), s.home_channel)
                 };
-                if return_home {
+                // Re-read the sentinel: the reactive hop above can take seconds,
+                // and a bind that opened meanwhile owns the adapter.
+                if return_home && !radio.bind_active() {
                     tracing::info!(home, "hop_return_home");
                     // Always attempt the channel set AND the respawn (never leave
                     // the radio group dead), but a silent `iw set channel` failure

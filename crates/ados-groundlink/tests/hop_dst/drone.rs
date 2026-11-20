@@ -14,12 +14,11 @@ use ados_protocol::shutdown::Shutdown;
 use ados_radio::channel::{pick_from_ranking, standard_channels};
 use ados_radio::config::WfbConfig;
 use ados_radio::daemon::hop_supervisor::{
-    emit_presence_beacons_on, run_hop_loop, ControlPlane, HopContext, HopRadio,
+    async_trait, emit_presence_beacons_on, run_hop_loop, ControlPlane, HopContext, HopRadio,
 };
 use ados_radio::hop::{hop_announce_delay_ms, respawn_channel, HopState};
 use ados_radio::link_proof::RxProof;
 use ados_radio::link_quality::LinkStats;
-use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::time::{sleep, Duration, Instant};
 
@@ -136,13 +135,16 @@ impl HopRadio for SimRadio {
                 }
                 g.stats.hops_executed += 1;
             } else {
-                // Not the flip of an announced hop: the return home.
+                // Not the flip of an announced hop: the return home, which
+                // moves the drone on its own; a hop check spanning it is moot.
                 g.stats.return_homes += 1;
-                if g.bind_open {
-                    g.violate(format!(
-                        "return home to {channel} retuned the radio while a bind owns the adapter"
-                    ));
-                }
+                g.disrupt();
+            }
+            if g.bind_open {
+                let what = if announced { "hop flip" } else { "return home" };
+                g.violate(format!(
+                    "{what} to {channel} retuned the radio while a bind owns the adapter"
+                ));
             }
             let p = g.f.drone_retune_fail;
             let fail = g.faults_on && g.rng.chance(p);

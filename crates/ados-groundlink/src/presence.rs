@@ -44,7 +44,7 @@ pub use emit::{
     linked_peers_persist_loop, HOP_PERSIST_CADENCE,
 };
 use follow::handle_control_frame;
-pub use follow::{hop_follow_refusal, FOLLOW_VERIFY_WINDOW};
+pub use follow::{handle_control_frame_on, hop_follow_refusal, ControlPort, FOLLOW_VERIFY_WINDOW};
 pub use listen::{listen_loop, listen_supervisor};
 
 /// Beacon cadence (10 s, matching the air side).
@@ -310,9 +310,9 @@ pub struct HopFollower {
 /// Where a control frame arrived: the fleet slot whose control port decoded
 /// it, and how many slots the fleet has registered right now.
 #[derive(Debug, Clone, Copy)]
-struct ControlContext {
-    slot: u8,
-    fleet_slots: usize,
+pub struct ControlContext {
+    pub slot: u8,
+    pub fleet_slots: usize,
 }
 
 #[cfg(test)]

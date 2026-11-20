@@ -14,7 +14,7 @@ use crate::{check, ground};
 
 /// How long the faults run.
 const FAULTS: Duration = Duration::from_secs(720);
-/// The quiet tail: low loss, no interference, no faults. Longer than the
+/// The quiet tail: no loss, no interference, no faults. Longer than the
 /// ground's 120 s presence-loss window plus a sweep.
 const TAIL: Duration = Duration::from_secs(240);
 
@@ -189,7 +189,10 @@ async fn snapshots(w: Shared) {
         let grounds: Vec<String> = g
             .grounds
             .iter()
-            .map(|r| format!("{}={} valid {}", r.name, r.channel, r.valid))
+            .map(|r| {
+                let valid = r.counter.as_ref().map_or(0, |c| c.get());
+                format!("{}={} valid {valid}", r.name, r.channel)
+            })
             .collect();
         let line = format!(
             "state drone={} alive={} gen={} {}",

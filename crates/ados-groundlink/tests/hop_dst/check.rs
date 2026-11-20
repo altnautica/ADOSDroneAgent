@@ -58,7 +58,14 @@ pub async fn monitor(w: Shared, d: Arc<Drone>) {
                 continue;
             }
             if gch == dch {
-                g.grounds[i].split_since = None;
+                // A split of more than 10 s (a stranded ground) that healed.
+                if g.grounds[i]
+                    .split_since
+                    .take()
+                    .is_some_and(|s| now - s > 10_000)
+                {
+                    g.stats.splits_healed += 1;
+                }
                 continue;
             }
             let since = *g.grounds[i].split_since.get_or_insert(now);
@@ -162,6 +169,9 @@ pub async fn hop_checks(w: Shared) {
                 continue;
             }
             g.stats.hop_checks += 1;
+            if !executed {
+                g.stats.unheard_checked += 1;
+            }
             for i in acked {
                 let gch = g.grounds[i].channel;
                 if gch != dch {

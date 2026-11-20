@@ -3,6 +3,8 @@ use super::listen::{
 };
 use super::*;
 use ados_radio::hop::derive_pair_key;
+use std::future::Future;
+use std::pin::Pin;
 
 /// The cold-start pair key, which a dev host without `/etc/drone.key` runs on.
 fn test_key() -> [u8; 32] {
@@ -665,6 +667,52 @@ async fn a_follow_with_no_traffic_on_the_new_channel_goes_back() {
         cache.peer_channel(),
         Some(149),
         "the hint follows the revert"
+    );
+}
+
+/// A radio that reports where it is tuned.
+struct TunedSetter {
+    inner: Arc<RecordingSetter>,
+    on: u8,
+}
+
+impl ChannelSetter for TunedSetter {
+    fn set_channel<'a>(
+        &'a self,
+        interface: &'a str,
+        channel: u8,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        self.inner.set_channel(interface, channel)
+    }
+
+    fn live_channel<'a>(
+        &'a self,
+        _interface: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<u8>> + Send + 'a>> {
+        Box::pin(async move { Some(self.on) })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_follow_goes_back_to_the_channel_the_radio_left_not_the_hint() {
+    // The watchdog swept the radio to 149 while the presence cache still
+    // pointed at 153: the revert lands where the radio was, not on 153.
+    let recording = RecordingSetter::ok();
+    let setter = Arc::new(TunedSetter {
+        inner: recording.clone(),
+        on: 149,
+    });
+    let iface = Arc::new(tokio::sync::Mutex::new(vec!["wlan1".to_string()]));
+    let follower = HopFollower::new(setter, iface).with_verify_window(Duration::from_millis(20));
+    follower.set_valid_counter(SharedValidCounter::new());
+    let cache = GsPresenceCache::new();
+    let outcome = follower
+        .follow("wlan1", 157, Duration::ZERO, Some(153), &cache)
+        .await;
+    assert_eq!(outcome, FollowOutcome::RevertedNoTraffic);
+    assert_eq!(
+        recording.calls(),
+        vec![("wlan1".to_string(), 157), ("wlan1".to_string(), 149)]
     );
 }
 
