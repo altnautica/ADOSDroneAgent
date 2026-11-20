@@ -17,7 +17,7 @@ use crate::daemon::startup::proxy_posture;
 /// vehicle fields up in place of the withheld local ones. So it appears here
 /// but in neither classification list, which is correct rather than an
 /// omission.
-const EXPECTED_EXTRAS_KEYS: [&str; 40] = [
+const EXPECTED_EXTRAS_KEYS: [&str; 41] = [
     "agent_commands_unsigned_rejected_risk",
     "agent_signing",
     "aux_mavlink_tee",
@@ -35,6 +35,7 @@ const EXPECTED_EXTRAS_KEYS: [&str; 40] = [
     "fc_port",
     "fc_reachable",
     "fc_source",
+    "fc_streams_unsupported",
     "fc_variant",
     "heartbeat_age_s",
     "injector_arbitration",

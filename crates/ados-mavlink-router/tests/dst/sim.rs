@@ -95,6 +95,8 @@ pub struct World {
     /// Whether stream requests must keep [`crate::checks`]' spacing (off
     /// where a sensor-table change re-requests at once by design).
     pub check_stream_spacing: bool,
+    /// The next stream request for this message id is lost on the wire.
+    pub drop_request: Option<u32>,
     pub live: Live,
     pub dl: Dl,
     /// The FC's missions over time: `(from, until, keys)`.
@@ -137,6 +139,7 @@ impl World {
             gcs: None,
             pilot: None,
             check_stream_spacing: true,
+            drop_request: None,
             live: Live::default(),
             dl: Dl::default(),
             fc_hist: Vec::new(),
@@ -265,11 +268,19 @@ impl World {
         self.gcs_step().await;
         crate::downlink::step(self).await;
         let writes = self.router.take_writes();
-        for wr in &writes {
-            self.observe_write(wr);
-        }
         for wr in writes {
-            self.up.send(now, wr, &mut self.rng);
+            let asked = self.observe_write(&wr);
+            let dropped = self.drop_request.is_some_and(|id| asked.contains(&id));
+            let delivered = if dropped {
+                self.drop_request = None;
+                self.note(format_args!("stream request {asked:?} lost"));
+                false
+            } else {
+                self.up.send(now, wr, &mut self.rng)
+            };
+            for id in asked {
+                self.live.asked(id, now, !delivered);
+            }
         }
         for p in self.up.recv(now) {
             self.fc.on_bytes(now, &p);
@@ -286,29 +297,30 @@ impl World {
             if b.len() < 10 || b[0] != 0xFD || (b[5], b[6]) != (fc::SYS, fc::COMP) {
                 continue;
             }
-            match u32::from_le_bytes([b[7], b[8], b[9], 0]) {
+            let id = u32::from_le_bytes([b[7], b[8], b[9], 0]);
+            self.live.seen.insert(id, self.now);
+            match id {
                 0 => self.live.hb = Some(self.now),
-                id => {
-                    self.live.data = Some(self.now);
-                    if id == 30 {
-                        self.live.attitude(self.now);
-                    }
-                }
+                30 => self.live.attitude(self.now),
+                _ => {}
             }
         }
     }
 
-    /// What the router wrote toward the FC: stream requests and its own
-    /// mission download requests.
-    fn observe_write(&mut self, wr: &[u8]) {
+    /// What the router wrote toward the FC: its own mission download
+    /// requests, and the message ids it asked to stream (returned).
+    fn observe_write(&mut self, wr: &[u8]) -> Vec<u32> {
+        let mut asked = Vec::new();
         for (h, msg, _) in mav::decode(wr) {
             if (h.system_id, h.component_id) != OURS {
                 continue;
             }
             match msg {
                 MavMessage::COMMAND_LONG(c) if c.command as u16 == 511 && c.param2 > 0.0 => {
-                    self.live.req = Some(self.now);
-                    if self.live.burst_at != Some(self.now) {
+                    let id = c.param1 as u32;
+                    asked.push(id);
+                    // A request for ATTITUDE marks a table burst.
+                    if id == 30 && self.live.burst_at != Some(self.now) {
                         crate::checks::stream_burst(self);
                     }
                 }
@@ -320,6 +332,7 @@ impl World {
                 _ => {}
             }
         }
+        asked
     }
 
     async fn gcs_step(&mut self) {

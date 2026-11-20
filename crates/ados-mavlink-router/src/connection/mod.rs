@@ -322,6 +322,8 @@ pub struct FcConnection {
     landed_state_req: std::sync::Mutex<send_scheduler::LandedStateRequest>,
     /// Where each FC-addressed request lane last went (`send_scheduler::RequestTargets`).
     request_targets: std::sync::Mutex<send_scheduler::RequestTargets>,
+    /// Which requested streams arrive, per message id (`send_scheduler::StreamWatch`).
+    stream_watch: send_scheduler::StreamWatch,
 }
 
 impl FcConnection {
@@ -405,6 +407,7 @@ impl FcConnection {
             sensor_streams: imu_fallback::SensorStreams::default(),
             landed_state_req: std::sync::Mutex::new(send_scheduler::LandedStateRequest::default()),
             request_targets: std::sync::Mutex::new(send_scheduler::RequestTargets::default()),
+            stream_watch: send_scheduler::StreamWatch::default(),
         })
     }
 

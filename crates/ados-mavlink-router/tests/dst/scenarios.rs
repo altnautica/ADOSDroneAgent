@@ -65,6 +65,10 @@ fn fc_link(seed: u64) -> World {
         let off = w.rng.between(1_500, 3_500);
         w.note(format_args!("fc quick reboot {off} ms"));
         w.fc.power_off(t + off);
+        // The re-request after the reboot loses its ATTITUDE frame: one
+        // stream missing while the rest flow.
+        w.run_to(t + off + 500).await;
+        w.drop_request = Some(30);
 
         let t = 70_000 + jitter(&mut w);
         w.run_to(t).await;

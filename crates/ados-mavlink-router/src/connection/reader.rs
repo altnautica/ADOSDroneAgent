@@ -204,6 +204,7 @@ impl FcConnection {
         *self.param_last_request.lock().await = None;
         self.param_last_cached_count.store(0, Ordering::Relaxed);
         self.sensor_streams.reset_link();
+        self.stream_watch.reset();
         tracing::warn!("fc_disconnected");
     }
 

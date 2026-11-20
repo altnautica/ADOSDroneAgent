@@ -461,6 +461,8 @@ pub(super) use landed_request::LandedStateRequest;
 mod sensor_sends;
 mod ticks;
 pub(super) use ticks::RequestTargets;
+mod stream_watch;
+pub(super) use stream_watch::StreamWatch;
 
 #[cfg(test)]
 mod identity_tests;

@@ -150,6 +150,10 @@ impl FcConnection {
                 if !matches!(msg, MavMessage::HEARTBEAT(_)) {
                     self.stamp_last_msg();
                 }
+                // Which requested stream this frame answers.
+                if let Some(id) = framing::frame_msg_id(&frame) {
+                    self.stream_watch.seen(id, self.clock.now());
+                }
                 if let MavMessage::HEARTBEAT(hb) = &msg {
                     self.latch_fc_identity(header.system_id, header.component_id);
                     if !s.fc_adopted {

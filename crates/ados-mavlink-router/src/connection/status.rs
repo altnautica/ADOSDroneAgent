@@ -17,6 +17,13 @@ impl FcConnection {
         self.fc_frames_decoded.load(Ordering::Relaxed)
     }
 
+    /// Requested streams (message ids) the FC left unanswered three asks in
+    /// a row while its other streams flowed: given up as unsupported until
+    /// one arrives. The router status publishes them (`fc_streams_unsupported`).
+    pub fn fc_streams_unsupported(&self) -> Vec<u32> {
+        self.stream_watch.unsupported()
+    }
+
     /// The flight controller's `(system, component)` id as latched from its
     /// own HEARTBEAT, or `None` before one has been seen on this process.
     ///

@@ -2,10 +2,13 @@
 //!
 //! * Liveness: a silent FC is declared lost within the heartbeat timeout of
 //!   its last decoded HEARTBEAT, and never while one is fresh.
-//! * Streams: while the FC streams nothing but its HEARTBEAT on a live link
-//!   (a reboot forgot the intervals, the link was lost), the router asks
-//!   again at least every [`STREAM_REREQUEST_MS`]; while ATTITUDE flows, the
-//!   router's stream requests are at least [`STREAM_MIN_MS`] apart.
+//! * Streams: every requested stream the FC supports reappears within
+//!   [`STREAM_REAPPEAR_MS`] of being lost on a live link (a reboot that
+//!   forgot the intervals, or a request for it lost on the wire while the
+//!   rest flow, which loses it again from then); a stream the FC cannot send
+//!   is asked for at most
+//!   [`UNSUPPORTED_ASKS`] times a minute while the link flows; while
+//!   ATTITUDE flows, its table requests are at least [`STREAM_MIN_MS`] apart.
 //! * Mission mirror: its own download never waits longer than one reply
 //!   timeout without a request and ends within its retry budget; a failed
 //!   download is reported (`route_stale`) until one succeeds; a mirror it
@@ -13,18 +16,26 @@
 //! * Command gates: a command-down-gated link puts no byte on the FC link; a
 //!   visor never forwards a ground station's flight command.
 
+use std::collections::BTreeMap;
+
 use ados_mavlink_router::mission_mirror::wire::ItemInt;
 use ados_mavlink_router::mission_mirror::{ITEM_TIMEOUT, RETRIES};
 use ados_protocol::mavlink::ardupilotmega::MISSION_ITEM_INT_DATA;
+
+use crate::fc;
 
 use crate::router::MIRROR_MS;
 use crate::sim::{World, STEP};
 
 /// `FcConnection`'s heartbeat timeout.
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 4_000;
-/// A stall shows within the stream stall window (5 s) on the 1 s request
-/// tick, and a stalled link is re-asked every stream minimum (10 s).
-pub const STREAM_REREQUEST_MS: u64 = 12_000;
+/// A lost stream is noticed after 5 s (the stall window, or a missing id's
+/// grace) on the 1 s request tick and re-asked within the 10 s re-ask
+/// spacing.
+pub const STREAM_REAPPEAR_MS: u64 = 12_000;
+/// Asks a minute for a stream the FC cannot send, while the link flows: the
+/// three before it is given up, plus the table's refreshes.
+pub const UNSUPPORTED_ASKS: usize = 5;
 /// The shortest stream refresh interval.
 pub const STREAM_MIN_MS: u64 = 10_000;
 /// The longest mission the scenarios hold, with its home slot.
@@ -48,15 +59,19 @@ fn mirror_key(i: &ItemInt) -> Key {
 #[derive(Default)]
 pub struct Live {
     pub opened_at: u64,
-    /// The router's last decoded FC HEARTBEAT, ATTITUDE and streamed frame
-    /// (any but a HEARTBEAT).
+    /// The router's last decoded FC HEARTBEAT and ATTITUDE.
     pub hb: Option<u64>,
     pub att: Option<u64>,
-    pub data: Option<u64>,
+    /// When each message id last came off the FC link.
+    pub seen: BTreeMap<u32, u64>,
     pub alive: bool,
     pub alive_since: u64,
-    /// The router's last stream request, and the last burst of them.
-    pub req: Option<u64>,
+    /// The router's last stream request per message id, and when the wire
+    /// last lost one (a stream is lost again from then).
+    pub asks: BTreeMap<u32, u64>,
+    lost_asks: BTreeMap<u32, u64>,
+    /// Asks for a stream the FC cannot send, made while ATTITUDE flowed.
+    unsupported_asks: BTreeMap<u32, Vec<u64>>,
     pub burst_at: Option<u64>,
     /// Every burst of stream requests.
     pub bursts: Vec<u64>,
@@ -80,6 +95,17 @@ impl Live {
     pub fn opened(&mut self, now: u64) {
         self.opened_at = now;
         self.flowing = false;
+    }
+
+    /// The router asked to stream `id` at `now`; `lost` on the wire.
+    pub fn asked(&mut self, id: u32, now: u64, lost: bool) {
+        self.asks.insert(id, now);
+        if lost {
+            self.lost_asks.insert(id, now);
+        }
+        if !fc::STREAMABLE.contains(&id) && self.att_fresh(now) {
+            self.unsupported_asks.entry(id).or_default().push(now);
+        }
     }
 
     /// Whether ATTITUDE is flowing now.
@@ -158,19 +184,24 @@ impl World {
             ));
         }
 
-        // Streams lost on a live link are asked for again.
+        // Every requested stream the FC supports comes back after a loss.
         if open && alive {
-            let absent_from = self.live.data.unwrap_or(0).max(self.live.alive_since);
-            let asked = self
-                .live
-                .req
-                .is_some_and(|r| now - r <= STREAM_REREQUEST_MS);
-            if now - absent_from > STREAM_REREQUEST_MS && !asked {
-                self.fail(format_args!(
-                    "the FC streamed only HEARTBEATs for {} ms on a live link and no stream request for {} ms",
-                    now - absent_from,
-                    self.live.req.map_or(now, |r| now - r)
-                ));
+            for id in fc::STREAMABLE {
+                let Some(&ask_at) = self.live.asks.get(&id) else {
+                    continue;
+                };
+                let since = [
+                    self.live.seen.get(&id).copied().unwrap_or(0),
+                    self.live.lost_asks.get(&id).copied().unwrap_or(0),
+                    self.live.alive_since,
+                ];
+                let absent = now - since.into_iter().max().unwrap_or(0);
+                if absent > STREAM_REAPPEAR_MS {
+                    self.fail(format_args!(
+                        "stream {id} absent for {absent} ms on a live link (last asked {} ms ago)",
+                        now - ask_at
+                    ));
+                }
             }
         }
 

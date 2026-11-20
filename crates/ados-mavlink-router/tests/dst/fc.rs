@@ -16,7 +16,7 @@ use crate::rng::Rng;
 pub const SYS: u8 = 1;
 pub const COMP: u8 = 1;
 /// The ids this FC can stream.
-const STREAMABLE: [u32; 5] = [1, 30, 33, 42, 245];
+pub const STREAMABLE: [u32; 5] = [1, 30, 33, 42, 245];
 const PARAMS: usize = 24;
 /// An upload's per-request wait and tries before the FC cancels it.
 const UPLOAD_RETRY_MS: u64 = 1_000;

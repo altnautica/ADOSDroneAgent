@@ -46,7 +46,9 @@ impl FcConnection {
     /// has streamed nothing but its HEARTBEAT (a stalled link, or an FC that
     /// rebooted and forgot its intervals, re-requests fast; a streaming link
     /// relaxes toward the max), then re-sends the per-message rates when the
-    /// interval elapses.
+    /// interval elapses. Between those, a stream missing while the others flow
+    /// is asked for on its own (`StreamWatch`), and given up as unsupported
+    /// after three unanswered asks.
     /// Nothing is requested before the FC identity is latched; the first latch
     /// and an identity change re-request at once, addressed to the FC.
     ///
@@ -101,7 +103,20 @@ impl FcConnection {
             last.map(|t| self.clock.since(t) >= interval)
                 .unwrap_or(true)
         };
+        let flowing = idle < STREAM_STALL;
         if !due {
+            // One stream missing while the rest flow (a request the link
+            // lost, a stream the FC dropped): ask for just that one, without
+            // waiting out the relaxed refresh. A stalled link is the whole
+            // table's business, above.
+            if flowing {
+                for msg_id in self.stream_watch.reask(now) {
+                    if let Some(&(_, hz)) = table.iter().find(|&&(id, _)| id == msg_id) {
+                        self.send_message_interval(fc, msg_id, 1_000_000.0 / hz)
+                            .await;
+                    }
+                }
+            }
             return;
         }
         for &(msg_id, rate_hz) in &table {
@@ -112,6 +127,7 @@ impl FcConnection {
             self.send_message_interval(fc, msg_id, 0.0).await;
         }
         self.sensor_streams.requested(capture_table, &table, now);
+        self.stream_watch.requested(&table, now, flowing);
         // The legacy `REQUEST_DATA_STREAM` groups, off by default.
         //
         // This used to be sent unconditionally, on the assumption that a firmware
