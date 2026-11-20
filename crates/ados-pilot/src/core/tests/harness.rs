@@ -54,6 +54,11 @@ pub struct World {
     /// The scripted FC sends LOCAL_POSITION_NED (off: its local position
     /// goes stale).
     pub local: bool,
+    /// The scripted FC stamps LOCAL_POSITION_NED with its boot time (the
+    /// test clock), so the pilot judges position steps
+    /// ([`crate::fc::pos_reset`]). Off: 0, never judged, as tests that put
+    /// the vehicle somewhere else between ticks need.
+    pub fc_clock: bool,
     /// The vehicle flies each tick's setpoint as a stiff FC would: its
     /// horizontal velocity becomes the setpoint's velocity plus the
     /// position loop's pull (gain 1/s) toward the setpoint's position, and
@@ -157,6 +162,7 @@ impl World {
             scan_ranges: vec![0.0; 360],
             goal_status: Vec::new(),
             local: true,
+            fc_clock: false,
             fly: false,
             seq: 1,
             af: crate::liftoff::sim::Airframe::balanced(),
@@ -213,7 +219,7 @@ impl World {
         let mut msgs = vec![self.heartbeat()];
         if self.local {
             msgs.push(MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
-                time_boot_ms: 0,
+                time_boot_ms: if self.fc_clock { self.now as u32 } else { 0 },
                 x: self.pos[0],
                 y: self.pos[1],
                 z: self.pos[2],

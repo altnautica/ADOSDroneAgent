@@ -14,8 +14,11 @@
 //! the low-battery floor's countdown and SmartRTL return, the supervised
 //! pause, resume and stalled-waypoint skip; and follow flights through
 //! trunks ([`forest`]): a corridor between trunk rows, a gap too narrow to
-//! enter, a held detour round a trunk and a seeded random stand. Latency,
-//! stick feel and throughput stay with the real-time World Engine benches.
+//! enter, a held detour round a trunk and a seeded random stand; and FC
+//! position resets ([`pos_reset`]): a 21 m EKF step under the pilot's hold
+//! and under a GUIDED target nobody streams, a GPS glitch's smaller step,
+//! and fast flight and a stepped clock that are none. Latency, stick feel
+//! and throughput stay with the real-time World Engine benches.
 //! The shaper pins ([`shaper_pins`]) hold the trajectories of goals, holds
 //! and landings to their recordings.
 //!
@@ -25,6 +28,7 @@ mod fc;
 mod forest;
 #[path = "../pins/mod.rs"]
 mod pins;
+mod pos_reset;
 mod rng;
 mod scenarios;
 mod shaper_pins;
@@ -105,6 +109,38 @@ fn dst_forest_detour_round_a_trunk_is_held() {
 #[test]
 fn dst_forest_stand_follows_a_walker_inside_the_margin() {
     matrix("forest_stand");
+}
+
+/// A 21 m EKF position reset in the pilot's hold: the copter holds where it
+/// is, never flying the step to the moved GUIDED target.
+#[test]
+fn dst_position_reset_in_the_pilots_hold_holds_in_place() {
+    matrix("reset_hold");
+}
+
+/// The incident: a 21 m reset under a GUIDED target a ground station left,
+/// with nobody streaming: the pilot's zero velocity holds the copter.
+#[test]
+fn dst_position_reset_under_an_unowned_guided_target_holds_in_place() {
+    matrix("reset_idle");
+}
+
+#[test]
+fn dst_gps_glitch_reset_is_held() {
+    matrix("reset_glitch");
+}
+
+#[test]
+fn dst_fast_flight_and_a_stepped_clock_are_no_reset() {
+    matrix("no_false_reset");
+}
+
+/// The simulated FC reproduces the dash when nothing answers the reset.
+#[test]
+fn dst_without_the_pilot_the_fc_flies_the_reset() {
+    for seed in SEEDS {
+        pos_reset::fc_flies_the_reset_alone(seed);
+    }
 }
 
 /// The stand whose follow route passed a trunk beyond the margin but inside

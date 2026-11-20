@@ -225,6 +225,14 @@ impl Sim {
         ));
     }
 
+    /// A frame from the FC outside its own streams (an ack to a ground
+    /// station, a STATUSTEXT), taken by the pilot now.
+    pub fn fc_frame(&mut self, m: MavMessage) {
+        self.trace.line(format_args!("{} fc_frame {m:?}", self.now));
+        self.p.on_fc(FC_SYS, FC_COMP, &m, self.now);
+        self.collect();
+    }
+
     fn reply(&mut self, r: Reply) {
         if !matches!(r, Reply::None) {
             self.trace.line(format_args!("{} reply {r:?}", self.now));
@@ -398,7 +406,8 @@ impl Sim {
     /// from the nose, each the range to the nearest trunk surface along it
     /// (0 for no return within [`LIDAR_RANGE_M`]).
     fn stand_scan(&self) -> Value {
-        let p = [self.fc.pos[0], self.fc.pos[1]];
+        let t = self.fc.truth();
+        let p = [t[0], t[1]];
         let yaw = self.fc.att[2];
         let ranges: Vec<f32> = (0..360)
             .map(|k| {
@@ -424,7 +433,10 @@ impl Sim {
     pub fn stand_clearance_m(&self) -> f32 {
         self.stand
             .iter()
-            .map(|&(c, r)| (c[0] - self.fc.pos[0]).hypot(c[1] - self.fc.pos[1]) - r)
+            .map(|&(c, r)| {
+                let t = self.fc.truth();
+                (c[0] - t[0]).hypot(c[1] - t[1]) - r
+            })
             .fold(f32::INFINITY, f32::min)
     }
 }

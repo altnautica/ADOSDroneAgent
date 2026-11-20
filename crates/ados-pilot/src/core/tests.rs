@@ -24,6 +24,7 @@ mod no_returns;
 mod overhead;
 #[path = "../../tests/pins/mod.rs"]
 mod pins;
+mod pos_reset;
 mod position_check;
 mod route_hold;
 mod route_sigma;

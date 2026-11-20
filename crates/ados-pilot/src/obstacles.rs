@@ -391,6 +391,22 @@ impl Obstacles {
         self.grid.transform();
     }
 
+    /// The FC's local estimate stepped by `d` (an EKF position reset) while
+    /// the vehicle stayed put: what the store holds in the FC's local frame
+    /// (the scan, the map-to-local offset) moves with it. The grid follows
+    /// at the next [`Obstacles::rebuild`].
+    pub fn shift(&mut self, d: V2) {
+        for h in &mut self.hits {
+            h.ne = geo::add(h.ne, d);
+        }
+        for p in &mut self.horizon {
+            *p = geo::add(*p, d);
+        }
+        if let Some(o) = self.offset.as_mut() {
+            *o = geo::add(*o, d);
+        }
+    }
+
     /// Distance along `dir` (unit) from `from` to the first obstacle, within
     /// `max_m`: grid cells and current scan hits.
     pub fn ray_distance(&self, from: V2, dir: V2, max_m: f32, now_ms: u64) -> Option<f32> {

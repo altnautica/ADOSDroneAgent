@@ -9,13 +9,13 @@ mod events;
 mod nav_cap;
 mod no_rc;
 mod operator;
+mod pos_reset;
 mod position_check;
 mod requests;
 mod state;
 mod take;
 mod touchdown;
 mod trace;
-
 pub(crate) use trace::limit;
 pub use trace::{ShadowCmd, SHADOW_MAX_AGE_MS};
 

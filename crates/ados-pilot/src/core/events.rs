@@ -104,6 +104,11 @@ impl Pilot {
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|v| u8::try_from(v).ok());
                 if let Some(set) = set {
+                    if set != self.nav_set && self.fc.armed {
+                        self.fc
+                            .pos_reset
+                            .cue(crate::fc::pos_reset::ResetCause::SourceSet, now_ms);
+                    }
                     self.nav_set = set;
                 }
                 if let Some(n) = super::position_check::ExtNav::parse(payload, now_ms) {
@@ -127,6 +132,7 @@ impl Pilot {
         let was_armed = self.fc.armed;
         let first = self.fc.heartbeat_ms == 0;
         let changed = self.fc.update(sysid, compid, msg, now_ms);
+        self.check_pos_reset(now_ms);
         if matches!(msg, MavMessage::OPTICAL_FLOW(_))
             && sysid == self.fc.sysid
             && compid == self.fc.compid

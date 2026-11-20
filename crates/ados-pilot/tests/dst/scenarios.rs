@@ -26,6 +26,10 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("forest_gap", crate::forest::forest_gap),
     ("forest_detour", crate::forest::forest_detour),
     ("forest_stand", crate::forest::forest_stand),
+    ("reset_hold", crate::pos_reset::reset_hold),
+    ("reset_idle", crate::pos_reset::reset_idle),
+    ("reset_glitch", crate::pos_reset::reset_glitch),
+    ("no_false_reset", crate::pos_reset::no_false_reset),
 ];
 
 fn ok(a: &ados_protocol::pilot::ActionResult) -> bool {

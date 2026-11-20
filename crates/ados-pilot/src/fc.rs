@@ -13,6 +13,7 @@ use crate::fc_profile::Firmware;
 
 mod ekf;
 pub mod extnav;
+pub mod pos_reset;
 pub mod rates;
 mod tx;
 pub use ekf::EkfPosition;
@@ -129,6 +130,8 @@ pub struct FcState {
     pub boot_epoch: u32,
     /// The FC's roll and pitch rate loop and its motor outputs.
     pub rates: rates::Rates,
+    /// Horizontal position resets of the FC's EKF ([`pos_reset`]).
+    pub pos_reset: pos_reset::ResetWatch,
 }
 
 impl FcState {
@@ -145,6 +148,7 @@ impl FcState {
                 if self.sysid != 0 && self.sysid != sysid {
                     self.boot_epoch += 1;
                     self.rc = None;
+                    self.pos_reset.reboot();
                 }
                 self.sysid = sysid;
                 self.compid = compid;
@@ -194,6 +198,13 @@ impl FcState {
                 };
                 self.local = Some(Stamped { v, at_ms: now_ms });
                 self.extnav.on_local(p.vx, p.vy, now_ms);
+                if self.from_fc(sysid, compid) {
+                    self.pos_reset.on_local(p.time_boot_ms, &v, now_ms);
+                }
+            }
+            MavMessage::GPS_GLOBAL_ORIGIN(o) if self.from_fc(sysid, compid) => {
+                self.pos_reset
+                    .on_origin(o.latitude, o.longitude, self.armed, now_ms);
             }
             // The FC re-emits its flow module's flow and range; a bridge may
             // also forward the module's own raw frames (its own sysid), which
@@ -254,6 +265,7 @@ impl FcState {
                 let text = String::from_utf8_lossy(&s.text[..end]).trim().to_owned();
                 if self.from_fc(sysid, compid) {
                     self.extnav.on_text(&text, now_ms);
+                    self.pos_reset.on_text(&text, self.armed, now_ms);
                 }
                 if !text.is_empty() && (s.severity as u8) <= STATUSTEXT_MIN_SEVERITY {
                     self.push_statustext(s.severity as u8, text, now_ms);

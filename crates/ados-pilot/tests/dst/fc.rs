@@ -121,6 +121,23 @@ pub struct Fc {
     /// Per-run gust strength, m/s.
     gust_mps: f32,
     sp: Option<(u64, SET_POSITION_TARGET_LOCAL_NED_DATA)>,
+    /// ArduCopter's GUIDED in the detail a position reset needs: a velocity
+    /// target flies a position target integrated from it (stabilised, and
+    /// held past the setpoint timeout), a position target is kept past the
+    /// timeout, a change of submode starts the position controller again at
+    /// the copter (dropping any reset offset), and [`Fc::ekf_reset`] moves
+    /// a position submode's copter by the step. Off: the simpler model the
+    /// other scenarios fly.
+    pub ap_guided: bool,
+    /// The estimate's steps from [`Fc::ekf_reset`]: the copter truly is at
+    /// `pos − frame_shift` ([`Fc::truth`]).
+    pub frame_shift: [f32; 2],
+    /// ArduPilot's position-controller offset after a reset in a position
+    /// submode (`EKFResetMethod::MoveVehicle`), slewed out at the position
+    /// controller's speed.
+    offset: [f32; 2],
+    /// The velocity submode's integrated position target.
+    vel_target: Option<[f32; 2]>,
     hold: [f32; 3],
     takeoff_alt: Option<f32>,
     landed_ms: Option<u64>,
@@ -157,6 +174,10 @@ impl Fc {
             gust: [0.0; 2],
             gust_mps: rng.range(0.05, 0.25),
             sp: None,
+            ap_guided: false,
+            frame_shift: [0.0; 2],
+            offset: [0.0; 2],
+            vel_target: None,
             hold: [0.0; 3],
             takeoff_alt: None,
             landed_ms: None,
@@ -223,8 +244,75 @@ impl Fc {
             self.mode = mode;
             self.hold = self.stop_point();
             self.sp = None;
+            self.offset = [0.0; 2];
+            self.vel_target = None;
             if mode == copter::AUTO && self.seq == 0 && !self.mission.is_empty() {
                 self.seq = 1;
+            }
+        }
+    }
+
+    /// Where the copter truly is ([`Fc::frame_shift`]).
+    pub fn truth(&self) -> [f32; 3] {
+        [
+            self.pos[0] - self.frame_shift[0],
+            self.pos[1] - self.frame_shift[1],
+            self.pos[2],
+        ]
+    }
+
+    /// The EKF's horizontal estimate steps by `d` while the copter stays
+    /// where it is (a source-set change, the origin set in flight, a GPS
+    /// glitch). In GUIDED's position submodes ArduPilot keeps the absolute
+    /// target and flies the copter to it, the step slewed in through the
+    /// offset (`ModeGuided::move_vehicle_on_ekf_reset`); the velocity
+    /// submode, the take-off and the other modes move their targets with the
+    /// estimate (`AC_PosControl::NE_handle_ekf_reset`). Needs
+    /// [`Fc::ap_guided`].
+    pub fn ekf_reset(&mut self, d: [f32; 2]) {
+        assert!(self.ap_guided, "a reset is modelled on ArduPilot's GUIDED");
+        self.pos = [self.pos[0] + d[0], self.pos[1] + d[1], self.pos[2]];
+        self.frame_shift = [self.frame_shift[0] + d[0], self.frame_shift[1] + d[1]];
+        let pos_submode =
+            self.mode == copter::GUIDED && self.takeoff_alt.is_none() && self.vel_target.is_none();
+        if pos_submode {
+            self.offset = [self.offset[0] + d[0], self.offset[1] + d[1]];
+        } else {
+            self.hold = [self.hold[0] + d[0], self.hold[1] + d[1], self.hold[2]];
+            if let Some(t) = self.vel_target.as_mut() {
+                *t = [t[0] + d[0], t[1] + d[1]];
+            }
+        }
+    }
+
+    /// A setpoint's submode against the one flown: a change starts GUIDED's
+    /// position controller again at the copter
+    /// (`ModeGuided::pva_control_start`), dropping any reset offset.
+    fn guided_submode(&mut self, s: &SET_POSITION_TARGET_LOCAL_NED_DATA) {
+        let pos_sp = s.type_mask.bits() & 0b111 == 0;
+        let was_pos = self.vel_target.is_none();
+        if pos_sp != was_pos {
+            self.offset = [0.0; 2];
+        }
+        self.vel_target = match (pos_sp, self.vel_target) {
+            (true, _) => None,
+            (false, Some(t)) => Some(t),
+            (false, None) => Some([self.pos[0], self.pos[1]]),
+        };
+    }
+
+    /// One tick of [`Fc::ap_guided`]'s GUIDED: the offset slews out, and the
+    /// velocity target's position moves on its velocity (none past the
+    /// timeout).
+    fn ap_guided_step(&mut self, now: u64, dt: f32) {
+        let n = self.offset[0].hypot(self.offset[1]);
+        if n > 0.0 {
+            let k = (n - MAX_H_MPS * dt).max(0.0) / n;
+            self.offset = [self.offset[0] * k, self.offset[1] * k];
+        }
+        if let (Some(t), Some((at, s))) = (self.vel_target.as_mut(), &self.sp) {
+            if now.saturating_sub(*at) <= SETPOINT_TIMEOUT_MS {
+                *t = [t[0] + s.vx * dt, t[1] + s.vy * dt];
             }
         }
     }
@@ -258,6 +346,9 @@ impl Fc {
             MavMessage::SET_POSITION_TARGET_LOCAL_NED(s) if self.mode == copter::GUIDED => {
                 if self.rig.engaged {
                     self.rig.af.goal_h = Some(-s.z);
+                }
+                if self.ap_guided {
+                    self.guided_submode(s);
                 }
                 self.sp = Some((now, s.clone()));
             }
@@ -365,6 +456,30 @@ impl Fc {
                     }
                 }
                 match &self.sp {
+                    Some((at, s)) if self.ap_guided => {
+                        let mask = s.type_mask.bits();
+                        let mut v = [0.0; 3];
+                        if mask & 0b111_000 == 0 && now.saturating_sub(*at) <= SETPOINT_TIMEOUT_MS {
+                            v = [s.vx, s.vy, s.vz];
+                        }
+                        if mask & 0b111 == 0 {
+                            v[0] += (s.x + self.offset[0] - self.pos[0]) * POS_GAIN;
+                            v[1] += (s.y + self.offset[1] - self.pos[1]) * POS_GAIN;
+                            v[2] += (s.z - self.pos[2]) * POS_GAIN;
+                        } else if let Some(t) = self.vel_target {
+                            v[0] += (t[0] - self.pos[0]) * POS_GAIN;
+                            v[1] += (t[1] - self.pos[1]) * POS_GAIN;
+                        }
+                        v
+                    }
+                    None if self.ap_guided => {
+                        let to = [
+                            self.hold[0] + self.offset[0],
+                            self.hold[1] + self.offset[1],
+                            self.hold[2],
+                        ];
+                        toward(self.pos, to, MAX_H_MPS)
+                    }
                     Some((at, s)) if now.saturating_sub(*at) <= SETPOINT_TIMEOUT_MS => {
                         let mask = s.type_mask.bits();
                         let mut v = [0.0; 3];
@@ -467,6 +582,9 @@ impl Fc {
                 self.landed = !af.airborne();
                 return;
             }
+        }
+        if self.ap_guided && self.mode == copter::GUIDED {
+            self.ap_guided_step(now, dt);
         }
         let want = self.target_vel(now);
         let h = (want[0] * want[0] + want[1] * want[1]).sqrt();
