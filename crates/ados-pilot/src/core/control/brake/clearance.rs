@@ -26,7 +26,7 @@ pub const PUSH_REPORT_MPS: f32 = 0.1;
 /// they would leave it faster than either asks. The result is never faster
 /// than the larger of `out` and the push, so a speed cap applied before the
 /// brake still holds (the push is at most `PUSH_MAX_MPS`, inside every cap).
-pub(super) fn with_push(out: V2, v_conf: f32, push: V2) -> V2 {
+pub(crate) fn with_push(out: V2, v_conf: f32, push: V2) -> V2 {
     let p = geo::norm(push);
     if p < 1e-6 {
         return geo::clamp_len(out, v_conf);

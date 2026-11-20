@@ -7,9 +7,11 @@ use crate::geo::{self, V2};
 
 mod clearance;
 mod sweep;
+mod turn;
 
 pub use clearance::*;
 use sweep::{Sweep, BRAKE_CAPS, SWEEP_DEPTH_SLACK_M, SWEEP_PATHS, SWEEP_ROUNDS};
+use turn::{turn_share, Bend};
 
 /// What the brake keeps clear: the obstacle margin and the vehicle's own
 /// radius from the lidar (the CG) to its outermost rigid extent
@@ -115,8 +117,14 @@ fn sector_of(dir: V2) -> usize {
 /// sideways motion of its own (a path cap keeps the direction; a radial cap
 /// slides along the obstacle). The answer's own stop path is drawn and
 /// solved again while it breaks its cap; after [`SWEEP_ROUNDS`] every point
-/// near the vehicle caps the velocity toward it too. Inside the hard-stop
-/// distance of an obstacle nothing but motion away from it is kept.
+/// near the vehicle caps the velocity toward it too. Turning from the flown
+/// velocity toward the ask, the FC flies a curve between them over its lag,
+/// which the straight paths miss: a point inside that bend ([`Bend`]) caps
+/// the velocity toward it radially, closing at up to what the setpoints the
+/// FC has queued fly toward it, and the answer is slowed until its stop
+/// curves ([`turn_share`]) stay out of every point's margin, or come no
+/// nearer than the stop asked now. Inside the hard-stop distance of an
+/// obstacle nothing but motion away from it is kept.
 ///
 /// Two limits keep the vehicle off walls in confined spaces, whoever flies
 /// (sticks, goto, skill goal, swarm): beside a wall the speed is held to the
@@ -213,9 +221,9 @@ pub fn brake_limit(
     // keep-out.
     let inside_at = margin + crate::obstacles::CELL_M / 2.0;
     let inside = r_min < inside_at;
-    let pass = (r_min - SWEEP_DEPTH_SLACK_M).max(inside_at);
+    let pass = (r_min - SWEEP_DEPTH_SLACK_M).max(inside_at).min(keep_out);
     let mut sweep = Sweep::new(a_h, keep_out, pass);
-    sweep.add(v, 0.0);
+    let asked_path = sweep.add(v, 0.0);
     // The flown path as long as the stop from the speed the scans see the
     // vehicle close along it, when that is faster than the estimate: an
     // estimate lagging the real motion must not shorten it.
@@ -229,17 +237,42 @@ pub fn brake_limit(
     let mut caps: [Option<(V2, f32)>; BRAKE_CAPS] = [None; BRAKE_CAPS];
     let mut tags = [0u16; BRAKE_CAPS];
     let mut out = v;
+    // Turning from the flown velocity toward the ask, the FC flies the bend
+    // between them over its lag on the setpoints it has queued, answers to
+    // the same ask: at most the ask held to its own path's cap. A point
+    // inside the bend, near enough for the turn to reach before it can
+    // stop, caps the velocity toward it radially too, closing at up to what
+    // those setpoints fly toward it.
+    let bend = Bend::of(vel, v);
+    let queued = if asked_path {
+        let (e, _) = sweep.paths[0];
+        let closing = closing_along(e).0;
+        let cap = points()
+            .filter(|p| p.4)
+            .filter_map(|(rel, ..)| sweep.room(0, rel))
+            .map(|room| room_cap(room, closing, a_h))
+            .fold(f32::INFINITY, f32::min);
+        geo::clamp_len(v, cap)
+    } else {
+        v
+    };
+    let s_turn = geo::norm(vel).max(geo::norm(queued));
+    let bend_reach = s_turn * BRAKE_LAG_S + s_turn * s_turn / (2.0 * a_h) + keep_out;
     for round in 0..=SWEEP_ROUNDS {
         let every = inside || round == SWEEP_ROUNDS;
         caps = [None; BRAKE_CAPS];
         tags = [0u16; BRAKE_CAPS];
         let along: [(f32, bool); SWEEP_PATHS] =
             std::array::from_fn(|k| closing_along(sweep.paths[k].0));
-        for (rel, _, dir, d, obstacle) in points() {
+        for (rel, r, dir, d, obstacle) in points() {
             // The seen space's edge caps radially, as it always has: what
             // lies beyond it is unknown in every direction.
-            if every || !obstacle {
-                let (closing, by_scan) = closing_along(dir);
+            let in_bend = obstacle && r < bend_reach && bend.is_some_and(|b| b.holds(rel));
+            if every || !obstacle || in_bend {
+                let (mut closing, by_scan) = closing_along(dir);
+                if in_bend {
+                    closing = closing.max(geo::dot(queued, dir));
+                }
                 let cap = stop_cap(d, closing, a_h, margin);
                 let sector = sector_of(dir);
                 if caps[sector].is_none_or(|(_, c)| cap < c) {
@@ -283,6 +316,16 @@ pub fn brake_limit(
             break;
         }
     }
+    // The straight paths miss a point inside the bend between the flown
+    // velocity and the answer (or the queued setpoints), which the FC flies
+    // round over its lag: the answer is slowed until its stop curves keep
+    // out of the margin (to the near face of a point's cell) too.
+    let share = if close {
+        1.0
+    } else {
+        let obstacles = || points().filter(|p| p.4).map(|p| p.0);
+        turn_share(vel, out, queued, bend, a_h, inside_at, obstacles)
+    };
     let out = if close {
         let n = geo::norm(away);
         if n > 1e-3 {
@@ -292,19 +335,20 @@ pub fn brake_limit(
             [0.0, 0.0]
         }
     } else {
-        out
+        geo::scale(out, share)
     };
     let mut by = if close {
         limit::HARD_STOP
     } else {
-        // The caps `v` broke that the answer sits on.
+        // The caps `v` broke that the answer sits on, and the turn's slowing.
+        let turned = if share < 1.0 { limit::OBSTACLE } else { 0 };
         caps.iter()
             .zip(tags)
             .filter_map(|(c, tag)| c.map(|(dir, cap)| (dir, cap, tag)))
             .filter(|&(dir, cap, _)| {
                 geo::dot(dir, v) > cap + 1e-4 && geo::dot(dir, out) >= cap - 1e-3
             })
-            .fold(0, |by, (_, _, tag)| by | tag)
+            .fold(turned, |by, (_, _, tag)| by | tag)
     };
     let (v_conf, push) = confined(&near, geom);
     if geo::norm(out) > v_conf + 1e-3 {
@@ -354,7 +398,7 @@ fn room_cap(room: f32, closing: f32, a: f32) -> f32 {
 /// onto one constraint line, or a vertex of two; at the answer some
 /// constraint `v` violates is active (KKT), so only lines `v` crosses are
 /// projected onto and paired with the rest.
-fn nearest_within(v: V2, caps: &[Option<(V2, f32)>]) -> V2 {
+pub(crate) fn nearest_within(v: V2, caps: &[Option<(V2, f32)>]) -> V2 {
     const TOL: f32 = 1e-4;
     let feasible = |x: V2| {
         caps.iter()
