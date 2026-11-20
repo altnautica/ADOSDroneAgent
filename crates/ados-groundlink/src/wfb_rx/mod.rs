@@ -480,7 +480,16 @@ mod tests {
         assert_eq!(links.ground, link_id(DEFAULT_FLEET_ID, SLOT_GROUND));
         assert_ne!(links.drone, link_id(7, FIRST_DRONE_SLOT));
         assert_ne!(links.ground, link_id(7, SLOT_GROUND));
-        // Its frames decode onto a port this ground always binds.
-        assert!(fleet_slots(&crate::fleet::FleetRegistry::default()).contains(&FIRST_DRONE_SLOT));
+        // Its frames decode onto ports of their own, never a slot's.
+        for slot in 0..=ados_radio::config::FLEET_MAX_SLOTS {
+            for port in [
+                video_rx_port(slot),
+                aux_rx_port(slot),
+                control_rx_port(slot),
+            ] {
+                assert_ne!(port, ados_radio::config::PROVISIONAL_AUX_RX_PORT);
+                assert_ne!(port, ados_radio::config::PROVISIONAL_CONTROL_RX_PORT);
+            }
+        }
     }
 }

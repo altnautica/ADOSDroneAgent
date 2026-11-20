@@ -78,6 +78,50 @@ impl AuxSinksOwned {
     }
 }
 
+/// Dispatch one datagram read on `lane`.
+///
+/// A slot's lane takes every channel ([`dispatch`]). The provisional lane
+/// (see [`AuxLane::Provisional`]) takes only relay answers, identity and
+/// status, and a datagram that does not decode, which [`dispatch`] counts as
+/// damage without acting on it. Every other channel is counted once as
+/// `provisional_dropped` and goes nowhere: a waiting drone's flight controller
+/// is not one of this ground's aircraft until it is on this ground's fleet.
+pub(super) async fn dispatch_on(
+    lane: AuxLane,
+    datagram: &[u8],
+    sinks: &AuxSinks<'_>,
+    counters: &AuxCounters,
+    gate: &mut SeamGate,
+    peers: &AuxPeerCache,
+) {
+    let slot = match lane {
+        AuxLane::Slot(slot) => slot,
+        AuxLane::Provisional => match aux_mux::decode(datagram) {
+            Ok((
+                AuxChannel::Response
+                | AuxChannel::Request
+                | AuxChannel::Identity
+                | AuxChannel::Status,
+                _,
+            ))
+            | Err(_) => {
+                // The slot is read only by the MAVLink branch, which these
+                // channels never reach.
+                crate::wfb_rx::FIRST_DRONE_SLOT
+            }
+            Ok(_) => {
+                let c = &counters.0;
+                counters.bump(&c.datagrams_received);
+                c.bytes_received
+                    .fetch_add(datagram.len() as u64, Ordering::Relaxed);
+                counters.bump(&c.provisional_dropped);
+                return;
+            }
+        },
+    };
+    dispatch(slot, datagram, sinks, counters, gate, peers).await;
+}
+
 /// Decode one datagram and act on it, updating exactly one received-path
 /// counter.
 ///

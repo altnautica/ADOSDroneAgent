@@ -82,6 +82,53 @@ fn ground_hears(registry: &Path, ground_fleet: u16, address: (u16, u8)) -> bool 
         || wfb_rx::provisional_links(ground_fleet).is_some_and(|l| l.drone == drone)
 }
 
+/// What the ground on `ground_fleet` makes of a beacon from `drone` at
+/// `heard_on`: the peers enrolment reads and the drones the slot reconciler
+/// counts as waiting on the provisional lane. A drone on the ground's own
+/// fleet is a linked peer; one on the default fleet while the ground is on
+/// another goes through the provisional presence path (its beacon decoded off
+/// the provisional port) into the linked-peers sidecar, marked provisional,
+/// and never counts as the presence the ground's watchdog reads.
+fn heard_by_ground(
+    ground_fleet: u16,
+    drone: &str,
+    heard_on: (u16, u8),
+    ground_dir: &Path,
+) -> (Vec<(String, String)>, std::collections::BTreeSet<String>) {
+    use ados_groundlink::watchdog::PresenceCache;
+    let waiting_lane = wfb_rx::provisional_links(ground_fleet)
+        .is_some_and(|l| l.drone == link_id(heard_on.0, heard_on.1));
+    if !waiting_lane {
+        return (
+            vec![(drone.to_string(), "drone".to_string())],
+            Default::default(),
+        );
+    }
+    let pair_key = [7u8; 32];
+    let beacon = ados_radio::hop::build_presence_beacon(drone, true, 149, -50, 1, &pair_key);
+    let cache = ados_groundlink::GsPresenceCache::new();
+    ados_groundlink::presence::handle_provisional_frame(&beacon, &pair_key, &cache, "");
+    assert_eq!(
+        cache.presence_age_s(),
+        None,
+        "a waiting drone is never the linked drone's presence"
+    );
+    let sidecar = ground_dir.join("linked-peers.json");
+    let payload = ados_groundlink::presence::linked_peers_payload(&cache.linked_peers());
+    std::fs::write(&sidecar, payload.to_string()).unwrap();
+    let now = crate::routes::status_full::now_unix_secs();
+    let peers = crate::routes::status_full::fresh_linked_peer_rows_in(&sidecar, now)
+        .into_iter()
+        .map(|p| (p.device_id, p.role))
+        .collect();
+    let waiting = crate::routes::gs_fleet_slot::uplinks::waiting_drones(&sidecar, now);
+    assert!(
+        waiting.contains(drone),
+        "heard waiting on the provisional lane"
+    );
+    (peers, waiting)
+}
+
 /// The ground on `ground_fleet` enrols `drone` from its beacon, its
 /// reconciler delivers the registry's address over the uplinks (the drone,
 /// still on `heard_on`'s fleet, answers on the one keyed to that fleet's
@@ -135,8 +182,8 @@ async fn enrol_and_deliver(
         &slots,
         &assignment,
     )
-        .await
-        .expect("the drone admits the delivery");
+    .await
+    .expect("the drone admits the delivery");
     let seen = link
         .seen
         .lock()

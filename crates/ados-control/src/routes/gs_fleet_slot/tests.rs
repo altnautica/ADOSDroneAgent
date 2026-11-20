@@ -137,6 +137,62 @@ async fn counting_lane() -> (Arc<AuxRpcProxy>, Arc<std::sync::atomic::AtomicUsiz
 }
 
 #[tokio::test]
+async fn an_offline_registered_drone_never_causes_provisional_uplink_traffic() {
+    // A registered drone that is off: unconfirmed and offered every tick, but
+    // never heard waiting on the provisional lane, so nothing goes out on the
+    // default fleet's ground link id, where a nearby drone paired to another
+    // ground would read it as mis-keyed traffic.
+    const OFFLINE: &str = "offline0drone";
+    let (provisional, sent) = counting_lane().await;
+    let uplinks = Uplinks {
+        fleet: test_drone::unheard_lane().await,
+        provisional: Some(provisional),
+    };
+    let slots = vec![slot_with_secret(OFFLINE, 2, test_drone::SECRET)];
+    let mut reconciler = SlotReconciler::default();
+    for _ in 0..2 {
+        reconciler
+            .tick(
+                &uplinks,
+                &slots,
+                Some(7),
+                &std::collections::BTreeSet::new(),
+            )
+            .await;
+    }
+    assert!(
+        reconciler.confirmed.is_empty(),
+        "it is still owed its address"
+    );
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // The same drone heard waiting there is offered on it.
+    let waiting = std::collections::BTreeSet::from([OFFLINE.to_string()]);
+    reconciler.tick(&uplinks, &slots, Some(7), &waiting).await;
+    assert!(sent.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn only_peers_heard_on_the_provisional_lane_are_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = dir.path().join("linked-peers.json");
+    std::fs::write(
+        &sidecar,
+        r#"{"version":1,"wall_time_unix":100.0,"peers":[
+            {"device_id":"waiting0drone","role":"drone","channel":149,"rssi_dbm":-50,"last_seen_unix":100.0,"slot":1,"provisional":true},
+            {"device_id":"linked0drone","role":"drone","channel":149,"rssi_dbm":-50,"last_seen_unix":100.0,"slot":1},
+            {"device_id":"stale0waiting","role":"drone","channel":149,"rssi_dbm":-50,"last_seen_unix":1.0,"slot":1,"provisional":true}
+        ]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        uplinks::waiting_drones(&sidecar, 101.0),
+        std::collections::BTreeSet::from(["waiting0drone".to_string()])
+    );
+    assert!(uplinks::waiting_drones(&dir.path().join("absent.json"), 101.0).is_empty());
+}
+
+#[tokio::test]
 async fn an_address_reaches_a_drone_that_hears_only_the_provisional_uplink() {
     // The drone an auto-pair bind left on the default fleet: the ground's
     // own uplink is never answered, the provisional one is, and the delivery

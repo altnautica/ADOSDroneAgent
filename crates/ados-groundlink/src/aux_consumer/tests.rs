@@ -1051,3 +1051,104 @@ async fn matching_plugin_contract_versions_are_not_flagged() {
     assert_eq!(snap.identity_frames, 1);
     assert_eq!(snap.identity_plugin_version_mismatch, 0);
 }
+
+#[tokio::test]
+async fn mavlink_on_the_provisional_lane_never_reaches_the_router_or_slot_1() {
+    // A drone this ground paired but has not yet addressed: its flight
+    // controller is not one of this ground's aircraft, so its HEARTBEAT is
+    // neither republished nor taken as any slot's identity.
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("mavlink-ingest.sock");
+    let (mut seam, server) = fake_seam(sock.clone());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let ingest = MavlinkIngest::new(&sock);
+    let counters = AuxCounters::new();
+    let mut gate = SeamGate::default();
+    let peers = AuxPeerCache::new();
+
+    let frame = heartbeat_from(1);
+    for channel in [
+        AuxChannel::Mavlink,
+        AuxChannel::Pilot,
+        AuxChannel::AppStream,
+    ] {
+        let datagram = aux_mux::encode(channel, &frame).unwrap();
+        dispatch_on(
+            AuxLane::Provisional,
+            &datagram,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
+        )
+        .await;
+    }
+    let snap = counters.snapshot();
+    assert_eq!(snap.datagrams_received, 3);
+    assert_eq!(snap.provisional_dropped, 3);
+    assert_eq!(snap.mavlink_frames, 0);
+    assert_eq!(snap.pilot_state, 0);
+    assert_eq!(snap.app_stream, 0);
+    assert_eq!(snap.accounted(), snap.datagrams_received);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), seam.recv())
+            .await
+            .is_err(),
+        "nothing reached the router"
+    );
+    // Slot 1 never took the waiting drone's system id: the registered drone
+    // on slot 2 presenting the same id collides with nobody.
+    assert!(peers.observe_system_id(2, 1).is_empty());
+
+    // The same frame on slot 1's own lane is that aircraft's and is
+    // republished.
+    let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
+    dispatch_on(
+        AuxLane::Slot(TEST_SLOT),
+        &datagram,
+        &AuxSinks::mavlink_only(&ingest),
+        &counters,
+        &mut gate,
+        &peers,
+    )
+    .await;
+    assert_eq!(seam.recv().await.unwrap(), frame);
+    server.abort();
+}
+
+#[tokio::test]
+async fn the_provisional_lane_still_carries_relay_answers() {
+    // The address delivery's answer comes back on this lane, so a response
+    // is handed to the proxy, not dropped.
+    use ados_protocol::aux_rpc::encode_response_fragment;
+    use ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest;
+
+    let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+    let counters = AuxCounters::new();
+    let mut gate = SeamGate::default();
+    let peers = AuxPeerCache::new();
+    let proxy = AuxRpcResponseIngest::new("/nonexistent/proxy.sock");
+    let fragment =
+        encode_response_fragment(b"0a1b2c3d4e5f", 9, 200, 0, 1, 11, br#"{"ok":true}"#).unwrap();
+    let framed = aux_mux::encode(AuxChannel::Response, &fragment).unwrap();
+    dispatch_on(
+        AuxLane::Provisional,
+        &framed,
+        &AuxSinks {
+            mavlink: &ingest,
+            rpc_response: Some(&proxy),
+            config_tunnel: None,
+            app_stream: None,
+            pilot: None,
+            local_plugins: None,
+        },
+        &counters,
+        &mut gate,
+        &peers,
+    )
+    .await;
+    let snap = counters.snapshot();
+    assert_eq!(snap.response_frames, 1);
+    assert_eq!(snap.response_dispatched, 1);
+    assert_eq!(snap.provisional_dropped, 0);
+}

@@ -48,7 +48,7 @@ pub use ados_protocol::aux_rpc_proxy::{
     AuxRpcProxy, AuxRpcResponseIngest, RpcError, RpcResponseOwned, RPC_DEFAULT_TIMEOUT,
 };
 pub use aux_consumer::{
-    run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot, AuxSinks,
+    run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot, AuxLane, AuxSinks,
     AuxSinksOwned,
 };
 pub use fanout::{run_default_fanout, run_fanout};
