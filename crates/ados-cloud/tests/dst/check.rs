@@ -77,6 +77,33 @@ pub async fn monitor(w: Shared) {
     }
 }
 
+/// While the node and the backend are both up, no row queued since waits more
+/// than [`CLAIM_WITHIN_MS`] for a claim.
+fn claims_live(g: &mut crate::world::World, now: u64) {
+    if !g.alive || g.outage_at(now).is_some() {
+        g.both_up_since = None;
+        return;
+    }
+    let server = g.server_ms();
+    let since = *g.both_up_since.get_or_insert(server);
+    let late: Vec<String> = g
+        .queue
+        .rows
+        .iter()
+        .filter(|r| r.status == Status::Pending && r.created_at >= since)
+        .filter(|r| server - r.created_at > CLAIM_WITHIN_MS)
+        .map(|r| {
+            format!(
+                "{} ({}) waited over {CLAIM_WITHIN_MS} ms for a claim",
+                r.id, r.command
+            )
+        })
+        .collect();
+    for v in late {
+        g.violate(v);
+    }
+}
+
 /// The checks on the drained end state.
 pub fn finish(w: &Shared) {
     let mut g = w.borrow_mut();

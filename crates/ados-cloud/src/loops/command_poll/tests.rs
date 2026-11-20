@@ -97,3 +97,22 @@ async fn an_ack_is_kept_until_the_queue_answers_it_for_good() {
         assert_eq!(link.1.get(), tries, "{answer:?}");
     }
 }
+
+/// An ack the queue fails on every pass stops holding the claim back after
+/// `ACK_MAX_REFUSALS` passes, and the count survives a restart.
+#[test]
+fn a_refused_ack_is_given_up_after_its_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("executed.json");
+    let mut executed = ExecutedCommands::load(&path);
+    executed
+        .record("c1", serde_json::json!({"commandId": "c1"}))
+        .unwrap();
+    for _ in 1..ACK_MAX_REFUSALS - 1 {
+        assert!(settle(&mut executed, "c1", AckFate::Refused));
+    }
+    let mut executed = ExecutedCommands::load(&path);
+    assert!(settle(&mut executed, "c1", AckFate::Refused));
+    assert!(!settle(&mut executed, "c1", AckFate::Refused));
+    assert!(executed.undelivered().is_empty());
+}

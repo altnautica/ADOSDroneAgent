@@ -243,4 +243,34 @@ impl Queue {
         r.closed_by_ack = true;
         (200, true)
     }
+
+    /// The stuck sweep at server time `now`; returns the ids it failed.
+    pub fn sweep_stuck(&mut self, now: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in &mut self.rows {
+            if r.status.terminal() || r.created_at + COMMAND_STUCK_MS > now {
+                continue;
+            }
+            let reason = if r.status == Status::Pending {
+                "command expired: never delivered to the node"
+            } else {
+                "command expired: claimed by the node but never acknowledged"
+            };
+            r.fail(now, reason);
+            r.swept = true;
+            out.push(r.id.clone());
+        }
+        out
+    }
+
+    /// The retention sweep at server time `now`; returns the ids it deleted.
+    pub fn prune(&mut self, now: u64) -> Vec<String> {
+        let (old, keep): (Vec<Row>, Vec<Row>) = self.rows.drain(..).partition(|r| {
+            r.status.terminal() && r.completed_at.unwrap_or(now) + COMMAND_RETENTION_MS <= now
+        });
+        self.rows = keep;
+        let ids = old.iter().map(|r| r.id.clone()).collect();
+        self.pruned.extend(old);
+        ids
+    }
 }

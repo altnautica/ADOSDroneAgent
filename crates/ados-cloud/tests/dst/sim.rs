@@ -94,8 +94,18 @@ async fn operate(w: Shared, mut enqueues: Vec<Enqueue>) {
         sleep_until(t0 + Duration::from_millis(e.at_ms)).await;
         let mut g = w.borrow_mut();
         let now = g.server_ms();
-        let id = g.queue.enqueue(now, e.command, e.args, e.ttl_ms);
+        let id = g
+            .queue
+            .enqueue(now, e.command, e.args, e.ttl_ms, e.poisoned);
         let ttl = e.ttl_ms.map_or("-".to_string(), |t| t.to_string());
-        g.log(format!("operator: queue {id} {} ttl {ttl}", e.command));
+        let poisoned = if e.poisoned {
+            " (its ack always fails)"
+        } else {
+            ""
+        };
+        g.log(format!(
+            "operator: queue {id} {} ttl {ttl}{poisoned}",
+            e.command
+        ));
     }
 }
