@@ -94,47 +94,9 @@ impl FcConnection {
                 }
                 continue;
             };
-            // A transport opened — clear the unreachable flag.
-            self.open_failed.store(false, Ordering::Relaxed);
-            *self.port.lock().await = port.clone();
-            // Identify an MSP FC (Betaflight/iNav) by the opened port's USB
-            // descriptor — the passive signal that survives the silent-until-
-            // polled blind spot of the byte sniff.
-            *self.fc_variant.lock().await = fc_variant_for_port(&port);
-            self.baud.store(baud, Ordering::Relaxed);
-            *self.fc_device.lock().await = link_state::canonical_fc_device(&port).await;
-            self.fc_signed.store(false, Ordering::Relaxed);
-            if self.command_down_gated() {
-                // MAVLink-over-ELRS, telemetry-only: install NO writer. With no
-                // writer every send path is a no-op (send_bytes early-returns),
-                // so the companion heartbeat, stream-interval requests, param
-                // sweep, and any forwarded client bytes are all suppressed and
-                // the host->FC command direction stays closed over the RC lane
-                // — while the read loop below still ingests inbound telemetry.
-                // Dropping the write half closes the send side outright, a
-                // stronger guarantee than gating each send path since no code
-                // can smuggle a byte through an absent writer. Enabling the
-                // command marker restores the writer (the else branch) for the
-                // bench-validated command lane.
-                drop(write_half);
-                let mut writer = self.writer.lock().await;
-                *writer = None;
-                self.next_link_gen();
-                drop(writer);
-                tracing::info!(port = %port, baud, "fc_connected_crsf_mavlink_command_down_gated");
-            } else {
-                let mut writer = self.writer.lock().await;
-                *writer = Some(write_half);
-                self.next_link_gen();
-                drop(writer);
-                tracing::info!(port = %port, baud, "fc_connected");
-            }
             // Captured once the writer is installed: only a failure recorded
             // against THIS link's generation tears it down.
-            let link_gen = self.link_gen();
-            self.connected.store(true, Ordering::Relaxed);
-            self.stamp_last_msg();
-            self.link_proven.store(false, Ordering::Relaxed);
+            let link_gen = self.begin_session(write_half, &port, baud).await;
             // A board identified as MSP by its USB descriptor is proven by
             // identity: it stays silent until a ground station polls it.
             let unproven = self.opened_unproven.load(Ordering::Relaxed)
@@ -160,24 +122,7 @@ impl FcConnection {
                 }
             }
 
-            // Link dropped (read EOF/error or a write failure): reset state and
-            // reconnect. Clearing the heartbeat clock means the freshly re-opened
-            // link reads as not-alive until a real HEARTBEAT arrives again.
-            self.connected.store(false, Ordering::Relaxed);
-            *self.last_heartbeat_at.lock().await = None;
-            *self.last_msp_at.lock().await = None;
-            *self.msp_armed.lock().await = None;
-            *self.fc_variant.lock().await = None;
-            *self.fc_device.lock().await = None;
-            self.fc_signed.store(false, Ordering::Relaxed);
-            self.msp_warned.store(false, Ordering::Relaxed);
-            *self.writer.lock().await = None;
-            self.param_priming.store(false, Ordering::Relaxed);
-            *self.param_sweep_started.lock().await = None;
-            *self.param_last_request.lock().await = None;
-            self.param_last_cached_count.store(0, Ordering::Relaxed);
-            self.sensor_streams.reset_link();
-            tracing::warn!("fc_disconnected");
+            self.end_session().await;
 
             // Re-open on the fixed interval — no ladder, no cap. A port that
             // opens but never accepts a write (readable-but-unwritable) used to
@@ -189,6 +134,77 @@ impl FcConnection {
                 _ = cancel.wait() => return,
             }
         }
+    }
+
+    /// Install a freshly opened transport as the current link: record its
+    /// port and baud, install `write_half` as the FC writer (none for a
+    /// command-down-gated source), mark the transport open and start the
+    /// session unproven. Returns the link generation a write failure on this
+    /// link is recorded against. [`Self::run`] calls it for every link it
+    /// opens; the in-process simulation (`tests/dst`) drives it directly.
+    pub async fn begin_session(&self, write_half: BoxedWriteHalf, port: &str, baud: u32) -> u64 {
+        // A transport opened — clear the unreachable flag.
+        self.open_failed.store(false, Ordering::Relaxed);
+        *self.port.lock().await = port.to_string();
+        // Identify an MSP FC (Betaflight/iNav) by the opened port's USB
+        // descriptor — the passive signal that survives the silent-until-
+        // polled blind spot of the byte sniff.
+        *self.fc_variant.lock().await = fc_variant_for_port(port);
+        self.baud.store(baud, Ordering::Relaxed);
+        *self.fc_device.lock().await = link_state::canonical_fc_device(port).await;
+        self.fc_signed.store(false, Ordering::Relaxed);
+        if self.command_down_gated() {
+            // MAVLink-over-ELRS, telemetry-only: install NO writer. With no
+            // writer every send path is a no-op (send_bytes early-returns),
+            // so the companion heartbeat, stream-interval requests, param
+            // sweep, and any forwarded client bytes are all suppressed and
+            // the host->FC command direction stays closed over the RC lane
+            // — while the read loop still ingests inbound telemetry.
+            // Dropping the write half closes the send side outright, a
+            // stronger guarantee than gating each send path since no code
+            // can smuggle a byte through an absent writer. Enabling the
+            // command marker restores the writer (the else branch) for the
+            // bench-validated command lane.
+            drop(write_half);
+            let mut writer = self.writer.lock().await;
+            *writer = None;
+            self.next_link_gen();
+            drop(writer);
+            tracing::info!(port = %port, baud, "fc_connected_crsf_mavlink_command_down_gated");
+        } else {
+            let mut writer = self.writer.lock().await;
+            *writer = Some(write_half);
+            self.next_link_gen();
+            drop(writer);
+            tracing::info!(port = %port, baud, "fc_connected");
+        }
+        let link_gen = self.link_gen();
+        self.connected.store(true, Ordering::Relaxed);
+        self.stamp_last_msg();
+        self.link_proven.store(false, Ordering::Relaxed);
+        link_gen
+    }
+
+    /// The link dropped (read EOF/error, a write failure, a silent unproven
+    /// port): reset its state before the next open. Clearing the heartbeat
+    /// clock means the freshly re-opened link reads as not-alive until a real
+    /// HEARTBEAT arrives again.
+    pub async fn end_session(&self) {
+        self.connected.store(false, Ordering::Relaxed);
+        *self.last_heartbeat_at.lock().await = None;
+        *self.last_msp_at.lock().await = None;
+        *self.msp_armed.lock().await = None;
+        *self.fc_variant.lock().await = None;
+        *self.fc_device.lock().await = None;
+        self.fc_signed.store(false, Ordering::Relaxed);
+        self.msp_warned.store(false, Ordering::Relaxed);
+        *self.writer.lock().await = None;
+        self.param_priming.store(false, Ordering::Relaxed);
+        *self.param_sweep_started.lock().await = None;
+        *self.param_last_request.lock().await = None;
+        self.param_last_cached_count.store(0, Ordering::Relaxed);
+        self.sensor_streams.reset_link();
+        tracing::warn!("fc_disconnected");
     }
 
     /// Resolves once a link opened without probe evidence has gone
@@ -265,198 +281,15 @@ impl FcConnection {
     }
 
     pub(super) async fn read_loop(&self, mut reader: BoxedReadHalf) {
-        // An MSP FC (identified by its USB descriptor at open) speaks MSP, not
-        // MAVLink, on FC->host, so extract_frames yields nothing and its responses
-        // never reach a GCS proxy on the frame lane. The variant is fixed for this
-        // read loop (set before it starts, cleared only after it returns), so
-        // capture it once and forward the raw bytes below. A MAVLink FC captures
-        // false here, so the frame path is byte-unchanged.
-        let msp_variant = self.fc_variant.lock().await.clone();
-        let is_msp = msp_variant.is_some();
-        // Observe-only reader of the FC's status replies to a proxy poller.
-        let mut msp_sniffer = super::msp_armed::MspResponseSniffer::default();
-        let mut buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut session = self.link_session().await;
         let mut chunk = [0u8; 2048];
-        let mut since_save = Instant::now();
-        // Rolling MSP-evidence accumulator for the link-hint detector.
-        let mut msp_count: usize = 0;
-        let mut msp_window = Instant::now();
-        // Which component on this link is the vehicle. Per session: a re-opened
-        // link latches afresh from its first autopilot HEARTBEAT.
-        let mut vehicle = VehicleSource::default();
-        // The cache is bound to the FC at the first vehicle HEARTBEAT of each
-        // session: a different FC can only appear across a reconnect.
-        let mut fc_adopted = false;
         loop {
             let n = match reader.read(&mut chunk).await {
                 Ok(0) => return, // EOF: link gone
                 Ok(n) => n,
                 Err(_) => return,
             };
-            // Host receive time of every frame completed by this read: the
-            // earliest point this process saw the bytes.
-            let rx_ns = ados_sensorbus::time::mono_ns();
-            // An MSP FC speaks MSP (not MAVLink) on FC->host: forward the raw chunk
-            // verbatim so a polling MSP GCS receives the FC's responses, and skip
-            // MAVLink framing entirely: an MSP stream carries no MAVLink, so
-            // scanning it only spends CPU on 0xFD/0xFE payload bytes and risks a
-            // chance checksum match putting a bogus frame on the frame lane
-            // alongside the raw ones. is_msp is false for a MAVLink FC, so the
-            // framing path below is byte-unchanged; the MSP link hint comes from the
-            // USB-descriptor variant, so the MSP-start sniff is unnecessary here too.
-            if is_msp {
-                self.link_proven.store(true, Ordering::Relaxed);
-                let _ = self.raw_tx.send(Bytes::copy_from_slice(&chunk[..n]));
-                let variant = msp_variant.as_deref().unwrap_or_default();
-                let mut latest = None;
-                msp_sniffer.feed(&chunk[..n], |cmd, payload| {
-                    if let Some(armed) = super::msp_armed::armed_from_frame(variant, cmd, payload) {
-                        latest = Some(armed);
-                    }
-                });
-                if let Some(armed) = latest {
-                    *self.msp_armed.lock().await = Some((armed, Instant::now()));
-                }
-                continue;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            // Cap the reassembly buffer so a stream of junk cannot grow it.
-            if buf.len() > 1 << 20 {
-                buf.clear();
-            }
-            // Sniff the raw chunk for MSP frame starts before reassembly drains
-            // the leading junk where they live. An FC whose serial port is set to
-            // MSP instead of MAVLink emits these; arming the hint lets the
-            // operator be told the link speaks the wrong protocol. Observe-only:
-            // MSP bytes are never decoded, acted on, or forwarded to the FC.
-            let starts = count_msp_frame_starts(&chunk[..n]);
-            if starts > 0 {
-                if msp_window.elapsed() > MSP_WINDOW {
-                    msp_count = 0;
-                    msp_window = Instant::now();
-                }
-                msp_count += starts;
-                // Two starts inside the window, and only while no HEARTBEAT is
-                // live — the alive gate is what guards against a stray `$M`/`$X`
-                // landing inside a MAVLink payload on a healthy link.
-                if msp_count >= 2 && !self.mavlink_alive().await {
-                    self.link_proven.store(true, Ordering::Relaxed);
-                    *self.last_msp_at.lock().await = Some(Instant::now());
-                    if !self.msp_warned.swap(true, Ordering::Relaxed) {
-                        let port = self.port.lock().await.clone();
-                        tracing::warn!(port = %port, "fc_link_msp_detected_not_mavlink");
-                    }
-                }
-            }
-            let frames = extract_frames(&mut buf);
-            if frames.is_empty() {
-                continue;
-            }
-            // Work proof for the supervisor: every checksum-valid frame off the
-            // link counts, whatever component sent it.
-            self.fc_frames_decoded
-                .fetch_add(frames.len() as u64, Ordering::Relaxed);
-            // The arrival timestamp is taken here, before any state lock and
-            // before the fan-out, so the measurement describes when the bytes
-            // reached this process rather than when they won a contended mutex.
-            // The state mutex is fair, not priority-ordered, so that wait is
-            // exactly the thing a loop-rate question is asking about and must
-            // not be folded into the answer.
-            //
-            // One formatted stamp per `read()`, not per frame: every frame in a
-            // chunk arrived in the same `read()`, so a per-frame stamp bought no
-            // extra resolution while allocating an RFC3339 `String` each time —
-            // at the measured 66 frames/s ArduPilot ingest that was the largest
-            // avoidable allocation left in this loop.
-            let now = now_iso();
-            for frame in frames {
-                // Fan the raw frame out verbatim (drop if no consumers / lagging).
-                // The original bytes are forwarded unchanged for both protocol
-                // versions; nothing here re-encodes a received frame. This same
-                // fan-out is the plugin lane: a subscribed consumer (the MAVLink
-                // socket) receives every frame, including a TUNNEL one, and
-                // filters for its own private payload_type on its side.
-                let _ = self.frame_tx.send(RxFrame::new(rx_ns, frame.clone()));
-                self.stamp_last_msg();
-                // Classify a TUNNEL (385) carrying a private (application)
-                // payload_type. The typed parser below rejects an unregistered
-                // payload_type as an unknown enum value, so this reads the type
-                // straight off the wire. This is observe-only: the frame is
-                // already on the plugin lane (the fan-out above); a TUNNEL is a
-                // transparent opaque pipe and is NEVER decoded, acted on, or
-                // re-sent toward the flight controller from here. The read loop
-                // only consumes FC->host frames, so there is no FC-injection path
-                // at this point regardless.
-                if let Some(payload_type) = mavlink::tunnel_payload_type(&frame) {
-                    if payload_type > mavlink::TUNNEL_RESERVED_PAYLOAD_TYPE_MAX {
-                        tracing::debug!(payload_type, "mavlink_tunnel_inbound_to_plugin_lane");
-                    }
-                }
-                if let Ok((header, msg)) = mavlink::parse_any(&frame) {
-                    // Only the vehicle's own frames drive the link and the state.
-                    // The FC forwards every other component's broadcast traffic
-                    // here too (a ground station's HEARTBEAT on a telemetry radio,
-                    // a gimbal, a second companion); those stay on the fan-out
-                    // above but never touch armed, mode, the alive clock, the
-                    // target system or the parameter cache. Our own companion
-                    // HEARTBEAT names no autopilot, so it is excluded the same way.
-                    if !vehicle.admit(header.system_id, header.component_id, &msg) {
-                        continue;
-                    }
-                    self.note_vehicle_frame(&frame);
-                    if let MavMessage::HEARTBEAT(hb) = &msg {
-                        self.latch_fc_identity(header.system_id, header.component_id);
-                        if !fc_adopted {
-                            fc_adopted = true;
-                            self.adopt_fc(crate::param_cache::FcIdentity {
-                                system_id: header.system_id,
-                                autopilot: hb.autopilot as u8,
-                                vehicle_type: hb.mavtype as u8,
-                            })
-                            .await;
-                        }
-                        self.link_proven.store(true, Ordering::Relaxed);
-                        *self.last_heartbeat_at.lock().await = Some(Instant::now());
-                        // A real FC HEARTBEAT clears any MSP suspicion so a link
-                        // that started noisy (or recovered) reads as healthy at
-                        // once, and re-arms the once-per-episode warning for any
-                        // future MSP episode.
-                        *self.last_msp_at.lock().await = None;
-                        self.msp_warned.store(false, Ordering::Relaxed);
-                        msp_count = 0;
-                    }
-                    // `Instant::now()` rather than the hoisted `now`: the
-                    // cadence tracker measures inter-arrival gaps and needs a
-                    // monotonic clock, which the ISO stamp is not.
-                    if matches!(msg, MavMessage::ATTITUDE(_)) {
-                        self.attitude_cadence.lock().await.record(Instant::now());
-                    }
-                    let persist = {
-                        let mut st = self.state.lock().await;
-                        st.update_from_message(&msg, &now)
-                    };
-                    if let Some((name, value, ptype)) = persist {
-                        // Serialise under the lock, release it, then do the disk
-                        // write off-reactor so neither the params lock nor a
-                        // worker thread is held across blocking I/O.
-                        if let Some((path, body)) = self
-                            .record_param(&name, value, ptype, param_slot(&msg), &mut since_save)
-                            .await
-                        {
-                            self.param_persister.persist(path, body);
-                        }
-                    }
-                }
-            }
+            self.ingest(&mut session, &chunk[..n]).await;
         }
-    }
-}
-
-/// The `(param_index, param_count)` of a `PARAM_VALUE`; any other message has
-/// no slot, which [`ParamCache::note_fetched`] ignores.
-fn param_slot(msg: &MavMessage) -> (u16, u16) {
-    match msg {
-        MavMessage::PARAM_VALUE(m) => (m.param_index, m.param_count),
-        _ => (u16::MAX, 0),
     }
 }

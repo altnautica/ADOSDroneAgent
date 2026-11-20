@@ -64,6 +64,7 @@ use ados_protocol::hwcaps::is_rc_bridge_usb_id;
 use framing::count_msp_frame_starts;
 pub(crate) use framing::extract_frames;
 use send_scheduler::STREAM_DEFAULT;
+use status::steady_now;
 use transport::{
     fc_variant_for_port, is_candidate_port, now_iso, open_serial, open_udp_listen, parse_net_spec,
     probe_baud, same_device, split_serial, BoxedReadHalf, NetSpec, ParamPersister, ProbeOutcome,
