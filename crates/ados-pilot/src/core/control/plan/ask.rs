@@ -11,6 +11,10 @@ use crate::geo::{self, V2};
 use crate::model::{limits, GoalLimits};
 use crate::planner::{self, Plan};
 
+/// The most a commanded speed is raised along a detour longer than the
+/// straight way to its end.
+pub const DETOUR_STRETCH_MAX: f32 = 1.5;
+
 impl Pilot {
     /// The goal's speed limit, `max_speed` held to the profile's limit and to
     /// any nav cap, and its own limit without the nav cap.
@@ -36,10 +40,19 @@ impl Pilot {
         let a_dec = APPROACH_DECEL_SHARE * gl.a_h;
         let detour = self.plan.state == AvoidState::Detour
             || goal.is_some_and(|g| g.kind == GoalKind::Vantage);
-        let to = if self.plan.state == AvoidState::Detour {
-            stretch(to, route_beyond_target(&self.plan))
-        } else {
-            to
+        // A commanded speed is the skill's speed toward its goal: along a
+        // detour longer than the straight way to its end it is flown that
+        // much faster (at most [`DETOUR_STRETCH_MAX`]).
+        let mut longer = 1.0;
+        let to = match (self.plan.state, self.plan.target, self.plan.goal) {
+            (AvoidState::Detour, Some(t), Some(end)) => {
+                let route = stretch(to, route_beyond_target(&self.plan));
+                let straight = geo::dist(geo::sub(t, to), end);
+                longer = (geo::norm(route) / straight.max(1e-3)).clamp(1.0, DETOUR_STRETCH_MAX);
+                route
+            }
+            (AvoidState::Detour, ..) => stretch(to, route_beyond_target(&self.plan)),
+            _ => to,
         };
         let Some(g) = goal else {
             return approach(to, a_dec, f32::INFINITY, dt);
@@ -49,7 +62,7 @@ impl Pilot {
         match (command, detour) {
             (true, false) => gv,
             (true, true) if geo::norm(gv) < 1e-3 => [0.0, 0.0],
-            (true, true) => approach(to, a_dec, geo::norm(gv).max(DETOUR_MIN_MPS), dt),
+            (true, true) => approach(to, a_dec, geo::norm(gv).max(DETOUR_MIN_MPS) * longer, dt),
             (false, false) => geo::add(gv, approach(to, a_dec, f32::INFINITY, dt)),
             (false, true) => approach(to, a_dec, f32::INFINITY, dt),
         }
@@ -91,4 +104,41 @@ fn stretch(to: V2, more: f32) -> V2 {
         return to;
     }
     geo::scale(to, (n + more) / n)
+}
+
+#[cfg(test)]
+mod tests {
+    use ados_protocol::pilot::{AvoidState, Goal, GoalKind, VelMode};
+
+    use crate::config::Settings;
+    use crate::core::Pilot;
+    use crate::geo;
+    use crate::model::goal_limits;
+    use crate::planner::Plan;
+
+    #[test]
+    fn a_commanded_speed_is_raised_by_how_much_longer_the_detour_is() {
+        // A detour from the origin round (4, 3) to (8, 0): 10 m of route
+        // for 8 m of straight way. The skill commands 1.4 m/s: the pilot
+        // flies the route at 1.4 x 1.25 = 1.75 m/s, toward its target.
+        let mut p = Pilot::new(Settings::default());
+        p.plan = Plan {
+            state: AvoidState::Detour,
+            target: Some([1.6, 1.2]),
+            goal: Some([8.0, 0.0]),
+            path: vec![[0.0, 0.0], [4.0, 3.0], [8.0, 0.0]],
+            min_clearance: None,
+        };
+        let mut g = Goal::new(GoalKind::Follow, [8.0, 0.0, -4.0], 3.0);
+        g.vel_mode = VelMode::Command;
+        g.vn = 1.4;
+        let gl = goal_limits(p.settings.pilot.profile);
+        let ask = p.goal_ask(Some(&g), [1.6, 1.2], &gl, 0.02);
+        assert!((geo::norm(ask) - 1.75).abs() < 1e-3, "{ask:?}");
+        assert!(geo::dot(ask, [0.8, 0.6]) > geo::norm(ask) - 1e-3, "{ask:?}");
+        // A detour no longer than the straight way keeps the commanded speed.
+        p.plan.goal = Some([16.0, 0.0]);
+        let ask = p.goal_ask(Some(&g), [1.6, 1.2], &gl, 0.02);
+        assert!((geo::norm(ask) - 1.4).abs() < 1e-3, "{ask:?}");
+    }
 }
