@@ -950,3 +950,61 @@ async fn each_pass_keeps_the_boxes_at_its_own_threshold() {
         .unwrap();
     assert_eq!(confs(plugin), vec![0.3, 0.5]);
 }
+
+/// A simulated camera's frames carry the simulator's time beside the host's
+/// capture time, and the tracker steps on the simulator's. The crop window
+/// must come from the same clock: planned on the host's (here 850 s ahead of
+/// the sim), the prediction ran the track's velocity over the longest step and
+/// the window landed hundreds of pixels off the walker (forest walk take
+/// 20261120-195849: walker inside the window on 9 of 55 crop batches, the
+/// lock `uncertain` on most batches).
+#[tokio::test]
+async fn a_simulated_frame_plans_its_crop_on_the_simulators_clock() {
+    let (e, _, _) = logged_follow_engine().await;
+    e.configure_crop_primary("det", None, 500_000_000);
+    // Crossing the picture at 120 px/s: a prediction run over the wrong clock
+    // carries it far off the walker.
+    let walk: Vec<[f32; 4]> = (0..24)
+        .map(|i| [300.0 + 12.0 * i as f32, 260.0, 70.0, 200.0])
+        .collect();
+    let at = |i: usize| {
+        let mut d = desc_at(i as u64, 900_000_000_000 + i as u64 * 100_000_000);
+        d.ts_sensor_ns = Some(50_000_000_000 + i as u64 * 100_000_000);
+        d.timebase = ados_protocol::framebus::TIMEBASE_SIM;
+        d
+    };
+    let first = e
+        .infer_and_publish("det", &at(0), &frame_with(&bbox(walk[0])))
+        .await
+        .unwrap();
+    let id = e.designate("main", &first.detections[0]).await.unwrap();
+    let (mut locked, mut windowed) = (0, 0);
+    let frames = 20;
+    for (i, b) in walk.iter().enumerate().skip(1).take(frames) {
+        let batch = e
+            .infer_and_publish("det", &at(i), &frame_with(&bbox(*b)))
+            .await
+            .unwrap();
+        locked += batch
+            .detections
+            .iter()
+            .filter(|d| d.track_id == Some(id) && d.lock_state == Some(LockState::Locked))
+            .count();
+        if let Some(w) = batch.crop_window {
+            windowed += 1;
+            let walker = bbox(*b);
+            assert!(
+                w.x <= walker.x
+                    && w.x + w.width >= walker.x + walker.width
+                    && w.y <= walker.y
+                    && w.y + w.height >= walker.y + walker.height,
+                "frame {i}: window {w:?} misses the walker {walker:?}"
+            );
+        }
+    }
+    assert!(windowed >= frames / 2, "{windowed} crop-only batches");
+    assert!(
+        locked >= frames - 1,
+        "locked on {locked} of {frames} batches"
+    );
+}

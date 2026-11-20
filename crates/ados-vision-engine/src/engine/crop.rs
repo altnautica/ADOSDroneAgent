@@ -162,13 +162,16 @@ impl VisionEngine {
         if !self.tracker_enabled || desc.format != FrameFormat::Rgb24 {
             return whole_only;
         }
+        // The tracker steps on the frame clock (a simulated frame's sim time,
+        // else its capture time): the window is predicted on the same one.
+        let frame_ts = crate::sim_pacing::frame_clock_ns(desc).unwrap_or(desc.ts_ns);
         let Some((predicted, class, coast_steps)) = self
             .trackers
             .lock()
             .await
             .get(&desc.camera_id)
             .and_then(|t| {
-                t.designated_prediction_at(desc.ts_ns)
+                t.designated_prediction_at(frame_ts)
                     .map(|(b, c)| (b, c.to_string(), t.coast_steps()))
             })
         else {
