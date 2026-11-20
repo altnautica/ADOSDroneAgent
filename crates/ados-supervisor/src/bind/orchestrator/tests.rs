@@ -1,8 +1,8 @@
-use super::peer::{peer_evidence_verdict, upstream_key_fresh};
+use super::peer::{counter_advanced, peer_evidence_verdict, upstream_key_fresh};
 use super::prep::{parse_iface_mode, summarize_precheck};
 use super::state::video_nudge_after_failed_bind;
 use super::*;
-use crate::bind::fsm::{now_monotonic, BindState};
+use crate::bind::fsm::BindState;
 use crate::bind::{BindRole, WAITING_PEER_WATCHDOG};
 use std::sync::atomic::Ordering;
 
@@ -81,6 +81,18 @@ fn peer_evidence_never_verifies_without_proof_of_a_real_peer() {
             );
         }
     }
+}
+
+#[test]
+fn the_gate_counts_frames_that_land_after_the_last_poll() {
+    // A fast exchange can start and finish inside one poller period; the
+    // gate's own read against the counter at tunnel open still proves it.
+    assert!(counter_advanced(Some(0), Some(3)));
+    assert!(counter_advanced(Some(7), Some(9)));
+    // No movement, or an unreadable tunnel, proves nothing.
+    assert!(!counter_advanced(Some(4), Some(4)));
+    assert!(!counter_advanced(None, Some(4)));
+    assert!(!counter_advanced(Some(4), None));
 }
 
 #[test]
@@ -185,14 +197,13 @@ async fn busy_when_a_session_holds_the_lock() {
     assert_eq!(busy, Err(BindStartError::Busy));
 }
 
-#[tokio::test]
-async fn reclaims_the_lock_from_a_terminal_orphan_session() {
-    // A guard held while the session record is terminal (e.g. a prior bind
-    // that finished but whose guard-holder has not yet dropped) must be
-    // reclaimable, not a permanent Busy. We assert the decision the self-heal
-    // makes on the session record, not the full reclaim (which needs a live
-    // wedged holder that releases on cancel).
-    let orch = BindOrchestrator::new();
+#[tokio::test(start_paused = true)]
+async fn reclaims_the_lock_only_from_a_finished_or_wedged_session() {
+    // A guard held while the session record has failed or aborted (a prior
+    // bind whose guard-holder is still cleaning up) must be reclaimable, not a
+    // permanent Busy, and so must a session parked past the watchdog. A
+    // session mid-setup (`Idle`), progressing, or finishing a bind that paired
+    // must not be: cancelling it would end a live bind as aborted.
     let mut s = BindSession::new(BindRole::Gs, "operator", None);
     s.transition(BindState::Failed); // terminal
     let terminal_reclaimable = s.state.is_terminal();

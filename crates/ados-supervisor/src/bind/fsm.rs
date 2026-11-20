@@ -138,6 +138,9 @@ pub struct BindSession {
     pub source: String,
     /// Monotonic float stamped on every transition (for `phase_age_s`).
     pub phase_entered_at: Option<f64>,
+    /// The same instant on the runtime's clock, which the no-progress watchdog
+    /// and the stale-lock reclaim measure against.
+    pub phase_clock: Option<tokio::time::Instant>,
     /// Monotonic float stamped when the bind TUN RX counter last advanced.
     pub last_frame_at: Option<f64>,
     pub last_rssi_dbm: Option<i32>,
@@ -167,6 +170,9 @@ impl BindSession {
             peer_device_id,
             source: source.to_string(),
             phase_entered_at: None,
+            // The setup window (`Idle`) has a clock too, so the stale-lock
+            // reclaim can tell a session mid-setup from a wedged one.
+            phase_clock: Some(tokio::time::Instant::now()),
             last_frame_at: None,
             last_rssi_dbm: None,
             bind_precheck: None,
@@ -179,6 +185,20 @@ impl BindSession {
     pub fn transition(&mut self, new_state: BindState) {
         self.state = new_state;
         self.phase_entered_at = Some(now_monotonic());
+        self.phase_clock = Some(tokio::time::Instant::now());
+    }
+
+    /// Whether a new bind may take the single-flight guard from the holder of
+    /// this session: its record has failed or aborted (the holder is only
+    /// cleaning up), or its phase has been parked past the rendezvous
+    /// watchdog. An `Idle` record's holder is setting the radio up for its bind
+    /// and a `Paired` one's is finishing a bind that succeeded; cancelling
+    /// either would end a live bind as aborted.
+    pub fn lock_reclaimable(&self) -> bool {
+        matches!(self.state, BindState::Failed | BindState::Aborted)
+            || self
+                .phase_clock
+                .is_none_or(|t| t.elapsed() > super::WAITING_PEER_WATCHDOG)
     }
 
     /// The REST/sentinel snapshot — same key set + ordering as Python

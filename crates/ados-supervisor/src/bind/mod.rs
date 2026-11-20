@@ -104,7 +104,9 @@ pub const WAITING_PEER_WATCHDOG: Duration = Duration::from_secs(120);
 /// a peer rendezvous occurs the key exchange completes in seconds; a longer
 /// budget only delays surfacing a peer that connected but then stalled.
 pub const KEY_TRANSFER_TIMEOUT: Duration = Duration::from_secs(90);
-/// Service-restart budget (`RESTARTING_SERVICES`).
+/// No-progress watchdog budget for `RESTARTING_SERVICES`. The key apply that
+/// phase runs is the commit point and is always finished, so past this budget
+/// the watchdog only logs; the session reports what the apply did.
 pub const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bounded wait for a wedged prior session to release the single-flight guard
 /// after it is asked to cancel, before a new bind gives up with `Busy`. Only

@@ -1,8 +1,6 @@
 //! Session bookkeeping: state mutators, the no-progress watchdog, cleanup,
 //! lifecycle events and the cross-process sentinel.
 
-use std::path::Path;
-
 use ados_protocol::logd::Level;
 use serde_json::{json, Value};
 
@@ -11,14 +9,14 @@ use super::{BindOrchestrator, InjectionPrepOutcome};
 use crate::bind::bind_event::{
     bind_failed_detail, bind_precheck_detail, BindFailReason, BIND_FAILED_KIND, BIND_PRECHECK_KIND,
 };
-use crate::bind::fsm::{now_monotonic, BindSession, BindState};
-use crate::bind::{socat, BindRole};
+use crate::bind::fsm::{BindSession, BindState};
+use crate::bind::BindRole;
 
 impl BindOrchestrator {
     /// Restart the normal wfb unit after a failed/aborted session so the rig is
     /// never left with both bind and normal profiles stopped.
     pub(super) async fn cleanup(&self, role: BindRole) {
-        socat::kill_stale_bind_socats().await;
+        self.host.kill_stale_socats().await;
         self.pm.stop(role.bind_unit()).await;
         self.pm.start(role.normal_unit()).await;
         // Same recovery as the success path, for a drone that holds a key: its
@@ -26,8 +24,7 @@ impl BindOrchestrator {
         // A drone with no key has no radio link for video to re-attach to, and
         // an unpaired drone runs a bind every ~40 s, so nudging it here would
         // tear its LAN video down on every attempt.
-        let key_held =
-            crate::bind::keys::read_public_fingerprint(Path::new(role.key_path())).is_ok();
+        let key_held = self.host.read_public_fingerprint(role.key_path()).is_ok();
         if video_nudge_after_failed_bind(role, key_held) {
             self.pm.try_restart("ados-video.service").await;
         }
@@ -42,7 +39,7 @@ impl BindOrchestrator {
         // every loop and nothing restores the onboard WiFi's data path. The 1 Hz
         // window guard covers the steady churn; this is the final restore after
         // the normal unit is back. Idempotent + channel-safety-gated.
-        crate::reg_reconciler::reconcile_global_domain(&self.events).await;
+        self.host.reconcile_reg_domain(&self.events).await;
     }
 
     /// Stamp the injection-iface prep result onto the session sentinel and ship a
@@ -165,13 +162,13 @@ impl BindOrchestrator {
         loop {
             let snapshot = {
                 let g = self.session.lock().await;
-                g.as_ref().map(|s| (s.state, s.phase_entered_at))
+                g.as_ref().map(|s| (s.state, s.phase_clock))
             };
-            if let Some((state, phase_entered_at)) = snapshot {
-                if let (Some(budget), Some(entered)) = (state.watchdog_budget(), phase_entered_at) {
-                    let parked = (now_monotonic() - entered).max(0.0);
-                    if parked >= budget.as_secs_f64() {
-                        return (state, parked);
+            if let Some((state, phase_clock)) = snapshot {
+                if let (Some(budget), Some(entered)) = (state.watchdog_budget(), phase_clock) {
+                    let parked = entered.elapsed();
+                    if parked >= budget {
+                        return (state, parked.as_secs_f64());
                     }
                 }
             }
@@ -181,13 +178,13 @@ impl BindOrchestrator {
 
     pub(super) async fn write_sentinel(&self) {
         let snap = self.session.lock().await.clone();
-        write_sentinel(snap.as_ref());
+        self.host.write_sentinel(&sentinel_body(snap.as_ref()));
     }
 }
 
-/// Write the cross-process bind sentinel atomically. `active` is the negation of
-/// the terminal-state set; an absent session writes `{"active": false}`.
-pub(super) fn write_sentinel(snap: Option<&BindSession>) {
+/// The cross-process bind sentinel body. `active` is the negation of the
+/// terminal-state set; an absent session writes `{"active": false}`.
+pub(super) fn sentinel_body(snap: Option<&BindSession>) -> Vec<u8> {
     let mut v = snap.map(|s| s.to_json()).unwrap_or_else(|| json!({}));
     let active = snap.map(|s| s.state.is_active()).unwrap_or(false);
     if let Some(obj) = v.as_object_mut() {
@@ -198,12 +195,7 @@ pub(super) fn write_sentinel(snap: Option<&BindSession>) {
             json!(crate::bind::BIND_STATE_SIDECAR_VERSION),
         );
     }
-    if let Ok(body) = serde_json::to_vec(&v) {
-        let sentinel = Path::new(crate::bind::BIND_STATE_SENTINEL);
-        if let Err(e) = ados_protocol::sidecar::write_atomic(sentinel, &body, 0o644) {
-            tracing::debug!(error = %e, "bind_sentinel_write_failed");
-        }
-    }
+    serde_json::to_vec(&v).unwrap_or_default()
 }
 
 /// Out-of-process `is_bind_active()`: read the sentinel's `active` flag. Used by

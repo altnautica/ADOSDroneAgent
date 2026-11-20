@@ -28,6 +28,7 @@ use serde_norway::{Mapping, Value};
 use crate::process_manager::ProcessManager;
 
 use super::fsm::iso_now;
+use super::orchestrator::BindHost;
 use super::BindRole;
 
 mod cameras;
@@ -307,6 +308,7 @@ pub fn persist_pair_state(
 /// with the unit stopped. Once the blob has arrived here the apply is atomic.
 pub async fn apply_keypair(
     pm: Arc<dyn ProcessManager>,
+    host: Arc<dyn BindHost>,
     blob: &[u8],
     role: BindRole,
     peer_device_id: Option<&str>,
@@ -315,12 +317,12 @@ pub async fn apply_keypair(
     validate_blob(blob)?;
 
     // Own the inputs so the apply task is self-contained (no borrow can be
-    // invalidated by a dropped caller future). The process-manager backend is an
-    // `Arc`, cheap to move into the task.
+    // invalidated by a dropped caller future). The process-manager backend and
+    // the host are `Arc`s, cheap to move into the task.
     let blob = blob.to_vec();
     let peer_device_id = peer_device_id.map(|s| s.to_string());
     let handle = tokio::spawn(async move {
-        apply_keypair_inner(pm, &blob, role, peer_device_id.as_deref(), fleet).await
+        apply_keypair_inner(pm, host, &blob, role, peer_device_id.as_deref(), fleet).await
     });
     // Joining propagates the inner result; a JoinError (the task panicked) is the
     // only way to land here without a result, surfaced as a write failure.
@@ -335,6 +337,7 @@ pub async fn apply_keypair(
 /// mid-sequence.
 async fn apply_keypair_inner(
     pm: Arc<dyn ProcessManager>,
+    host: Arc<dyn BindHost>,
     blob: &[u8],
     role: BindRole,
     peer_device_id: Option<&str>,
@@ -364,31 +367,20 @@ async fn apply_keypair_inner(
         tracing::warn!(unit, "wfb_unit_still_active_before_key_write");
     }
 
-    let target = Path::new(role.key_path());
-    write_atomic(target, blob, 0o600).map_err(|e| format!("key write failed: {e}"))?;
-    let fingerprint = read_public_fingerprint(target).ok();
+    let target = role.key_path();
+    host.write_key(target, blob)
+        .map_err(|e| format!("key write failed: {e}"))?;
+    let fingerprint = host.read_public_fingerprint(target).ok();
     let paired_at = iso_now();
 
     // Disarm auto_pair UNCONDITIONALLY (see module doc) — never gate on peer id.
     // Safe now that the orchestrator's peer-evidence gate keeps an unverified
     // (solo/phantom) bind from ever reaching this apply.
-    persist_pair_state(
-        Path::new(super::CONFIG_YAML),
-        Path::new(super::CONFIG_LOCK_PATH),
-        role,
-        peer_device_id,
-        Some(&paired_at),
-        Some(false),
-        fleet,
-    );
+    host.persist_pair_state(role, peer_device_id, Some(&paired_at), Some(false), fleet);
 
     // Best-effort setup-complete sentinel (the captive portal stands down).
     let body = format!("{paired_at}\n");
-    if let Err(e) = write_atomic(
-        Path::new(super::SETUP_COMPLETE_PATH),
-        body.as_bytes(),
-        0o644,
-    ) {
+    if let Err(e) = host.write_setup_complete(body.as_bytes()) {
         tracing::warn!(error = %e, "setup_complete_sentinel_failed");
     }
 

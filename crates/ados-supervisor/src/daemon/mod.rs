@@ -70,6 +70,10 @@ async fn serve() -> Result<()> {
     // The bind orchestrator is shared between the monitor (which gates radio
     // auto-restart on a live bind) and the control socket task.
     let bind_orch = Arc::new(bind::orchestrator::BindOrchestrator::new());
+    // A bind the previous process was killed in the middle of left its window
+    // open (bind unit up, sentinel active): close it before the radio unit
+    // starts.
+    bind_orch.recover_interrupted().await;
 
     // Publish the board fingerprint sidecar (/run/ados/board.json) BEFORE any
     // service starts, so the first reader never sees an absent file. This is now

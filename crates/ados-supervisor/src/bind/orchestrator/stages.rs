@@ -1,17 +1,13 @@
 //! The bind stages proper: pre-flight, radio prep, tunnel bring-up, the wire
 //! key exchange behind the peer-evidence gate, and key application.
 
-use std::path::Path;
-
-use super::peer::{peer_evidence_verdict, peer_poll, upstream_key_fresh};
-use super::prep::prepare_injection_iface_for_bind;
-use super::{AbortOnDrop, BindError, BindOrchestrator, PeerEvidence};
+use super::peer::{counter_advanced, peer_evidence_verdict, peer_poll};
+use super::{AbortOnDrop, BindError, BindOrchestrator, PeerEvidence, SocatFailure};
 use crate::bind::bind_event::BindFailReason;
 use crate::bind::fsm::BindState;
 use crate::bind::{
-    iface, keys, socat, BindRole, KEY_TRANSFER_TIMEOUT, RESTART_TIMEOUT, TUNNEL_WAIT_TIMEOUT,
-    UPSTREAM_BIND_KEY, UPSTREAM_BIND_YAML, UPSTREAM_DRONE_KEY, UPSTREAM_GS_KEY, WFB_BIND_CLIENT_SH,
-    WFB_BIND_SERVER_SH,
+    keys, socat, BindRole, KEY_TRANSFER_TIMEOUT, TUNNEL_WAIT_TIMEOUT, UPSTREAM_BIND_KEY,
+    UPSTREAM_BIND_YAML, WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH,
 };
 
 impl BindOrchestrator {
@@ -25,7 +21,7 @@ impl BindOrchestrator {
         // Pre-flight: every external dep must be present BEFORE we touch the
         // radio so a missing artifact fails fast with a structured error.
         for path in [UPSTREAM_BIND_KEY, UPSTREAM_BIND_YAML] {
-            if !Path::new(path).is_file() {
+            if !self.host.file_present(path) {
                 return Err(BindError::new(format!(
                     "upstream wfb-ng artifact missing: {path}. Reinstall via \
                      install.sh to provision /etc/bind.key and /etc/bind.yaml."
@@ -33,14 +29,14 @@ impl BindOrchestrator {
             }
         }
         for script in [WFB_BIND_SERVER_SH, WFB_BIND_CLIENT_SH] {
-            if !Path::new(script).is_file() {
+            if !self.host.file_present(script) {
                 return Err(BindError::new(format!(
                     "upstream wfb-ng helper missing: {script}. wfb-ng package \
                      must be installed via install.sh."
                 )));
             }
         }
-        if !crate::bind::on_path("socat") {
+        if !self.host.on_path("socat") {
             return Err(BindError::new(
                 "socat binary not found on PATH. Install via `apt install \
                  socat` or rerun install.sh.",
@@ -50,7 +46,7 @@ impl BindOrchestrator {
         // GS-only: generate the fresh keypair BEFORE stopping the wfb unit so a
         // keygen failure leaves the rig with its normal service still running.
         if role == BindRole::Gs {
-            self.generate_keypair().await?;
+            self.host.generate_keypair().await.map_err(BindError::new)?;
         }
 
         // Stop the normal unit so it releases the radio for the bind profile.
@@ -64,9 +60,7 @@ impl BindOrchestrator {
         // domain — poisoning the onboard WiFi at the source. A no-op when already
         // current; off the async runtime (blocking modprobe). Layer of prevention
         // beneath the bind-window reg guard, which remains the backstop.
-        tokio::task::spawn_blocking(|| crate::rtl_modprobe::reconcile_live_driver(true))
-            .await
-            .ok();
+        self.host.reconcile_injection_driver().await;
 
         // Put the WFB injection adapter into NetworkManager-enumerable monitor
         // mode before the bind unit starts. The vendored wfb-ng `wfb-server`
@@ -79,7 +73,7 @@ impl BindOrchestrator {
         // monitor mode (readback + retry) and the result is stamped on the
         // sentinel + emitted as a durable event, so a stuck bind is diagnosable
         // without a wfb-server stderr trace.
-        let prep = prepare_injection_iface_for_bind().await;
+        let prep = self.host.prepare_injection_iface().await;
         self.record_bind_precheck(role, &prep).await;
 
         self.set_state(BindState::OpeningTunnel).await;
@@ -98,7 +92,7 @@ impl BindOrchestrator {
         // (which can time out on a failing bind and never reach the post-tunnel
         // heal at tunnel_and_transfer). The 1 Hz bind-window guard keeps it pinned
         // thereafter; this is the prompt first heal.
-        crate::reg_reconciler::reconcile_global_domain(&self.events).await;
+        self.host.reconcile_reg_domain(&self.events).await;
 
         // try { … } finally { stop bind_unit }: the bind unit is stopped on
         // BOTH success and failure once it has been started.
@@ -118,7 +112,11 @@ impl BindOrchestrator {
         fleet: Option<keys::FleetIdentity>,
     ) -> Result<(), BindError> {
         let bind_iface = role.bind_iface();
-        if !iface::wait_for_iface(bind_iface, TUNNEL_WAIT_TIMEOUT).await {
+        if !self
+            .host
+            .wait_for_iface(bind_iface, TUNNEL_WAIT_TIMEOUT)
+            .await
+        {
             return Err(BindError::with_phase(
                 format!(
                     "bind tunnel interface {bind_iface} did not come up within {}s",
@@ -139,14 +137,19 @@ impl BindOrchestrator {
         // ever forces a domain that permits the configured channel and never the
         // baked country / world default; idempotent when already in sync. The
         // supervisor's periodic reconciler stays the backstop.
-        crate::reg_reconciler::reconcile_global_domain(&self.events).await;
+        self.host.reconcile_reg_domain(&self.events).await;
 
         self.set_state(BindState::WaitingPeer).await;
+
+        // The counter as the tunnel opens: the gate compares against it, so a
+        // frame that lands after the poller's last sample still counts.
+        let rx_at_open = self.host.rx_packets(bind_iface);
 
         // Background poller: stamps last_frame_at when the bind TUN RX counter
         // advances. Aborted on return via the guard's Drop.
         let _poll_guard = AbortOnDrop(tokio::spawn(peer_poll(
             self.session.clone(),
+            self.host.clone(),
             bind_iface.to_string(),
         )));
 
@@ -154,7 +157,7 @@ impl BindOrchestrator {
         // key must have been deposited AFTER this instant to count as this
         // session's transfer (a leftover from any earlier bind has an older
         // mtime and must not satisfy the success check).
-        let session_start = std::time::SystemTime::now();
+        let session_start = self.host.wall_now();
 
         // Stages 4+5 share ONE budget (matches Python: splitting them would
         // change the failure phase the GCS badge reports on timeout).
@@ -177,10 +180,15 @@ impl BindOrchestrator {
             // 1. Decoded peer traffic on the bind TUN this session — the TUN RX
             //    counter only advances for frames that passed FEC + decryption
             //    in wfb_rx, and a local TCP loopback never traverses the TUN.
-            let frames_seen = {
+            //    The poller samples once a second, and a fast exchange can
+            //    start and finish inside one sample period, so the counter is
+            //    also read here and compared with its value at tunnel open.
+            let polled = {
                 let g = self.session.lock().await;
                 g.as_ref().and_then(|s| s.last_frame_at).is_some()
             };
+            let frames_seen =
+                polled || counter_advanced(rx_at_open, self.host.rx_packets(bind_iface));
             // 2. Drone only: the upstream key file must have been deposited by
             //    THIS session's transfer (the wire protocol copies it fresh on
             //    a real exchange). A pre-existing file from an earlier bind
@@ -218,7 +226,7 @@ impl BindOrchestrator {
             self.set_peer_verified(Some(true)).await;
             self.set_state(BindState::ApplyingKeys).await;
 
-            if !Path::new(upstream).is_file() {
+            if !self.host.file_present(upstream) {
                 return Err(BindError::with_phase(
                     format!(
                         "bind protocol completed but {upstream} not present. \
@@ -227,7 +235,7 @@ impl BindOrchestrator {
                     "applying_keys",
                 ));
             }
-            std::fs::read(upstream).map_err(|e| {
+            self.host.read_file(upstream).map_err(|e| {
                 BindError::with_phase(format!("failed to read {upstream}: {e}"), "applying_keys")
             })
         })
@@ -248,35 +256,27 @@ impl BindOrchestrator {
             }
         };
 
-        // Stage 6: apply the key + restart the normal wfb unit, own budget.
+        // Stage 6: apply the key + restart the normal wfb unit. The apply is
+        // the commit point: it runs to completion in its own task (every
+        // service-manager call in it is bounded by the backend), so it is
+        // awaited to the end rather than raced against a timer that would
+        // report a failure while the new key still goes live.
         self.set_state(BindState::RestartingServices).await;
-        match tokio::time::timeout(
-            RESTART_TIMEOUT,
-            keys::apply_keypair(
-                self.pm.clone(),
-                &blob,
-                role,
-                peer_device_id.as_deref(),
-                fleet,
-            ),
+        if let Err(e) = keys::apply_keypair(
+            self.pm.clone(),
+            self.host.clone(),
+            &blob,
+            role,
+            peer_device_id.as_deref(),
+            fleet,
         )
         .await
         {
-            Ok(Ok(_pair)) => {}
-            Ok(Err(e)) => return Err(BindError::with_phase(e, "restarting_services")),
-            Err(_) => {
-                return Err(BindError::with_phase(
-                    format!(
-                        "service restart timed out after {}s",
-                        RESTART_TIMEOUT.as_secs()
-                    ),
-                    "restarting_services",
-                ))
-            }
+            return Err(BindError::with_phase(e, "restarting_services"));
         }
 
         // Best-effort fingerprint of the freshly applied key.
-        let fp = keys::read_public_fingerprint(Path::new(role.key_path())).ok();
+        let fp = self.host.read_public_fingerprint(role.key_path()).ok();
         self.set_fingerprint(fp).await;
 
         self.set_state(BindState::Paired).await;
@@ -284,43 +284,9 @@ impl BindOrchestrator {
         Ok(())
     }
 
-    /// GS-only `wfb_keygen` in `/etc` → `/etc/gs.key` + `/etc/drone.key`.
-    async fn generate_keypair(&self) -> Result<(), BindError> {
-        if !crate::bind::on_path("wfb_keygen") {
-            return Err(BindError::new(
-                "wfb_keygen binary not found on PATH. install.sh provisions \
-                 wfb-ng with the keygen tool; reinstall the agent.",
-            ));
-        }
-        // Remove stale leftovers so a half-written pair can't ship mismatched.
-        for path in [UPSTREAM_GS_KEY, UPSTREAM_DRONE_KEY] {
-            let _ = std::fs::remove_file(path);
-        }
-        let out = tokio::process::Command::new("wfb_keygen")
-            .current_dir("/etc")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| BindError::new(format!("wfb_keygen spawn failed: {e}")))?;
-        if !out.status.success() {
-            return Err(BindError::new(format!(
-                "wfb_keygen failed (rc={:?}): {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        if !Path::new(UPSTREAM_GS_KEY).is_file() || !Path::new(UPSTREAM_DRONE_KEY).is_file() {
-            return Err(BindError::new(format!(
-                "wfb_keygen exited 0 but did not produce {UPSTREAM_GS_KEY} + {UPSTREAM_DRONE_KEY}"
-            )));
-        }
-        Ok(())
-    }
-
     /// Drone side: listen on the tunnel rendezvous for the gs to connect.
     async fn run_drone_server(&self) -> Result<(), BindError> {
-        if !Path::new(WFB_BIND_SERVER_SH).is_file() {
+        if !self.host.file_present(WFB_BIND_SERVER_SH) {
             return Err(BindError::new(format!(
                 "upstream {WFB_BIND_SERVER_SH} missing. wfb-ng package must be installed."
             )));
@@ -332,7 +298,7 @@ impl BindOrchestrator {
 
     /// GS side: connect to the drone's listener over the tunnel.
     async fn run_gs_client(&self) -> Result<(), BindError> {
-        if !Path::new(WFB_BIND_CLIENT_SH).is_file() {
+        if !self.host.file_present(WFB_BIND_CLIENT_SH) {
             return Err(BindError::new(format!(
                 "upstream {WFB_BIND_CLIENT_SH} missing. wfb-ng package must be installed."
             )));
@@ -345,11 +311,12 @@ impl BindOrchestrator {
     /// Spawn the socat tunnel (process-group isolated) and run it to exit. A
     /// non-zero rc → a `transferring_keys`-tagged error with the stderr tail.
     async fn run_socat(&self, args: &[String], what: &str) -> Result<(), BindError> {
-        let mut proc = socat::SocatProcess::spawn(args).map_err(|e| {
-            BindError::with_phase(format!("failed to spawn {what}: {e}"), "transferring_keys")
-        })?;
-        let (rc, _stdout, stderr) = proc.run().await.map_err(|e| {
-            BindError::with_phase(format!("{what} run failed: {e}"), "transferring_keys")
+        let (rc, stderr) = self.host.run_socat(args).await.map_err(|e| {
+            let message = match e {
+                SocatFailure::Spawn(e) => format!("failed to spawn {what}: {e}"),
+                SocatFailure::Run(e) => format!("{what} run failed: {e}"),
+            };
+            BindError::with_phase(message, "transferring_keys")
         })?;
         if rc != 0 {
             let tail: String = String::from_utf8_lossy(&stderr)

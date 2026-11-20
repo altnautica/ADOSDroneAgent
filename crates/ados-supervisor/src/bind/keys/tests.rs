@@ -16,6 +16,7 @@ async fn apply_keypair_rejects_a_bad_blob_before_touching_any_unit() {
     // blob has arrived (the precondition the cancellation-safe spawn relies on).
     let err = apply_keypair(
         crate::process_manager::select(),
+        std::sync::Arc::new(crate::bind::orchestrator::SystemHost),
         &[0u8; 10],
         BindRole::Drone,
         None,

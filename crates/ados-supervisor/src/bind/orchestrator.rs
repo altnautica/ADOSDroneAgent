@@ -21,12 +21,14 @@ use super::bind_event::BindFailReason;
 use super::fsm::BindSession;
 
 mod error;
+mod host;
 mod peer;
 mod prep;
 mod session;
 mod stages;
 mod state;
 
+pub use host::{BindHost, SocatFailure, SystemHost};
 pub use state::read_sentinel_active;
 
 /// A recoverable bind failure. `phase` names the [`BindState`](super::fsm::BindState)
@@ -88,6 +90,9 @@ pub struct BindOrchestrator {
     /// the normal radio unit, starts the bind unit, and restarts the units on
     /// cleanup. Selected for the host OS.
     pm: Arc<dyn ProcessManager>,
+    /// Every other effect the bind sequence has on the host: files, socat,
+    /// keygen, interfaces, the regulatory domain and the sentinel.
+    host: Arc<dyn BindHost>,
 }
 
 /// The peer-evidence verdict for a completed wire exchange. Pure so the
@@ -106,18 +111,15 @@ enum PeerEvidence {
 }
 
 /// The per-iface result of preparing one injection adapter for monitor mode.
-/// (Constructed only on the linux prep path + in tests; the host lib build sees
-/// it solely through `summarize_precheck`'s slice param.)
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone)]
-struct InjectionPrepOutcome {
-    iface: String,
+pub struct InjectionPrepOutcome {
+    pub iface: String,
     /// The readback operating mode after prep (`monitor` | `managed` | `unknown`).
-    injection_mode: String,
+    pub injection_mode: String,
     /// Whether the readback confirmed `type monitor` within the retry budget.
-    monitor_verified: bool,
+    pub monitor_verified: bool,
     /// Whether NetworkManager enumerates the iface (the legacy precheck condition).
-    nm_enumerable: bool,
+    pub nm_enumerable: bool,
 }
 
 #[cfg(test)]

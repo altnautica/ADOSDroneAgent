@@ -11,13 +11,14 @@ use ados_protocol::logd::{emitter::EventEmitter, Level};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use super::state::write_sentinel;
-use super::{AbortOnDrop, BindError, BindOrchestrator, BindStartError, InProgressGuard};
-use crate::bind::bind_event::{bind_started_detail, BindFailReason, BIND_STARTED_KIND};
-use crate::bind::fsm::{now_monotonic, BindSession, BindState};
-use crate::bind::{
-    keys, socat, BindRole, BIND_REG_RECONCILE_INTERVAL, LOCK_RECLAIM_TIMEOUT, WAITING_PEER_WATCHDOG,
+use super::state::sentinel_body;
+use super::{
+    AbortOnDrop, BindError, BindHost, BindOrchestrator, BindStartError, InProgressGuard, SystemHost,
 };
+use crate::bind::bind_event::{bind_started_detail, BindFailReason, BIND_STARTED_KIND};
+use crate::bind::fsm::{BindSession, BindState};
+use crate::bind::{keys, BindRole, BIND_REG_RECONCILE_INTERVAL, LOCK_RECLAIM_TIMEOUT};
+use crate::process_manager::ProcessManager;
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -42,9 +43,9 @@ impl Drop for InProgressGuard {
 /// shared reconcile is idempotent (a no-op when already in sync) and only ever
 /// forces a domain that permits the configured channel, never the baked country
 /// or the world default.
-async fn bind_window_reg_guard(events: EventEmitter) {
+async fn bind_window_reg_guard(host: Arc<dyn BindHost>, events: EventEmitter) {
     loop {
-        crate::reg_reconciler::reconcile_global_domain(&events).await;
+        host.reconcile_reg_domain(&events).await;
         tokio::time::sleep(BIND_REG_RECONCILE_INTERVAL).await;
     }
 }
@@ -60,13 +61,28 @@ impl BindOrchestrator {
     /// on the current tokio runtime, so call this from within a runtime context
     /// (every call site — the supervisor main and the tests — already is).
     pub fn new() -> Self {
+        Self::with_host(
+            Arc::new(SystemHost),
+            crate::process_manager::select(),
+            EventEmitter::new("ados-supervisor"),
+        )
+    }
+
+    /// Construct the orchestrator over an explicit host, service manager and
+    /// event emitter. [`new`](Self::new) passes the real ones.
+    pub fn with_host(
+        host: Arc<dyn BindHost>,
+        pm: Arc<dyn ProcessManager>,
+        events: EventEmitter,
+    ) -> Self {
         Self {
             lock: Mutex::new(()),
             session: Arc::new(Mutex::new(None)),
             cancel: Arc::new(tokio::sync::Notify::new()),
             session_in_progress: Arc::new(AtomicBool::new(false)),
-            events: EventEmitter::new("ados-supervisor"),
-            pm: crate::process_manager::select(),
+            events,
+            pm,
+            host,
         }
     }
 
@@ -156,12 +172,7 @@ impl BindOrchestrator {
                 let reclaimable = match self.session.lock().await.as_ref() {
                     // Guard held but no session record — orphaned; reclaim.
                     None => true,
-                    Some(s) => {
-                        s.state.is_terminal()
-                            || s.phase_entered_at.is_none_or(|t| {
-                                now_monotonic() - t > WAITING_PEER_WATCHDOG.as_secs_f64()
-                            })
-                    }
+                    Some(s) => s.lock_reclaimable(),
                 };
                 if !reclaimable {
                     return Err(BindStartError::Busy);
@@ -187,8 +198,10 @@ impl BindOrchestrator {
         self.session_in_progress.store(true, Ordering::SeqCst);
         let _in_progress = InProgressGuard(self.session_in_progress.clone());
 
-        // Sweep stragglers before touching the radio (cheap + idempotent).
-        socat::kill_stale_bind_socats().await;
+        // Install this session's record before the stale-socat sweep, which can
+        // take seconds: a concurrent bind that finds the guard held reads the
+        // record to decide whether it may take over, and a missing record reads
+        // as an orphaned guard.
         let new_session = BindSession::new(role, source, peer_device_id.clone());
         // Capture the identifiers + a monotonic origin for the lifecycle events
         // before the session is moved behind the lock.
@@ -196,6 +209,8 @@ impl BindOrchestrator {
         let started_at = Instant::now();
         *self.session.lock().await = Some(new_session);
         self.write_sentinel().await;
+        // Sweep stragglers before touching the radio (cheap + idempotent).
+        self.host.kill_stale_socats().await;
         tracing::info!(role = role.as_str(), source, "bind_session_started");
         self.events.emit(
             BIND_STARTED_KIND,
@@ -211,9 +226,13 @@ impl BindOrchestrator {
         // Pin the global regulatory domain at 1 Hz for the whole window. Dropped
         // (aborting the loop) when this function returns, so it covers the bind
         // unit's monitor-mode churn through every retry AND the cleanup restart.
-        let _reg_guard = AbortOnDrop(tokio::spawn(bind_window_reg_guard(self.events.clone())));
+        let _reg_guard = AbortOnDrop(tokio::spawn(bind_window_reg_guard(
+            self.host.clone(),
+            self.events.clone(),
+        )));
 
         let run = self.run_session(role, peer_device_id, fleet);
+        tokio::pin!(run);
         tokio::pin!(cancel);
         let internal_cancel = self.cancel.clone();
 
@@ -232,13 +251,28 @@ impl BindOrchestrator {
         // (the control socket's `cancel_bind` op). Either aborts. The watchdog is
         // a no-progress detector that re-arms each phase, so a healthy bind whose
         // phases sum past any single budget no longer trips a fixed global timer.
-        let outcome = tokio::select! {
+        let mut outcome = tokio::select! {
             biased;
-            r = run => Outcome::Done(r),
+            r = &mut run => Outcome::Done(r),
             _ = &mut cancel => Outcome::Cancelled,
             _ = internal_cancel.notified() => Outcome::Cancelled,
             (phase, parked_s) = self.watch_no_progress() => Outcome::Watchdog(phase, parked_s),
         };
+
+        // From `RestartingServices` on, the key apply has begun, and it runs to
+        // completion in its own task whatever happens here; at `Paired` only
+        // the bind unit's stop is left. A cancel or the watchdog landing now
+        // must not report the session aborted or failed while the new key
+        // goes live: finish the session and report what the apply did.
+        if !matches!(outcome, Outcome::Done(_))
+            && matches!(
+                self.current_state().await,
+                Some(BindState::RestartingServices | BindState::Paired)
+            )
+        {
+            tracing::warn!("bind_interrupt_after_key_apply_began: finishing the session");
+            outcome = Outcome::Done((&mut run).await);
+        }
 
         let elapsed_s = started_at.elapsed().as_secs();
         match outcome {
@@ -306,8 +340,8 @@ impl BindOrchestrator {
         }
 
         self.set_finished().await;
+        self.write_sentinel().await;
         let snap = self.session.lock().await.clone();
-        write_sentinel(snap.as_ref());
         Ok(snap.map(|s| s.to_json()).unwrap_or_else(|| json!({})))
     }
 }

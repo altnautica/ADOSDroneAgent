@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use super::PeerEvidence;
+use super::{BindHost, PeerEvidence};
 use crate::bind::fsm::{now_monotonic, BindSession};
-use crate::bind::{iface, BindRole, TUNNEL_POLL_INTERVAL};
+use crate::bind::{BindRole, TUNNEL_POLL_INTERVAL};
 
 /// Decide whether a completed wire exchange proved a real peer participated.
 /// `frames_seen` = the bind-TUN RX counter advanced this session (frames that
@@ -42,16 +42,26 @@ pub(super) fn upstream_key_fresh(path: &Path, since: std::time::SystemTime) -> b
         .unwrap_or(false)
 }
 
+/// Whether the bind TUN RX counter moved between two reads. An unreadable read
+/// (iface absent or torn down) proves nothing.
+pub(super) fn counter_advanced(at_open: Option<u64>, now: Option<u64>) -> bool {
+    matches!((at_open, now), (Some(a), Some(b)) if a != b)
+}
+
 /// Background poller: stamp `last_frame_at` when the bind TUN RX counter
 /// advances; self-exits when the session leaves the active set.
-pub(super) async fn peer_poll(session: Arc<Mutex<Option<BindSession>>>, iface: String) {
+pub(super) async fn peer_poll(
+    session: Arc<Mutex<Option<BindSession>>>,
+    host: Arc<dyn BindHost>,
+    iface: String,
+) {
     let mut last: Option<u64> = None;
     loop {
         let active = matches!(session.lock().await.as_ref(), Some(s) if s.state.is_active());
         if !active {
             return;
         }
-        if let Some(current) = iface::read_rx_packets_counter(&iface) {
+        if let Some(current) = host.rx_packets(&iface) {
             if let Some(prev) = last {
                 if current != prev {
                     if let Some(s) = session.lock().await.as_mut() {
