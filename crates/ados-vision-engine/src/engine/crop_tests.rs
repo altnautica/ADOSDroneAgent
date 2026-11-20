@@ -955,9 +955,9 @@ async fn each_pass_keeps_the_boxes_at_its_own_threshold() {
 /// capture time, and the tracker steps on the simulator's. The crop window
 /// must come from the same clock: planned on the host's (here 850 s ahead of
 /// the sim), the prediction ran the track's velocity over the longest step and
-/// the window landed hundreds of pixels off the walker (forest walk take
-/// 20261120-195849: walker inside the window on 9 of 55 crop batches, the
-/// lock `uncertain` on most batches).
+/// the window landed hundreds of pixels off the walker (in a simulated forest
+/// walk the walker was inside the window on 9 of 55 crop batches and the lock
+/// read `uncertain` on most batches).
 #[tokio::test]
 async fn a_simulated_frame_plans_its_crop_on_the_simulators_clock() {
     let (e, _, _) = logged_follow_engine().await;
