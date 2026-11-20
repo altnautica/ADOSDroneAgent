@@ -30,8 +30,9 @@
 //!     -> {"ok":false,"error":"E_BIND_ACTIVE","detail":"<one sentence>"}
 //! {"op":"uplink_give_back","holder_device_id":"...","phone_key":"..."}
 //!     -> {"ok":true,"state":"transmitting","uplink":{...}}
-//! {"op":"uplink_take_back","phone_confirmed":true}
+//! {"op":"uplink_take_back","phone_key":"<holder told>"|null,"phone_confirmed":true}
 //!     -> {"ok":true,"state":"transmitting","uplink":{...}}
+//!     -> {"ok":false,"error":"E_UPLINK_CHANGED",...}   (a holder it did not tell)
 //! {"op":"uplink_status"}
 //!     -> {"ok":true,"state":"standby","uplink":{...},"holder_phone_key":"...","yield_url":"..."}
 //! ```
@@ -50,7 +51,7 @@ use serde_json::{json, Value};
 
 use crate::pair_state;
 
-mod uplink_ops;
+pub mod uplink_ops;
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;

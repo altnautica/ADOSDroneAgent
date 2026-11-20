@@ -24,8 +24,8 @@ use crate::wfb_rx::{GroundTx, TxStdout};
 mod tests;
 
 /// The two ground transmitters a generation drives: [`GroundTx`] on the box,
-/// a fake in the tests.
-pub(super) trait TxPair {
+/// a fake in the tests and the simulation.
+pub trait TxPair {
     fn is_running(&self) -> bool;
     /// Spawn both; their stats streams.
     fn start(&mut self) -> impl Future<Output = std::io::Result<TxStdout>> + Send;
@@ -47,7 +47,8 @@ impl TxPair for GroundTx {
     }
 }
 
-pub(super) struct GenTx<'u, T: TxPair, W> {
+/// One receive generation's ground transmitters, following the uplink's asks.
+pub struct GenTx<'u, T: TxPair, W> {
     uplink: &'u Uplink,
     /// `None` only while dropping, which kills the pair before it detaches.
     tx: Option<T>,
@@ -62,7 +63,7 @@ pub(super) struct GenTx<'u, T: TxPair, W> {
 impl<'u, T: TxPair, W> GenTx<'u, T, W> {
     /// Attach a new generation to `uplink`; the asks it follows from now on,
     /// starting with the one in force.
-    pub(super) fn attach(uplink: &'u Uplink, tx: T) -> (Self, TxAsks) {
+    pub fn attach(uplink: &'u Uplink, tx: T) -> (Self, TxAsks) {
         let asks = uplink.attach_generation();
         let gen_tx = Self {
             uplink,
@@ -79,7 +80,7 @@ impl<'u, T: TxPair, W> GenTx<'u, T, W> {
     /// and could not, which ends the generation exactly as a spawn failure of
     /// the whole chain did. `spawn_watcher` starts the standby watcher's
     /// receiver, when standing by without one.
-    pub(super) async fn apply(
+    pub async fn apply(
         &mut self,
         ask: TxAsk,
         spawn_watcher: impl FnOnce() -> std::io::Result<W>,
@@ -132,7 +133,7 @@ impl<'u, T: TxPair, W> GenTx<'u, T, W> {
     /// End the generation: stop both transmitters and wait until both exited,
     /// then detach (in `Drop`), so a take waiting on this generation is
     /// answered only once nothing it ran transmits.
-    pub(super) async fn close(mut self) {
+    pub async fn close(mut self) {
         if let Some(tx) = self.tx.as_mut().filter(|tx| tx.is_running()) {
             self.stopped.send_replace(true);
             tx.stop().await;

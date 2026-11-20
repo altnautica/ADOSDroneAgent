@@ -219,12 +219,28 @@ async fn the_boxs_operator_takes_back_whether_or_not_the_phone_answered() {
     let dir = tempfile::tempdir().unwrap();
     let u = &new_uplink(&dir);
     // Idempotent while transmitting.
-    let idle = ops::take_back(u, false).await;
+    let idle = ops::take_back(u, None, false).await;
     assert_eq!(idle["state"], json!("transmitting"));
     ops::take(u, take_req("a1b2", "K"), OK_CTX).await;
-    let r = ops::take_back(u, false).await;
+    let r = ops::take_back(u, Some("K"), false).await;
     assert_eq!(r["state"], json!("transmitting"));
     assert!(u.wants_transmit());
+}
+
+/// A take that lands after the take-back read the box transmitting (or read
+/// another holder) is a holder nobody told to stop: the box keeps standing
+/// by for it rather than transmit on top of it.
+#[tokio::test(start_paused = true)]
+async fn a_take_back_never_starts_over_a_holder_it_did_not_tell() {
+    let dir = tempfile::tempdir().unwrap();
+    let u = &new_uplink(&dir);
+    ops::take(u, take_req("a1b2", "K"), OK_CTX).await;
+    for told in [None, Some("OTHER")] {
+        let r = ops::take_back(u, told, false).await;
+        assert_eq!(r["error"], json!("E_UPLINK_CHANGED"));
+        assert!(matches!(u.state(), UplinkState::Standby(_)));
+        assert!(!u.wants_transmit());
+    }
 }
 
 #[tokio::test(start_paused = true)]

@@ -22,6 +22,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - The vision status counts each detector pass's hits on a designated subject: beside `crop_runs`/`crop_hits`, `subject_full_runs` and `subject_full_hits` count the whole-frame passes run while the track is live and those that found a box of its class in the window a crop around it looks in.
 
+- An in-process deterministic simulation of the ground-station uplink handover (`crates/ados-groundlink/tests/dst`, run by `cargo test -p ados-groundlink --test dst`): the box's uplink state, its ops through the command socket, a receive generation on a fake transmitter pair and the LAN route's phone admission, replay guard and take-back signing, against phones that take, give back, answer take-backs and yield to other grounds, over a lossy, duplicating LAN with an eavesdropper replaying captured requests and take-back calls, on a paused clock thousands of times faster than real time. Every 20 ms tick it checks that two grounds never transmit at once except after an unconfirmed take-back (and then for under a minute), that a standby box never radiates, that the box falls back exactly after the 25 s holder window, and that no replayed request or take-back call is accepted; a meta-test checks that one seed replays byte for byte.
+
 ### Changed
 
 - The pilot's angle maths (`atan2`, `asin`, `acos`) is pure Rust, the same on every C library: glibc versions disagreed in the last bit, which moved an obstacle return across a 5° sector edge and changed a brake. `clippy.toml` in `ados-pilot` refuses the platform versions.
@@ -45,6 +47,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 - A launch holds at the height it was asked for. The take-off step ends at 90 % of the launch height, and the pilot's hold kept the height it had then, so a 3 m launch hovered near 2.6 m; the hold now takes the launch height above the steady take-off's start point (above the ground the height reading measures, for the FC's own take-off).
 
 - A ground station reached only over the radio hears the drone's pilot again. A pilot state that does not fit one aux frame goes down as the fields a ground reads instead of being dropped silently; the router status counts states sent, dropped as oversized and failed (`pilot_downlink`) and logs the first drop. A phone's uplink take during a bind is refused with 409 `E_BIND_ACTIVE` instead of 503, since the bind stops the radio service that would have refused it.
+
+- A ground station's take-back no longer starts its transmitters on top of a phone it never told to stop. The take-back route reads the holder, tells it and waits for its answer, then asks the radio service to transmit; a phone whose take landed in between (the route found the box transmitting, or another holder) held the uplink by then, and the box transmitted over it unconfirmed until the phone heard a beacon. The route now names the holder it told (`phone_key` on `uplink_take_back`), and the radio service refuses a take-back over any other holder with 409 `E_UPLINK_CHANGED`, so the operator's retry tells the new holder first. Found by the ground-station uplink simulation (`dst_take_back_race`).
 
 ## [0.123.1] - 2026-11-20
 

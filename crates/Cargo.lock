@@ -307,6 +307,7 @@ name = "ados-groundlink"
 version = "0.124.4"
 dependencies = [
  "ados-config",
+ "ados-control",
  "ados-plugin-host",
  "ados-proc",
  "ados-protocol",
@@ -320,6 +321,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "hmac",
+ "http",
  "mdns-sd",
  "nix 0.29.0",
  "sd-notify",

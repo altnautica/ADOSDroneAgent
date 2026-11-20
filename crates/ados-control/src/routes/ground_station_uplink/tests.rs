@@ -249,6 +249,20 @@ fn a_take_registers_the_phones_own_address_for_the_take_back() {
     );
 }
 
+#[test]
+fn a_take_back_names_the_holder_it_told() {
+    let standby = json!({"ok": true, "state": "standby", "holder_phone_key": "FP"});
+    assert_eq!(
+        take_back_command(&standby, true),
+        json!({"op": "uplink_take_back", "phone_key": "FP", "phone_confirmed": true})
+    );
+    let transmitting = json!({"ok": true, "state": "transmitting", "holder_phone_key": null});
+    assert_eq!(
+        take_back_command(&transmitting, false),
+        json!({"op": "uplink_take_back", "phone_key": null, "phone_confirmed": false})
+    );
+}
+
 async fn body(resp: Response) -> (StatusCode, Value) {
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)

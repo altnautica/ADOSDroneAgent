@@ -85,3 +85,9 @@ nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# The in-process simulation (`tests/dst`) admits the phones' requests and signs
+# the take-back calls with the box's own LAN route code, on a paused virtual
+# clock.
+ados-control = { path = "../ados-control" }
+http = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

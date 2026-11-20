@@ -25,10 +25,13 @@
 //! still spawning cannot answer for the take.
 
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::sync::watch;
+// The runtime's clock: the monotonic clock in the service, a paused virtual
+// clock in the simulation tests.
+use tokio::time::Instant;
 
 pub mod ops;
 pub mod watcher;

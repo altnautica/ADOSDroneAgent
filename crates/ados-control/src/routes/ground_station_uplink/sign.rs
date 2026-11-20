@@ -215,6 +215,15 @@ impl ReplayGuard {
     }
 }
 
+/// The take-back call's body and its base64 MAC under `key` at `now_ms`, the
+/// timestamp the call carries in [`TS_HEADER`].
+pub fn yield_request(key: &[u8; 32], box_device_id: &str, now_ms: i64) -> (String, String) {
+    let body = yield_body(box_device_id);
+    let mac_b64 =
+        base64::engine::general_purpose::STANDARD.encode(yield_mac(key, now_ms, body.as_bytes()));
+    (body, mac_b64)
+}
+
 /// Tell the holding phone to stop transmitting: one `POST` to the address it
 /// registered at take, signed under [`YIELD_MAC_CONTEXT`]. True when it
 /// answered 2xx within [`YIELD_TIMEOUT`], which it does only after its
@@ -223,9 +232,7 @@ pub async fn call_yield(url: &str, key: &[u8; 32], box_device_id: &str, now_ms: 
     let Some((addr, path)) = parse_http_url(url) else {
         return false;
     };
-    let body = yield_body(box_device_id);
-    let mac_b64 =
-        base64::engine::general_purpose::STANDARD.encode(yield_mac(key, now_ms, body.as_bytes()));
+    let (body, mac_b64) = yield_request(key, box_device_id, now_ms);
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
          {TS_HEADER}: {now_ms}\r\n{MAC_HEADER}: {mac_b64}\r\nContent-Length: {}\r\n\

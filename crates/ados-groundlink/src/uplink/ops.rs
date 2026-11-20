@@ -3,9 +3,8 @@
 //! return. Each one holds the uplink's op lock for its whole run, so a stop and
 //! a start never interleave.
 
-use std::time::Instant;
-
 use serde_json::{json, Value};
+use tokio::time::Instant;
 
 use super::{Holder, Uplink, UplinkState, TX_SWITCH_DEADLINE};
 
@@ -147,11 +146,28 @@ pub async fn give_back(u: &Uplink, holder_device_id: &str, phone_key: &str) -> V
 }
 
 /// Transition 3: the box's own operator takes the uplink back. The LAN route
-/// told the phone first and waited for it; `phone_confirmed` says whether it
-/// answered. The box transmits either way.
-pub async fn take_back(u: &Uplink, phone_confirmed: bool) -> Value {
+/// read the holder, told it first and waited for it: `told` is the phone key
+/// of the holder it told (`None` when it found the box transmitting), and
+/// `phone_confirmed` says whether that phone answered. The box transmits
+/// either way, but only over the holder it told: a take that landed after the
+/// route's read is refused here, so the box never starts on top of a phone it
+/// just confirmed standby to and never asked to stop.
+pub async fn take_back(u: &Uplink, told: Option<&str>, phone_confirmed: bool) -> Value {
     let _op = u.op().await;
     if let UplinkState::Standby(holder) = u.state() {
+        if told != Some(holder.phone_key.as_str()) {
+            tracing::warn!(
+                holder_device_id = %holder.device_id,
+                "uplink_take_back_holder_changed: a phone took the uplink while it was being taken back"
+            );
+            return refusal(
+                "E_UPLINK_CHANGED",
+                &format!(
+                    "{} took the uplink while it was being taken back; take it back again to tell it to stop first.",
+                    holder.name
+                ),
+            );
+        }
         tracing::info!(phone_confirmed, "uplink_take_back");
         resume(u, &holder, "uplink_taken_back").await;
     }

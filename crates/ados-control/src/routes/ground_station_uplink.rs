@@ -280,10 +280,21 @@ async fn take_back() -> Response {
         }
         tracing::info!(phone_confirmed, "uplink_take_back_requested");
     }
-    reply_from(
-        groundlink_cmd_roundtrip(
-            &json!({"op": "uplink_take_back", "phone_confirmed": phone_confirmed}),
-        )
-        .await,
-    )
+    reply_from(groundlink_cmd_roundtrip(&take_back_command(&status, phone_confirmed)).await)
+}
+
+/// The command-socket request that takes the uplink back from the holder
+/// `status` named, the one the route told (none when the box was
+/// transmitting): the radio service refuses it if another phone holds the
+/// uplink by then, so the box never starts on top of a phone it did not tell.
+pub fn take_back_command(status: &Value, phone_confirmed: bool) -> Value {
+    let told = match status.get("state").and_then(Value::as_str) {
+        Some("standby") => status.get("holder_phone_key").cloned(),
+        _ => None,
+    };
+    json!({
+        "op": "uplink_take_back",
+        "phone_key": told.unwrap_or(Value::Null),
+        "phone_confirmed": phone_confirmed,
+    })
 }

@@ -27,7 +27,9 @@ mod generation;
 mod ground_video;
 mod receive;
 mod services;
-mod uplink_tx;
+// Public so the in-process simulation (`tests/dst`) drives a generation's
+// transmitters with a fake pair.
+pub mod uplink_tx;
 
 use ados_protocol::shutdown::Shutdown;
 use std::process::ExitCode;

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::uplink::ops::{self, TakeContext, TakeRequest};
-use crate::uplink::uplink;
+use crate::uplink::{uplink, Uplink};
 
 #[derive(Debug, Deserialize)]
 struct UplinkRequest {
@@ -33,6 +33,8 @@ pub(super) enum UplinkCommand {
         phone_key: String,
     },
     TakeBack {
+        /// The phone key of the holder the route told, if it found one.
+        phone_key: Option<String>,
         phone_confirmed: bool,
     },
     Status,
@@ -75,6 +77,7 @@ pub(super) fn parse(line: &[u8]) -> Option<Result<UplinkCommand, Value>> {
             _ => missing("holder_device_id or phone_key"),
         },
         "uplink_take_back" => Ok(UplinkCommand::TakeBack {
+            phone_key: req.phone_key.filter(|k| !k.is_empty()),
             phone_confirmed: req.phone_confirmed,
         }),
         "uplink_status" => Ok(UplinkCommand::Status),
@@ -85,24 +88,34 @@ pub(super) fn parse(line: &[u8]) -> Option<Result<UplinkCommand, Value>> {
 
 /// Serve one line if it is an uplink op.
 pub(super) async fn dispatch(line: &[u8], direct_role: bool) -> Option<Value> {
+    dispatch_on(uplink(), line, || TakeContext {
+        bind_active: ados_supervisor::bind::orchestrator::read_sentinel_active(),
+        direct_role,
+    })
+    .await
+}
+
+/// Serve one line if it is an uplink op, against `u`; `take_context` is read
+/// only for a take.
+pub async fn dispatch_on(
+    u: &Uplink,
+    line: &[u8],
+    take_context: impl FnOnce() -> TakeContext,
+) -> Option<Value> {
     let cmd = match parse(line)? {
         Ok(cmd) => cmd,
         Err(reply) => return Some(reply),
     };
-    let u = uplink();
     Some(match cmd {
-        UplinkCommand::Take(req) => {
-            let ctx = TakeContext {
-                bind_active: ados_supervisor::bind::orchestrator::read_sentinel_active(),
-                direct_role,
-            };
-            ops::take(u, req, ctx).await
-        }
+        UplinkCommand::Take(req) => ops::take(u, req, take_context()).await,
         UplinkCommand::GiveBack {
             holder_device_id,
             phone_key,
         } => ops::give_back(u, &holder_device_id, &phone_key).await,
-        UplinkCommand::TakeBack { phone_confirmed } => ops::take_back(u, phone_confirmed).await,
+        UplinkCommand::TakeBack {
+            phone_key,
+            phone_confirmed,
+        } => ops::take_back(u, phone_key.as_deref(), phone_confirmed).await,
         UplinkCommand::Status => ops::status(u),
     })
 }
@@ -159,9 +172,17 @@ mod tests {
     #[test]
     fn take_back_and_status_parse() {
         assert_eq!(
-            parse(br#"{"op":"uplink_take_back","phone_confirmed":true}"#),
+            parse(br#"{"op":"uplink_take_back","phone_key":"FP-1","phone_confirmed":true}"#),
             Some(Ok(UplinkCommand::TakeBack {
+                phone_key: Some("FP-1".into()),
                 phone_confirmed: true
+            }))
+        );
+        assert_eq!(
+            parse(br#"{"op":"uplink_take_back","phone_key":null,"phone_confirmed":false}"#),
+            Some(Ok(UplinkCommand::TakeBack {
+                phone_key: None,
+                phone_confirmed: false
             }))
         );
         assert_eq!(

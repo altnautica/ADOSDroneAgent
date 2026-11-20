@@ -8,10 +8,11 @@
 //! frame and stamps the holder's beacons; after [`super::HOLDER_STALE`] with
 //! none the box transmits again.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ados_radio::hop::{parse_presence_beacon, verify_hop_packet};
 use tokio::net::UdpSocket;
+use tokio::time::Instant;
 
 use super::{ops, Uplink};
 use crate::presence::resolve_pair_key;
