@@ -775,12 +775,15 @@ async fn a_crop_model_that_fails_every_run_falls_back_to_the_whole_frame() {
     }
 }
 
-/// Two crop batches in a row that leave the designated track coasting turn
-/// the whole frame on for every batch until the track re-associates; then
-/// the crop is primary again. The status counts each pass's hits on the
-/// subject.
+/// Two crop-only batches in a row that leave the designated track coasting
+/// add the whole frame to the next batch, and the count starts again: while
+/// the subject stays lost the whole frame runs on every third batch, never
+/// on every batch (a whole pass costs several crops, and on a small subject
+/// it finds nothing: running it every batch halved the crop rate of a bench
+/// take and its lock never confirmed). After the re-association the crop is
+/// primary again. The status counts each pass's hits on the subject.
 #[tokio::test]
-async fn two_crop_misses_while_coasting_run_the_whole_frame_until_reassociation() {
+async fn crop_misses_while_coasting_add_the_whole_frame_every_third_batch() {
     let (e, _, log) = logged_follow_engine().await;
     // The whole frame's own interval never comes due in this replay.
     e.configure_crop_primary("det", None, 10_000_000_000);
@@ -792,8 +795,10 @@ async fn two_crop_misses_while_coasting_run_the_whole_frame_until_reassociation(
         .await
         .unwrap();
     e.designate("main", &first.detections[0]).await.unwrap();
-    // Seen, seen, then hidden for four batches, then seen again.
-    let seen = [true, true, false, false, false, false, true, true];
+    // Seen, seen, then hidden for six batches, then seen again.
+    let seen = [
+        true, true, false, false, false, false, false, false, true, true,
+    ];
     let mut whole = Vec::new();
     for (k, &visible) in seen.iter().enumerate() {
         let i = k as u64 + 1;
@@ -806,11 +811,11 @@ async fn two_crop_misses_while_coasting_run_the_whole_frame_until_reassociation(
     }
     assert_eq!(
         whole,
-        [false, false, false, false, true, true, true, false],
+        [false, false, false, false, true, false, false, true, false, false],
         "whole-frame pass per batch"
     );
     let status = e.detection_status(&["main".to_string()], 0);
     let c = &status.cameras["main"];
-    assert_eq!((c.subject_full_runs, c.subject_full_hits), (3, 1));
-    assert!(c.crop_runs >= 5 && c.crop_hits >= 3, "{c:?}");
+    assert_eq!((c.subject_full_runs, c.subject_full_hits), (2, 0));
+    assert!(c.crop_runs >= 8 && c.crop_hits >= 4, "{c:?}");
 }

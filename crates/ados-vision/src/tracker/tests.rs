@@ -1339,3 +1339,25 @@ fn a_miss_longer_than_the_reconfirm_window_owes_a_new_reconfirm() {
     let u = t.update_with_appearance(&[cand(obj(100.0, 100.0), 0)]);
     assert_eq!(lock(&u), Some(LockState::Locked));
 }
+
+/// An operator designation carries no descriptor (it is seeded from the
+/// clicked wire box). A small subject the detector finds one batch in two
+/// missed its first batch after the click: miss, hit, miss, hit. The first
+/// hit's descriptor becomes the template, so the second hit is a clean
+/// association inside the re-confirm window and locks; one that looks
+/// different is refused.
+#[test]
+fn a_designation_that_misses_its_first_batch_locks_on_hit_miss_hit() {
+    let run = |last_tag: usize| {
+        let mut t = SingleObjectTracker::new(TrackerConfig::default());
+        t.designate(&obj(100.0, 100.0)).unwrap();
+        let u = t.update_with_appearance(&[]);
+        assert_eq!(lock(&u), Some(LockState::Uncertain));
+        let u = t.update_with_appearance(&[cand(obj(101.0, 100.0), 0)]);
+        assert_eq!(lock(&u), Some(LockState::Uncertain), "the re-confirm frame");
+        t.update_with_appearance(&[]);
+        lock(&t.update_with_appearance(&[cand(obj(102.0, 100.0), last_tag)]))
+    };
+    assert_eq!(run(0), Some(LockState::Locked));
+    assert_eq!(run(1), Some(LockState::Uncertain));
+}

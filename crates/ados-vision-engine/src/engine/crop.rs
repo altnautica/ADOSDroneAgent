@@ -22,10 +22,13 @@
 //! accelerator lease and priority, so the detector's priority over depth is
 //! unchanged.
 //!
-//! A crop that keeps missing a coasting subject is looking in the wrong place
-//! (the subject stepped out of the window, or the crop model does not find it
-//! where the whole frame does): after `CROP_MISSES_TO_WHOLE` such batches in a
-//! row, every batch runs the whole frame too until the track re-associates.
+//! A crop that keeps missing a coasting subject may be looking in the wrong
+//! place (the subject stepped out of the window): after
+//! `CROP_MISSES_TO_WHOLE` crop-only batches in a row that leave the track
+//! coasting, the next batch runs the whole frame too, and the count starts
+//! again. While the subject stays lost the whole frame runs on every third
+//! batch, not every batch: a subject small enough to need the crop is below
+//! the whole frame's size floor, and a whole pass costs several crops.
 
 use std::collections::HashMap;
 
@@ -66,8 +69,8 @@ pub(super) const CROP_COAST_SHRINK: f32 = 0.95;
 /// detector's own pace (`perception_scheduler`).
 const FULL_FRAME_SLACK_NS: u64 = 16_000_000;
 
-/// Crop batches in a row after which the track still coasts, before every
-/// batch runs the whole frame as well until the track re-associates.
+/// Crop-only batches in a row after which the track still coasts, before the
+/// next batch runs the whole frame as well.
 pub(super) const CROP_MISSES_TO_WHOLE: u32 = 2;
 
 /// The frame window the crop pass runs on: the model's input aspect, centred on
@@ -368,13 +371,24 @@ impl VisionEngine {
         }
     }
 
-    /// After the batch's tracker step: a batch that ran the crop pass while a
-    /// designated track is live counts a crop miss when the track still
-    /// coasts after it, and any association ends the run of misses.
-    pub(super) fn note_crop_outcome(&self, camera_id: &str, crop_ran: bool, associated: bool) {
+    /// After the batch's tracker step, while a designated track is live: a
+    /// crop-only batch after which the track still coasts is a crop miss; an
+    /// association, or a batch that ran the whole frame (it just looked
+    /// outside the window), ends the run of misses. So while the subject stays
+    /// lost the whole frame runs on at most every third batch: on a small
+    /// subject it finds nothing the crop does not (the subject sits below its
+    /// size floor) and costs several crops, so running it every batch halved
+    /// the crop rate and kept the lock from confirming.
+    pub(super) fn note_crop_outcome(
+        &self,
+        camera_id: &str,
+        crop_ran: bool,
+        whole_ran: bool,
+        associated: bool,
+    ) {
         let mut state = self.batch_state();
         let c = state.cameras.entry(camera_id.to_string()).or_default();
-        if associated {
+        if associated || whole_ran {
             c.crop_misses = 0;
         } else if crop_ran {
             c.crop_misses += 1;

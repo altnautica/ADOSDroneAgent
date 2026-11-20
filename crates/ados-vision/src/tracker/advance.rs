@@ -95,8 +95,14 @@ impl SingleObjectTracker {
                 // first, still-doubted re-confirm frame out of a coast. A frame
                 // under any contention or doubt leaves the template untouched, so
                 // the EMA can never be dragged onto a prediction-riding
-                // distractor and self-reinforce.
-                if blend && !entering_reconfirm {
+                // distractor and self-reinforce. A track with no template yet
+                // (an operator designation is seeded from a wire box, without
+                // a descriptor) adopts the descriptor of its first association
+                // even on a re-confirm frame: there is no template to poison,
+                // and without one no later association is clean, so a
+                // designation that misses its first batch could only confirm
+                // on two associations in a row.
+                if blend && (!entering_reconfirm || track.template.is_none()) {
                     self.blend_template(&mut track, cand);
                 }
                 track.state = match track.state {

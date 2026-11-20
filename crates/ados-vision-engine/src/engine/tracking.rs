@@ -137,7 +137,12 @@ impl VisionEngine {
                     .await
                     .get(&desc.camera_id)
                     .is_some_and(|t| t.coast_steps() == 0.0);
-                self.note_crop_outcome(&desc.camera_id, times.crop_ms.is_some(), associated);
+                self.note_crop_outcome(
+                    &desc.camera_id,
+                    times.crop_ms.is_some(),
+                    ran_whole,
+                    associated,
+                );
             }
             tracked
         } else {
