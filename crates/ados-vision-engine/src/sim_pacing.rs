@@ -18,26 +18,37 @@
 //!
 //! Lockstep (`simulation.clock_mode: lockstep`). Each simulated camera is a
 //! participant of the agent's barrier from its second frame, once its frame
-//! period is known. Its source hands frame F on one frame late: an Annex-B
-//! NAL ends only at the next start code, so the RTSP source releases F once
-//! F+1's first NAL arrives (the only source that carries simulated frames).
-//! A lane therefore expects its next frame by the time the frame after it is
-//! rendered (two periods past its last frame), and reports done to half a
-//! period past that, never past a held batch's release time, and nothing more
-//! while a frame of it is in inference: the simulator steps no further until
-//! the next frame was decoded and inferred, and every batch is published at
-//! its own sim time. This holds for any `grant_ms`: the barrier acknowledges
-//! a boundary while every report is past it, so the run holds only at the
-//! first boundary at or past the lane's target, after drawing every frame
-//! before it, the releasing frame included (the half period is the margin
-//! for the step that draws it); a coarser grant only lets the run go up to
-//! one grant past the target. A camera whose expected frame has not come
-//! [`LANE_SILENCE_MS`] of wall time after the simulator passed the time it
-//! should have leaves the barrier (under World Engine's default 2 s
-//! participant timeout, so one lost frame never fails the run); a source that
-//! fails or falls silent leaves it too. It joins again once its frames return.
+//! period is known. Its source hands frame F on some frames late, the
+//! source's depth: frame F reaches the engine only once frame F + depth is
+//! rendered. The RTSP source (the only one carrying simulated frames) is two
+//! deep: an Annex-B NAL ends only at the next start code, so the source
+//! writes F to the decoder once F+1's first NAL arrives, and the ffmpeg
+//! decoder emits a picture only once the next one has started (measured on
+//! ffmpeg 8.0.1 with x264 and NVENC streams: one frame held even when fed a
+//! whole access unit and an access unit delimiter, any thread count,
+//! `low_delay`). A lane expects its next frame by the time the frame `depth`
+//! after it is rendered, and reports done to half a period past that, never
+//! past a held batch's release time, and nothing more while a frame of it is
+//! in inference: the simulator steps no further until the next frame was
+//! decoded and inferred, and every batch is published at its own sim time.
+//! This holds for any `grant_ms`: the barrier acknowledges a boundary while
+//! every report is past it, so the run holds only at the first boundary at or
+//! past the lane's target, after drawing every frame before it, the
+//! releasing frame included (the half period is the margin for the step that
+//! draws it); a coarser grant only lets the run go up to one grant past the
+//! target.
+//!
+//! The depth is learned per camera: it starts at [`SOURCE_DEPTH_FRAMES`], and
+//! a lane held past its expected time with no frame for [`LANE_PROBE_MS`] of
+//! wall time (the frame it waits for would have been rendered and on its
+//! way) takes one frame more, up to [`MAX_SOURCE_DEPTH_FRAMES`], so a deeper
+//! source holds the run for a moment, never for good. A camera still without
+//! its frame [`LANE_SILENCE_MS`] after that at the deepest leaves the barrier
+//! (under World Engine's default 2 s participant timeout, so a lost frame
+//! never fails the run); a source that fails or falls silent leaves it too.
+//! It joins again once its frames return, keeping its learned depth.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -47,19 +58,39 @@ use ados_time::{Clock, Participant};
 use serde::Deserialize;
 use tokio::sync::{broadcast, Notify};
 
+mod pacing;
+pub use pacing::Pacing;
+
 /// Weight of the newest inference in the measured latency.
 const LATENCY_EWMA_ALPHA: f64 = 0.2;
 
-/// Frames a simulated camera's source holds back (see the module docs).
-const SOURCE_DELAY_FRAMES: u64 = 1;
+/// The depth a camera's source starts at: the RTSP source's two frames (see
+/// the module docs).
+pub const SOURCE_DEPTH_FRAMES: u64 = 2;
 
-/// Wall time, ms, a lockstep lane waits for a frame that should have come
-/// before it leaves the barrier: under World Engine's default participant
-/// timeout (2 s).
+/// The deepest source a lane learns before it leaves the barrier instead.
+pub const MAX_SOURCE_DEPTH_FRAMES: u64 = 4;
+
+/// Wall time, ms, a lane is held past its expected time with no frame before
+/// it takes one frame more depth.
+pub const LANE_PROBE_MS: u64 = 250;
+
+/// Wall time, ms, a lockstep lane at the deepest waits for a frame that
+/// should have come before it leaves the barrier: under World Engine's
+/// default participant timeout (2 s).
 pub const LANE_SILENCE_MS: u64 = 1_000;
 
 /// How often, wall time, lockstep lanes are checked for a missing frame.
 const LANE_CHECK_MS: u64 = 250;
+
+/// What [`Pacing::overdue`] did to a lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overdue {
+    /// It takes one frame more depth (now this deep); it reports again.
+    Deeper(String, u64),
+    /// It left the barrier.
+    Gone(String),
+}
 
 /// A frame's time on the engine's frame clock: a simulated frame's sim time,
 /// ns; `None` for a frame on the host clock.
@@ -101,129 +132,6 @@ impl SimSetup {
     /// reports to the clock.
     pub fn enabled(&self) -> bool {
         self.gate.enabled
-    }
-}
-
-/// One simulated camera's lane.
-#[derive(Debug, Default, Clone, Copy)]
-struct Lane {
-    last_ns: Option<u64>,
-    period_ns: Option<u64>,
-    /// Frames taken and not yet finished (in inference, or about to be).
-    busy: u32,
-    /// Wall time, ms, since which the simulator is past the time this lane's
-    /// next frame should have arrived by.
-    overdue_since_ms: Option<u64>,
-}
-
-/// The pacing state: held batches and each camera's lane. Pure; the
-/// [`SimPacing`] shell drives it from the clock.
-#[derive(Debug, Default)]
-pub struct Pacing {
-    held: BTreeMap<(u64, u64), DetectionBatch>,
-    seq: u64,
-    lanes: HashMap<String, Lane>,
-}
-
-impl Pacing {
-    /// When `batch` may be published, ns of sim time: its frame's sim time
-    /// plus `latency_ns`. `None` for a batch of a host-clock frame.
-    pub fn release_ns(batch: &DetectionBatch, latency_ns: u64) -> Option<u64> {
-        let ms = u64::try_from(batch.ts_sensor_ms?).ok()?;
-        Some(ms.saturating_mul(1_000_000).saturating_add(latency_ns))
-    }
-
-    /// Hold `batch` until sim time `at_ns`.
-    pub fn hold(&mut self, at_ns: u64, batch: DetectionBatch) {
-        self.seq += 1;
-        self.held.insert((at_ns, self.seq), batch);
-    }
-
-    /// The held batches due at sim time `now_ns`, in release order.
-    pub fn due(&mut self, now_ns: u64) -> Vec<DetectionBatch> {
-        let later = self.held.split_off(&(now_ns.saturating_add(1), 0));
-        std::mem::replace(&mut self.held, later)
-            .into_values()
-            .collect()
-    }
-
-    /// The earliest held release, ns.
-    pub fn next_release(&self) -> Option<u64> {
-        self.held.keys().next().map(|(at, _)| *at)
-    }
-
-    /// A frame of `camera` at sim time `sim_ns` was taken: the lane is busy
-    /// with it until [`Self::free`].
-    pub fn frame(&mut self, camera: &str, sim_ns: u64) {
-        let lane = self.lanes.entry(camera.to_owned()).or_default();
-        if let Some(last) = lane.last_ns.filter(|l| sim_ns > *l) {
-            lane.period_ns = Some(sim_ns - last);
-        }
-        lane.last_ns = Some(lane.last_ns.map_or(sim_ns, |l| l.max(sim_ns)));
-        lane.overdue_since_ms = None;
-        lane.busy += 1;
-    }
-
-    /// One frame [`Self::frame`] took is finished.
-    pub fn free(&mut self, camera: &str) {
-        if let Some(lane) = self.lanes.get_mut(camera) {
-            lane.busy = lane.busy.saturating_sub(1);
-        }
-    }
-
-    /// The camera's source failed or fell silent: its lane starts again.
-    pub fn lost(&mut self, camera: &str) {
-        self.lanes.remove(camera);
-    }
-
-    /// The sim time by which `lane`'s next frame reaches the engine: the time
-    /// the frame after it is rendered (the source's one-frame delay).
-    fn expected_ns(lane: &Lane) -> Option<u64> {
-        let period = lane.period_ns?;
-        Some(lane.last_ns? + period * (1 + SOURCE_DELAY_FRAMES))
-    }
-
-    /// What `camera` reports done to the barrier: half a period past the time
-    /// its next frame reaches the engine, never past one of its held batches.
-    /// `None` while a frame of it is busy or before its period is known.
-    pub fn done_target(&self, camera: &str) -> Option<u64> {
-        let lane = self.lanes.get(camera)?;
-        if lane.busy > 0 {
-            return None;
-        }
-        let next = Self::expected_ns(lane)? + lane.period_ns? / 2;
-        let held = self
-            .held
-            .iter()
-            .find(|(_, b)| b.camera_id == camera)
-            .map(|((at, _), _)| *at);
-        Some(held.map_or(next, |at| at.min(next)))
-    }
-
-    /// The lanes whose expected frame has not come [`LANE_SILENCE_MS`] after
-    /// the simulator passed its expected time, at sim time `sim_now_ns` and
-    /// wall time `wall_ms`; they are removed (they leave the barrier).
-    pub fn overdue(&mut self, sim_now_ns: u64, wall_ms: u64) -> Vec<String> {
-        let mut gone = Vec::new();
-        for (camera, lane) in &mut self.lanes {
-            let late = lane.busy == 0 && Self::expected_ns(lane).is_some_and(|e| sim_now_ns > e);
-            if !late {
-                lane.overdue_since_ms = None;
-                continue;
-            }
-            let since = *lane.overdue_since_ms.get_or_insert(wall_ms);
-            if wall_ms.saturating_sub(since) >= LANE_SILENCE_MS {
-                gone.push(camera.clone());
-            }
-        }
-        for c in &gone {
-            self.lanes.remove(c);
-        }
-        gone
-    }
-
-    fn cameras(&self) -> Vec<String> {
-        self.lanes.keys().cloned().collect()
     }
 }
 
@@ -362,24 +270,43 @@ impl SimPacing {
         self.parts_lock().remove(camera);
     }
 
-    /// Lanes whose expected frame never came leave the barrier.
-    fn drop_overdue(&self, wall_ms: u64) {
+    /// Lanes held past their expected frame take more depth (and report the
+    /// later target); ones whose frame never comes leave the barrier.
+    fn check_overdue(&self, wall_ms: u64) {
         let Some(now) = self.clock.sim_ns() else {
             return;
         };
-        let mut s = self.lock();
-        let gone = s.overdue(now, wall_ms);
-        if gone.is_empty() {
-            return;
+        let mut deeper = Vec::new();
+        {
+            let mut s = self.lock();
+            let out = s.overdue(now, wall_ms);
+            if out.is_empty() {
+                return;
+            }
+            let mut parts = self.parts_lock();
+            for o in out {
+                match o {
+                    Overdue::Deeper(c, depth) => {
+                        tracing::info!(
+                            camera = %c,
+                            depth_frames = depth,
+                            "simulated frame later than its source depth: the camera expects its frames one later"
+                        );
+                        deeper.push(c);
+                    }
+                    Overdue::Gone(c) => {
+                        parts.remove(&c);
+                        tracing::warn!(
+                            camera = %c,
+                            silence_ms = LANE_SILENCE_MS,
+                            "simulated frame overdue: the camera leaves the lockstep barrier until its frames return"
+                        );
+                    }
+                }
+            }
         }
-        let mut parts = self.parts_lock();
-        for c in gone {
-            parts.remove(&c);
-            tracing::warn!(
-                camera = %c,
-                silence_ms = LANE_SILENCE_MS,
-                "simulated frame overdue: the camera leaves the lockstep barrier until its frames return"
-            );
+        for c in deeper {
+            self.report(&c);
         }
     }
 
@@ -459,7 +386,7 @@ async fn silence_loop(p: std::sync::Weak<SimPacing>) {
             return;
         };
         let wall_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        p.drop_overdue(wall_ms);
+        p.check_overdue(wall_ms);
     }
 }
 
