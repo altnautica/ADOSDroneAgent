@@ -2,7 +2,21 @@
 
 use super::*;
 
+/// Steady time for FC heartbeat liveness: wall time, read through Tokio's
+/// clock. In a service it is `Instant::now()`; under the in-process
+/// simulation's paused runtime (`tests/dst`) it advances with the simulated
+/// time, so a heartbeat timeout is exercised without waiting it out.
+pub(super) fn steady_now() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
+
 impl FcConnection {
+    /// Cumulative MAVLink frames decoded off the flight-controller link since
+    /// the process started. Never reset, so a consumer takes deltas.
+    pub fn frames_decoded(&self) -> u64 {
+        self.fc_frames_decoded.load(Ordering::Relaxed)
+    }
+
     /// The flight controller's `(system, component)` id as latched from its
     /// own HEARTBEAT, or `None` before one has been seen on this process.
     ///
@@ -34,7 +48,7 @@ impl FcConnection {
         self.last_heartbeat_at
             .lock()
             .await
-            .map(|t| t.elapsed().as_secs_f64())
+            .map(|t| steady_now().saturating_duration_since(t).as_secs_f64())
     }
     /// Whether a fresh HEARTBEAT has decoded within [`HEARTBEAT_TIMEOUT`]. The
     /// demo loop has no real HEARTBEAT clock but drives synthetic telemetry, so
@@ -44,7 +58,7 @@ impl FcConnection {
             return self.connected.load(Ordering::Relaxed);
         }
         match *self.last_heartbeat_at.lock().await {
-            Some(t) => t.elapsed() < HEARTBEAT_TIMEOUT,
+            Some(t) => steady_now().saturating_duration_since(t) < HEARTBEAT_TIMEOUT,
             None => false,
         }
     }

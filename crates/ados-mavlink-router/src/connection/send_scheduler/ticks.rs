@@ -42,9 +42,11 @@ impl FcConnection {
         slot.replace(fc) != Some(fc)
     }
 
-    /// Adaptive stream request. Picks the interval from how long the link has
-    /// been idle (stalled link re-requests fast; healthy link relaxes toward
-    /// the max), then re-sends the per-message rates when the interval elapses.
+    /// Adaptive stream request. Picks the interval from how long the vehicle
+    /// has streamed nothing but its HEARTBEAT (a stalled link, or an FC that
+    /// rebooted and forgot its intervals, re-requests fast; a streaming link
+    /// relaxes toward the max), then re-sends the per-message rates when the
+    /// interval elapses.
     /// Nothing is requested before the FC identity is latched; the first latch
     /// and an identity change re-request at once, addressed to the FC.
     ///
@@ -275,9 +277,9 @@ impl FcConnection {
         }
     }
 
-    /// Run the stream cadence, banner, landed-state and parameter-sweep ticks
-    /// once a second of ADOS time until `cancel`. Under lockstep the lane
-    /// reports done until its next tick once a tick's FC writes are sent.
+    /// Run [`Self::request_tick`] once a second of ADOS time until `cancel`.
+    /// Under lockstep the lane reports done until its next tick once a
+    /// tick's FC writes are sent.
     pub async fn run_request_ticks(&self, cancel: Shutdown) {
         let lane = self.clock.lane();
         let mut tick = self.clock.interval(Duration::from_secs(1));
@@ -286,14 +288,18 @@ impl FcConnection {
                 l.done_until(&tick);
             }
             tokio::select! {
-                _ = tick.tick() => {
-                    self.tick_streams().await;
-                    self.tick_banner_request().await;
-                    self.tick_landed_state_request().await;
-                    self.tick_param_sweep().await;
-                }
+                _ = tick.tick() => self.request_tick().await,
                 _ = cancel.wait() => break,
             }
         }
+    }
+
+    /// One request tick: the stream cadence, banner, landed-state and
+    /// parameter-sweep requests, in that order.
+    pub async fn request_tick(&self) {
+        self.tick_streams().await;
+        self.tick_banner_request().await;
+        self.tick_landed_state_request().await;
+        self.tick_param_sweep().await;
     }
 }

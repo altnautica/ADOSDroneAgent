@@ -1,6 +1,6 @@
 //! Per-link bookkeeping on [`FcConnection`]: the link generation that keeps a
 //! stale write failure from tearing down a healthy replacement link, the
-//! inbound-activity clock, the FC device and signing observations, and the PIC
+//! stream-activity clock, the FC device and signing observations, and the PIC
 //! gate entry points.
 
 use std::sync::atomic::Ordering;
@@ -80,15 +80,16 @@ impl FcConnection {
         &self.clock
     }
 
-    /// Stamp the inbound-activity clock, on ADOS time.
+    /// Stamp the stream-activity clock, on ADOS time: the link opened, or the
+    /// vehicle sent a streamed frame (anything but its HEARTBEAT).
     pub(super) fn stamp_last_msg(&self) {
         self.last_msg_at
             .store(self.clock.now_ns(), Ordering::Relaxed);
     }
 
-    /// ADOS time since the last inbound frame: on a node following the
-    /// simulator a paused simulator idles nothing, and a link the simulator
-    /// runs at N× goes stale after the same sim time as at 1×.
+    /// ADOS time since the vehicle's last streamed frame: on a node following
+    /// the simulator a paused simulator idles nothing, and a link the
+    /// simulator runs at N× goes stale after the same sim time as at 1×.
     pub(super) fn last_msg_idle(&self) -> Duration {
         let at = self.last_msg_at.load(Ordering::Relaxed);
         Duration::from_nanos(self.clock.now_ns().saturating_sub(at))

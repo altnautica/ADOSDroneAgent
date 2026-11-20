@@ -1,5 +1,6 @@
 //! The FC connect loop, the demo source and the frame read loop.
 
+use super::ingest::param_slot;
 use super::*;
 
 impl FcConnection {

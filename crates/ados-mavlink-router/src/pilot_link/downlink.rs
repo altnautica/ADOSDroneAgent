@@ -3,7 +3,13 @@
 //! `Pilot` channel, and its tally is published in the router status as
 //! `pilot_downlink`.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use ados_protocol::aux_egress::AuxEgress;
+use ados_protocol::aux_mux::AuxChannel;
 
 /// The pilot state goes down the aux link this often.
 pub const DOWNLINK_PERIOD_MS: u64 = 500;
@@ -12,11 +18,51 @@ pub const DOWNLINK_PERIOD_MS: u64 = 500;
 /// the flight controller's system id.
 pub const DOWNLINK_MAX_BODY: usize = ados_protocol::aux_mux::AUX_MAX_PAYLOAD - 1;
 
+/// The lane a downlinked state leaves on: the aux egress's `Pilot` channel on
+/// a drone, an in-process radio in the simulation (`tests/dst`).
+pub trait StateEgress: Send + Sync {
+    /// Send one downlink payload; `Err` says why it did not leave.
+    fn send_state<'a>(
+        &'a self,
+        payload: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+impl StateEgress for AuxEgress {
+    fn send_state<'a>(
+        &'a self,
+        payload: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.send(AuxChannel::Pilot, payload)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+}
+
 /// Who the downlinked state is from, and the lane it leaves on.
 pub struct Downlink {
-    pub egress: std::sync::Arc<ados_protocol::aux_egress::AuxEgress>,
+    pub egress: Arc<dyn StateEgress>,
     /// The flight controller's system id, once learned.
     pub fc_sysid: Box<dyn Fn() -> Option<u8> + Send + Sync>,
+}
+
+/// A due state on its way down: the payload (the FC's system id, then the
+/// trimmed `state` body) and the lane it leaves on.
+pub struct StateSend {
+    pub(super) egress: Arc<dyn StateEgress>,
+    pub payload: Vec<u8>,
+}
+
+impl StateSend {
+    /// Send it, counting the outcome in `stats`.
+    pub async fn send(self, stats: &DownlinkStats) {
+        match self.egress.send_state(&self.payload).await {
+            Ok(()) => stats.sent(),
+            Err(e) => stats.send_failed(&e),
+        }
+    }
 }
 
 /// What the downlink did with each due state.

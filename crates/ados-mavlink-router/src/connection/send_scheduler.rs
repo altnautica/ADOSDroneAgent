@@ -412,13 +412,13 @@ impl FcConnection {
     }
 
     /// [`Self::send_msg`] for this crate's own background tasks (the mission
-    /// mirror's download).
-    pub(crate) async fn send_own(&self, msg: &MavMessage) -> bool {
+    /// mirror's download) and the in-process simulation that drives them.
+    pub async fn send_own(&self, msg: &MavMessage) -> bool {
         self.send_msg(msg).await
     }
 
     /// This router's own `(system id, component id)`.
-    pub(crate) fn our_ids(&self) -> (u8, u8) {
+    pub fn our_ids(&self) -> (u8, u8) {
         (self.cfg.system_id, self.cfg.component_id)
     }
 

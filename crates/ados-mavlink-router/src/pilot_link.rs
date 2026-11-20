@@ -27,11 +27,15 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ados_protocol::pilot::{self, ControlMode};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+// Steady time for the pilot's liveness and the downlink period, read through
+// Tokio's clock: wall time in a service, simulated time under the in-process
+// simulation's paused runtime (`tests/dst`).
+use tokio::time::Instant;
 
 mod downlink;
 mod filter;
@@ -286,14 +290,16 @@ impl PilotLink {
         self.downlink.get().map(|_| self.downlink_stats.snapshot())
     }
 
+    /// One `state` off the pilot socket: record it, and when the downlink is
+    /// due return the send that carries it down. A due state that cannot fit
+    /// one aux frame even reduced is counted (`oversize_dropped`) instead.
+    pub fn on_pilot_state(&self, body: &rmpv::Value) -> Option<StateSend> {
+        self.on_state(body);
+        self.downlink_due(body)
+    }
+
     /// The state body to downlink, when one is due.
-    fn downlink_due(
-        &self,
-        body: &rmpv::Value,
-    ) -> Option<(
-        std::sync::Arc<ados_protocol::aux_egress::AuxEgress>,
-        Vec<u8>,
-    )> {
+    fn downlink_due(&self, body: &rmpv::Value) -> Option<StateSend> {
         let d = self.downlink.get()?;
         let now = self.now_ms();
         if now.saturating_sub(self.downlink_ms.load(Ordering::Relaxed)) < DOWNLINK_PERIOD_MS {
@@ -311,7 +317,10 @@ impl PilotLink {
                 return None;
             }
         }
-        Some((std::sync::Arc::clone(&d.egress), payload))
+        Some(StateSend {
+            egress: std::sync::Arc::clone(&d.egress),
+            payload,
+        })
     }
 
     pub fn send_goto(&self, ned: [f32; 3], yaw: Option<f32>) {
@@ -389,15 +398,8 @@ async fn run(path: PathBuf, mut rx: mpsc::Receiver<Vec<u8>>) {
                     while let Ok(Some(body)) = pilot::read_msg(&mut rd).await {
                         if let (Ok((op, v)), Some(link)) = (pilot::peek_op(&body), global()) {
                             if op == "state" {
-                                link.on_state(&v);
-                                if let Some((egress, payload)) = link.downlink_due(&v) {
-                                    tokio::spawn(async move {
-                                        let ch = ados_protocol::aux_mux::AuxChannel::Pilot;
-                                        match egress.send(ch, &payload).await {
-                                            Ok(()) => link.downlink_stats.sent(),
-                                            Err(e) => link.downlink_stats.send_failed(&e),
-                                        }
-                                    });
+                                if let Some(send) = link.on_pilot_state(&v) {
+                                    tokio::spawn(send.send(&link.downlink_stats));
                                 }
                             }
                         }

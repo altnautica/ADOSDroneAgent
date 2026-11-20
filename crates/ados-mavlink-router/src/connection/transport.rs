@@ -23,7 +23,7 @@ use super::framing::{count_msp_frame_starts, extract_frames};
 /// run loop is transport-agnostic. Serial is the default on the dev rigs; the
 /// `tcp:`/`udp:` connection strings exist for SITL.
 pub(crate) type BoxedReadHalf = Pin<Box<dyn AsyncRead + Send + Unpin>>;
-pub(crate) type BoxedWriteHalf = Pin<Box<dyn AsyncWrite + Send + Unpin>>;
+pub type BoxedWriteHalf = Pin<Box<dyn AsyncWrite + Send + Unpin>>;
 
 /// Wraps a connected [`UdpSocket`] as a duplex byte stream. MAVLink datagrams
 /// arrive one frame per packet, so a read yields one datagram's bytes and a

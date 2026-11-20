@@ -66,8 +66,8 @@ pub(crate) use framing::extract_frames;
 use send_scheduler::STREAM_DEFAULT;
 use transport::{
     fc_variant_for_port, is_candidate_port, now_iso, open_serial, open_udp_listen, parse_net_spec,
-    probe_baud, same_device, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ParamPersister,
-    ProbeOutcome, UdpAdapter, BAUD_CANDIDATES, BAUD_FALLBACK,
+    probe_baud, same_device, split_serial, BoxedReadHalf, NetSpec, ParamPersister, ProbeOutcome,
+    UdpAdapter, BAUD_CANDIDATES, BAUD_FALLBACK,
 };
 
 /// Fixed interval between flight-controller reconnect attempts.
@@ -233,9 +233,9 @@ pub struct FcConnection {
     /// open, cleared on teardown.
     fc_variant: Mutex<Option<String>>,
     baud: AtomicU32,
-    /// ADOS-time nanoseconds ([`Self::clock`]) of the last inbound frame.
-    /// An atomic rather than a mutex: it is stamped once per read on the
-    /// hottest path and read by the stream cadence.
+    /// ADOS-time nanoseconds ([`Self::clock`]) of the vehicle's last streamed
+    /// frame (any but its HEARTBEAT) or the link's open. An atomic: it is
+    /// stamped per frame on the hottest path and read by the stream cadence.
     last_msg_at: AtomicU64,
     /// The monotonic origin of the visor drop-log rate limit (wall time).
     epoch: Instant,
@@ -258,8 +258,8 @@ pub struct FcConnection {
     /// measurement taken only once someone remembers to ask has no history.
     attitude_cadence: Mutex<crate::cadence::InboundCadence>,
     /// Monotonic clock of the last decoded HEARTBEAT, distinct from
-    /// `last_msg_at` (which bumps on ANY inbound frame bytes, including garbage
-    /// that happens to form a frame). `None` until the first HEARTBEAT decodes
+    /// `last_msg_at` (which bumps on the vehicle's streamed frames and never
+    /// on a HEARTBEAT). `None` until the first HEARTBEAT decodes
     /// on the current process. Drives the heartbeat-freshness gate that decides
     /// whether the link is alive, not merely transport-open. Reset to `None` on
     /// link teardown so a stale value from a prior session never reads as alive.
@@ -485,15 +485,11 @@ impl FcConnection {
     pub fn transport_open(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
-
-    /// Cumulative MAVLink frames decoded off the flight-controller link since
-    /// the process started. Never reset, so a consumer takes deltas.
-    pub fn frames_decoded(&self) -> u64 {
-        self.fc_frames_decoded.load(Ordering::Relaxed)
-    }
 }
 
 mod discovery;
+mod ingest;
+pub use {ingest::LinkSession, transport::BoxedWriteHalf};
 mod lidar_exclusion;
 mod reader;
 mod status;
