@@ -9,7 +9,7 @@ use super::{BindOrchestrator, InjectionPrepOutcome};
 use crate::bind::bind_event::{
     bind_failed_detail, bind_precheck_detail, BindFailReason, BIND_FAILED_KIND, BIND_PRECHECK_KIND,
 };
-use crate::bind::fsm::{BindSession, BindState};
+use crate::bind::fsm::{BindSession, BindState, PendingApply};
 use crate::bind::BindRole;
 
 impl BindOrchestrator {
@@ -122,6 +122,14 @@ impl BindOrchestrator {
         let mut g = self.session.lock().await;
         if let Some(s) = g.as_mut() {
             s.fingerprint = fp;
+        }
+    }
+
+    /// Record the key apply this session commits to. The next transition
+    /// writes it to the sentinel.
+    pub(super) async fn set_pending_apply(&self, pending: PendingApply) {
+        if let Some(s) = self.session.lock().await.as_mut() {
+            s.pending_apply = Some(pending);
         }
     }
 

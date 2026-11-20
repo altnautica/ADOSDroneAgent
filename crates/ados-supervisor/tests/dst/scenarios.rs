@@ -26,10 +26,11 @@ const ANY: &[Outcome] = &[Outcome::Bound, Outcome::Aborted];
 /// A fault landing in the last exchange can leave one rig on the new key and
 /// the other not, which no protocol can rule out: the drone commits on the
 /// ground station's close, the ground station on the drone's `OK`, and the
-/// last of those can be lost, cut by a kill or a cancel, or outlive the
-/// sender's tunnel. Such a run must still report honestly on both rigs and
-/// restore both radios; the split is counted in the matrix line.
-const ANY_OR_SPLIT: &[Outcome] = &[Outcome::Bound, Outcome::Aborted, Outcome::Split];
+/// last of those can be lost, cut by a cancel or a kill before the gate, or
+/// outlive the sender's tunnel. These scenarios then run both rigs' auto-pair
+/// loops (the re-arm latch included), and the pair must end bound within the
+/// latch's bound; the matrix line counts the splits reconciled.
+const RECONCILED: &[Outcome] = &[Outcome::Bound];
 
 /// Both rigs bind at about the same time over a clean link: they bind.
 fn clean(seed: u64) -> (Run, &'static [Outcome]) {
@@ -68,9 +69,10 @@ fn lossy(seed: u64) -> (Run, &'static [Outcome]) {
         gs_present: true,
         first_bind_s: [(0.0, 20.0), (0.0, 20.0)],
         attempts: [4, 4],
+        reconcile: true,
         ..Plan::default()
     };
-    (simulate(seed, faults, plan), ANY_OR_SPLIT)
+    (simulate(seed, faults, plan), RECONCILED)
 }
 
 /// The drone binds with no ground station listening: every attempt ends on
@@ -86,21 +88,20 @@ fn no_peer(seed: u64) -> (Run, &'static [Outcome]) {
 }
 
 /// One rig's supervisor is killed mid-bind and restarted by systemd; the
-/// operators keep trying.
+/// operators keep trying. On a clean link, so the only fault is the kill: a
+/// kill past the killed rig's peer-evidence gate must not leave a split (the
+/// restart finishes the apply), an earlier one may and is reconciled.
 fn restart(seed: u64) -> (Run, &'static [Outcome]) {
     let rig = if seed.is_multiple_of(2) { DRONE } else { GS };
-    let faults = Faults {
-        loss: 0.05,
-        ..Faults::clean()
-    };
     let plan = Plan {
         gs_present: true,
         first_bind_s: [(0.0, 5.0), (0.0, 5.0)],
         attempts: [4, 4],
         kill: Some((rig, (1.0, 12.0))),
+        reconcile: true,
         ..Plan::default()
     };
-    (simulate(seed, faults, plan), ANY_OR_SPLIT)
+    (simulate(seed, Faults::clean(), plan), RECONCILED)
 }
 
 /// The operator cancels one rig's bind mid-way and does not retry.
@@ -111,9 +112,10 @@ fn cancel(seed: u64) -> (Run, &'static [Outcome]) {
         first_bind_s: [(0.0, 5.0), (0.0, 5.0)],
         attempts: [1, 1],
         cancel: Some((rig, (1.0, 12.0))),
+        reconcile: true,
         ..Plan::default()
     };
-    (simulate(seed, Faults::clean(), plan), ANY_OR_SPLIT)
+    (simulate(seed, Faults::clean(), plan), RECONCILED)
 }
 
 /// A second bind lands on one rig while its first is in flight.

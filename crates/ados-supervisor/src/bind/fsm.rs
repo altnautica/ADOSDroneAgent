@@ -124,6 +124,49 @@ pub struct BindPrecheck {
     pub iface: Option<String>,
 }
 
+/// The key apply a session committed to, written into the session record (and
+/// so the sentinel) the moment the peer-evidence gate passed and the upstream
+/// key was read, before the apply begins. A supervisor killed past that point
+/// finishes the apply on restart from this record rather than rolling back.
+/// It names the key by its public fingerprint only: the sentinel is world
+/// readable and never carries key material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApply {
+    /// Fingerprint of the upstream key file the apply writes.
+    pub fingerprint: String,
+    /// The fleet addressing the apply persists (the drone's issued slot).
+    pub fleet: Option<super::keys::FleetIdentity>,
+}
+
+impl PendingApply {
+    /// The sentinel form. The apply always disarms auto-pair, recorded so the
+    /// record states the whole pair state it commits to.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "fingerprint": self.fingerprint,
+            "fleet_id": self.fleet.map(|f| f.fleet_id),
+            "fleet_slot": self.fleet.map(|f| f.fleet_slot),
+            "auto_pair_enabled": false,
+        })
+    }
+
+    /// Read the sentinel form back; `None` when absent or malformed.
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let fingerprint = v.get("fingerprint")?.as_str()?.to_string();
+        let id = v.get("fleet_id").and_then(Value::as_u64);
+        let slot = v.get("fleet_slot").and_then(Value::as_u64);
+        let fleet = match (id, slot) {
+            (Some(id), Some(slot)) => Some(super::keys::FleetIdentity {
+                fleet_id: u16::try_from(id).ok()?,
+                fleet_slot: u8::try_from(slot).ok()?,
+            }),
+            (None, None) => None,
+            _ => return None,
+        };
+        Some(Self { fingerprint, fleet })
+    }
+}
+
 /// One bind attempt. Cloned cheaply for status snapshots + the sentinel write.
 #[derive(Debug, Clone)]
 pub struct BindSession {
@@ -153,6 +196,9 @@ pub struct BindSession {
     /// the no-peer failure so the UI can name the cause. Additive on the
     /// sentinel.
     pub peer_verified: Option<bool>,
+    /// The key apply this session committed to, once the gate passed. Additive
+    /// on the sentinel.
+    pub pending_apply: Option<PendingApply>,
 }
 
 impl BindSession {
@@ -177,6 +223,7 @@ impl BindSession {
             last_rssi_dbm: None,
             bind_precheck: None,
             peer_verified: None,
+            pending_apply: None,
         }
     }
 
@@ -235,6 +282,9 @@ impl BindSession {
             // session carries false when the wire protocol completed without
             // evidence of a peer (the solo/self-bind case).
             "peer_verified": self.peer_verified,
+            // The committed key apply (additive; null until the gate passed
+            // and the key was read). What a restart finishes.
+            "pending_apply": self.pending_apply.as_ref().map(PendingApply::to_json),
         })
     }
 }

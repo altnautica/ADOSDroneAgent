@@ -8,6 +8,19 @@ fn validate_rejects_non_64() {
     assert!(validate_blob(&[]).is_err());
 }
 
+#[test]
+fn blob_fingerprint_matches_the_file_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tx.key");
+    let blob: Vec<u8> = (0u8..64).collect();
+    std::fs::write(&path, &blob).unwrap();
+    assert_eq!(
+        blob_fingerprint(&blob),
+        Some(read_public_fingerprint(&path).unwrap())
+    );
+    assert_eq!(blob_fingerprint(&blob[..63]), None);
+}
+
 #[tokio::test]
 async fn apply_keypair_rejects_a_bad_blob_before_touching_any_unit() {
     // The blob is validated up front, before the apply task is spawned: a

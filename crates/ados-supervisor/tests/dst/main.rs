@@ -21,6 +21,7 @@
 
 mod check;
 mod host;
+mod reconcile;
 mod rng;
 mod scenarios;
 mod sim;
@@ -44,6 +45,11 @@ fn seeds() -> std::ops::RangeInclusive<u64> {
 
 /// Run `name` on every matrix seed; fail with a reproducer on any break.
 fn matrix(name: &str) {
+    run_seeds(name, seeds().collect());
+}
+
+/// Run `name` on `list`; fail with a reproducer on any break.
+fn run_seeds(name: &str, list: Vec<u64>) {
     let (_, scenario) = ALL
         .iter()
         .find(|(n, _)| *n == name)
@@ -51,12 +57,22 @@ fn matrix(name: &str) {
     let wall = Instant::now();
     let mut sim_s = 0.0;
     let mut tally = [0u32; 3];
-    for seed in seeds() {
+    let mut reconciled = 0u32;
+    for &seed in &list {
         let (run, allowed) = scenario(seed);
         sim_s += run.sim_s;
         tally[run.outcome as usize] += 1;
+        if run.before_reconcile == check::Outcome::Split && run.outcome == check::Outcome::Bound {
+            reconciled += 1;
+        }
         if std::env::var_os("DST_TRACE").is_some() {
-            eprintln!("dst {name} seed {seed}: {:?}", run.outcome);
+            eprintln!(
+                "dst {name} seed {seed}: {:?} (operators left {:?}, kills {:?})",
+                run.outcome, run.before_reconcile, run.kills
+            );
+            if std::env::var_os("DST_SEED").is_some() {
+                eprintln!("{}", run.trace.lines().join("\n"));
+            }
         }
         let mut breaks = run.violations.clone();
         if !allowed.contains(&run.outcome) {
@@ -84,9 +100,10 @@ fn matrix(name: &str) {
     }
     let wall_s = wall.elapsed().as_secs_f64();
     eprintln!(
-        "dst {name}: {} seeds ({} bound, {} aborted, {} split by a fault in the last exchange), \
-         {sim_s:.0} sim s in {wall_s:.2} wall s ({:.0}x real time)",
-        seeds().count(),
+        "dst {name}: {} seeds ({} bound, {} aborted, {} split; {reconciled} split by a fault in \
+         the last exchange and reconciled by auto-pair), {sim_s:.0} sim s in {wall_s:.2} wall s \
+         ({:.0}x real time)",
+        list.len(),
         tally[0],
         tally[1],
         tally[2],
@@ -112,6 +129,16 @@ fn dst_no_peer() {
 #[test]
 fn dst_restart() {
     matrix("restart");
+}
+
+/// Seeds the wide sweeps found: supervisors killed past their peer-evidence
+/// gate (the restart must finish the apply, no split), and splits a fault in
+/// the last exchange left that auto-pair must reconcile.
+#[test]
+fn dst_regression_seeds() {
+    run_seeds("restart", vec![11, 170, 268, 778, 818]);
+    run_seeds("lossy", vec![290, 323]);
+    run_seeds("cancel", vec![778, 818]);
 }
 
 #[test]

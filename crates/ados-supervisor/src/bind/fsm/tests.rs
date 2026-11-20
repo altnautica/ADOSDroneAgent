@@ -225,3 +225,32 @@ fn session_id_is_uuid_shaped_and_unique() {
         vec![8, 4, 4, 4, 12]
     );
 }
+
+#[test]
+fn pending_apply_round_trips_through_the_sentinel() {
+    use crate::bind::keys::FleetIdentity;
+    let with_slot = PendingApply {
+        fingerprint: "0011223344556677".to_string(),
+        fleet: Some(FleetIdentity {
+            fleet_id: 12,
+            fleet_slot: 3,
+        }),
+    };
+    let v = with_slot.to_json();
+    assert_eq!(v["auto_pair_enabled"], false);
+    assert_eq!(PendingApply::from_json(&v), Some(with_slot));
+    let no_slot = PendingApply {
+        fingerprint: "8899aabbccddeeff".to_string(),
+        fleet: None,
+    };
+    assert_eq!(PendingApply::from_json(&no_slot.to_json()), Some(no_slot));
+    // A half-written fleet or a missing fingerprint is no record at all.
+    let half = serde_json::json!({"fingerprint": "00", "fleet_id": 1, "fleet_slot": null});
+    assert_eq!(PendingApply::from_json(&half), None);
+    assert_eq!(PendingApply::from_json(&serde_json::json!({})), None);
+    // A session carries it on the sentinel only once the gate committed.
+    let mut s = BindSession::new(BindRole::Drone, "operator", None);
+    assert!(s.to_json()["pending_apply"].is_null());
+    s.pending_apply = PendingApply::from_json(&v);
+    assert_eq!(s.to_json()["pending_apply"]["fleet_slot"], 3);
+}

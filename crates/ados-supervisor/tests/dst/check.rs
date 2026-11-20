@@ -15,7 +15,7 @@ use std::time::Duration;
 use ados_supervisor::bind::keys::FleetIdentity;
 use serde_norway::{Mapping, Value};
 
-use crate::world::{key_origin, lock, Rig, Shared, DRONE, GS};
+use crate::world::{key_origin, lock, Rig, Shared, World, DRONE, GS};
 
 /// How the run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +103,16 @@ pub async fn monitor(w: Shared) {
     }
 }
 
+/// How the pair stands against `before`: both rigs on new keys, neither, or one.
+pub fn classify(g: &World, before: &Snapshot) -> Outcome {
+    let changed = [DRONE, GS].map(|i| g.rigs[i].key().map(<[u8]>::to_vec) != before.keys[i]);
+    match changed {
+        [false, false] => Outcome::Aborted,
+        [true, true] => Outcome::Bound,
+        _ => Outcome::Split,
+    }
+}
+
 /// The end-state check: classify the outcome and record every break.
 pub fn finish(
     w: &Shared,
@@ -148,10 +158,18 @@ pub fn finish(
         }
         let origin = [DRONE, GS].map(|i| g.rigs[i].key().and_then(key_origin));
         let drone = &g.rigs[DRONE];
-        let slot_ok = wfb(drone, "fleet_slot").and_then(Value::as_u64)
-            == Some(u64::from(drone_fleet.fleet_slot))
-            && wfb(drone, "fleet_id").and_then(Value::as_u64)
-                == Some(u64::from(drone_fleet.fleet_id));
+        // The issued slot, or none at all when the drone's key came from an
+        // auto-pair bind (which carries no fleet assignment by design).
+        let slot_ok = match (
+            wfb(drone, "fleet_id").and_then(Value::as_u64),
+            wfb(drone, "fleet_slot").and_then(Value::as_u64),
+        ) {
+            (Some(id), Some(slot)) => {
+                id == u64::from(drone_fleet.fleet_id) && slot == u64::from(drone_fleet.fleet_slot)
+            }
+            (None, None) => drone.auto_paired,
+            _ => false,
+        };
         // A rig that took a key holds a whole enrolment: its half of a
         // generated pair, auto-pair disarmed, and on the drone the issued slot.
         let whole = [
@@ -168,19 +186,14 @@ pub fn finish(
                 ));
             }
         }
-        match changed {
-            [false, false] => Outcome::Aborted,
-            [true, true] => {
-                if !matches!(origin, [Some((a, 0)), Some((b, 1))] if a == b) {
-                    breaks.push(format!(
-                        "the rigs took keys of different pairs: drone {:?}, gs {:?}",
-                        origin[DRONE], origin[GS]
-                    ));
-                }
-                Outcome::Bound
-            }
-            _ => Outcome::Split,
+        let outcome = classify(&g, before);
+        if outcome == Outcome::Bound && !matches!(origin, [Some((a, 0)), Some((b, 1))] if a == b) {
+            breaks.push(format!(
+                "the rigs took keys of different pairs: drone {:?}, gs {:?}",
+                origin[DRONE], origin[GS]
+            ));
         }
+        outcome
     };
     record(w, breaks);
     outcome

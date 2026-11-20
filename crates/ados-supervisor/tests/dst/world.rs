@@ -76,6 +76,8 @@ pub struct Rig {
     pub last_state: Option<String>,
     /// The sequence number of the last `systemctl` job issued per unit.
     pub jobs: BTreeMap<String, u64>,
+    /// An auto-pair bind (which carries no fleet assignment) paired this rig.
+    pub auto_paired: bool,
 }
 
 impl Rig {
@@ -179,6 +181,8 @@ impl Trace {
 pub struct World {
     pub rng: Rng,
     pub t0: Instant,
+    /// A std clock origin the auto-pair latch's debounce measures from.
+    pub std_t0: std::time::Instant,
     pub rigs: [Rig; 2],
     pub conn: Option<Conn>,
     /// Connections accepted so far.
@@ -189,6 +193,9 @@ pub struct World {
     pub trace: Trace,
     /// Invariant breaks seen by the per-tick monitor.
     pub violations: Vec<String>,
+    /// Each supervisor kill: the rig, and whether its bind had passed the
+    /// peer-evidence gate when it died.
+    pub kills: Vec<(usize, bool)>,
 }
 
 impl World {
@@ -196,6 +203,7 @@ impl World {
         Self {
             rng: Rng::new(seed),
             t0: Instant::now(),
+            std_t0: std::time::Instant::now(),
             rigs: [rig(BindRole::Drone, "drone"), rig(BindRole::Gs, "gs")],
             conn: None,
             conns: 0,
@@ -203,12 +211,18 @@ impl World {
             faults,
             trace: Trace::default(),
             violations: Vec::new(),
+            kills: Vec::new(),
         }
     }
 
     /// Simulated milliseconds since the run began.
     pub fn now_ms(&self) -> u64 {
         Instant::now().duration_since(self.t0).as_millis() as u64
+    }
+
+    /// The simulated instant on a std clock (the latch takes std instants).
+    pub fn std_now(&self) -> std::time::Instant {
+        self.std_t0 + Instant::now().duration_since(self.t0)
     }
 
     /// The rigs' wall clocks (one shared epoch: freshness is only ever judged
@@ -228,19 +242,37 @@ impl World {
         Duration::from_secs_f32(self.rng.range(range.0, range.1).max(0.0))
     }
 
-    /// Whether a frame can cross the air right now: both tunnels up and no
-    /// outage.
-    pub fn link_up(&self) -> bool {
+    /// Whether the air is out right now.
+    fn outage(&self) -> bool {
         let now = Instant::now();
-        let outage = self.faults.outages.iter().any(|(start, len)| {
+        self.faults.outages.iter().any(|(start, len)| {
             let s = self.t0 + *start;
             now >= s && now < s + *len
-        });
-        !outage
+        })
+    }
+
+    /// Whether a frame can cross the bind tunnels right now: both tunnels up
+    /// and no outage.
+    pub fn link_up(&self) -> bool {
+        let now = Instant::now();
+        !self.outage()
             && self
                 .rigs
                 .iter()
                 .all(|r| r.iface_up_at.is_some_and(|t| now >= t))
+    }
+
+    /// Whether the normal radio link decodes: both normal units running on
+    /// the two halves of one keypair, and no outage.
+    pub fn radio_link(&self) -> bool {
+        let [d, g] = &self.rigs;
+        !self.outage()
+            && d.unit_running(d.role.normal_unit())
+            && g.unit_running(g.role.normal_unit())
+            && matches!(
+                (d.key().and_then(key_origin), g.key().and_then(key_origin)),
+                (Some((a, 0)), Some((b, 1))) if a == b
+            )
     }
 }
 
@@ -265,6 +297,7 @@ fn rig(role: BindRole, name: &'static str) -> Rig {
         settled: true,
         last_state: None,
         jobs: BTreeMap::new(),
+        auto_paired: false,
     }
 }
 

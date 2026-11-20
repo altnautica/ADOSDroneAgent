@@ -16,7 +16,7 @@ use super::{
     AbortOnDrop, BindError, BindHost, BindOrchestrator, BindStartError, InProgressGuard, SystemHost,
 };
 use crate::bind::bind_event::{bind_started_detail, BindFailReason, BIND_STARTED_KIND};
-use crate::bind::fsm::{BindSession, BindState};
+use crate::bind::fsm::{BindSession, BindState, PendingApply};
 use crate::bind::{keys, BindRole, BIND_REG_RECONCILE_INTERVAL, LOCK_RECLAIM_TIMEOUT};
 use crate::process_manager::ProcessManager;
 
@@ -131,14 +131,18 @@ impl BindOrchestrator {
         self.cancel.notify_waiters();
     }
 
-    /// Undo a bind the previous supervisor process left mid-way. Call once at
-    /// startup, before the radio unit starts. The sentinel lives in `/run/ados`,
-    /// which survives a supervisor restart, so a process killed mid-bind (the
-    /// systemd watchdog, a crash) leaves it reading active, which holds the
-    /// radio's hop supervisor and the ground-station uplink off for good, and
-    /// leaves the bind unit holding the adapter. The key apply writes the key
-    /// and the pair config back to back, so only the bind window itself needs
-    /// undoing.
+    /// Resolve a bind the previous supervisor process left mid-way. Call once
+    /// at startup, before the radio unit starts. The sentinel lives in
+    /// `/run/ados`, which survives a supervisor restart, so a process killed
+    /// mid-bind (the systemd watchdog, a crash) leaves it reading active, which
+    /// holds the radio's hop supervisor and the ground-station uplink off for
+    /// good, and leaves the bind unit holding the adapter.
+    ///
+    /// The bind window is always closed. A session that had passed the
+    /// peer-evidence gate and recorded its key apply (`pending_apply`) had
+    /// committed, and its peer may already run the new key, so the apply is
+    /// finished from the deposited upstream key; anything earlier rolls back to
+    /// the pair state the rig had, which a bind before its apply never touched.
     pub async fn recover_interrupted(&self) {
         let Some(body) = self.host.read_sentinel() else {
             return;
@@ -161,7 +165,46 @@ impl BindOrchestrator {
         for r in role.map_or(vec![BindRole::Drone, BindRole::Gs], |r| vec![r]) {
             self.pm.stop(r.bind_unit()).await;
         }
+        let pending = v.get("pending_apply").and_then(PendingApply::from_json);
+        if let (Some(role), Some(pending)) = (role, pending) {
+            let peer = v.get("peer_device_id").and_then(Value::as_str);
+            self.finish_pending_apply(role, &pending, peer).await;
+        }
         self.host.write_sentinel(&sentinel_body(None));
+    }
+
+    /// Finish a committed key apply after a restart, from the upstream key the
+    /// bind deposited, if that file is still the key the session committed to.
+    async fn finish_pending_apply(
+        &self,
+        role: BindRole,
+        pending: &PendingApply,
+        peer_device_id: Option<&str>,
+    ) {
+        let upstream = role.upstream_key();
+        let blob = match self.host.read_file(upstream) {
+            Ok(b) if keys::blob_fingerprint(&b).as_deref() == Some(&pending.fingerprint) => b,
+            _ => {
+                tracing::warn!(
+                    upstream,
+                    "bind_restart_apply_skipped: the committed key is gone"
+                );
+                return;
+            }
+        };
+        let result = keys::apply_keypair(
+            self.pm.clone(),
+            self.host.clone(),
+            &blob,
+            role,
+            peer_device_id,
+            pending.fleet,
+        )
+        .await;
+        match result {
+            Ok(_) => tracing::warn!(role = role.as_str(), "bind_restart_apply_finished"),
+            Err(e) => tracing::warn!(error = %e, "bind_restart_apply_failed"),
+        }
     }
 
     /// Snapshot of the current session for the REST surface, or None if idle.

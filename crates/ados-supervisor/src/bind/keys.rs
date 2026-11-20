@@ -79,20 +79,24 @@ pub fn validate_blob(blob: &[u8]) -> Result<(), String> {
 /// Both rigs of a pair compute the same value, so a heartbeat cross-check is a
 /// string compare. Mirrors `read_public_fingerprint`.
 pub fn read_public_fingerprint(path: &Path) -> Result<String, String> {
-    use blake2::digest::{consts::U8, Digest};
-    use blake2::Blake2b;
-
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return Err(format!(
+    blob_fingerprint(&data).ok_or_else(|| {
+        format!(
             "key file at {} is {} bytes, expected {WFB_KEY_FILE_BYTES}",
             path.display(),
             data.len()
-        ));
-    }
-    Ok(hex::encode(Blake2b::<U8>::digest(
-        &data[WFB_PUBLIC_HALF_OFFSET..],
-    )))
+        )
+    })
+}
+
+/// The fingerprint of an in-memory key file, `None` unless it is exactly a
+/// 64-byte key. Same value [`read_public_fingerprint`] gives for the file.
+pub fn blob_fingerprint(blob: &[u8]) -> Option<String> {
+    use blake2::digest::{consts::U8, Digest};
+    use blake2::Blake2b;
+
+    (blob.len() == WFB_KEY_FILE_BYTES)
+        .then(|| hex::encode(Blake2b::<U8>::digest(&blob[WFB_PUBLIC_HALF_OFFSET..])))
 }
 
 /// Load the config mapping for a WRITE, distinguishing an absent file (a fresh

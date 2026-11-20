@@ -14,7 +14,8 @@ use tokio::task::JoinHandle;
 
 use crate::check;
 use crate::host::boot_handles;
-use crate::world::{key_blob, lock, Faults, File, Shared, Trace, World, DRONE, GS};
+use crate::reconcile;
+use crate::world::{lock, Faults, Shared, Trace, World, DRONE, GS};
 
 /// How long a killed supervisor stays down (`RestartSec=3`).
 const RESTART_SEC: Duration = Duration::from_secs(3);
@@ -36,14 +37,22 @@ pub struct Plan {
     pub cancel: Option<(usize, (f32, f32))>,
     /// Start a second bind on this rig once, in this window.
     pub second_bind: Option<(usize, (f32, f32))>,
+    /// After the operators, run both rigs' auto-pair loops until the pair
+    /// converges, within [`reconcile::bound`].
+    pub reconcile: bool,
 }
 
 /// A finished run.
 pub struct Run {
     pub trace: Trace,
     pub violations: Vec<String>,
+    /// The outcome when the operators were done.
+    pub before_reconcile: check::Outcome,
+    /// The final outcome.
     pub outcome: check::Outcome,
     pub sim_s: f64,
+    /// Each supervisor kill: the rig, and whether it was past its gate.
+    pub kills: Vec<(usize, bool)>,
 }
 
 /// An event emitter whose shipper never runs: events go nowhere, no socket is
@@ -68,24 +77,33 @@ pub fn simulate(seed: u64, faults: Faults, plan: Plan) -> Run {
         let fleet = setup(&w);
         let before = check::Snapshot::take(&w);
         let monitor = tokio::spawn(check::monitor(w.clone()));
-        let mut lives: Vec<JoinHandle<()>> = Vec::new();
+        let mut lives: Vec<(usize, JoinHandle<Arc<BindOrchestrator>>)> = Vec::new();
         for rig in [DRONE, GS] {
             if rig == GS && !plan.gs_present {
                 continue;
             }
             let f = fleet[rig];
-            lives.push(tokio::spawn(life(
-                w.clone(),
-                rig,
-                f,
-                plan.clone(),
-                events.clone(),
-            )));
+            let life = life(w.clone(), rig, f, plan.clone(), events.clone());
+            lives.push((rig, tokio::spawn(life)));
         }
-        for l in lives {
-            l.await.expect("a rig's life ends");
+        let mut orchs = Vec::new();
+        for (rig, l) in lives {
+            orchs.push((rig, l.await.expect("a rig's life ends")));
         }
-        lock(&w).log("operators done");
+        let before_reconcile = check::classify(&lock(&w), &before);
+        lock(&w).log(format!("operators done: {before_reconcile:?}"));
+        // A split that a kill after the killed rig's peer-evidence gate left
+        // behind is one the restart was to finish, not a lost last exchange.
+        if before_reconcile == check::Outcome::Split {
+            let mut g = lock(&w);
+            if g.kills.iter().any(|(_, after_check)| *after_check) {
+                g.violations
+                    .push("split after a kill past the peer-evidence gate".to_string());
+            }
+        }
+        if plan.reconcile {
+            reconcile_pair(&w, orchs).await;
+        }
         tokio::time::sleep(SETTLE).await;
         monitor.abort();
         let outcome = check::finish(&w, &before, fleet[DRONE], plan.gs_present);
@@ -95,32 +113,51 @@ pub fn simulate(seed: u64, faults: Faults, plan: Plan) -> Run {
         Run {
             trace: std::mem::take(&mut g.trace),
             violations: std::mem::take(&mut g.violations),
+            before_reconcile,
             outcome,
             sim_s,
+            kills: std::mem::take(&mut g.kills),
         }
     })
 }
 
-/// A freshly flashed drone (no key, auto-pair armed) and a ground station
-/// still holding the key of an earlier pairing. Returns the fleet addressing
-/// each rig's operator passes: the ground station's registry issues the drone
-/// a slot, the ground station itself takes slot 0.
+/// Run both rigs' auto-pair loops until the pair converges; a pair still
+/// apart after [`reconcile::bound`] is a break.
+async fn reconcile_pair(w: &Shared, orchs: Vec<(usize, Arc<BindOrchestrator>)>) {
+    let records = tempfile::tempdir().expect("a pair-proof record dir");
+    let deadline = tokio::time::Instant::now() + reconcile::bound();
+    let loops: Vec<_> = orchs
+        .into_iter()
+        .map(|(rig, orch)| {
+            let record = records.path().join(format!("pair-proof-{rig}.json"));
+            tokio::spawn(reconcile::auto_pair(w.clone(), rig, orch, record, deadline))
+        })
+        .collect();
+    for l in loops {
+        l.await.expect("an auto-pair loop ends");
+    }
+    let mut g = lock(w);
+    if reconcile::converged(&g) {
+        g.log("pair converged");
+    } else {
+        let bound = reconcile::bound().as_secs();
+        g.violations.push(format!(
+            "the pair did not converge within {bound} s of the operators"
+        ));
+    }
+}
+
+/// A freshly flashed drone and a new ground station: no keys, auto-pair
+/// armed. Returns the fleet addressing each rig's operator passes: the ground
+/// station's registry issues the drone a slot, the ground station itself takes
+/// slot 0.
 fn setup(w: &Shared) -> [FleetIdentity; 2] {
     let mut g = lock(w);
     let fleet_id = 1 + (g.rng.next_u64() % 200) as u16;
     let slot = 1 + (g.rng.next_u64() % 7) as u8;
-    let mtime = g.wall_now();
     for r in &mut g.rigs {
         apply_pair_fields(&mut r.config, r.role, None, None, Some(true), None);
     }
-    let gs = &mut g.rigs[GS];
-    gs.files.insert(
-        gs.role.key_path().to_string(),
-        File {
-            data: key_blob(0, 1),
-            mtime,
-        },
-    );
     g.log(format!("fleet {fleet_id}, drone slot {slot}"));
     [
         FleetIdentity {
@@ -156,10 +193,17 @@ async fn boot(w: &Shared, rig: usize, events: &EventEmitter) -> Arc<BindOrchestr
 }
 
 /// Kill `rig`'s supervisor: every call its process makes from now on blocks
-/// forever, and its socat children die with its control group.
+/// forever, and its socat children die with its control group. Records
+/// whether its bind had passed the peer-evidence gate (the sentinel says so).
 fn kill(w: &Shared, rig: usize) {
     let mut g = lock(w);
     let r = &mut g.rigs[rig];
+    let after_check = r.sentinel_active()
+        && r.sentinel
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v["peer_verified"].as_bool())
+            == Some(true);
     r.epoch += 1;
     r.busy = false;
     r.settled = false;
@@ -167,7 +211,10 @@ fn kill(w: &Shared, rig: usize) {
     // pair state from its config, as the pairing surfaces do.
     r.last_state = None;
     let name = r.name;
-    g.log(format!("{name} supervisor killed"));
+    g.kills.push((rig, after_check));
+    g.log(format!(
+        "{name} supervisor killed (past the peer check: {after_check})"
+    ));
 }
 
 fn at(w: &Shared, window: (f32, f32)) -> tokio::time::Instant {
@@ -177,7 +224,13 @@ fn at(w: &Shared, window: (f32, f32)) -> tokio::time::Instant {
 
 /// One rig over the run: its supervisor, its operator, and whatever the plan
 /// does to it.
-async fn life(w: Shared, rig: usize, fleet: FleetIdentity, plan: Plan, events: EventEmitter) {
+async fn life(
+    w: Shared,
+    rig: usize,
+    fleet: FleetIdentity,
+    plan: Plan,
+    events: EventEmitter,
+) -> Arc<BindOrchestrator> {
     let mut orch = boot(&w, rig, &events).await;
     let first = at(&w, plan.first_bind_s[rig]);
     let attempts = plan.attempts[rig];
@@ -205,7 +258,7 @@ async fn life(w: Shared, rig: usize, fleet: FleetIdentity, plan: Plan, events: E
     ));
     let Some((_, window)) = plan.kill.filter(|(r, _)| *r == rig) else {
         driver.await.expect("the operator ends");
-        return;
+        return orch;
     };
     let when = at(&w, window);
     tokio::select! {
@@ -218,9 +271,10 @@ async fn life(w: Shared, rig: usize, fleet: FleetIdentity, plan: Plan, events: E
             orch = boot(&w, rig, &events).await;
             // Auto-pair's settle delay before the first attempt after a boot.
             let now = tokio::time::Instant::now() + ados_supervisor::auto_pair::START_DELAY;
-            operator(w.clone(), rig, orch, fleet, now, attempts).await;
+            operator(w.clone(), rig, orch.clone(), fleet, now, attempts).await;
         }
     }
+    orch
 }
 
 /// The operator (or auto-pair) on one rig: bind until paired, with the

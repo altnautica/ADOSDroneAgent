@@ -4,7 +4,7 @@
 use super::peer::{counter_advanced, peer_evidence_verdict, peer_poll};
 use super::{AbortOnDrop, BindError, BindOrchestrator, PeerEvidence, SocatFailure};
 use crate::bind::bind_event::BindFailReason;
-use crate::bind::fsm::BindState;
+use crate::bind::fsm::{BindState, PendingApply};
 use crate::bind::{
     keys, socat, BindRole, KEY_TRANSFER_TIMEOUT, TUNNEL_WAIT_TIMEOUT, UPSTREAM_BIND_KEY,
     UPSTREAM_BIND_YAML, WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH,
@@ -260,7 +260,14 @@ impl BindOrchestrator {
         // the commit point: it runs to completion in its own task (every
         // service-manager call in it is bounded by the backend), so it is
         // awaited to the end rather than raced against a timer that would
-        // report a failure while the new key still goes live.
+        // report a failure while the new key still goes live. The apply it
+        // commits to goes into the session record (and the sentinel, with the
+        // transition below) first, so a supervisor killed from here on finishes
+        // it at restart instead of leaving the peer paired alone.
+        if let Some(fingerprint) = keys::blob_fingerprint(&blob) {
+            self.set_pending_apply(PendingApply { fingerprint, fleet })
+                .await;
+        }
         self.set_state(BindState::RestartingServices).await;
         if let Err(e) = keys::apply_keypair(
             self.pm.clone(),

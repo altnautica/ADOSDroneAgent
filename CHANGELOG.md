@@ -66,6 +66,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - A second bind started while one is setting up or finishing is refused as busy. The single-flight guard took over from a session it judged finished or orphaned, and that included a session still in its setup window (`idle`, normal radio unit already stopped) and one that had just paired, so a REST bind racing auto-pair cancelled the first bind and ran its own. Only a failed or aborted session, or one parked past the watchdog, is taken over now. Found by the bind simulation (`dst_concurrent`).
 
+- A supervisor killed after its bind passed the peer-evidence gate finishes the pairing when it restarts instead of leaving the peer paired alone. The rig had committed (its peer may already run the new key), but the restart only closed the bind window, so in the bind simulation 33 of 1000 runs with a supervisor killed mid-bind ended with one rig on the new key and the other without it until auto-pair's re-arm hold (10 minutes) ran out. The bind now records the apply it commits to (the key's public fingerprint, the drone's issued slot, auto-pair disarmed) in the session record and the bind-state sentinel (`pending_apply`) before the apply starts, and at startup the supervisor finishes that apply from the deposited key when the fingerprint still matches; a bind killed before the gate still rolls back. The bind simulation now runs both rigs' auto-pair loops and re-arm latch after the operators and checks that a pair split by a fault in its last exchange (a lost close or `OK`, a cancel or a kill before the gate) ends bound within the latch's bound, and that no kill past the gate splits the pair (`dst_restart`, `dst_regression_seeds`).
+
 ## [0.123.1] - 2026-11-20
 
 ### Added
