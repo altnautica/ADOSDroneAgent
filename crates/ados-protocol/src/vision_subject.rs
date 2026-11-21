@@ -28,6 +28,12 @@
 //! subject's published `track_id` on `vision.detection`. `stamp_ns` is on the
 //! frame clock the tracker steps on: a simulated frame's sim time, else the
 //! frame's capture time on the host monotonic clock.
+//!
+//! **Release.** When the designation ends, or the estimate loses the subject
+//! past its coast limit, one released record says so: `{v, camera_id, id,
+//! stamp_ns, released: true}` ([`SubjectReleased`]). A consumer drops the
+//! subject on it; a state record never carries `released`. Read a record of
+//! either kind with [`SubjectRecord`].
 
 use rmpv::Value;
 use thiserror::Error;
@@ -165,11 +171,16 @@ impl SubjectState {
     pub fn from_msgpack(bytes: &[u8]) -> Result<Self, SubjectStateError> {
         let value = rmpv::decode::read_value(&mut &bytes[..])
             .map_err(|e| SubjectStateError::Msgpack(e.to_string()))?;
-        let v = uint(&value, "v")?;
+        Self::from_value(&value)
+    }
+
+    /// Decode an already-parsed record (the map [`Self::to_msgpack`] writes).
+    pub fn from_value(value: &Value) -> Result<Self, SubjectStateError> {
+        let v = uint(value, "v")?;
         if v != u64::from(VISION_SUBJECT_VERSION) {
             return Err(SubjectStateError::Version(v));
         }
-        let Value::Array(preds) = get(&value, "predictions")? else {
+        let Value::Array(preds) = get(value, "predictions")? else {
             return Err(field_err("predictions", "not an array"));
         };
         if preds.len() > MAX_PREDICTIONS {
@@ -185,7 +196,7 @@ impl SubjectState {
                 })
             })
             .collect::<Result<_, SubjectStateError>>()?;
-        let Value::Array(names) = get(&value, "sources")? else {
+        let Value::Array(names) = get(value, "sources")? else {
             return Err(field_err("sources", "not an array"));
         };
         let mut flags = [false; 4];
@@ -197,19 +208,19 @@ impl SubjectState {
             flags[i] = true;
         }
         Ok(Self {
-            camera_id: get(&value, "camera_id")?
+            camera_id: get(value, "camera_id")?
                 .as_str()
                 .map(str::to_owned)
                 .ok_or_else(|| field_err("camera_id", "not a string"))?,
-            id: u32::try_from(uint(&value, "id")?).map_err(|_| field_err("id", "out of range"))?,
-            stamp_ns: uint(&value, "stamp_ns")?,
-            fix_age_ms: u32::try_from(uint(&value, "fix_age_ms")?)
+            id: u32::try_from(uint(value, "id")?).map_err(|_| field_err("id", "out of range"))?,
+            stamp_ns: uint(value, "stamp_ns")?,
+            fix_age_ms: u32::try_from(uint(value, "fix_age_ms")?)
                 .map_err(|_| field_err("fix_age_ms", "out of range"))?,
-            pos_ned: array(&value, "pos_ned")?,
-            cov: array(&value, "cov")?,
-            vel_ned: array(&value, "vel_ned")?,
-            mode_probs: array(&value, "mode_probs")?,
-            height_m: num(&value, "height_m")?,
+            pos_ned: array(value, "pos_ned")?,
+            cov: array(value, "cov")?,
+            vel_ned: array(value, "vel_ned")?,
+            mode_probs: array(value, "mode_probs")?,
+            height_m: num(value, "height_m")?,
             predictions,
             sources: SubjectSources {
                 box_height: flags[0],
@@ -218,6 +229,75 @@ impl SubjectState {
                 beacon: flags[3],
             },
         })
+    }
+}
+
+/// The end of a designated subject: the operator's designation ended, or the
+/// estimate lost the subject past its coast limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubjectReleased {
+    pub camera_id: String,
+    /// The released subject's track id.
+    pub id: u32,
+    /// When it was released, on the frame clock.
+    pub stamp_ns: u64,
+}
+
+/// One record on the topic: a state or a release.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubjectRecord {
+    State(SubjectState),
+    Released(SubjectReleased),
+}
+
+impl SubjectRecord {
+    /// Encode as a msgpack map (no length prefix).
+    pub fn to_msgpack(&self) -> Vec<u8> {
+        match self {
+            Self::State(s) => s.to_msgpack(),
+            Self::Released(r) => {
+                let value = map(vec![
+                    ("v", Value::from(VISION_SUBJECT_VERSION)),
+                    ("camera_id", Value::from(r.camera_id.as_str())),
+                    ("id", Value::from(r.id)),
+                    ("stamp_ns", Value::from(r.stamp_ns)),
+                    ("released", Value::Boolean(true)),
+                ]);
+                let mut out = Vec::with_capacity(96);
+                // Writing to a Vec cannot fail.
+                rmpv::encode::write_value(&mut out, &value).expect("msgpack into a Vec");
+                out
+            }
+        }
+    }
+
+    /// Decode a record of either kind.
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, SubjectStateError> {
+        let value = rmpv::decode::read_value(&mut &bytes[..])
+            .map_err(|e| SubjectStateError::Msgpack(e.to_string()))?;
+        Self::from_value(&value)
+    }
+
+    /// Decode an already-parsed record of either kind.
+    pub fn from_value(value: &Value) -> Result<Self, SubjectStateError> {
+        if get(value, "released").is_err() {
+            return SubjectState::from_value(value).map(Self::State);
+        }
+        let v = uint(value, "v")?;
+        if v != u64::from(VISION_SUBJECT_VERSION) {
+            return Err(SubjectStateError::Version(v));
+        }
+        if get(value, "released")?.as_bool() != Some(true) {
+            return Err(field_err("released", "not true"));
+        }
+        Ok(Self::Released(SubjectReleased {
+            camera_id: get(value, "camera_id")?
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| field_err("camera_id", "not a string"))?,
+            id: u32::try_from(uint(value, "id")?).map_err(|_| field_err("id", "out of range"))?,
+            stamp_ns: uint(value, "stamp_ns")?,
+        }))
     }
 }
 
@@ -328,6 +408,33 @@ mod tests {
         assert!(!s.sources.any());
         let back = SubjectState::from_msgpack(&s.to_msgpack()).unwrap();
         assert_eq!(back.sources, SubjectSources::default());
+    }
+
+    #[test]
+    fn a_released_record_round_trips_and_is_not_a_state() {
+        let r = SubjectRecord::Released(SubjectReleased {
+            camera_id: "main".into(),
+            id: 7,
+            stamp_ns: 42,
+        });
+        let bytes = r.to_msgpack();
+        assert_eq!(SubjectRecord::from_msgpack(&bytes).unwrap(), r);
+        assert!(SubjectState::from_msgpack(&bytes).is_err());
+        let s = SubjectRecord::State(state());
+        assert_eq!(SubjectRecord::from_msgpack(&s.to_msgpack()).unwrap(), s);
+        let mut fake = Vec::new();
+        rmpv::encode::write_value(
+            &mut fake,
+            &map(vec![
+                ("v", Value::from(VISION_SUBJECT_VERSION)),
+                ("camera_id", Value::from("main")),
+                ("id", Value::from(7)),
+                ("stamp_ns", Value::from(42)),
+                ("released", Value::Boolean(false)),
+            ]),
+        )
+        .unwrap();
+        assert!(SubjectRecord::from_msgpack(&fake).is_err());
     }
 
     /// A valid record with one field replaced.

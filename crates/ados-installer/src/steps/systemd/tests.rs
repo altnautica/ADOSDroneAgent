@@ -398,5 +398,8 @@ fn run_dir_tmpfiles_creates_the_capture_group_writable_dir() {
     // The plugin-bound run subdirectories exist before any plugin starts.
     assert!(body.contains("d /run/ados/sensing 0755 root root -\n"));
     assert!(body.contains("d /run/ados/capture-storage 0755 root root -\n"));
+    // The voxel-map dir: created, never re-owned (the plugin host hands it to
+    // the map's writer).
+    assert!(body.contains("d /run/ados/voxmap - - - -\n"));
     assert!(!body.contains(ados_protocol::ipc::OPERATOR_GROUP));
 }

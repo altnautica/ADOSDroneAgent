@@ -145,29 +145,39 @@ impl DepthFrame {
     pub fn from_msgpack(bytes: &[u8]) -> Result<Self, DepthFrameError> {
         let value = rmpv::decode::read_value(&mut &bytes[..])
             .map_err(|e| DepthFrameError::Msgpack(e.to_string()))?;
-        let v = uint(&value, "v")?;
+        Self::from_value(&value)
+    }
+
+    /// Decode an already-parsed record (the map [`Self::to_msgpack`] writes).
+    /// The intrinsics must be finite and positive and the mount pitch finite.
+    pub fn from_value(value: &Value) -> Result<Self, DepthFrameError> {
+        let v = uint(value, "v")?;
         if v != VISION_DEPTH_FRAME_VERSION {
             return Err(DepthFrameError::Version(v));
         }
-        let w = u16::try_from(uint(&value, "w")?).map_err(|_| field_err("w", "out of range"))?;
-        let h = u16::try_from(uint(&value, "h")?).map_err(|_| field_err("h", "out of range"))?;
+        let w = u16::try_from(uint(value, "w")?).map_err(|_| field_err("w", "out of range"))?;
+        let h = u16::try_from(uint(value, "h")?).map_err(|_| field_err("h", "out of range"))?;
         let pixels = usize::from(w) * usize::from(h);
-        let fit = get(&value, "fit")?;
+        let fit = get(value, "fit")?;
+        let pitch_down_deg = num(value, "pitch_down_deg")?;
+        if !pitch_down_deg.is_finite() {
+            return Err(field_err("pitch_down_deg", "not finite"));
+        }
         Ok(Self {
-            camera_id: get(&value, "camera_id")?
+            camera_id: get(value, "camera_id")?
                 .as_str()
                 .map(str::to_owned)
                 .ok_or_else(|| field_err("camera_id", "not a string"))?,
-            stamp_ns: uint(&value, "stamp_ns")?,
+            stamp_ns: uint(value, "stamp_ns")?,
             w,
             h,
-            fx: num(&value, "fx")?,
-            fy: num(&value, "fy")?,
-            cx: num(&value, "cx")?,
-            cy: num(&value, "cy")?,
-            pitch_down_deg: num(&value, "pitch_down_deg")?,
-            depth_mm: plane(&value, "depth_mm", pixels)?,
-            sigma_mm: plane(&value, "sigma_mm", pixels)?,
+            fx: positive(value, "fx")?,
+            fy: positive(value, "fy")?,
+            cx: positive(value, "cx")?,
+            cy: positive(value, "cy")?,
+            pitch_down_deg,
+            depth_mm: plane(value, "depth_mm", pixels)?,
+            sigma_mm: plane(value, "sigma_mm", pixels)?,
             fit: DepthFit {
                 scale: num(fit, "scale")?,
                 shift: num(fit, "shift")?,
@@ -178,6 +188,16 @@ impl DepthFrame {
                     .map_err(|_| field_err("held_ms", "out of range"))?,
             },
         })
+    }
+}
+
+/// A finite, strictly positive number.
+fn positive(v: &Value, key: &'static str) -> Result<f32, DepthFrameError> {
+    let x = num(v, key)?;
+    if x > 0.0 && x.is_finite() {
+        Ok(x)
+    } else {
+        Err(field_err(key, format!("{x} is not finite and positive")))
     }
 }
 
@@ -291,5 +311,32 @@ mod tests {
             DepthFrame::from_msgpack(&bytes),
             Err(DepthFrameError::Version(1))
         );
+    }
+
+    #[test]
+    fn non_finite_or_non_positive_intrinsics_are_refused() {
+        for bad in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
+            for field in ["fx", "fy", "cx", "cy"] {
+                let mut f = frame(4, 3);
+                match field {
+                    "fx" => f.fx = bad,
+                    "fy" => f.fy = bad,
+                    "cx" => f.cx = bad,
+                    _ => f.cy = bad,
+                }
+                let err = DepthFrame::from_msgpack(&f.to_msgpack()).unwrap_err();
+                assert!(
+                    matches!(err, DepthFrameError::Field { field: got, .. } if got == field),
+                    "{field} = {bad}: {err}"
+                );
+            }
+        }
+        let mut f = frame(4, 3);
+        f.pitch_down_deg = f32::NAN;
+        assert!(DepthFrame::from_msgpack(&f.to_msgpack()).is_err());
+        // The parsed-value path is the same decoder.
+        let ok = frame(4, 3);
+        let value = rmpv::decode::read_value(&mut &ok.to_msgpack()[..]).unwrap();
+        assert_eq!(DepthFrame::from_value(&value).unwrap(), ok);
     }
 }

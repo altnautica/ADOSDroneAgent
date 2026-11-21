@@ -16,6 +16,7 @@ mod route;
 mod topic_glob;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use rmpv::Value;
 use tokio::sync::broadcast;
@@ -59,10 +60,12 @@ pub struct Event {
 /// Built on `tokio::sync::broadcast` so the host can hand a fresh subscriber
 /// receiver to each plugin's fan-out task. Topic matching is applied per
 /// subscriber against the topic the event carries; the publisher does not
-/// pre-filter, so the bus stays a single shared channel.
+/// pre-filter, so the bus stays a single shared channel. Events travel as
+/// `Arc<Event>`: every receiver shares the one payload (a depth frame is
+/// 48 KiB) rather than cloning it.
 #[derive(Debug)]
 pub struct EventBus {
-    tx: broadcast::Sender<Event>,
+    tx: broadcast::Sender<Arc<Event>>,
 }
 
 impl EventBus {
@@ -72,7 +75,7 @@ impl EventBus {
     }
 
     /// A receiver a plugin fan-out task drains, applying its own topic match.
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Event>> {
         self.tx.subscribe()
     }
 
@@ -80,7 +83,7 @@ impl EventBus {
     /// with no receivers returns 0 rather than erroring, matching the Python
     /// `publish` which returns a delivered count.
     pub fn publish(&self, event: Event) -> usize {
-        self.tx.send(event).unwrap_or(0)
+        self.tx.send(Arc::new(event)).unwrap_or(0)
     }
 
     /// Current receiver count.
@@ -660,7 +663,7 @@ mod tests {
         let delivered = bus.publish(evt.clone());
         assert_eq!(delivered, 1);
         let got = rx.recv().await.unwrap();
-        assert_eq!(got, evt);
+        assert_eq!(*got, evt);
     }
 
     #[test]

@@ -80,7 +80,9 @@ from ados.sdk.vision.subject import (
     VISION_SUBJECT_READ_CAP,
     VISION_SUBJECT_TOPIC,
     SubjectPrediction,
+    SubjectReleased,
     SubjectState,
+    decode_subject_record,
 )
 
 log = get_logger("sdk.vision")
@@ -120,6 +122,8 @@ __all__ = [
     "VIO_COMPONENT_ID",
     "POSE_COVARIANCE_LEN",
     "SubjectState",
+    "SubjectReleased",
+    "decode_subject_record",
     "SubjectPrediction",
     "VISION_SUBJECT_TOPIC",
     "VISION_SUBJECT_READ_CAP",

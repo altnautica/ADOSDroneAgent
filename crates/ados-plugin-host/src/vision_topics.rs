@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use ados_protocol::ipc::read_length_prefixed;
 use ados_protocol::vision_depth_frame::{DepthFrame, FRAME_MAX_BYTES, VISION_DEPTH_FRAME_TOPIC};
-use ados_protocol::vision_subject::{SubjectState, SUBJECT_MAX_BYTES, VISION_SUBJECT_TOPIC};
+use ados_protocol::vision_subject::{SubjectRecord, SUBJECT_MAX_BYTES, VISION_SUBJECT_TOPIC};
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 
@@ -49,8 +49,9 @@ pub struct Stream {
     pub topic: &'static str,
     /// The largest record the contract allows.
     pub max_bytes: usize,
-    /// Whether a record decodes under the contract.
-    pub valid: fn(&[u8]) -> bool,
+    /// Whether a parsed record decodes under the contract and is fit to
+    /// forward.
+    pub valid: fn(&rmpv::Value) -> bool,
 }
 
 /// The engine's metric depth frames.
@@ -58,16 +59,27 @@ pub const DEPTH_FRAMES: Stream = Stream {
     socket: "vision-depth-frames.sock",
     topic: VISION_DEPTH_FRAME_TOPIC,
     max_bytes: FRAME_MAX_BYTES,
-    valid: |b| DepthFrame::from_msgpack(b).is_ok(),
+    valid: |v| DepthFrame::from_value(v).is_ok(),
 };
 
+/// The longest a subject state may have gone without a measurement and
+/// still be forwarded, ms. An older one is a stale position (a coasting
+/// estimate, or a last state the engine kept past its subject); consumers
+/// see the subject as lost instead.
+pub const SUBJECT_MAX_FIX_AGE_MS: u32 = 2_000;
+
 /// The designated subject's world state (last-state: a new reader gets the
-/// latest one at once).
+/// latest one at once). A released record always passes; a state only while
+/// its fix is at most [`SUBJECT_MAX_FIX_AGE_MS`] old.
 pub const SUBJECT: Stream = Stream {
     socket: "vision-subject.sock",
     topic: VISION_SUBJECT_TOPIC,
     max_bytes: SUBJECT_MAX_BYTES,
-    valid: |b| SubjectState::from_msgpack(b).is_ok(),
+    valid: |v| match SubjectRecord::from_value(v) {
+        Ok(SubjectRecord::State(s)) => s.fix_age_ms <= SUBJECT_MAX_FIX_AGE_MS,
+        Ok(SubjectRecord::Released(_)) => true,
+        Err(_) => false,
+    },
 };
 
 /// Every forwarded stream.
@@ -77,12 +89,14 @@ pub const STREAMS: [Stream; 2] = [DEPTH_FRAMES, SUBJECT];
 pub const RETRY: Duration = Duration::from_secs(2);
 
 /// The decoded event payload of one record of `stream`, or `None` when it
-/// does not decode under the contract or would not fit one event.
+/// does not decode under the contract or would not fit one event. The record
+/// is parsed once; the contract check runs on the parsed value.
 pub fn payload(stream: &Stream, body: &[u8]) -> Option<rmpv::Value> {
-    if body.len() > EVENT_PAYLOAD_MAX_BYTES || !(stream.valid)(body) {
+    if body.len() > EVENT_PAYLOAD_MAX_BYTES {
         return None;
     }
-    rmpv::decode::read_value(&mut &body[..]).ok()
+    let value = rmpv::decode::read_value(&mut &body[..]).ok()?;
+    (stream.valid)(&value).then_some(value)
 }
 
 /// Read `conn` until it closes, publishing every valid record on `bus`.

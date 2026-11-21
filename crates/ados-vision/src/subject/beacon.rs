@@ -74,6 +74,12 @@ pub enum BeaconOutcome {
     /// Not fused on the beacon alone: too long since the last fused beacon
     /// fix; the chain resumes only after vision returns.
     Broken,
+    /// Not fused on the beacon alone: too few fixes have fused close to the
+    /// vision track for the phone to be known to be on the subject.
+    Unassociated,
+    /// Not fused: not a valid fix (a position that is not finite, or an
+    /// accuracy that is not a positive number).
+    Invalid,
     /// Not fused: too far from the track to be the same person.
     Gated,
     /// Not fused: older than the estimate, or not finite.

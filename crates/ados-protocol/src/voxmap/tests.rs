@@ -18,8 +18,28 @@ fn meta(stamp_ns: u64) -> VoxmapMeta {
     }
 }
 
+/// The map file in a directory of its own (`0750`), as the plugin host lays
+/// it out, under the tempdir made this process's alone (`0700`; a umask of
+/// `002` leaves it group-writable).
 fn path_in(dir: &tempfile::TempDir) -> PathBuf {
-    dir.path().join("ados-voxmap-v1")
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sub = dir.path().join("voxmap");
+    if !sub.exists() {
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+    sub.join("map-v1")
+}
+
+/// Run `f` on another thread and return its result, failing the test when it
+/// has not returned within two seconds (it blocked).
+fn promptly<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .expect("the call blocked")
 }
 
 #[test]
@@ -66,6 +86,25 @@ fn malformed_headers_are_refused() {
         VoxmapMeta::decode(&bad),
         Err(VoxmapError::BadDims(_))
     ));
+    for (res, pose_n) in [
+        (0.0f32, 0.0f32),
+        (-0.1, 0.0),
+        (f32::NAN, 0.0),
+        (f32::INFINITY, 0.0),
+    ]
+    .into_iter()
+    .chain([(0.15, f32::NAN), (0.15, f32::NEG_INFINITY)])
+    {
+        let mut m = meta(1);
+        m.res_m = res;
+        m.map_from_body[0] = pose_n;
+        let mut bad = [0u8; HEADER_LEN];
+        m.encode(2, &mut bad);
+        assert!(
+            matches!(VoxmapMeta::decode(&bad), Err(VoxmapError::BadGeometry)),
+            "res {res}, pose north {pose_n}"
+        );
+    }
 }
 
 #[test]
@@ -169,7 +208,7 @@ fn wrong_dims_and_short_files_are_errors() {
 }
 
 #[test]
-fn trust_requires_the_group_and_an_owner_only_write_bit() {
+fn trust_follows_the_directory_owner_and_one_owner_only_write_bit() {
     let dir = tempfile::tempdir().unwrap();
     let path = path_in(&dir);
     let gid = nix::unistd::getegid();
@@ -180,28 +219,139 @@ fn trust_requires_the_group_and_an_owner_only_write_bit() {
     w.publish(&meta(5), |_, _| {}).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o640);
-    assert!(VoxmapReader::open_trusted(&path, &group.name).is_ok());
+    assert!(VoxmapReader::open_trusted(&path).is_ok());
+
+    // A second link to the map: refused.
+    let link = dir.path().join("second-link");
+    std::fs::hard_link(&path, &link).unwrap();
+    assert!(matches!(
+        VoxmapReader::open_trusted(&path),
+        Err(VoxmapError::Untrusted(_))
+    ));
+    std::fs::remove_file(&link).unwrap();
+    assert!(VoxmapReader::open_trusted(&path).is_ok());
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
     assert!(matches!(
-        VoxmapReader::open_trusted(&path, &group.name),
+        VoxmapReader::open_trusted(&path),
         Err(VoxmapError::Untrusted(_))
     ));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let sub = path.parent().unwrap();
+    std::fs::set_permissions(sub, std::fs::Permissions::from_mode(0o770)).unwrap();
     assert!(matches!(
-        VoxmapReader::open_trusted(&path, "ados-no-such-group-xyz"),
-        Err(VoxmapError::NoSuchGroup(_))
+        VoxmapReader::open_trusted(&path),
+        Err(VoxmapError::Untrusted(_))
     ));
+    std::fs::set_permissions(sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+    // A directory whose parent others may write (the world-writable /tmp
+    // above a tempdir): refused, someone could have swapped the directory.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(matches!(
+        VoxmapReader::open_trusted(&path),
+        Err(VoxmapError::Untrusted(_))
+    ));
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(VoxmapReader::open_trusted(&path).is_ok());
+}
+
+/// The ownership rules on inodes this test process cannot make: a file owned
+/// by a uid other than the directory's (the recorded writer), and a parent
+/// owned by another user.
+#[test]
+fn trust_refuses_another_owner() {
+    use super::reader::{trust, Inode};
+    let dir = |uid: u32, mode: u32| Inode {
+        uid,
+        mode: 0o040000 | mode,
+        nlink: 2,
+        is_file: false,
+        is_dir: true,
+    };
+    let file = |uid: u32, nlink: u64| Inode {
+        uid,
+        mode: 0o100640,
+        nlink,
+        is_file: true,
+        is_dir: false,
+    };
+    let (me, writer, other) = (0, 980, 981);
+    assert!(trust(dir(0, 0o755), dir(writer, 0o750), file(writer, 1), me).is_ok());
+    assert!(trust(dir(0, 0o755), dir(writer, 0o750), file(other, 1), me).is_err());
+    assert!(trust(dir(0, 0o755), dir(writer, 0o750), file(writer, 2), me).is_err());
+    assert!(trust(dir(other, 0o755), dir(writer, 0o750), file(writer, 1), me).is_err());
+    assert!(trust(dir(0, 0o1777), dir(writer, 0o750), file(writer, 1), me).is_err());
+    let mut fifo = file(writer, 1);
+    fifo.is_file = false;
+    assert!(trust(dir(0, 0o755), dir(writer, 0o750), fifo, me).is_err());
 }
 
 #[test]
 fn symlinks_are_not_followed() {
     let dir = tempfile::tempdir().unwrap();
+    let link = path_in(&dir);
     let real = dir.path().join("real");
     VoxmapWriter::create(&real, DIMS, None).unwrap();
-    let link = path_in(&dir);
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert!(VoxmapReader::open(&link).is_err());
+    assert!(VoxmapReader::open_trusted(&link).is_err());
     assert!(VoxmapWriter::create(&link, DIMS, None).is_err());
+}
+
+/// A FIFO planted at the path never blocks a reader or the writer: each opens
+/// without blocking and refuses it.
+#[test]
+fn a_fifo_at_the_path_is_refused_without_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path_in(&dir);
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+    let p = path.clone();
+    assert!(matches!(
+        promptly(move || VoxmapReader::open(&p).map(|_| ())),
+        Err(VoxmapError::Untrusted(_))
+    ));
+    let p = path.clone();
+    assert!(promptly(move || VoxmapReader::open_trusted(&p).map(|_| ())).is_err());
+    let p = path.clone();
+    assert!(matches!(
+        promptly(move || VoxmapWriter::create(&p, DIMS, None).map(|_| ())),
+        Err(VoxmapError::Untrusted(_))
+    ));
+}
+
+/// The writer publishes only into a directory no other user may write, so a
+/// file another user planted there cannot exist to block it.
+#[test]
+fn the_writer_refuses_a_directory_others_may_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path_in(&dir);
+    let sub = path.parent().unwrap();
+    std::fs::set_permissions(sub, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    assert!(matches!(
+        VoxmapWriter::create(&path, DIMS, None),
+        Err(VoxmapError::Untrusted(_))
+    ));
+    assert!(!path.exists(), "nothing created in a shared directory");
+    std::fs::set_permissions(sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+    assert!(VoxmapWriter::create(&path, DIMS, None).is_ok());
+}
+
+#[test]
+fn an_occupancy_only_read_leaves_the_distance_plane_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path_in(&dir);
+    let mut w = VoxmapWriter::create(&path, DIMS, None).unwrap();
+    w.publish(&meta(7), |occ, esdf| {
+        occ.fill(2);
+        esdf.fill(9);
+    })
+    .unwrap();
+    let mut r = VoxmapReader::open(&path).unwrap();
+    let mut snap = VoxSnapshot::default();
+    assert_eq!(r.read_occupancy_into(&mut snap).unwrap(), ReadStatus::Fresh);
+    assert!(snap.valid && snap.esdf_dm.is_empty());
+    assert!(snap.occupancy.iter().all(|&b| b == 2));
+    assert_eq!(r.read_occupancy_into(&mut snap).unwrap(), ReadStatus::Stale);
 }
 
 /// A writer publishing in bursts (back to back, then paced) while a reader

@@ -55,6 +55,7 @@ pub use depth::{DepthModelState, DepthSetup, DEPTH_PERMIT_WAIT};
 pub use embeddings::{
     strip_embeddings, EmbeddingInterest, EMBEDDING_ATTR, EMBEDDING_MODEL_ATTR, HISTOGRAM_EMBEDDING,
 };
+pub use subject::DesignationOrigin;
 
 use ados_vision::tracker::{Appearance, Candidate, TrackerConfig};
 
@@ -165,6 +166,9 @@ pub struct VisionEngine {
     sim_pacing: std::sync::OnceLock<Arc<crate::sim_pacing::SimPacing>>,
     /// The designated subject's world estimate per camera, and its broadcast.
     subject: std::sync::Mutex<subject::SubjectRuntime>,
+    /// The voxel map the subject's predictions read, behind its own lock so
+    /// its file I/O never runs under `subject`.
+    voxmap: voxmap_space::VoxSpace,
 }
 
 /// How a camera ring is sized.
@@ -276,6 +280,7 @@ impl VisionEngine {
             camera_mounts: std::sync::Mutex::new(HashMap::new()),
             sim_pacing: std::sync::OnceLock::new(),
             subject: std::sync::Mutex::new(subject::SubjectRuntime::default()),
+            voxmap: voxmap_space::VoxSpace::default(),
         })
     }
 

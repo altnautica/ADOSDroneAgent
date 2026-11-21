@@ -8,8 +8,10 @@ import pytest
 
 from ados.sdk.vision import (
     VISION_SUBJECT_TOPIC,
+    SubjectReleased,
     SubjectState,
     VisionClient,
+    decode_subject_record,
 )
 
 
@@ -64,6 +66,18 @@ def test_a_malformed_record_is_refused(over: dict[str, Any]) -> None:
         SubjectState.from_payload(_payload(**over))
 
 
+_RELEASED = {"v": 1, "camera_id": "main", "id": 7, "stamp_ns": 2_000_000_000, "released": True}
+
+
+def test_a_released_record_decodes_and_is_not_a_state() -> None:
+    assert decode_subject_record(_RELEASED) == SubjectReleased("main", 7, 2_000_000_000)
+    assert isinstance(decode_subject_record(_payload()), SubjectState)
+    with pytest.raises(ValueError):
+        SubjectState.from_payload(_RELEASED)
+    with pytest.raises(ValueError):
+        decode_subject_record({**_RELEASED, "released": False})
+
+
 class _Ipc:
     def __init__(self) -> None:
         self.subs: dict[str, Any] = {}
@@ -81,3 +95,13 @@ async def test_subscribe_subject_decodes_and_filters_by_camera() -> None:
     await cb(_payload(camera_id="aux"))
     await cb({"v": 1})
     assert [s.camera_id for s in got] == ["main"]
+
+
+async def test_subscribe_subject_delivers_the_release() -> None:
+    ipc = _Ipc()
+    got: list[SubjectState | SubjectReleased] = []
+    await VisionClient(ipc).subscribe_subject(got.append)  # type: ignore[arg-type]
+    cb = ipc.subs[VISION_SUBJECT_TOPIC]
+    await cb(_payload())
+    await cb(_RELEASED)
+    assert [type(r).__name__ for r in got] == ["SubjectState", "SubjectReleased"]

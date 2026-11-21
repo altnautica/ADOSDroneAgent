@@ -1,10 +1,12 @@
-//! The `vision-subject.sock` broadcast: every designated-subject state the
-//! engine estimates ([`ados_protocol::vision_subject::SubjectState`],
+//! The `vision-subject.sock` broadcast: every designated-subject record the
+//! engine produces ([`ados_protocol::vision_subject::SubjectRecord`],
 //! `vision.subject.v1`) as one length-prefixed msgpack record, for the
 //! services that follow the subject.
 //!
 //! Last-state: a subscriber that connects while a subject is tracked gets the
-//! newest state at once instead of waiting for the next detector batch. A
+//! newest state at once instead of waiting for the next detector batch. Once
+//! the subject is released, the release is the last state, so a reader that
+//! connects later never receives the released subject's old position. A
 //! subscriber whose queue fills is dropped by the broadcast server, so the
 //! engine never backs up behind it.
 
@@ -42,7 +44,7 @@ pub fn spawn(
     }))
 }
 
-/// Bind `vision-subject.sock` and forward every subject state to it until
+/// Bind `vision-subject.sock` and forward every subject record to it until
 /// `cancel`.
 pub async fn serve(
     engine: Arc<VisionEngine>,
@@ -56,7 +58,7 @@ pub async fn serve(
     loop {
         tokio::select! {
             recv = rx.recv() => match recv {
-                Ok(state) => match encode_frame(&state.to_msgpack(), SUBJECT_MAX_BYTES) {
+                Ok(record) => match encode_frame(&record.to_msgpack(), SUBJECT_MAX_BYTES) {
                     Ok(bytes) => server.broadcast(bytes.into()).await,
                     Err(e) => tracing::warn!(error = %e, "vision_subject_encode_failed"),
                 },

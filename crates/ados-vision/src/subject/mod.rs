@@ -98,6 +98,14 @@ pub struct SubjectConfig {
     /// The longest gap between two fused beacon fixes that keeps the
     /// beacon-only track going, s.
     pub beacon_only_max_gap_s: f32,
+    /// Beacon fixes that must fuse beside vision, each close to the vision
+    /// track, before the beacon may carry the track alone: the evidence that
+    /// the phone is on the designated subject.
+    pub beacon_assoc_fixes: u8,
+    /// The squared Mahalanobis distance under which a beacon fix beside
+    /// vision counts towards that evidence (two degrees of freedom; 5.99 is
+    /// the 95 % bound). A fix past the gate clears it.
+    pub beacon_assoc_chi2: f32,
 }
 
 impl Default for SubjectConfig {
@@ -123,6 +131,8 @@ impl Default for SubjectConfig {
             beacon_only_max_s: 60.0,
             beacon_only_max_acc_m: 10.0,
             beacon_only_max_gap_s: 1.5,
+            beacon_assoc_fixes: 5,
+            beacon_assoc_chi2: 5.99,
         }
     }
 }
@@ -177,6 +187,9 @@ pub struct SubjectEstimator {
     height: Scalar,
     track: Option<Track>,
     t_ns: Option<u64>,
+    /// Beacon fixes that fused close to the vision track (see
+    /// [`SubjectConfig::beacon_assoc_fixes`]).
+    beacon_assoc: u8,
 }
 
 impl SubjectEstimator {
@@ -188,6 +201,7 @@ impl SubjectEstimator {
             height: Scalar::new(f64::from(cfg.height_prior_m), f64::from(cfg.height_sigma_m)),
             track: None,
             t_ns: None,
+            beacon_assoc: 0,
         }
     }
 
@@ -315,15 +329,19 @@ impl SubjectEstimator {
     /// reported accuracy no worse than
     /// [`SubjectConfig::beacon_only_max_acc_m`], and at most
     /// [`SubjectConfig::beacon_only_max_gap_s`] after the last fused beacon
-    /// fix: a chain broken by a gap stays broken until vision returns.
+    /// fix (a chain broken by a gap stays broken until vision returns), and
+    /// only once [`SubjectConfig::beacon_assoc_fixes`] fixes have fused beside
+    /// vision close to its track under this designation: the phone has been
+    /// seen to move with the designated subject. A fix the gate refuses
+    /// beside vision clears that evidence.
     pub fn fuse_beacon(&mut self, fix: &BeaconFix) -> BeaconOutcome {
-        if !fix
-            .ned
-            .iter()
-            .chain([&fix.horiz_acc_m])
-            .all(|v| v.is_finite())
-            || self.stale(fix.stamp_ns)
+        if !(fix.ned.iter().all(|v| v.is_finite())
+            && fix.horiz_acc_m.is_finite()
+            && fix.horiz_acc_m > 0.0)
         {
+            return BeaconOutcome::Invalid;
+        }
+        if self.stale(fix.stamp_ns) {
             return BeaconOutcome::Stale;
         }
         let cfg = self.cfg;
@@ -351,6 +369,9 @@ impl SubjectEstimator {
             if !chained {
                 return BeaconOutcome::Broken;
             }
+            if self.beacon_assoc < cfg.beacon_assoc_fixes {
+                return BeaconOutcome::Unassociated;
+            }
         }
         let z = [f64::from(fix.ned[0]), f64::from(fix.ned[1])];
         let s2 = f64::from(fix.sigma_m()).powi(2);
@@ -360,7 +381,12 @@ impl SubjectEstimator {
         let Some(tr) = self.track.as_mut() else {
             return BeaconOutcome::NoVision;
         };
-        if tr.imm.distance2(z, &r) > f64::from(cfg.gate_chi2) {
+        let d2 = tr.imm.distance2(z, &r);
+        if d2 > f64::from(cfg.gate_chi2) {
+            if !alone {
+                // Vision sees the subject and the phone is elsewhere.
+                self.beacon_assoc = 0;
+            }
             return BeaconOutcome::Gated;
         }
         tr.imm.update(z, &r, &cfg);
@@ -371,6 +397,9 @@ impl SubjectEstimator {
             tr.bias = [[0.0; 2]; 2];
             BeaconOutcome::Alone
         } else {
+            if d2 <= f64::from(cfg.beacon_assoc_chi2) {
+                self.beacon_assoc = self.beacon_assoc.saturating_add(1);
+            }
             BeaconOutcome::Fused
         }
     }

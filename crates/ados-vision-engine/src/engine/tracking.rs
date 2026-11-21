@@ -138,13 +138,13 @@ impl VisionEngine {
             let tracked = self
                 .track(&desc.camera_id, detections, apps, pixels, Some(ts))
                 .await;
-            let held = self
+            let designation = self
                 .trackers
                 .lock()
                 .await
                 .get(&desc.camera_id)
-                .and_then(|t| t.mot.designated_id());
-            self.update_subject(desc, &tracked, held, ts);
+                .and_then(CameraTracks::designation);
+            self.update_subject(desc, &tracked, designation, ts);
             if plan.subject.is_some() {
                 let associated = self
                     .trackers
@@ -292,13 +292,26 @@ impl VisionEngine {
     /// ([`Self::take_designation`]), so the first locked box follows the tap
     /// by one frame and one crop pass.
     pub async fn designate(&self, camera_id: &str, target: &Detection) -> Option<u64> {
+        self.designate_from(camera_id, target, DesignationOrigin::Operator)
+            .await
+    }
+
+    /// [`Self::designate`] by `origin`: only an operator's designation has its
+    /// subject's world state published (`vision.subject.v1`); a plugin's is
+    /// tracked and locked the same, but never located.
+    pub async fn designate_from(
+        &self,
+        camera_id: &str,
+        target: &Detection,
+        origin: DesignationOrigin,
+    ) -> Option<u64> {
         self.grant_designation(camera_id, ados_protocol::framebus::mono_ns() / 1_000_000);
         let id = {
             let mut trackers = self.trackers.lock().await;
             trackers
                 .entry(camera_id.to_string())
                 .or_insert_with(|| CameraTracks::new(self.tracker_cfg))
-                .designate(target)
+                .designate(target, origin)
         };
         if id.is_some() {
             self.note_designation(camera_id);

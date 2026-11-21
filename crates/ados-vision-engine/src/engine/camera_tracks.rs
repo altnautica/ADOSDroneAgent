@@ -4,6 +4,7 @@ use ados_protocol::framebus::{BoundingBox, Detection, TrackState};
 use ados_vision::mot::{describe, Features, MotConfig, MultiObjectTracker, FEAT_DIM};
 use ados_vision::tracker::{SingleObjectTracker, TrackUpdate, TrackerConfig};
 
+use super::subject::{Designation, DesignationOrigin};
 use super::tracking::bbox_iou;
 
 /// One camera's trackers, under one lock: the single-object lock that owns
@@ -22,6 +23,8 @@ pub(super) struct CameraTracks {
     bridge: Option<(u64, u32)>,
     /// This frame's appearance descriptors, reused across frames.
     features: Vec<Option<Features>>,
+    /// Who made the current designation.
+    origin: Option<DesignationOrigin>,
 }
 
 impl CameraTracks {
@@ -31,6 +34,7 @@ impl CameraTracks {
             mot: MultiObjectTracker::new(MotConfig::default()),
             bridge: None,
             features: Vec::new(),
+            origin: None,
         }
     }
 
@@ -51,11 +55,16 @@ impl CameraTracks {
             .map(|(_, w)| u64::from(w))
     }
 
-    pub(super) fn designate(&mut self, target: &Detection) -> Option<u64> {
+    pub(super) fn designate(
+        &mut self,
+        target: &Detection,
+        origin: DesignationOrigin,
+    ) -> Option<u64> {
         let bbox = target.bbox.as_ref()?;
         let sot = self.sot.designate(target)?;
         let id = self.mot.designate(bbox, &target.class_label);
         self.bridge = Some((sot, id));
+        self.origin = Some(origin);
         Some(u64::from(id))
     }
 
@@ -63,6 +72,16 @@ impl CameraTracks {
         self.sot = SingleObjectTracker::new(cfg);
         self.mot.clear_designation();
         self.bridge = None;
+        self.origin = None;
+    }
+
+    /// The subject the multi-object tracker holds designated, and who
+    /// designated it.
+    pub(super) fn designation(&self) -> Option<Designation> {
+        Some(Designation {
+            id: self.mot.designated_id()?,
+            origin: self.origin?,
+        })
     }
 
     /// Advance the multi-object tracker, describing every box from `pixels`

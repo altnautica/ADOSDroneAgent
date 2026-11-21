@@ -42,6 +42,11 @@ fn a_beacon_never_starts_a_track() {
     assert!(est.state("main", &OpenSpace).is_none());
 }
 
+/// The walker's beacon fix at `t`, on the walker.
+fn on_walker(t: f64) -> BeaconFix {
+    beacon(t, (6.0 + 1.4 * t) as f32, 0.0)
+}
+
 #[test]
 fn a_beacon_fuses_beside_vision_then_alone_within_its_bounds() {
     let (mut est, ..) = walking(30);
@@ -52,44 +57,71 @@ fn a_beacon_fuses_beside_vision_then_alone_within_its_bounds() {
         },
         ..est.clone()
     };
-    // At 2.9 s the walker is at (10.06, 0).
+    // Far from the vision track: another phone, not the subject.
     assert_eq!(
-        est.fuse_beacon(&beacon(2.95, 10.1, 0.5)),
-        BeaconOutcome::Fused
-    );
-    let st = est.state("main", &OpenSpace).unwrap();
-    assert!(st.sources.beacon && st.sources.depth && st.sources.box_height);
-    // Far from the track: another phone, not the subject.
-    assert_eq!(
-        est.fuse_beacon(&beacon(3.0, 40.0, 30.0)),
+        est.fuse_beacon(&beacon(2.92, 40.0, 30.0)),
         BeaconOutcome::Gated
     );
+    // Fixes on the walker fuse beside vision and build the association.
+    assert_eq!(est.fuse_beacon(&on_walker(2.94)), BeaconOutcome::Fused);
+    let st = est.state("main", &OpenSpace).unwrap();
+    assert!(st.sources.beacon && st.sources.depth && st.sources.box_height);
+    let mut early = est.clone();
+    for t in [2.96, 2.98, 3.0, 3.02] {
+        assert_eq!(est.fuse_beacon(&on_walker(t)), BeaconOutcome::Fused);
+    }
+    let mut reset = est.clone();
     // Vision last fixed 1.53 s ago: on the beacon alone, a poor fix is
     // refused and a good one fuses.
     let poor = BeaconFix {
         horiz_acc_m: 12.0,
-        ..beacon(4.43, 12.2, 0.0)
+        ..on_walker(4.43)
     };
     assert_eq!(est.fuse_beacon(&poor), BeaconOutcome::Inaccurate);
-    assert_eq!(
-        est.fuse_beacon(&beacon(4.43, 12.2, 0.0)),
-        BeaconOutcome::Alone
-    );
+    assert_eq!(est.fuse_beacon(&on_walker(4.43)), BeaconOutcome::Alone);
     // A 2 s gap breaks the chain.
-    assert_eq!(
-        est.fuse_beacon(&beacon(6.5, 15.1, 0.0)),
-        BeaconOutcome::Broken
-    );
+    assert_eq!(est.fuse_beacon(&on_walker(6.5)), BeaconOutcome::Broken);
     assert_eq!(
         est.fuse_beacon(&beacon(1.0, 7.0, 0.0)),
         BeaconOutcome::Stale
     );
+
+    // One associated fix is not enough to carry the track alone.
+    assert_eq!(
+        early.fuse_beacon(&on_walker(4.43)),
+        BeaconOutcome::Unassociated
+    );
+    // A fix far from the vision track clears the association.
+    assert_eq!(
+        reset.fuse_beacon(&beacon(3.04, 40.0, 30.0)),
+        BeaconOutcome::Gated
+    );
+    assert_eq!(reset.fuse_beacon(&on_walker(3.06)), BeaconOutcome::Fused);
+    assert_eq!(
+        reset.fuse_beacon(&on_walker(4.5)),
+        BeaconOutcome::Unassociated
+    );
+
     // With beacon-only tracking off, a fix without vision does nothing.
     let mut off = off;
-    assert_eq!(
-        off.fuse_beacon(&beacon(4.43, 12.2, 0.0)),
-        BeaconOutcome::NoVision
-    );
+    assert_eq!(off.fuse_beacon(&on_walker(4.43)), BeaconOutcome::NoVision);
+}
+
+#[test]
+fn an_invalid_beacon_fix_is_refused() {
+    let (mut est, ..) = walking(30);
+    for acc in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        let fix = BeaconFix {
+            horiz_acc_m: acc,
+            ..on_walker(2.95)
+        };
+        assert_eq!(est.fuse_beacon(&fix), BeaconOutcome::Invalid, "{acc}");
+    }
+    let nan = BeaconFix {
+        ned: [f32::NAN, 0.0, 0.0],
+        ..on_walker(2.95)
+    };
+    assert_eq!(est.fuse_beacon(&nan), BeaconOutcome::Invalid);
 }
 
 /// A wall across the walker's path, 2 m thick, from east -3 to 3.

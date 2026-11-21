@@ -38,7 +38,12 @@ from ados.sdk.vision.frames import (
     FrameCallback,
 )
 from ados.sdk.vision.pose import Odometry, Pose
-from ados.sdk.vision.subject import VISION_SUBJECT_TOPIC, SubjectState
+from ados.sdk.vision.subject import (
+    VISION_SUBJECT_TOPIC,
+    SubjectReleased,
+    SubjectState,
+    decode_subject_record,
+)
 
 if TYPE_CHECKING:
     from ados.plugins.ipc_client import PluginIpcClient
@@ -187,20 +192,20 @@ class VisionClient:
 
     async def subscribe_subject(
         self,
-        callback: Callable[[SubjectState], Awaitable[None] | None],
+        callback: Callable[[SubjectState | SubjectReleased], Awaitable[None] | None],
         *,
         camera_id: str | None = None,
     ) -> None:
         """Receive the designated subject's world state
         (:data:`VISION_SUBJECT_TOPIC`), optionally from one ``camera_id``.
         Gated on ``event.subscribe`` plus ``vision.subject.read``. Each event
-        is decoded into a :class:`SubjectState`; one that does not decode is
-        dropped."""
+        is decoded into a :class:`SubjectState`, or a :class:`SubjectReleased`
+        when the subject is gone; one that does not decode is dropped."""
         want = camera_id
 
         async def _on_state(payload: dict[str, Any]) -> None:
             try:
-                state = SubjectState.from_payload(payload)
+                state = decode_subject_record(payload)
             except ValueError:
                 return
             if want is not None and state.camera_id != want:

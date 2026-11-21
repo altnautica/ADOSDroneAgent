@@ -65,10 +65,20 @@ fn local_ned(b: &FollowBeacon, home: &Home) -> [f32; 3] {
     [0, 1, 2].map(|i| home.local_ned[i] + d[i] as f32)
 }
 
+/// A fix the router could have sent: latitude and longitude on the globe,
+/// a positive finite accuracy, a finite altitude when it has one.
+fn valid_fix(b: &FollowBeacon) -> bool {
+    (-90.0..=90.0).contains(&b.lat)
+        && (-180.0..=180.0).contains(&b.lon)
+        && b.horiz_acc_m.is_finite()
+        && b.horiz_acc_m > 0.0
+        && b.alt_m.is_none_or(f64::is_finite)
+}
+
 impl VisionEngine {
     /// Apply one export event line arriving at `rx_ms` (engine clock): a
-    /// beacon fix from the host is queued for the subject estimate. Returns
-    /// whether it was.
+    /// valid beacon fix from the host is handed to every running subject
+    /// estimate. Returns whether the line was such a fix.
     pub fn apply_beacon_line(&self, line: &[u8], rx_ms: u64) -> bool {
         let Some(b) = beacon_of(line) else {
             return false;
@@ -76,7 +86,7 @@ impl VisionEngine {
         let Some(home) = self.range_feed.home() else {
             return false;
         };
-        if !(b.lat.is_finite() && b.lon.is_finite() && b.horiz_acc_m.is_finite()) {
+        if !valid_fix(&b) {
             return false;
         }
         let stamp_ns = if self.sim_pacing.get().is_some() {
@@ -138,5 +148,33 @@ pub(super) mod tests {
         assert!((ned[1] + 2.0).abs() < 1e-3 && (ned[2] - 2.5).abs() < 1e-3);
         assert!(beacon_of(&line("com.example.spoof", 52.0, 4.5)).is_none());
         assert!(beacon_of(b"{not json").is_none());
+    }
+
+    #[test]
+    fn a_fix_off_the_globe_or_without_a_positive_accuracy_is_refused() {
+        let good = beacon_of(&line(BEACON_PUBLISHER, 52.0, 4.5)).unwrap();
+        assert!(valid_fix(&good));
+        for (lat, lon) in [(91.0, 4.5), (-90.5, 4.5), (52.0, 180.5), (f64::NAN, 4.5)] {
+            assert!(
+                !valid_fix(&FollowBeacon {
+                    lat,
+                    lon,
+                    ..good.clone()
+                }),
+                "{lat} {lon}"
+            );
+        }
+        for acc in [0.0, -3.0, f32::NAN, f32::INFINITY] {
+            let b = FollowBeacon {
+                horiz_acc_m: acc,
+                ..good.clone()
+            };
+            assert!(!valid_fix(&b), "{acc}");
+        }
+        let b = FollowBeacon {
+            alt_m: Some(f64::INFINITY),
+            ..good
+        };
+        assert!(!valid_fix(&b));
     }
 }

@@ -5,6 +5,9 @@ use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{fence, Ordering};
 
+use nix::fcntl::OFlag;
+
+use super::reader::open_nonblocking;
 use super::{file_len, offset, voxel_count, VoxmapError, VoxmapMeta, HEADER_LEN};
 
 /// Publishes maps of one window size into a seam M file.
@@ -23,22 +26,48 @@ pub struct VoxmapWriter {
 impl VoxmapWriter {
     /// Create (or reopen) the file at `path` for windows of `dims`, mode
     /// `0640`, and when `group` is given hand it to that group (the writer
-    /// must be a member). A file at the path owned by another user is
+    /// must be a member).
+    ///
+    /// The file's directory must be this writer's own and writable by it
+    /// alone (the plugin host hands [`super::VOXMAP_DIR`] to the one granted
+    /// writer), so no other uid can have planted anything at the path. A
+    /// file there owned by another user, with more than one link, or that is
+    /// not a regular file (a FIFO is opened without blocking and refused) is
     /// refused: it was not created by this writer and cannot be trusted to
     /// carry only its data. Symlinks are not followed.
     pub fn create(path: &Path, dims: [u16; 3], group: Option<&str>) -> Result<Self, VoxmapError> {
         if dims.contains(&0) || voxel_count(dims) > super::MAX_VOXELS {
             return Err(VoxmapError::BadDims(dims));
         }
+        let me = nix::unistd::geteuid().as_raw();
+        let dir_path = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let dir = open_nonblocking(dir_path, OFlag::O_DIRECTORY)?.metadata()?;
+        if dir.uid() != me || dir.mode() & 0o022 != 0 {
+            return Err(VoxmapError::Untrusted(format!(
+                "{} is not this writer's own directory (uid {}, mode {:o}): another user \
+                 could plant a file there",
+                dir_path.display(),
+                dir.uid(),
+                dir.mode() & 0o7777
+            )));
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .mode(0o640)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+            .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).bits())
             .open(path)?;
         let md = file.metadata()?;
-        let me = nix::unistd::geteuid().as_raw();
+        if !md.file_type().is_file() {
+            return Err(VoxmapError::Untrusted(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
         if md.uid() != me {
             return Err(VoxmapError::Untrusted(format!(
                 "{} is owned by uid {}, not this writer",
@@ -46,10 +75,11 @@ impl VoxmapWriter {
                 md.uid()
             )));
         }
-        if !md.file_type().is_file() {
+        if md.nlink() != 1 {
             return Err(VoxmapError::Untrusted(format!(
-                "{} is not a regular file",
-                path.display()
+                "{} has {} links, not one",
+                path.display(),
+                md.nlink()
             )));
         }
         if let Some(name) = group {

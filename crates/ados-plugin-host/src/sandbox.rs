@@ -178,11 +178,14 @@ pub const CAPTURE_STATE_DIR: &str = "/run/ados/capture";
 pub const CAPTURE_ROOT_MOUNT: &str = "/run/ados/capture-root";
 
 /// The capability that lets a plugin publish the pilot's 3D voxel map (seam
-/// M). The grant joins [`ados_protocol::voxmap::VOXMAP_GROUP`]: the writer
-/// hands the map file to that group, and the pilot reads a file only when it
-/// carries that group and only its owner may write it. No other process can
-/// give a file that group, so an ungranted plugin can neither write the map
-/// nor squat a file the pilot would read in its place.
+/// M). The plugin host hands [`ados_protocol::voxmap::VOXMAP_DIR`] to the one
+/// installed plugin holding the grant (see
+/// `PluginSupervisor::assign_voxmap_writer`), and the grant binds that
+/// directory into the plugin's sandbox and joins
+/// [`ados_protocol::voxmap::VOXMAP_GROUP`], which the writer hands the file
+/// to. The pilot reads a file only when the directory's owner owns it, so an
+/// ungranted plugin can neither write the map nor squat a file the pilot
+/// would read in its place.
 pub const VOXMAP_WRITE_CAP: &str = "shm.voxmap";
 
 /// Paths a plugin never reaches, granted or not: every credential the agent
@@ -389,6 +392,9 @@ pub fn sandbox_directives(
         lines.push(format!("BindReadOnlyPaths=-{CAPTURE_STORAGE_DIR}"));
         lines.push(format!("BindPaths=-{CAPTURE_STATE_DIR}"));
     }
+    if granted.contains(VOXMAP_WRITE_CAP) {
+        lines.push(format!("BindPaths=-{}", ados_protocol::voxmap::VOXMAP_DIR));
+    }
     let host_fs = granted.contains(FILESYSTEM_HOST_CAP);
     let mut rw: Vec<String> = BASE_READ_WRITE_PATHS
         .iter()
@@ -583,14 +589,16 @@ mod tests {
         assert_eq!(tail, NO_GRANT_FILESYSTEM);
 
         // Granting every sandbox capability reopens only the data roots and
-        // the named capture/sensor paths: the run dir stays an empty tmpfs,
-        // nothing under it becomes writable but the capture marker dir, and no
-        // other path is bound back, least of all another plugin's socket dir.
+        // the named capture/sensor/map paths: the run dir stays an empty
+        // tmpfs, nothing under it becomes writable but the capture marker dir
+        // and the map dir, and no other path is bound back, least of all
+        // another plugin's socket dir.
         let allowed = [
             "BindReadOnlyPaths=-/run/ados/logd.sock",
             "BindReadOnlyPaths=-/run/ados/sensing",
             "BindReadOnlyPaths=-/run/ados/capture-storage",
             "BindPaths=-/run/ados/capture",
+            "BindPaths=-/run/ados/voxmap",
         ];
         let everything: Vec<&str> = sandbox_enforced_caps().into_iter().collect();
         for (granted, lines) in [
@@ -868,18 +876,21 @@ mod tests {
         assert!(capture_root_bind(&granted, None).is_empty());
     }
 
-    /// The voxel-map grant joins the map's group and nothing else; no other
-    /// grant joins it.
+    /// The voxel-map grant joins the map's group and binds the map directory,
+    /// and nothing else; no other grant does either.
     #[test]
     fn the_voxmap_grant_joins_only_the_voxmap_group() {
         let lines = sandbox_directives(&caps(&[VOXMAP_WRITE_CAP]), true, &[], &[]);
         assert!(lines.contains(&"SupplementaryGroups=ados-voxmap".to_string()));
+        assert!(lines.contains(&"BindPaths=-/run/ados/voxmap".to_string()));
         assert!(!lines.iter().any(|l| l.contains("ados-operator")));
         let others: Vec<&str> = sandbox_enforced_caps()
             .into_iter()
             .filter(|c| *c != VOXMAP_WRITE_CAP)
             .collect();
         let rest = sandbox_directives(&caps(&others), true, &[], &[]);
-        assert!(!rest.iter().any(|l| l.contains("ados-voxmap")));
+        assert!(!rest
+            .iter()
+            .any(|l| l.contains("ados-voxmap") || l.contains("/run/ados/voxmap")));
     }
 }

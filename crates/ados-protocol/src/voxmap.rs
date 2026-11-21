@@ -2,7 +2,7 @@
 //! pilot through one shared-memory file.
 //!
 //! The map is a robot-centred window of voxels in Navigation's map frame
-//! (north, east, down, metres). The file at [`VOXMAP_SHM_PATH`] holds a fixed
+//! (north, east, down, metres). The file at [`VOXMAP_PATH`] holds a fixed
 //! [`HEADER_LEN`]-byte header followed by two byte planes of `nx * ny * nz`
 //! entries each, x fastest (`index = x + nx * (y + ny * z)`, window-relative):
 //!
@@ -46,12 +46,25 @@
 //!
 //! # Who may write
 //!
-//! The writer creates the file `0640` and hands it to [`VOXMAP_GROUP`]; a
-//! plugin joins that group only while it holds the `shm.voxmap` capability.
-//! [`VoxmapReader::open_trusted`] accepts the file only when its group is
-//! [`VOXMAP_GROUP`] and neither group nor other may write it: a process
-//! outside the group cannot give a file that group, so a file squatted at the
-//! path by any other plugin is refused rather than read as the map.
+//! The map lives in [`VOXMAP_DIR`], a directory on the agent's run tmpfs that
+//! only root can create entries beside (its parent is root's and writable by
+//! root alone). The plugin host (root) hands that directory to exactly one
+//! writer: the single installed plugin holding the `shm.voxmap` capability,
+//! or nobody (root) when none or several hold it. The directory's owner is
+//! therefore the root-made record of who the writer is, and only that uid can
+//! create, replace or remove the map file.
+//!
+//! [`VoxmapReader::open_trusted`] checks that chain on every open: the
+//! directory's parent is root's (or the reader's own) and writable by its
+//! owner only; the directory is writable by its owner only; the file is a
+//! regular file owned by the directory's owner, with one link, writable by
+//! its owner only. [`VoxmapWriter::create`] refuses a directory that is not
+//! its own or that anyone else may write, so no other uid can plant a file
+//! that blocks it. Both sides open with `O_NOFOLLOW | O_NONBLOCK |
+//! O_CLOEXEC` and check the type on the descriptor before reading, so a FIFO
+//! or symlink at the path is refused at once instead of blocking the opener.
+//! The writer hands the file to [`VOXMAP_GROUP`] too, so a reader outside
+//! root can be let in by group; trust never rests on the group.
 
 mod reader;
 mod writer;
@@ -68,8 +81,11 @@ pub const VOXMAP_V1_VERSION: u16 = match crate::contracts::contract_version("nav
     None => panic!("nav.voxmap.v1 is registered in contracts.toml"),
 };
 
-/// Where Navigation publishes the map.
-pub const VOXMAP_SHM_PATH: &str = "/dev/shm/ados-voxmap-v1";
+/// The directory the map lives in; its owner is the map's single writer.
+pub const VOXMAP_DIR: &str = "/run/ados/voxmap";
+
+/// Where Navigation publishes the map: `map-v1` in [`VOXMAP_DIR`].
+pub const VOXMAP_PATH: &str = "/run/ados/voxmap/map-v1";
 
 /// The group a writer hands the file to; a plugin joins it only while it holds
 /// the `shm.voxmap` capability.
@@ -205,6 +221,13 @@ impl VoxmapMeta {
                 .map(|i| f32::from_le_bytes(take(buf, offset::MAP_FROM_BODY + 4 * i))),
             tier: VoxTier::from_u8(buf[offset::TIER]),
         };
+        // A voxel edge that is not a positive finite number, or a pose with a
+        // NaN or infinity, would place every voxel nowhere: corrupt.
+        if !(meta.res_m.is_finite() && meta.res_m > 0.0)
+            || meta.map_from_body.iter().any(|v| !v.is_finite())
+        {
+            return Err(VoxmapError::BadGeometry);
+        }
         Ok((seq, meta))
     }
 }
@@ -240,6 +263,7 @@ pub struct VoxSnapshot {
     pub seq: u64,
     pub meta: VoxmapMeta,
     pub occupancy: Vec<u8>,
+    /// Empty after [`VoxmapReader::read_occupancy_into`].
     pub esdf_dm: Vec<u8>,
 }
 
@@ -289,4 +313,6 @@ pub enum VoxmapError {
     Untrusted(String),
     #[error("group {0} does not exist")]
     NoSuchGroup(String),
+    #[error("voxmap header voxel size or body pose is not finite and positive")]
+    BadGeometry,
 }

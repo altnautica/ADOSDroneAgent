@@ -50,7 +50,7 @@ use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use crate::engine::VisionEngine;
+use crate::engine::{DesignationOrigin, VisionEngine};
 
 mod push;
 use push::{spawn_detection_push, spawn_frame_push};
@@ -312,18 +312,39 @@ async fn handle_publish(engine: &Arc<VisionEngine>, args: &Value) -> Result<Valu
 /// specific box (the operator's click-to-follow pick, or a plugin's),
 /// overriding the auto-lock. Only a camera the engine captures has a tracker
 /// to lock, so any other camera id is refused rather than growing the tracker
-/// map.
+/// map. The plugin host stamps every plugin's request with its `owner`, and
+/// the control plane's click-to-follow route sends none: a request with an
+/// owner is a plugin's designation, whose subject is never located
+/// ([`DesignationOrigin`]).
 async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
     let req = vision_rpc::decode_designate_track(args)?;
     if !engine.has_ring(&req.camera_id).await {
         return Err(anyhow!("no camera {} on this node", req.camera_id));
     }
-    let track_id = engine.designate(&req.camera_id, &req.target).await;
+    let origin = designation_origin(args);
+    let track_id = engine
+        .designate_from(&req.camera_id, &req.target, origin)
+        .await;
     Ok(ok_map(&[
         ("designated", Value::Boolean(track_id.is_some())),
         ("track_id", track_id.map(Value::from).unwrap_or(Value::Nil)),
         ("camera_id", Value::from(req.camera_id)),
     ]))
+}
+
+/// Who made a `vision.designate_track` request: a plugin when it carries an
+/// owner field at all (the host stamps one on every plugin request), the
+/// operator otherwise.
+fn designation_origin(args: &Value) -> DesignationOrigin {
+    let owned = args.as_map().is_some_and(|m| {
+        m.iter()
+            .any(|(k, _)| k.as_str() == Some(vision_rpc::OWNER_FIELD))
+    });
+    if owned {
+        DesignationOrigin::Plugin
+    } else {
+        DesignationOrigin::Operator
+    }
 }
 
 /// Handle `vision.request_detection`: take, renew (`hold_ms > 0`) or release
@@ -977,5 +998,16 @@ mod tests {
         map.iter()
             .find(|(k, _)| k.as_str() == Some(key))
             .map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn a_designation_the_host_stamped_is_a_plugins() {
+        let operator = Value::Map(vec![(Value::from("camera_id"), Value::from("main"))]);
+        assert_eq!(designation_origin(&operator), DesignationOrigin::Operator);
+        let plugin = vision_rpc::with_owner(&operator, "com.example.follow");
+        assert_eq!(designation_origin(&plugin), DesignationOrigin::Plugin);
+        // Even an empty owner marks it: only the host writes the field.
+        let empty = vision_rpc::with_owner(&operator, "");
+        assert_eq!(designation_origin(&empty), DesignationOrigin::Plugin);
     }
 }

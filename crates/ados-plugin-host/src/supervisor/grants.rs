@@ -144,6 +144,7 @@ impl PluginSupervisor {
         self.ensure_account(manifest)?;
         self.ensure_http_dir(manifest)?;
         self.ensure_data_dir(manifest)?;
+        self.assign_voxmap_writer();
         let granted = self
             .find_install(plugin_id)
             .map(state::granted_caps)

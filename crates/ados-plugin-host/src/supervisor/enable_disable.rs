@@ -59,6 +59,7 @@ impl PluginSupervisor {
         self.ensure_account(&manifest)?;
         self.ensure_http_dir(&manifest)?;
         self.ensure_data_dir(&manifest)?;
+        self.assign_voxmap_writer();
         // Enabled before the start: the plugin host serves an enabled plugin,
         // and its socket and token must be there before the unit runs.
         let (prior_status, prior_enabled_at) = {
@@ -198,6 +199,9 @@ impl PluginSupervisor {
         // that is still installed.
         self.installs = remove_install(std::mem::take(&mut self.installs), plugin_id);
         save_state(&self.installs, Some(&self.paths.state_path))?;
+        // A removed writer's map directory goes to the next sole holder, or
+        // back to root.
+        self.assign_voxmap_writer();
         tracing::info!(plugin_id, keep_data, "plugin_removed");
         let outcome = RemoveOutcome { warning };
         if keep_data {

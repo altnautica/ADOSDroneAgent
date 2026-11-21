@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use ados_protocol::frame::encode_frame;
 use ados_protocol::ipc::IpcBroadcast;
 use ados_protocol::vision_depth_frame::{DepthFit, FRAME_COLS, FRAME_ROWS, VISION_DEPTH_READ_CAP};
-use ados_protocol::vision_subject::SubjectPrediction;
+use ados_protocol::vision_subject::{SubjectPrediction, SubjectReleased, SubjectState};
 use ados_protocol::vision_subject::{SubjectSources, PREDICTION_HORIZONS_S};
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -129,6 +129,27 @@ fn only_valid_records_become_payloads() {
     assert!(payload(&DEPTH_FRAMES, &[0xc1]).is_none());
 }
 
+#[test]
+fn a_release_is_forwarded_and_a_stale_state_is_not() {
+    let released = SubjectRecord::Released(SubjectReleased {
+        camera_id: "main".into(),
+        id: 7,
+        stamp_ns: 9,
+    });
+    let p = payload(&SUBJECT, &released.to_msgpack()).expect("a release");
+    assert_eq!(SubjectRecord::from_msgpack(&encoded(&p)).unwrap(), released);
+    let edge = SubjectState {
+        fix_age_ms: SUBJECT_MAX_FIX_AGE_MS,
+        ..subject(9)
+    };
+    assert!(payload(&SUBJECT, &edge.to_msgpack()).is_some());
+    let stale = SubjectState {
+        fix_age_ms: SUBJECT_MAX_FIX_AGE_MS + 1,
+        ..subject(9)
+    };
+    assert!(payload(&SUBJECT, &stale.to_msgpack()).is_none());
+}
+
 #[tokio::test]
 async fn engine_frames_reach_the_bus_and_a_slow_subscriber_blocks_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,4 +228,24 @@ async fn the_last_subject_state_reaches_a_late_reader() {
         subject(5)
     );
     task.abort();
+}
+
+#[tokio::test]
+async fn every_receiver_shares_one_event() {
+    let bus = EventBus::new();
+    let (mut a, mut b) = (bus.subscribe(), bus.subscribe());
+    let p = payload(&DEPTH_FRAMES, &frame(1).to_msgpack()).unwrap();
+    assert_eq!(publish_host_event(&bus, DEPTH_FRAMES.topic, p), 2);
+    let (ea, eb) = (a.recv().await.unwrap(), b.recv().await.unwrap());
+    assert!(
+        Arc::ptr_eq(&ea, &eb),
+        "the 48 KiB frame is not copied per receiver"
+    );
+}
+
+#[test]
+fn a_frame_with_bad_intrinsics_is_not_forwarded() {
+    let mut f = frame(1);
+    f.fx = f32::NAN;
+    assert!(payload(&DEPTH_FRAMES, &f.to_msgpack()).is_none());
 }

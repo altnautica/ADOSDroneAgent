@@ -77,10 +77,13 @@ class SubjectState:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> SubjectState:
-        """Decode one event payload; :class:`ValueError` when it is not a
-        ``vision.subject.v1`` record."""
+        """Decode one state payload; :class:`ValueError` when it is not a
+        ``vision.subject.v1`` state (a released record included: read those
+        with :func:`decode_subject_record`)."""
         if not isinstance(payload, dict):
             raise ValueError("subject state is not a map")
+        if "released" in payload:
+            raise ValueError("subject record is a release, not a state")
         version = _uint(payload, "v")
         if version != VISION_SUBJECT_VERSION:
             raise ValueError(f"subject state version {version} is not {VISION_SUBJECT_VERSION}")
@@ -123,3 +126,36 @@ class SubjectState:
             predictions=tuple(predictions),
             sources=frozenset(sources_raw),
         )
+
+
+@dataclass(frozen=True)
+class SubjectReleased:
+    """The designated subject is gone: the designation ended or changed, or
+    the estimate coasted past its limit. Drop the subject on it."""
+
+    camera_id: str
+    id: int
+    """The released subject's ``track_id``."""
+    stamp_ns: int
+
+
+def decode_subject_record(payload: dict[str, Any]) -> SubjectState | SubjectReleased:
+    """Decode one ``vision.subject.v1`` event payload, a state or a release;
+    :class:`ValueError` when it is neither."""
+    if not isinstance(payload, dict):
+        raise ValueError("subject record is not a map")
+    if "released" not in payload:
+        return SubjectState.from_payload(payload)
+    if payload.get("released") is not True:
+        raise ValueError("subject field released: not true")
+    version = _uint(payload, "v")
+    if version != VISION_SUBJECT_VERSION:
+        raise ValueError(f"subject record version {version} is not {VISION_SUBJECT_VERSION}")
+    camera_id = payload.get("camera_id")
+    if not isinstance(camera_id, str):
+        raise ValueError("subject field camera_id: not a string")
+    return SubjectReleased(
+        camera_id=camera_id,
+        id=_uint(payload, "id"),
+        stamp_ns=_uint(payload, "stamp_ns"),
+    )

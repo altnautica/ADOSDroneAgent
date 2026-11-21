@@ -485,6 +485,7 @@ mod install;
 mod readiness;
 mod refresh;
 mod units;
+mod voxmap;
 
 pub use readiness::{verify_install, InstallVerifier, TAMPERED_REASON};
 use units::*;

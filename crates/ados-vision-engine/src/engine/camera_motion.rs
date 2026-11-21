@@ -90,6 +90,12 @@ impl VisionEngine {
         Some((geometry, frame_time(desc, m.setup.fc_on_sim_clock)))
     }
 
+    /// The flight controller runs on the simulation clock (see
+    /// [`CameraMotionSetup::fc_on_sim_clock`]).
+    pub(super) fn fc_on_sim_clock(&self) -> bool {
+        self.camera_motion().setup.fc_on_sim_clock
+    }
+
     /// Before the batch on `desc`: move the camera's track by the vehicle's
     /// turn since the previous batch's frame. Returns the shift applied, in
     /// pixels; `None` when there was nothing to move (no tracker, no geometry

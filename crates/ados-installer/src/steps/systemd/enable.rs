@@ -110,12 +110,18 @@ pub(super) fn install_run_dir_tmpfiles() {
 /// `/run/ados/capture-storage` (the janitor's capture-storage sidecar) are
 /// bound whole into the plugins granted them, so they must exist before any
 /// plugin starts: a missing bind source is skipped, and the plugin would then
-/// never see the files appear.
+/// never see the files appear. `/run/ados/voxmap` (the 3D voxel map) is
+/// bound into the plugin granted `shm.voxmap` for the same reason; it is
+/// created root's `0755` and its mode and owner are left unset (`-`), so a
+/// later `systemd-tmpfiles --create` never takes it back from the writer the
+/// plugin host handed it to.
 pub(super) fn run_dir_tmpfiles_body() -> String {
     format!(
         "d /run/ados 0755 root root -\nd /run/ados/capture 2775 root {} -\n\
-         d /run/ados/sensing 0755 root root -\nd /run/ados/capture-storage 0755 root root -\n",
-        ados_protocol::ipc::CAPTURE_GROUP
+         d /run/ados/sensing 0755 root root -\nd /run/ados/capture-storage 0755 root root -\n\
+         d {} - - - -\n",
+        ados_protocol::ipc::CAPTURE_GROUP,
+        ados_protocol::voxmap::VOXMAP_DIR
     )
 }
 
