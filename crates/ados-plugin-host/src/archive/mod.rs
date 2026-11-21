@@ -257,12 +257,37 @@ pub fn parse_archive_bytes(raw: Vec<u8>) -> Result<ArchiveContents, LifecycleErr
     })
 }
 
+/// The member count the archive's end record declares must be the count the
+/// zip reader listed, so no entry is shadowed or hidden from the name checks.
+pub(super) fn check_declared_count(raw: &[u8], listed: usize) -> Result<(), ArchiveError> {
+    let mut cursor = Cursor::new(raw);
+    let (declared, size, offset) = declared_directory(&mut cursor, "archive")?;
+    if size > TOTAL_DECOMPRESSED_MAX {
+        return Err(ArchiveError(format!(
+            "archive has a {size}-byte central directory"
+        )));
+    }
+    let headers = directory_headers(&mut cursor, offset, size, "archive")?;
+    if headers != declared {
+        return Err(ArchiveError(format!(
+            "archive declares {declared} entries but its directory holds {headers}"
+        )));
+    }
+    if declared != listed as u64 {
+        return Err(ArchiveError(format!(
+            "archive declares {declared} entries but its directory lists {listed}"
+        )));
+    }
+    Ok(())
+}
+
 /// Walk the zip central directory, applying the traversal/symlink/size rejects,
 /// and read every file entry into memory keyed by its (validated) name. The
 /// returned `BTreeMap` is path-sorted, which feeds the canonical hash directly.
 fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
     let mut zf = zip::ZipArchive::new(Cursor::new(raw))
         .map_err(|e| ArchiveError(format!("not a valid zip archive: {e}")))?;
+    check_declared_count(raw, zf.len())?;
 
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut total_decompressed: u64 = 0;

@@ -262,3 +262,52 @@ fn a_declared_count_the_directory_disagrees_with_is_refused() {
         "{err}"
     );
 }
+
+#[test]
+fn bytes_after_the_end_record_or_a_second_disk_are_refused() {
+    let mut trailing = zip_of(&[M::File("a", b"x")]);
+    trailing.extend_from_slice(b"junk");
+    assert!(refused(&trailing, PayloadCaps::DEFAULT).contains("does not end the file"));
+    let mut disk = zip_of(&[M::File("a", b"x")]);
+    let at = disk.len() - 22;
+    disk[at + 4..at + 6].copy_from_slice(&1u16.to_le_bytes());
+    assert!(refused(&disk, PayloadCaps::DEFAULT).contains("multi-disk"));
+}
+
+#[test]
+fn the_directory_parse_reads_no_further_than_its_budget() {
+    let data = vec![7u8; 1000];
+    let left = std::rc::Rc::new(std::cell::Cell::new(Some(100)));
+    let mut r = Budgeted {
+        inner: Cursor::new(data),
+        left: left.clone(),
+    };
+    let mut buf = [0u8; 64];
+    assert_eq!(r.read(&mut buf).unwrap(), 64);
+    assert!(r.read(&mut buf).is_err(), "past the budget");
+    left.set(None);
+    assert_eq!(r.read(&mut buf).unwrap(), 64, "lifted for member reads");
+}
+
+#[test]
+fn a_member_larger_than_it_declares_is_refused() {
+    let mut zip = zip_of(&[M::File("a", &[1u8; 300])]);
+    // The central directory's uncompressed size field of the one member.
+    let at = zip
+        .windows(4)
+        .position(|w| w == b"PK\x01\x02")
+        .expect("central directory header");
+    zip[at + 24..at + 28].copy_from_slice(&10u32.to_le_bytes());
+    refused(&zip, PayloadCaps::DEFAULT);
+}
+
+#[test]
+fn an_adosplug_whose_count_disagrees_is_refused() {
+    let mut zip = zip_of(&[M::File("manifest.yaml", b"id: x\n"), M::File("b", b"y")]);
+    let at = zip.len() - 22;
+    zip[at + 8..at + 10].copy_from_slice(&1u16.to_le_bytes());
+    zip[at + 10..at + 12].copy_from_slice(&1u16.to_le_bytes());
+    assert!(read_entries(&zip).is_err());
+    let dir = tempfile::tempdir().unwrap();
+    assert!(unpack_to(&zip, dir.path(), &Executables::default()).is_err());
+}

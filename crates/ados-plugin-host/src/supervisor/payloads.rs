@@ -17,6 +17,19 @@ pub(super) fn place_payloads(
 ) -> Result<Vec<AttestedFile>, LifecycleError> {
     let executables = Executables::of(manifest);
     let mut placed = Vec::with_capacity(fetched.len());
+    // One counter for the install: what the payloads downloaded, then every
+    // byte each unpack writes, against the per-install cap.
+    let specs = manifest
+        .agent
+        .as_ref()
+        .map(|a| a.payloads.as_slice())
+        .unwrap_or_default();
+    let spec_of = |path: &str| specs.iter().find(|p| p.path == path);
+    let downloaded: u64 = fetched
+        .iter()
+        .filter_map(|(p, _)| spec_of(p).map(|s| s.size_bytes))
+        .sum();
+    let mut left = PAYLOADS_INSTALL_MAX_BYTES.saturating_sub(downloaded);
     for (path, sha256) in fetched {
         let dest = staging.join(path);
         if dest.symlink_metadata().is_ok() {
@@ -26,19 +39,21 @@ pub(super) fn place_payloads(
             ))
             .into());
         }
-        let unpack = manifest
-            .agent
-            .as_ref()
-            .and_then(|a| a.payloads.iter().find(|p| p.path == *path))
-            .and_then(|p| p.unpack);
+        let unpack = spec_of(path).and_then(|p| p.unpack);
         if let Some(PayloadUnpack::Zip) = unpack {
-            let files = crate::archive::unpack_payload_zip(
+            let caps = crate::archive::PayloadCaps {
+                total_bytes: left.min(crate::archive::PayloadCaps::DEFAULT.total_bytes),
+                ..crate::archive::PayloadCaps::DEFAULT
+            };
+            let files = crate::archive::unpack_payload_zip_capped(
                 &payload_dir.join(path),
                 &dest,
                 path,
                 &executables,
+                caps,
             )
             .map_err(|e| SupervisorError(format!("plugin {}: {e}", manifest.id)))?;
+            left = left.saturating_sub(files.iter().map(|f| f.bytes).sum());
             placed.extend(files.into_iter().map(|f| {
                 AttestedFile::payload(f.path, &f.sha256, Some((path.clone(), sha256.clone())))
             }));

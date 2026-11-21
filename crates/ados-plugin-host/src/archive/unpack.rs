@@ -183,6 +183,7 @@ pub fn unpack_to(
         .map_err(|e| ArchiveError(format!("cannot create {}: {e}", dest.display())))?;
     let mut zf = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|e| ArchiveError(format!("not a valid zip archive: {e}")))?;
+    check_declared_count(archive_bytes, zf.len())?;
     let mut total_decompressed: u64 = 0;
     let mut written: BTreeSet<String> = BTreeSet::new();
     for i in 0..zf.len() {

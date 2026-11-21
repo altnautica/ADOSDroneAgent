@@ -115,6 +115,14 @@ pub fn verify_install(install_dir: &Path, install: &PluginInstall) -> Result<(),
         .filter_map(|f| f.unpacked_from.as_deref())
         .collect();
     for root in unpacked {
+        if !Path::new(root)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return Err(format!(
+                "unpacked payload path {root:?} is not under the install"
+            ));
+        }
         let mut stack = vec![dir.join(root)];
         while let Some(at) = stack.pop() {
             let entries = std::fs::read_dir(&at).map_err(|e| format!("{root} unreadable: {e}"))?;
@@ -192,6 +200,29 @@ fn install_stamp(install_dir: &Path, plugin_id: &str) -> InstallStamp {
     ];
     if let Ok(attestation) = Attestation::read_from(&dir) {
         stamp.extend(attestation.files.iter().map(|f| stat(&dir.join(&f.path))));
+        // A file added under an unpacked payload changes its directory's
+        // mtime, so every directory there is in the stamp too.
+        let roots: BTreeSet<&str> = attestation
+            .files
+            .iter()
+            .filter_map(|f| f.unpacked_from.as_deref())
+            .filter(|r| {
+                Path::new(r)
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_)))
+            })
+            .collect();
+        for root in roots {
+            let mut stack = vec![dir.join(root)];
+            while let Some(at) = stack.pop() {
+                stamp.push(stat(&at));
+                if let Ok(entries) = std::fs::read_dir(&at) {
+                    stack.extend(entries.flatten().filter_map(|e| {
+                        e.file_type().ok().filter(|t| t.is_dir()).map(|_| e.path())
+                    }));
+                }
+            }
+        }
     }
     stamp
 }

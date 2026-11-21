@@ -77,6 +77,8 @@ const ZIP64_EOCD_SIG: u32 = 0x0606_4b50;
 pub struct UnpackedFile {
     pub path: String,
     pub sha256: String,
+    /// Bytes written.
+    pub bytes: u64,
 }
 
 /// Unpack the verified zip at `zip_path` into `dest` (which must not exist)
@@ -138,8 +140,16 @@ pub fn unpack_payload_zip_capped(
 
 /// The member count and central directory size the end-of-central-directory
 /// record declares (the Zip64 record's when the classic one defers to it).
-fn declared_directory(file: &mut File, rel: &str) -> Result<(u64, u64, u64), ArchiveError> {
-    let bad = |why: &str| ArchiveError(format!("payload {rel} is not a valid zip archive: {why}"));
+///
+/// The record must be the last signature in the file, sit on a single disk
+/// (disk fields 0, this disk's count equal to the total) and its comment must
+/// end exactly at the end of the file, so no other record can hide in a
+/// comment or in trailing bytes for a reader to pick instead.
+pub(crate) fn declared_directory<R: Read + Seek>(
+    file: &mut R,
+    rel: &str,
+) -> Result<(u64, u64, u64), ArchiveError> {
+    let bad = |why: &str| ArchiveError(format!("{rel} is not a valid zip archive: {why}"));
     let len = file
         .seek(SeekFrom::End(0))
         .map_err(|e| bad(&e.to_string()))?;
@@ -157,7 +167,17 @@ fn declared_directory(file: &mut File, rel: &str) -> Result<(u64, u64, u64), Arc
         .rev()
         .find(|&i| u32_at(&tail, i) == u64::from(EOCD_SIG))
         .ok_or_else(|| bad("no end-of-central-directory record"))?;
-    let (entries, size) = (u16_at(&tail, at + 10), u32_at(&tail, at + 12));
+    if at as u64 + 22 + u16_at(&tail, at + 20) != tail_len {
+        return Err(bad(
+            "the end-of-central-directory comment does not end the file",
+        ));
+    }
+    let (disk, cd_disk) = (u16_at(&tail, at + 4), u16_at(&tail, at + 6));
+    let (here, entries) = (u16_at(&tail, at + 8), u16_at(&tail, at + 10));
+    if disk != 0 || cd_disk != 0 || here != entries {
+        return Err(bad("a multi-disk archive"));
+    }
+    let size = u32_at(&tail, at + 12);
     let offset = u32_at(&tail, at + 16);
     if entries != 0xFFFF && size != 0xFFFF_FFFF && offset != 0xFFFF_FFFF {
         return Ok((entries, size, offset));
@@ -175,6 +195,9 @@ fn declared_directory(file: &mut File, rel: &str) -> Result<(u64, u64, u64), Arc
     if u32_at(&loc, 0) != u64::from(ZIP64_LOCATOR_SIG) {
         return Err(bad("no Zip64 locator"));
     }
+    if u32_at(&loc, 4) != 0 || u32_at(&loc, 16) != 1 {
+        return Err(bad("a multi-disk archive"));
+    }
     let mut rec = [0u8; 56];
     file.seek(SeekFrom::Start(u64_at(&loc, 8)))
         .and_then(|_| file.read_exact(&mut rec))
@@ -182,13 +205,44 @@ fn declared_directory(file: &mut File, rel: &str) -> Result<(u64, u64, u64), Arc
     if u32_at(&rec, 0) != u64::from(ZIP64_EOCD_SIG) {
         return Err(bad("no Zip64 end-of-central-directory record"));
     }
+    if u32_at(&rec, 16) != 0 || u32_at(&rec, 20) != 0 || u64_at(&rec, 24) != u64_at(&rec, 32) {
+        return Err(bad("a multi-disk archive"));
+    }
     Ok((u64_at(&rec, 32), u64_at(&rec, 40), u64_at(&rec, 48)))
+}
+
+/// A reader that fails once it has handed out `budget` bytes, while the
+/// budget is set: the zip reader parses the directory through it, so no
+/// layout the hand-read record did not describe can make it read further.
+/// Cleared for the member reads that follow.
+pub(crate) struct Budgeted<R> {
+    pub(crate) inner: R,
+    pub(crate) left: std::rc::Rc<std::cell::Cell<Option<u64>>>,
+}
+
+impl<R: Read> Read for Budgeted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if let Some(left) = self.left.get() {
+            let left = left.checked_sub(n as u64).ok_or_else(|| {
+                std::io::Error::other("the zip directory reads past its declared size")
+            })?;
+            self.left.set(Some(left));
+        }
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Budgeted<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
 }
 
 /// The file headers actually in the central directory at `offset`, `size`
 /// bytes long (already capped).
-fn directory_headers(
-    file: &mut File,
+pub(crate) fn directory_headers<R: Read + Seek>(
+    file: &mut R,
     offset: u64,
     size: u64,
     rel: &str,
@@ -246,7 +300,7 @@ fn unpack_into(
 ) -> Result<Vec<UnpackedFile>, ArchiveError> {
     let mut file = File::open(zip_path)
         .map_err(|e| ArchiveError(format!("cannot open payload {rel}: {e}")))?;
-    let (declared, directory, offset) = declared_directory(&mut file, rel)?;
+    let (declared, directory, offset) = declared_directory(&mut file, &format!("payload {rel}"))?;
     if declared > caps.entries as u64 {
         return Err(ArchiveError(format!(
             "payload {rel} holds {declared} members; cap is {}",
@@ -267,8 +321,16 @@ fn unpack_into(
     }
     file.seek(SeekFrom::Start(0))
         .map_err(|e| ArchiveError(format!("cannot read payload {rel}: {e}")))?;
-    let mut zf = zip::ZipArchive::new(file)
+    // The reader may read the directory and the end records (its search
+    // window included), nothing more, until the members are read.
+    let left = std::rc::Rc::new(std::cell::Cell::new(Some(directory + 128 * 1024)));
+    let budgeted = Budgeted {
+        inner: file,
+        left: left.clone(),
+    };
+    let mut zf = zip::ZipArchive::new(budgeted)
         .map_err(|e| ArchiveError(format!("payload {rel} is not a valid zip archive: {e}")))?;
+    left.set(None);
     if zf.len() as u64 != declared {
         return Err(ArchiveError(format!(
             "payload {rel} declares {declared} members but its directory lists {}",
@@ -346,6 +408,7 @@ fn unpack_into(
             .open(&target)
             .map_err(|e| ArchiveError(format!("payload {rel}: cannot create {body}: {e}")))?;
         let compressed = entry.compressed_size();
+        let declared_size = entry.size();
         let mut hasher = Sha256::new();
         let mut head = [0u8; 4];
         let mut head_len = 0usize;
@@ -362,6 +425,11 @@ fn unpack_into(
                 return Err(ArchiveError(format!(
                     "payload {rel}: member {body} inflates past the per-member cap {}",
                     caps.entry_bytes
+                )));
+            }
+            if written > declared_size {
+                return Err(ArchiveError(format!(
+                    "payload {rel}: member {body} inflates past its declared {declared_size} bytes"
                 )));
             }
             // The ratio bound holds while the member streams, not only after.
@@ -385,6 +453,7 @@ fn unpack_into(
         files.push(UnpackedFile {
             path,
             sha256: hex::encode(hasher.finalize()),
+            bytes: written,
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
