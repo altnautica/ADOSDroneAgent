@@ -39,6 +39,9 @@ pub const BIN_PREFIX: &str = "bin:";
 
 /// Hard cap on one downloaded payload, in bytes (1 GiB).
 pub const PAYLOAD_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// Cap on everything one install's payloads take on disk: their downloads
+/// plus, for an unpacked one, as much again (8 GiB).
+pub const PAYLOADS_INSTALL_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// The `<arch>-<os>` key this host resolves `binaries` and payload `arch_os`
 /// against: `aarch64-linux`, `x86_64-linux`, `aarch64-macos`.

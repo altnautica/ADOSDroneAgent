@@ -211,7 +211,7 @@ fn directory_headers(
 }
 
 /// Room on the filesystem holding `dir` for `bytes` more.
-fn check_room(dir: &Path, bytes: u64, rel: &str) -> Result<(), ArchiveError> {
+pub(crate) fn check_room(dir: &Path, bytes: u64, rel: &str) -> Result<(), ArchiveError> {
     let st = nix::sys::statvfs::statvfs(dir)
         .map_err(|e| ArchiveError(format!("payload {rel}: cannot read free space: {e}")))?;
     let free = st.blocks_available().saturating_mul(st.fragment_size());

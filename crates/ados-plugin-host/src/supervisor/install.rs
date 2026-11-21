@@ -232,6 +232,27 @@ impl PluginSupervisor {
         if applicable.is_empty() {
             return Ok(Vec::new());
         }
+        // One budget for the whole install: what the payloads download, and
+        // as much again for what an unpacked one inflates to (each unpack
+        // checks its own declared size against the room left as well).
+        let fetched_bytes: u64 = applicable.iter().map(|p| p.size_bytes).sum();
+        let unpacked_bytes: u64 = applicable
+            .iter()
+            .filter(|p| p.unpack.is_some())
+            .map(|p| p.size_bytes)
+            .sum();
+        let budget = fetched_bytes.saturating_add(unpacked_bytes);
+        if budget > PAYLOADS_INSTALL_MAX_BYTES {
+            return Err(SupervisorError(format!(
+                "plugin {}: payloads total {budget} bytes; the per-install cap is \
+                 {PAYLOADS_INSTALL_MAX_BYTES}",
+                manifest.id
+            ))
+            .into());
+        }
+        std::fs::create_dir_all(&self.paths.install_dir)?;
+        crate::archive::check_room(&self.paths.install_dir, budget, &manifest.id)
+            .map_err(|e| SupervisorError(format!("plugin {}: {e}", manifest.id)))?;
         let source: Arc<dyn DownloadSource> = match &self.download {
             Some(s) => s.clone(),
             None => Arc::new(HttpDownloadSource::new()),

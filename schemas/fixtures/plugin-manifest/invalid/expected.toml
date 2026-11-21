@@ -107,6 +107,9 @@ rule = "node surface profile is non-empty"
 [payload-bad-arch]
 rule = "payload arch_os is <arch>-<os>"
 
+[payload-dot-segment]
+rule = "payload path has no '.' segment"
+
 [payload-bad-sha]
 rule = "payload sha256 is 64 lowercase hex"
 
