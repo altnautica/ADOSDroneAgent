@@ -163,6 +163,7 @@ pub const SANDBOX_ENFORCED_CAPS: &[&str] = &[
     "network.listen",
     "network.outbound",
     "sensor.stream.read",
+    "shm.voxmap",
 ];
 
 #[cfg(test)]

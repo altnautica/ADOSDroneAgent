@@ -541,6 +541,15 @@
       "side": "agent"
     },
     {
+      "category": "flight_control",
+      "description": "Lets the plugin write the shared-memory voxel map (occupancy and obstacle distance around the vehicle) that the agent's pilot reads to plan and brake around obstacles. Used by the navigation extension; one writer per node.",
+      "enforced": true,
+      "id": "shm.voxmap",
+      "label": "Publish the 3D obstacle map to the pilot",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
       "category": "data_network",
       "description": "Lets the plugin add new fields to the telemetry stream that ships to the GCS. Used by sensor plugins that surface custom readings on the dashboard.",
       "enforced": true,

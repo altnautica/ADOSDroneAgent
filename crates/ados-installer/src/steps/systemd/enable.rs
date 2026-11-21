@@ -245,8 +245,9 @@ pub(super) fn enable_if_present(unit: &str) {
 /// `ados-plg-*` user whose primary group is [`ados_protocol::ipc::PLUGIN_GROUP`];
 /// a plugin granted camera frames also carries
 /// [`ados_protocol::vision_rpc::VISION_READERS_GROUP`], one granted capture
-/// storage [`ados_protocol::ipc::CAPTURE_GROUP`], and one granted the sensor
-/// bus [`ados_protocol::ipc::SENSORS_GROUP`]. systemd refuses a unit whose
+/// storage [`ados_protocol::ipc::CAPTURE_GROUP`], one granted the sensor
+/// bus [`ados_protocol::ipc::SENSORS_GROUP`], and one granted the voxel map
+/// [`ados_protocol::voxmap::VOXMAP_GROUP`]. systemd refuses a unit whose
 /// `Group=`/`SupplementaryGroups=` names a missing group, so all exist before
 /// any plugin is installed.
 ///
@@ -284,6 +285,7 @@ pub(super) fn provision_ados_identity() {
         ados_protocol::vision_rpc::VISION_READERS_GROUP,
         ados_protocol::ipc::CAPTURE_GROUP,
         ados_protocol::ipc::SENSORS_GROUP,
+        ados_protocol::voxmap::VOXMAP_GROUP,
     ] {
         if !exec::run_ok("getent", &["group", grp]) {
             let _ = exec::run("groupadd", &["--system", grp]);

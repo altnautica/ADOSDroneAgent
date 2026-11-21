@@ -177,6 +177,14 @@ pub const CAPTURE_STATE_DIR: &str = "/run/ados/capture";
 /// (a root on `/mnt` without `filesystem.host`) is hidden by it.
 pub const CAPTURE_ROOT_MOUNT: &str = "/run/ados/capture-root";
 
+/// The capability that lets a plugin publish the pilot's 3D voxel map (seam
+/// M). The grant joins [`ados_protocol::voxmap::VOXMAP_GROUP`]: the writer
+/// hands the map file to that group, and the pilot reads a file only when it
+/// carries that group and only its owner may write it. No other process can
+/// give a file that group, so an ungranted plugin can neither write the map
+/// nor squat a file the pilot would read in its place.
+pub const VOXMAP_WRITE_CAP: &str = "shm.voxmap";
+
 /// Paths a plugin never reaches, granted or not: every credential the agent
 /// keeps under `/etc/ados`.
 ///
@@ -256,6 +264,7 @@ pub fn sandbox_enforced_caps() -> BTreeSet<&'static str> {
     set.insert(FILESYSTEM_HOST_CAP);
     set.insert(SENSOR_STREAM_READ_CAP);
     set.insert(CAPTURE_STORAGE_WRITE_CAP);
+    set.insert(VOXMAP_WRITE_CAP);
     set
 }
 
@@ -332,6 +341,12 @@ pub fn sandbox_directives(
         lines.push(format!(
             "SupplementaryGroups={}",
             ados_protocol::ipc::CAPTURE_GROUP
+        ));
+    }
+    if granted.contains(VOXMAP_WRITE_CAP) {
+        lines.push(format!(
+            "SupplementaryGroups={}",
+            ados_protocol::voxmap::VOXMAP_GROUP
         ));
     }
 
@@ -851,5 +866,20 @@ mod tests {
             );
         }
         assert!(capture_root_bind(&granted, None).is_empty());
+    }
+
+    /// The voxel-map grant joins the map's group and nothing else; no other
+    /// grant joins it.
+    #[test]
+    fn the_voxmap_grant_joins_only_the_voxmap_group() {
+        let lines = sandbox_directives(&caps(&[VOXMAP_WRITE_CAP]), true, &[], &[]);
+        assert!(lines.contains(&"SupplementaryGroups=ados-voxmap".to_string()));
+        assert!(!lines.iter().any(|l| l.contains("ados-operator")));
+        let others: Vec<&str> = sandbox_enforced_caps()
+            .into_iter()
+            .filter(|c| *c != VOXMAP_WRITE_CAP)
+            .collect();
+        let rest = sandbox_directives(&caps(&others), true, &[], &[]);
+        assert!(!rest.iter().any(|l| l.contains("ados-voxmap")));
     }
 }

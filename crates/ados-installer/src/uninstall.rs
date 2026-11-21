@@ -177,12 +177,13 @@ fn plugin_users(passwd: &str) -> Vec<String> {
 }
 
 /// The groups a purge removes, after every account in them is gone.
-fn purge_groups() -> [&'static str; 6] {
+fn purge_groups() -> [&'static str; 7] {
     [
         ados_protocol::ipc::PLUGIN_GROUP,
         ados_protocol::vision_rpc::VISION_READERS_GROUP,
         ados_protocol::ipc::CAPTURE_GROUP,
         ados_protocol::ipc::SENSORS_GROUP,
+        ados_protocol::voxmap::VOXMAP_GROUP,
         ados_protocol::ipc::OPERATOR_GROUP,
         "ados",
     ]
@@ -445,6 +446,7 @@ mod tests {
             ados_protocol::vision_rpc::VISION_READERS_GROUP,
             ados_protocol::ipc::CAPTURE_GROUP,
             ados_protocol::ipc::SENSORS_GROUP,
+            ados_protocol::voxmap::VOXMAP_GROUP,
             ados_protocol::ipc::OPERATOR_GROUP,
             "ados",
         ] {
