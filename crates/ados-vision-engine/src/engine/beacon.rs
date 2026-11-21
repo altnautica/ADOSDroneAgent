@@ -9,7 +9,9 @@
 //! home reported yet, fixes are dropped. Each fix is queued and fused in time
 //! order just before the first sighting that is not older than it, so a fix
 //! arriving while a frame is still in inference never makes that frame stale
-//! (see [`super::subject`]). Beacon-only tracking stays off.
+//! (see [`super::subject`]). Once vision has lost the subject the fixes keep
+//! the estimate alive on their own, within `vision.subject.beacon_only_max_s`
+//! of the last vision fix ([`ados_vision::subject::SubjectEstimator::fuse_beacon`]).
 //!
 //! Clock: the estimate runs on the frame clock. Under simulation that is the
 //! simulator's time, which the fix's `stamp_ns` (ADOS time at the router) is

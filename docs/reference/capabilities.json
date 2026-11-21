@@ -722,6 +722,15 @@
     },
     {
       "category": "data_network",
+      "description": "Lets the plugin read vision.depth.v2: the vision engine's camera depth frames (a 128 x 96 depth plane in millimetres with a per-pixel uncertainty, the camera intrinsics and how the frame was scaled to metres), for building a 3D map. It includes requesting depth: the plugin may take and renew a depth lease on a camera (vision.request_detection with kind depth; detection and surfaces leases still need vision.track.designate), which keeps the engine's depth model running there. Only the host publishes the topic; reading it does not open the camera or command the vehicle.",
+      "enforced": true,
+      "id": "vision.depth.read",
+      "label": "Read metric depth frames from the vision engine",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
       "description": "Lets the plugin publish detection results (bounding boxes, class labels, confidence, track ids) that other plugins, overlays, and mission logic can consume. Detections are derived data; they do not command the vehicle.",
       "enforced": true,
       "id": "vision.detection.publish",
@@ -771,6 +780,15 @@
       "enforced": true,
       "id": "vision.offload.advertise",
       "label": "Advertise a perception offload link",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin read vision.subject.v1: the world state the vision engine estimates for the person the operator designated (ground position in the local frame with its uncertainty, velocity, motion-model weights, predicted positions over the next three seconds, estimated height and the cues that fed it). Only the host publishes the topic; it updates while the operator's lock holds. Reading it does not designate a target, open the camera or command the vehicle.",
+      "enforced": true,
+      "id": "vision.subject.read",
+      "label": "Read the designated subject's position and motion",
       "risk": "medium",
       "side": "agent"
     },

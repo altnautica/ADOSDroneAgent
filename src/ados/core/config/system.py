@@ -83,6 +83,15 @@ class VisionDepthConfig(BaseModel):
     threads: int = Field(default=2, ge=1, le=U32_MAX)
 
 
+class VisionSubjectConfig(BaseModel):
+    """The designated subject's world estimate (``vision.subject.v1``)."""
+
+    # How long, in seconds, the estimate may run on the subject's phone beacon
+    # alone after vision last saw the subject; 0 keeps it from running on the
+    # beacon alone (beside vision the beacon still fuses).
+    beacon_only_max_s: float = Field(default=60.0, ge=0, le=3600)
+
+
 class VisionConfig(BaseModel):
     enabled: bool = False
     backend: VisionBackend = "auto"
@@ -121,6 +130,7 @@ class VisionConfig(BaseModel):
     # lens); 1 keeps every box.
     max_box_area_frac: float = Field(default=0.5, gt=0, le=1)
     depth: VisionDepthConfig = VisionDepthConfig()
+    subject: VisionSubjectConfig = VisionSubjectConfig()
     # On a node following the simulator's clock, a result of a simulated frame
     # is released this long after the frame's sim time (the bench writes the
     # measured p50 of a real-time take of the same profile); unset, the

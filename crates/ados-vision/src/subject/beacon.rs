@@ -61,14 +61,20 @@ impl BeaconFix {
 /// What a beacon fix did to the estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BeaconOutcome {
-    /// Fused into the vision track.
+    /// Fused beside a recent vision fix.
     Fused,
-    /// Started a track on the beacon alone (only when the caller opted in).
-    Started,
-    /// Not fused: no vision fix within the window, and the caller has not
-    /// opted in to beacon-only tracking.
+    /// Fused with vision lost: the track runs on the beacon alone.
+    Alone,
+    /// Not fused: no track vision started and still holds, beacon-only
+    /// tracking is off, or it ran past its time limit since the last vision
+    /// fix.
     NoVision,
-    /// Not fused: too far from the vision track to be the same person.
+    /// Not fused on the beacon alone: the reported accuracy is too poor.
+    Inaccurate,
+    /// Not fused on the beacon alone: too long since the last fused beacon
+    /// fix; the chain resumes only after vision returns.
+    Broken,
+    /// Not fused: too far from the track to be the same person.
     Gated,
     /// Not fused: older than the estimate, or not finite.
     Stale,

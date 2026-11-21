@@ -138,7 +138,13 @@ impl VisionEngine {
             let tracked = self
                 .track(&desc.camera_id, detections, apps, pixels, Some(ts))
                 .await;
-            self.update_subject(desc, &tracked, ts);
+            let held = self
+                .trackers
+                .lock()
+                .await
+                .get(&desc.camera_id)
+                .and_then(|t| t.mot.designated_id());
+            self.update_subject(desc, &tracked, held, ts);
             if plan.subject.is_some() {
                 let associated = self
                     .trackers

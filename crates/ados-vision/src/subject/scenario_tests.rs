@@ -332,3 +332,138 @@ fn one_update_costs_under_50_us() {
         assert!(mean <= 50.0, "mean {mean:.1} us");
     }
 }
+
+/// One frame of a beacon run: the truth, the state after it and what the
+/// beacon fix of the frame (if any) did.
+struct BeaconStep {
+    t: f64,
+    truth: [f64; 3],
+    state: Option<SubjectState>,
+    beacon: Option<BeaconOutcome>,
+}
+
+/// The straight walker, seen with depth at 10 Hz outside `hidden`, its
+/// phone's fixes (3 m accuracy, white noise of the matching sigma) arriving
+/// at 5 Hz until `beacon_until` s.
+fn beacon_run(hidden: (f64, f64), beacon_until: f64, duration: f64, seed: u64) -> Vec<BeaconStep> {
+    let eye = Eye::with_depth(CAMERA);
+    let walk = |t: f64| [7.0, -6.0 + 1.4 * t, 0.0];
+    let mut rng = Rng::new(seed);
+    let mut est = SubjectEstimator::new(1, SubjectConfig::default());
+    let frames = (duration * 10.0).round() as usize;
+    (0..=frames)
+        .map(|k| {
+            let t = k as f64 * 0.1;
+            let truth = walk(t);
+            let stamp_ns = (t * 1e9).round() as u64;
+            let beacon = (k.is_multiple_of(2) && t < beacon_until).then(|| {
+                let fix = BeaconFix {
+                    stamp_ns,
+                    ned: [0.0; 3],
+                    horiz_acc_m: 3.0,
+                };
+                let s = f64::from(fix.sigma_m());
+                est.fuse_beacon(&BeaconFix {
+                    ned: [
+                        (truth[0] + s * rng.normal()) as f32,
+                        (truth[1] + s * rng.normal()) as f32,
+                        0.0,
+                    ],
+                    ..fix
+                })
+            });
+            if t >= hidden.0 && t < hidden.1 {
+                est.coast(stamp_ns);
+            } else {
+                est.observe(&eye.sight(k, t, truth, 1.8, &mut rng));
+            }
+            BeaconStep {
+                t,
+                truth,
+                state: est.state("main", &OpenSpace),
+                beacon,
+            }
+        })
+        .collect()
+}
+
+fn horizontal_error(st: &SubjectState, truth: [f64; 3]) -> f64 {
+    (f64::from(st.pos_ned[0]) - truth[0]).hypot(f64::from(st.pos_ned[1]) - truth[1])
+}
+
+#[test]
+fn the_beacon_alone_holds_the_track_through_a_ten_second_occlusion() {
+    let mut errors = Vec::new();
+    let mut ahead = Vec::new();
+    for seed in 1..=5 {
+        let steps = beacon_run((3.0, 13.0), f64::INFINITY, 16.0, seed);
+        for s in steps.iter().filter(|s| (3.0..13.0).contains(&s.t)) {
+            let st = s.state.as_ref().expect("the beacon keeps the track");
+            errors.push(horizontal_error(st, s.truth));
+            if s.t >= 4.0 {
+                let beacon_only = ados_protocol::vision_subject::SubjectSources {
+                    beacon: true,
+                    ..Default::default()
+                };
+                assert_eq!(st.sources, beacon_only, "at {:.1} s", s.t);
+            }
+            if s.t >= 4.5 && s.beacon.is_some() {
+                // A rare noise tail is gated; the chain carries on.
+                assert!(
+                    matches!(s.beacon, Some(BeaconOutcome::Alone | BeaconOutcome::Gated)),
+                    "{:?} at {:.1} s",
+                    s.beacon,
+                    s.t
+                );
+            }
+            let pred = st.predictions.iter().find(|p| p.dt_s == 1.0).unwrap();
+            let truth = [7.0, -6.0 + 1.4 * (s.t + 1.0)];
+            ahead.push(
+                (f64::from(pred.pos_ned[0]) - truth[0])
+                    .hypot(f64::from(pred.pos_ned[1]) - truth[1]),
+            );
+        }
+        // Vision takes the subject back and fuses at once.
+        let back = steps.iter().find(|s| s.t >= 13.5).unwrap();
+        let st = back.state.as_ref().unwrap();
+        assert!(st.sources.box_height && st.fix_age_ms == 0);
+        assert!(horizontal_error(st, back.truth) <= 1.0, "seed {seed}");
+    }
+    let (p, p_ahead) = (p95(errors), p95(ahead));
+    println!("beacon-only 10 s: position error p95 {p:.2} m, +1 s prediction p95 {p_ahead:.2} m");
+    assert!(p <= 2.0, "p95 {p:.2} m");
+}
+
+#[test]
+fn a_beacon_that_stops_leaves_the_track_to_coast_out() {
+    let steps = beacon_run((3.0, f64::INFINITY), 6.0, 13.0, 1);
+    // The last fix arrived at 5.8 s: the track coasts 5 s, then is dropped.
+    assert!(steps
+        .iter()
+        .filter(|s| s.t <= 10.8)
+        .all(|s| s.state.is_some()));
+    assert!(steps
+        .iter()
+        .filter(|s| s.t >= 10.9)
+        .all(|s| s.state.is_none()));
+}
+
+#[test]
+fn the_beacon_alone_holds_the_track_for_sixty_seconds_at_most() {
+    let steps = beacon_run((2.0, f64::INFINITY), f64::INFINITY, 70.0, 2);
+    // The last vision fix was at 1.9 s.
+    let alone = |s: &BeaconStep| s.beacon == Some(BeaconOutcome::Alone);
+    assert!(steps
+        .iter()
+        .filter(|s| (3.5..61.9).contains(&s.t))
+        .all(|s| s.state.is_some()));
+    assert!(steps
+        .iter()
+        .filter(|s| s.t > 61.95 && s.beacon.is_some())
+        .all(|s| s.beacon == Some(BeaconOutcome::NoVision)));
+    assert!(steps.iter().filter(|s| s.t > 61.95).all(|s| !alone(s)));
+    assert!(steps
+        .iter()
+        .filter(|s| s.t >= 66.9)
+        .all(|s| s.state.is_none()));
+}

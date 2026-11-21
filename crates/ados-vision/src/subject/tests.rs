@@ -32,33 +32,26 @@ fn beacon(t: f64, n: f32, e: f32) -> BeaconFix {
 }
 
 #[test]
-fn a_beacon_alone_never_tracks_unless_opted_in() {
+fn a_beacon_never_starts_a_track() {
     let mut est = SubjectEstimator::new(1, SubjectConfig::default());
+    assert!(est.cfg.beacon_only);
     assert_eq!(
         est.fuse_beacon(&beacon(0.0, 5.0, 0.0)),
         BeaconOutcome::NoVision
     );
     assert!(est.state("main", &OpenSpace).is_none());
-
-    let mut opted = SubjectEstimator::new(
-        1,
-        SubjectConfig {
-            beacon_only: true,
-            ..SubjectConfig::default()
-        },
-    );
-    assert_eq!(
-        opted.fuse_beacon(&beacon(0.0, 5.0, 0.0)),
-        BeaconOutcome::Started
-    );
-    let st = opted.state("main", &OpenSpace).unwrap();
-    assert!(st.sources.beacon && !st.sources.box_height);
-    assert_eq!(st.pos_ned[0], 5.0);
 }
 
 #[test]
-fn a_beacon_fuses_beside_vision_and_stops_when_vision_is_old() {
+fn a_beacon_fuses_beside_vision_then_alone_within_its_bounds() {
     let (mut est, ..) = walking(30);
+    let off = SubjectEstimator {
+        cfg: SubjectConfig {
+            beacon_only: false,
+            ..est.cfg
+        },
+        ..est.clone()
+    };
     // At 2.9 s the walker is at (10.06, 0).
     assert_eq!(
         est.fuse_beacon(&beacon(2.95, 10.1, 0.5)),
@@ -71,14 +64,31 @@ fn a_beacon_fuses_beside_vision_and_stops_when_vision_is_old() {
         est.fuse_beacon(&beacon(3.0, 40.0, 30.0)),
         BeaconOutcome::Gated
     );
-    // No vision for 2 s: the beacon no longer fuses on its own.
+    // Vision last fixed 1.53 s ago: on the beacon alone, a poor fix is
+    // refused and a good one fuses.
+    let poor = BeaconFix {
+        horiz_acc_m: 12.0,
+        ..beacon(4.43, 12.2, 0.0)
+    };
+    assert_eq!(est.fuse_beacon(&poor), BeaconOutcome::Inaccurate);
     assert_eq!(
-        est.fuse_beacon(&beacon(5.0, 13.0, 0.0)),
-        BeaconOutcome::NoVision
+        est.fuse_beacon(&beacon(4.43, 12.2, 0.0)),
+        BeaconOutcome::Alone
+    );
+    // A 2 s gap breaks the chain.
+    assert_eq!(
+        est.fuse_beacon(&beacon(6.5, 15.1, 0.0)),
+        BeaconOutcome::Broken
     );
     assert_eq!(
         est.fuse_beacon(&beacon(1.0, 7.0, 0.0)),
         BeaconOutcome::Stale
+    );
+    // With beacon-only tracking off, a fix without vision does nothing.
+    let mut off = off;
+    assert_eq!(
+        off.fuse_beacon(&beacon(4.43, 12.2, 0.0)),
+        BeaconOutcome::NoVision
     );
 }
 

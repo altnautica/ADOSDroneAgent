@@ -4747,6 +4747,16 @@
       "type": "string"
     },
     {
+      "default": 60.0,
+      "description": "Beacon Only Max S",
+      "enum": null,
+      "key": "vision.subject.beacon_only_max_s",
+      "maximum": 3600,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
+    },
+    {
       "default": false,
       "description": "Tracker Enabled",
       "enum": null,

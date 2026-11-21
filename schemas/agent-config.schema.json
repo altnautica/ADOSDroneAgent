@@ -3830,6 +3830,12 @@
           "title": "Socket Dir",
           "type": "string"
         },
+        "subject": {
+          "$ref": "#/$defs/VisionSubjectConfig",
+          "default": {
+            "beacon_only_max_s": 60.0
+          }
+        },
         "tracker_enabled": {
           "default": false,
           "title": "Tracker Enabled",
@@ -4040,6 +4046,20 @@
         }
       },
       "title": "VisionReidConfig",
+      "type": "object"
+    },
+    "VisionSubjectConfig": {
+      "description": "The designated subject's world estimate (``vision.subject.v1``).",
+      "properties": {
+        "beacon_only_max_s": {
+          "default": 60.0,
+          "maximum": 3600,
+          "minimum": 0,
+          "title": "Beacon Only Max S",
+          "type": "number"
+        }
+      },
+      "title": "VisionSubjectConfig",
       "type": "object"
     },
     "VisionTapConfig": {
@@ -5094,6 +5114,9 @@
         "sim_latency_ms": null,
         "slot_count": 4,
         "socket_dir": "/run/ados",
+        "subject": {
+          "beacon_only_max_s": 60.0
+        },
         "tracker_enabled": false,
         "whole_frame_conf": 0.45
       }

@@ -19,9 +19,11 @@
 //!    the subject; the range was wrong, not the person).
 //! 3. **Prediction.** Positions and covariances at 0.5 to 3 s, walked through
 //!    a [`FreeSpace`] map so a predicted path bends round occupied space.
-//! 4. **Beacon.** The subject's own GNSS fix ([`BeaconFix`]) fuses into the
-//!    vision track; it never tracks alone unless
-//!    [`SubjectConfig::beacon_only`] allows it.
+//! 4. **Beacon.** The subject's own GNSS fix ([`BeaconFix`]) fuses into a
+//!    track vision started. When vision loses the subject, beacon fixes keep
+//!    the track alive on their own ([`SubjectConfig::beacon_only`]), only
+//!    while they are accurate and unbroken and for a bounded time after the
+//!    last vision fix; a beacon never starts a track.
 //!
 //! Pure and deterministic: time comes in with every call, nothing allocates
 //! per update but the prediction list and the depth sample buffers.
@@ -81,10 +83,21 @@ pub struct SubjectConfig {
     pub restart_after: u8,
     /// The longest the track coasts without a fix before it is dropped, s.
     pub max_coast_s: f32,
-    /// Track on the beacon alone, without a recent vision fix.
+    /// Keep a vision-started track alive on beacon fixes alone once vision
+    /// has lost the subject.
     pub beacon_only: bool,
-    /// How recent a vision fix must be for a beacon fix to fuse, s.
+    /// A beacon fix fuses beside vision while a vision fix is at most this
+    /// old, s; past it the track is on the beacon alone.
     pub beacon_vision_window_s: f32,
+    /// The longest a track runs on the beacon alone after its last vision
+    /// fix, s.
+    pub beacon_only_max_s: f32,
+    /// The worst reported horizontal accuracy a beacon-only fix is taken
+    /// with, metres.
+    pub beacon_only_max_acc_m: f32,
+    /// The longest gap between two fused beacon fixes that keeps the
+    /// beacon-only track going, s.
+    pub beacon_only_max_gap_s: f32,
 }
 
 impl Default for SubjectConfig {
@@ -105,8 +118,11 @@ impl Default for SubjectConfig {
             gate_chi2: 13.8,
             restart_after: 3,
             max_coast_s: 5.0,
-            beacon_only: false,
+            beacon_only: true,
             beacon_vision_window_s: 1.5,
+            beacon_only_max_s: 60.0,
+            beacon_only_max_acc_m: 10.0,
+            beacon_only_max_gap_s: 1.5,
         }
     }
 }
@@ -138,9 +154,6 @@ const SOURCE_WINDOW_NS: u64 = 1_000_000_000;
 
 /// The subject's height is held to a person's.
 const HEIGHT_RANGE_M: (f64, f64) = (1.0, 2.2);
-
-/// The vertical sigma a beacon-started track takes, metres.
-const BEACON_DOWN_SIGMA_M: f64 = 5.0;
 
 #[derive(Debug, Clone)]
 struct Track {
@@ -293,9 +306,16 @@ impl SubjectEstimator {
         outcome
     }
 
-    /// Fuse the subject's own GNSS fix. It fuses only while a vision fix is
-    /// at most [`SubjectConfig::beacon_vision_window_s`] old, unless
-    /// [`SubjectConfig::beacon_only`] allows tracking on the beacon alone.
+    /// Fuse the subject's own GNSS fix into a track vision started (a beacon
+    /// never starts one). Beside vision (a vision fix at most
+    /// [`SubjectConfig::beacon_vision_window_s`] old) any fix inside the gate
+    /// fuses. On the beacon alone it fuses only with
+    /// [`SubjectConfig::beacon_only`] set, at most
+    /// [`SubjectConfig::beacon_only_max_s`] after the last vision fix, with a
+    /// reported accuracy no worse than
+    /// [`SubjectConfig::beacon_only_max_acc_m`], and at most
+    /// [`SubjectConfig::beacon_only_max_gap_s`] after the last fused beacon
+    /// fix: a chain broken by a gap stays broken until vision returns.
     pub fn fuse_beacon(&mut self, fix: &BeaconFix) -> BeaconOutcome {
         if !fix
             .ned
@@ -306,42 +326,53 @@ impl SubjectEstimator {
         {
             return BeaconOutcome::Stale;
         }
-        let window = (f64::from(self.cfg.beacon_vision_window_s) * 1e9) as u64;
-        let seen = self
+        let cfg = self.cfg;
+        let secs = |s: f32| (f64::from(s) * 1e9) as u64;
+        let Some(tr) = self
             .track
             .as_ref()
-            .and_then(|tr| tr.last_vision_ns)
-            .is_some_and(|v| fix.stamp_ns.saturating_sub(v) <= window);
-        if !seen && !self.cfg.beacon_only {
+            .filter(|tr| fix.stamp_ns.saturating_sub(tr.last_fix_ns) <= secs(cfg.max_coast_s))
+        else {
             return BeaconOutcome::NoVision;
+        };
+        let since_vision = tr
+            .last_vision_ns
+            .map_or(u64::MAX, |v| fix.stamp_ns.saturating_sub(v));
+        let alone = since_vision > secs(cfg.beacon_vision_window_s);
+        if alone {
+            let chained = tr.source_ns[3]
+                .is_some_and(|b| fix.stamp_ns.saturating_sub(b) <= secs(cfg.beacon_only_max_gap_s));
+            if !cfg.beacon_only || since_vision > secs(cfg.beacon_only_max_s) {
+                return BeaconOutcome::NoVision;
+            }
+            if fix.horiz_acc_m > cfg.beacon_only_max_acc_m {
+                return BeaconOutcome::Inaccurate;
+            }
+            if !chained {
+                return BeaconOutcome::Broken;
+            }
         }
-        self.advance(fix.stamp_ns);
-        let t = self.t_ns.unwrap_or(fix.stamp_ns);
         let z = [f64::from(fix.ned[0]), f64::from(fix.ned[1])];
         let s2 = f64::from(fix.sigma_m()).powi(2);
         let r = [[s2, 0.0], [0.0, s2]];
-        let outcome = match &mut self.track {
-            Some(tr) if tr.imm.distance2(z, &r) > f64::from(self.cfg.gate_chi2) => {
-                return BeaconOutcome::Gated;
-            }
-            Some(tr) => {
-                tr.imm.update(z, &r, &self.cfg);
-                BeaconOutcome::Fused
-            }
-            None => BeaconOutcome::Started,
+        self.advance(fix.stamp_ns);
+        let t = self.t_ns.unwrap_or(fix.stamp_ns);
+        let Some(tr) = self.track.as_mut() else {
+            return BeaconOutcome::NoVision;
         };
-        let tr = self.track.get_or_insert_with(|| Track {
-            imm: Imm::new(z, &r, &self.cfg),
-            down: Scalar::new(f64::from(fix.ned[2]), BEACON_DOWN_SIGMA_M),
-            last_fix_ns: t,
-            last_vision_ns: None,
-            source_ns: [None; 4],
-            bias: [[0.0; 2]; 2],
-            gated: 0,
-        });
+        if tr.imm.distance2(z, &r) > f64::from(cfg.gate_chi2) {
+            return BeaconOutcome::Gated;
+        }
+        tr.imm.update(z, &r, &cfg);
         tr.last_fix_ns = t;
         tr.source_ns[3] = Some(t);
-        outcome
+        if alone {
+            // The box's range bias no longer describes the estimate.
+            tr.bias = [[0.0; 2]; 2];
+            BeaconOutcome::Alone
+        } else {
+            BeaconOutcome::Fused
+        }
     }
 
     /// The published state, with predictions walked through `free`; `None`

@@ -13,11 +13,13 @@ use crate::engine::{DetectionDemandMode, DetectionPolicy};
 
 mod models;
 mod sockets;
+mod subject;
 use models::default_threads;
 pub use models::{
     DepthConfig, DepthPlan, DetectorConfig, ReidConfig, DEFAULT_DEPTH_FILE_STEM,
     DEFAULT_DEPTH_MODEL_ID, DEPTH_RATE_ACCEL_HZ, DEPTH_RATE_CPU_HZ,
 };
+pub use subject::SubjectSettings;
 
 fn default_socket_dir() -> String {
     "/run/ados".to_string()
@@ -189,6 +191,9 @@ pub struct VisionConfig {
     /// The depth model behind the depth and surfaces layers.
     #[serde(default)]
     pub depth: DepthConfig,
+    /// The designated subject's world estimate.
+    #[serde(default)]
+    pub subject: SubjectSettings,
     /// Where installed models live (the registry downloads here).
     #[serde(default = "default_models_dir")]
     pub models_dir: String,
@@ -228,6 +233,7 @@ impl Default for VisionConfig {
             confidence_threshold: default_confidence_threshold(),
             whole_frame_conf: default_whole_frame_conf(),
             depth: DepthConfig::default(),
+            subject: SubjectSettings::default(),
             models_dir: default_models_dir(),
             camera_mounts: std::collections::HashMap::new(),
         }
@@ -310,6 +316,8 @@ impl VisionConfig {
             whole_frame_conf: f32,
             #[serde(default)]
             depth: DepthConfig,
+            #[serde(default)]
+            subject: SubjectSettings,
             #[serde(default = "default_models_dir")]
             models_dir: String,
         }
@@ -387,6 +395,7 @@ impl VisionConfig {
             confidence_threshold: v.confidence_threshold,
             whole_frame_conf: v.whole_frame_conf,
             depth: v.depth,
+            subject: v.subject,
             models_dir: v.models_dir,
             camera_mounts,
         }

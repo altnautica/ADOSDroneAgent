@@ -62,6 +62,8 @@ pub(super) struct SubjectRuntime {
     /// Beacon fixes not yet fused, in time order.
     beacons: VecDeque<BeaconFix>,
     space: VoxSpace,
+    /// The tuning every new estimate is built with.
+    cfg: SubjectConfig,
     tx: broadcast::Sender<SubjectState>,
 }
 
@@ -73,6 +75,7 @@ impl Default for SubjectRuntime {
             depth: HashMap::new(),
             beacons: VecDeque::new(),
             space: VoxSpace::default(),
+            cfg: SubjectConfig::default(),
             tx: broadcast::channel(SUBJECT_QUEUE).0,
         }
     }
@@ -106,10 +109,14 @@ impl SubjectRuntime {
 }
 
 /// The designated subject in a tracked batch: its published id, and its box
-/// when this frame measured it under a firm lock.
-fn designated(detections: &[Detection]) -> Option<(u32, Option<&Detection>)> {
-    let d = detections.iter().find(|d| d.lock_state.is_some())?;
-    let id = u32::try_from(d.track_id?).ok()?;
+/// when this frame measured it under a firm lock. Without the lock's box in
+/// the batch (the lock lost the subject), the subject is the one the
+/// multi-object tracker still holds designated (`held`), unmeasured.
+fn designated(detections: &[Detection], held: Option<u32>) -> Option<(u32, Option<&Detection>)> {
+    let Some(d) = detections.iter().find(|d| d.lock_state.is_some()) else {
+        return held.map(|id| (id, None));
+    };
+    let id = d.track_id.and_then(|i| u32::try_from(i).ok()).or(held)?;
     let measured = d.lock_state == Some(LockState::Locked)
         && d.track_state != Some(TrackState::Lost)
         && d.bbox.is_some();
@@ -128,16 +135,26 @@ impl VisionEngine {
         self.subject_runtime().tx.subscribe()
     }
 
+    /// Set the subject estimate's tuning (`vision.subject`, once, at start);
+    /// an estimate already running keeps its own.
+    pub fn configure_subject(&self, cfg: SubjectConfig) {
+        self.subject_runtime().cfg = cfg;
+    }
+
     /// Advance `desc`'s camera's subject estimate on its tracked batch
     /// `detections` (stamped `stamp_ns` on the tracker's frame clock) and
-    /// broadcast the state. Returns the state published, if any.
+    /// broadcast the state. `held` is the subject the camera's multi-object
+    /// tracker holds designated: the estimate lives while it does, through
+    /// vision losing the subject (when the beacon may carry it). Returns the
+    /// state published, if any.
     pub(super) fn update_subject(
         &self,
         desc: &FrameDescriptor,
         detections: &[Detection],
+        held: Option<u32>,
         stamp_ns: u64,
     ) -> Option<SubjectState> {
-        let Some((id, seen)) = designated(detections) else {
+        let Some((id, seen)) = designated(detections, held) else {
             self.subject_runtime().estimators.remove(&desc.camera_id);
             return None;
         };
@@ -163,12 +180,13 @@ impl VisionEngine {
                     .filter(|f| f.stamp_ns.abs_diff(desc.ts_ns) <= DEPTH_MAX_SKEW_NS),
             )
         });
+        let cfg = rt.cfg;
         let est = rt
             .estimators
             .entry(desc.camera_id.clone())
-            .or_insert_with(|| SubjectEstimator::new(id, SubjectConfig::default()));
+            .or_insert_with(|| SubjectEstimator::new(id, cfg));
         if est.id() != id {
-            *est = SubjectEstimator::new(id, SubjectConfig::default());
+            *est = SubjectEstimator::new(id, cfg);
         }
         while let Some(fix) = rt.beacons.front().filter(|f| f.stamp_ns <= stamp_ns) {
             est.fuse_beacon(fix);

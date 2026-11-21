@@ -112,7 +112,9 @@ fn a_locked_box_is_placed_in_ned_and_published() {
     let e = engine(true);
     let mut rx = e.subscribe_subject();
     let det = [subject(TrackState::Confirmed, LockState::Locked)];
-    let st = e.update_subject(&desc(1_000), &det, 1_000_000_000).unwrap();
+    let st = e
+        .update_subject(&desc(1_000), &det, None, 1_000_000_000)
+        .unwrap();
     assert!(close(st.pos_ned, FEET, 0.05), "{:?}", st.pos_ned);
     assert_eq!((st.id, st.fix_age_ms), (3, 0));
     assert!(st.sources.box_height && !st.sources.depth && !st.sources.ground);
@@ -154,7 +156,9 @@ fn depth_on_the_subject_and_the_rangefinder_ground_fuse() {
     };
     e.subject_runtime().depth.insert("main".into(), frame);
     let det = [subject(TrackState::Confirmed, LockState::Locked)];
-    let st = e.update_subject(&desc(1_000), &det, 1_000_000_000).unwrap();
+    let st = e
+        .update_subject(&desc(1_000), &det, None, 1_000_000_000)
+        .unwrap();
     assert!(
         st.sources.box_height && st.sources.depth && st.sources.ground,
         "{:?}",
@@ -167,16 +171,16 @@ fn depth_on_the_subject_and_the_rangefinder_ground_fuse() {
 fn a_coasting_or_ambiguous_lock_moves_the_estimate_on_without_a_fix() {
     let e = engine(true);
     let locked = [subject(TrackState::Confirmed, LockState::Locked)];
-    e.update_subject(&desc(1_000), &locked, 1_000_000_000)
+    e.update_subject(&desc(1_000), &locked, None, 1_000_000_000)
         .unwrap();
     let coasting = [subject(TrackState::Lost, LockState::Locked)];
     let st = e
-        .update_subject(&desc(1_300), &coasting, 1_300_000_000)
+        .update_subject(&desc(1_300), &coasting, None, 1_300_000_000)
         .unwrap();
     assert_eq!(st.fix_age_ms, 300);
     let ambiguous = [subject(TrackState::Confirmed, LockState::Uncertain)];
     let st = e
-        .update_subject(&desc(1_600), &ambiguous, 1_600_000_000)
+        .update_subject(&desc(1_600), &ambiguous, None, 1_600_000_000)
         .unwrap();
     assert_eq!(st.fix_age_ms, 600);
 }
@@ -185,23 +189,35 @@ fn a_coasting_or_ambiguous_lock_moves_the_estimate_on_without_a_fix() {
 fn nothing_is_published_without_a_lock_or_a_camera_geometry() {
     let e = engine(true);
     let det = [subject(TrackState::Confirmed, LockState::Locked)];
-    e.update_subject(&desc(1_000), &det, 1_000_000_000).unwrap();
-    // The lock is gone: the estimate is dropped.
+    e.update_subject(&desc(1_000), &det, Some(3), 1_000_000_000)
+        .unwrap();
+    // The lock is gone but the tracker still holds the designation: the
+    // estimate coasts on.
     let mut free = subject(TrackState::Confirmed, LockState::Locked);
     free.lock_state = None;
+    let st = e
+        .update_subject(
+            &desc(1_100),
+            std::slice::from_ref(&free),
+            Some(3),
+            1_100_000_000,
+        )
+        .unwrap();
+    assert_eq!((st.id, st.fix_age_ms), (3, 100));
+    // The designation is released: the estimate is dropped.
     assert!(e
-        .update_subject(&desc(1_100), &[free], 1_100_000_000)
+        .update_subject(&desc(1_200), &[free], None, 1_200_000_000)
         .is_none());
     assert!(e.subject_runtime().estimators.is_empty());
 
     // A camera without a cameras[] entry has no world geometry.
     let bare = engine(false);
     assert!(bare
-        .update_subject(&desc(1_000), &det, 1_000_000_000)
+        .update_subject(&desc(1_000), &det, None, 1_000_000_000)
         .is_none());
     // A frame the pose histories do not cover places nothing either.
     assert!(e
-        .update_subject(&desc(9_000), &det, 9_000_000_000)
+        .update_subject(&desc(9_000), &det, None, 9_000_000_000)
         .is_none());
 }
 
@@ -209,11 +225,12 @@ fn nothing_is_published_without_a_lock_or_a_camera_geometry() {
 fn a_new_designation_restarts_the_estimate() {
     let e = engine(true);
     let det = [subject(TrackState::Confirmed, LockState::Locked)];
-    e.update_subject(&desc(1_000), &det, 1_000_000_000).unwrap();
+    e.update_subject(&desc(1_000), &det, None, 1_000_000_000)
+        .unwrap();
     let mut other = subject(TrackState::Confirmed, LockState::Locked);
     other.track_id = Some(9);
     let st = e
-        .update_subject(&desc(1_100), &[other], 1_100_000_000)
+        .update_subject(&desc(1_100), &[other], None, 1_100_000_000)
         .unwrap();
     assert_eq!(st.id, 9);
 }
@@ -242,14 +259,19 @@ fn a_beacon_fix_waits_for_a_frame_not_older_than_it_then_fuses() {
     assert!(!e.apply_beacon_line(&beacon_at_feet("com.example.spoof"), 1_050));
 
     let det = [subject(TrackState::Confirmed, LockState::Locked)];
-    e.update_subject(&desc(1_000), &det, 1_000_000_000).unwrap();
+    e.update_subject(&desc(1_000), &det, None, 1_000_000_000)
+        .unwrap();
     assert!(e.apply_beacon_line(&beacon_at_feet(BEACON_PUBLISHER), 1_150));
     // The frame captured before the fix arrived does not take it.
-    let st = e.update_subject(&desc(1_100), &det, 1_100_000_000).unwrap();
+    let st = e
+        .update_subject(&desc(1_100), &det, None, 1_100_000_000)
+        .unwrap();
     assert!(!st.sources.beacon);
     assert_eq!(e.subject_runtime().beacons.len(), 1);
     // The next frame does, first, and is not refused as older than it.
-    let st = e.update_subject(&desc(1_200), &det, 1_200_000_000).unwrap();
+    let st = e
+        .update_subject(&desc(1_200), &det, None, 1_200_000_000)
+        .unwrap();
     assert!(
         st.sources.beacon && st.sources.box_height,
         "{:?}",
@@ -270,6 +292,34 @@ fn a_beacon_without_a_designated_subject_never_starts_a_track() {
     // not start a track.
     let ambiguous = [subject(TrackState::Confirmed, LockState::Uncertain)];
     assert!(e
-        .update_subject(&desc(1_000), &ambiguous, 1_000_000_000)
+        .update_subject(&desc(1_000), &ambiguous, Some(3), 1_000_000_000)
         .is_none());
+}
+
+#[test]
+fn the_beacon_keeps_the_estimate_after_vision_loses_the_subject() {
+    let e = engine(true);
+    e.range_feed()
+        .set_home(crate::engine::beacon::tests::home());
+    let det = [subject(TrackState::Confirmed, LockState::Locked)];
+    e.update_subject(&desc(1_000), &det, Some(3), 1_000_000_000)
+        .unwrap();
+    // The lock is lost; the tracker keeps the designation and the phone's
+    // fixes keep coming at 5 Hz.
+    let mut last = None;
+    for k in 1..=25u64 {
+        let t = 1_000 + 100 * k;
+        if k.is_multiple_of(2) {
+            assert!(e.apply_beacon_line(&beacon_at_feet(BEACON_PUBLISHER), t));
+        }
+        last = e.update_subject(&desc(t), &[], Some(3), t * 1_000_000);
+        assert!(last.is_some(), "at {t} ms");
+    }
+    let st = last.unwrap();
+    let beacon_only = ados_protocol::vision_subject::SubjectSources {
+        beacon: true,
+        ..Default::default()
+    };
+    assert_eq!(st.sources, beacon_only);
+    assert!(close(st.pos_ned, FEET, 1.0), "{:?}", st.pos_ned);
 }

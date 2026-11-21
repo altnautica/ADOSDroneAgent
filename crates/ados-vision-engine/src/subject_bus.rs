@@ -22,13 +22,15 @@ use crate::engine::VisionEngine;
 /// Per-client outbound queue depth: a few seconds of states at detector rate.
 const SUBJECT_QUEUE_DEPTH: usize = 64;
 
-/// Serve `vision-subject.sock` in its own task while the tracker runs (only
-/// the tracker designates a subject); `None` when it does not.
+/// Tune the subject estimate from `vision.subject`, then serve
+/// `vision-subject.sock` in its own task while the tracker runs (only the
+/// tracker designates a subject); `None` when it does not.
 pub fn spawn(
     engine: &Arc<VisionEngine>,
     config: &VisionConfig,
     cancel: &Shutdown,
 ) -> Option<JoinHandle<()>> {
+    engine.configure_subject(config.subject.estimator());
     if !config.tracker_enabled {
         return None;
     }
