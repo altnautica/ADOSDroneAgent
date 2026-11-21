@@ -4,13 +4,16 @@
 // pipeline latency and the re-acquire mode; height above ground is the bottom
 // row's alone. Rows by width class: one merged line at compact, two rows at
 // medium, four above; while the subject is sought, the recovery line (seconds
-// left, the vantage state, what hides the subject) sits under the range.
+// left, the vantage state, what hides the subject) sits under the range, then
+// the follow height lowered under leaves (with why) and the overhead
+// clearance the pilot reports ahead, each only while it applies.
 
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
 import { cn } from "@/lib/utils";
 import type { PhaseTone } from "@/shared/hud/follow-chrome";
 import type { FollowState } from "@/shared/hud/nav-types";
+import type { OverheadAhead } from "@/shared/hud/pilot-fields";
 import { specText } from "@/shared/hud/spec-text";
 
 const PHASE_CLASS: Record<PhaseTone | "warn", string> = {
@@ -25,12 +28,15 @@ export function FollowRangePanel({
   follow,
   ageMs,
   widthClass,
+  overhead = null,
 }: {
   follow: FollowState | null;
   ageMs: number;
   widthClass: WidthClass;
+  /** The fresh pilot frame's `overhead_ahead`, or null. */
+  overhead?: OverheadAhead | null;
 }) {
-  const m = followPanelModel(follow, ageMs);
+  const m = followPanelModel(follow, ageMs, overhead);
   const plate = cn(
     "pointer-events-none rounded-lg border border-hud-hair bg-hud-glass-strong font-mono backdrop-blur-hud",
     m.stale && "opacity-50",
@@ -60,6 +66,13 @@ export function FollowRangePanel({
         <span className={cn("text-[11px] font-semibold tracking-hud-tag", PHASE_CLASS[m.phaseTone])}>{m.phase}</span>
       </div>
       {m.recovery ? <div className="text-[12px] text-hud-coast">{m.recovery}</div> : null}
+      {m.height ? (
+        <div className="flex flex-col text-[12px]" data-testid="follow-height-lowered">
+          <span className="text-hud-warn">{m.height.text}</span>
+          {m.height.reason ? <span className="text-hud-ink-2">{m.height.reason}</span> : null}
+        </div>
+      ) : null}
+      {m.overhead ? <div className="text-[12px] text-hud-ink-2" data-testid="follow-overhead-ahead">{m.overhead}</div> : null}
       <div className="flex items-center gap-[8px]">
         <svg width={160} height={10} className="shrink-0" aria-hidden>
           <rect x={0} y={3} width={160} height={4} rx={2} fill="var(--hud-hair)" />

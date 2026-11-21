@@ -257,3 +257,33 @@ fn a_pilot_on_a_sim_clock_carries_its_badge() {
     );
     assert_eq!(label(json!({"source": "sim"})).as_deref(), Some("SIM"));
 }
+
+#[test]
+fn the_follow_height_lowered_under_leaves_and_the_overhead_ahead_parse() {
+    let a = Autonomy::from_value(&json!({
+        "follow": {"ts_ms": 1, "age_ms": 40, "data": {"phase": "following",
+            "height_setpoint_m": 3.87, "height_lowered": true, "height_reason": "canopy"}},
+        "pilot": {"ts_ms": 1, "age_ms": 40, "data": {"owner": "skill",
+            "overhead_ahead": {"lease_id": 7, "fly_under_agl_m": 3.87, "ahead_m": 2.5}}},
+    }));
+    let follow = a.follow.unwrap();
+    assert_eq!(follow.height_lowered_m, Some(3.87));
+    assert_eq!(follow.height_reason.as_deref(), Some("canopy"));
+    let o = a.pilot.unwrap().overhead_ahead.unwrap();
+    assert_eq!(
+        (o.lease_id, o.fly_under_agl_m, o.ahead_m),
+        (7, Some(3.87), Some(2.5))
+    );
+
+    // A height flown as set, an unknown reason and a clear way read as absent.
+    let a = Autonomy::from_value(&json!({
+        "follow": {"ts_ms": 1, "age_ms": 40, "data": {"phase": "following",
+            "height_setpoint_m": 6.0, "height_reason": "fog"}},
+        "pilot": {"ts_ms": 1, "age_ms": 40, "data": {"owner": "skill",
+            "overhead_ahead": {"lease_id": 7, "fly_under_agl_m": null, "ahead_m": null}}},
+    }));
+    let follow = a.follow.unwrap();
+    assert_eq!(follow.height_lowered_m, None);
+    assert_eq!(follow.height_reason, None);
+    assert_eq!(a.pilot.unwrap().overhead_ahead, None);
+}

@@ -261,6 +261,43 @@ fn a_camera_loss_while_waiting_names_its_reason() {
     assert!(!text.contains("camera-lost"), "{text}");
 }
 
+/// Under leaves the follow rows name the lowered height and why, and the
+/// pilot's overhead clearance ahead reads while it reports one.
+#[test]
+fn the_follow_rows_name_the_height_under_leaves_and_the_overhead_ahead() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        json!({
+            "follow": {"ts_ms": 1, "age_ms": 40, "data": {"phase": "following", "track_id": 7,
+                "height_setpoint_m": 3.87, "height_lowered": true, "height_reason": "canopy_floor"}},
+            "pilot": {"ts_ms": 1, "age_ms": 40, "data": {"owner": "skill",
+                "overhead_ahead": {"lease_id": 7, "fly_under_agl_m": 3.87, "ahead_m": 2.5}}},
+        }),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("Flying under leaves: 3.9 m"), "{text}");
+    assert!(
+        text.contains("At the lowest follow height, leaves lower still"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Overhead clearance ahead: 3.9 m in 3 m"),
+        "{text}"
+    );
+
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        follow_status(json!({"phase": "following", "track_id": 7, "height_setpoint_m": 6.0})),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(!text.contains("Flying under leaves"), "{text}");
+    assert!(!text.contains("Overhead clearance"), "{text}");
+}
+
 #[test]
 fn every_prompt_case_matches_the_shared_fixture() {
     let cases: Value = serde_json::from_str(include_str!(

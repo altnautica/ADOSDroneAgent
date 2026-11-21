@@ -94,6 +94,11 @@ pub struct Follow {
     /// Height above ground the follow skill flies on (`rng` or `baro`).
     pub agl_m: Option<f64>,
     pub agl_source: Option<String>,
+    /// The follow height flown while it is lowered under leaves
+    /// (`height_setpoint_m` with `height_lowered`); `None` while flown as set.
+    pub height_lowered_m: Option<f64>,
+    /// Why the height is lowered (`canopy`, `canopy_floor`), when named.
+    pub height_reason: Option<String>,
     /// The kind's age at the agent when read; `None` when it reports none.
     pub age_ms: Option<u64>,
     pub stale: bool,
@@ -283,6 +288,9 @@ pub struct Pilot {
     /// The pilot does not trust the horizontal position; `None` while it
     /// does (or an older agent says nothing).
     pub position_unverified: Option<PositionUnverified>,
+    /// Leaves or a ceiling overhead along the lease goal's way, while the
+    /// pilot reports both the fly-under height and the distance to it.
+    pub overhead_ahead: Option<ados_protocol::pilot::OverheadAhead>,
     /// Why the cap (`gnss-denied`, `confined-near`), while one applies.
     pub speed_cap_reason: Option<String>,
     /// The operator's place class, `open` or `confined` (absent reads open).
@@ -344,6 +352,9 @@ impl Autonomy {
             hold_reason: s(d, "hold_reason"),
             agl_m: f(d, "agl_m"),
             agl_source: one_of(d, "agl_source", &["rng", "baro"]),
+            height_lowered_m: f(d, "height_setpoint_m")
+                .filter(|_| d.get("height_lowered").and_then(Value::as_bool) == Some(true)),
+            height_reason: one_of(d, "height_reason", &["canopy", "canopy_floor"]),
             age_ms,
             stale,
         });

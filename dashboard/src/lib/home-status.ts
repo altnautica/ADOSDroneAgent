@@ -24,6 +24,7 @@ import { linkLossLine } from "@/shared/hud/link-loss";
 import { resolveNavSource, type NavSourceResult } from "@/shared/hud/nav-source";
 import { PHASE_TONE, type PhaseTone } from "@/shared/hud/follow-chrome";
 import { followPrompt, type FollowPromptAction } from "@/shared/hud/follow-prompt";
+import { followHeightLine, overheadAheadLine, type FollowHeightLine } from "@/shared/hud/follow-height";
 import { parseFollowState, parseNavState, type FollowPhase, type FollowState, type NavState } from "@/shared/hud/nav-types";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
@@ -184,11 +185,15 @@ export interface HomeFollow {
   actions: HomeFollowAction[];
   /** The resume sequence the follow reports; a resume writes one past it. */
   resumeSeq: number;
+  /** `Flying under leaves: 3.9 m` and why, while the follow height is lowered. */
+  height: FollowHeightLine | null;
+  /** `Overhead clearance ahead: 3.9 m in 3 m`, while the pilot reports one. */
+  overhead: string | null;
 }
 
-/** The follow line of a fresh follow frame; null while follow is off or
- *  unheard. */
-export function homeFollow(f: FollowState | null): HomeFollow | null {
+/** The follow line of a fresh follow frame (with the fresh pilot frame's
+ *  overhead report); null while follow is off or unheard. */
+export function homeFollow(f: FollowState | null, pilot: PilotState | null = null): HomeFollow | null {
   if (!f || f.phase === "idle") return null;
   let word = specText(`follow.phase.${f.phase}`);
   if (f.trackId != null) word += ` #${f.trackId}`;
@@ -201,6 +206,8 @@ export function homeFollow(f: FollowState | null): HomeFollow | null {
     body: prompt ? specText(prompt.bodyKey) : null,
     actions: prompt ? prompt.actions.filter((a): a is HomeFollowAction => a === "resume" || a === "stop") : [],
     resumeSeq: f.operatorResumeSeq,
+    height: followHeightLine(f),
+    overhead: overheadAheadLine(pilot?.overheadAhead ?? null),
   };
 }
 

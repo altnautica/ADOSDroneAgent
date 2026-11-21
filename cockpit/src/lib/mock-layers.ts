@@ -77,6 +77,8 @@ export function demoPilotData(nowMs: number): Record<string, unknown> {
     plan_ned: [],
     readiness: [],
     mission: follow ? null : MISSION,
+    // Leaves ahead of the follow skill's way, under which it lowers its height.
+    overhead_ahead: follow ? { lease_id: 1, fly_under_agl_m: 3.9, ahead_m: 6 } : null,
     // The navigation sensors (`sensor-health.json`): flow, range and the lidar.
     sensors: {
       flow: { state: "ok", quality: 212, rate_hz: 20, age_ms: 40 },

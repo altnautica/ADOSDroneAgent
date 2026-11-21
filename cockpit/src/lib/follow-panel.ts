@@ -3,9 +3,10 @@
 // (seconds left of the search budget, the vantage state, what hides the
 // subject), the ±2σ interval bar, the geometry line, and the range cues with
 // the pipeline latency and the re-acquire mode. Height above ground is the
-// bottom row's alone: one AGL on screen. Every value reads `—` once the report
-// is older than 2 s, and the phase word then reads STALE. Pure, so the panel
-// is a thin view.
+// bottom row's alone: one AGL on screen, while the follow height lowered under
+// leaves and the overhead clearance the pilot reports ahead get a line each.
+// Every value reads `—` once the report is older than 2 s, and the phase word
+// then reads STALE. Pure, so the panel is a thin view.
 
 import {
   bearing3,
@@ -16,7 +17,9 @@ import {
   type IntervalBar,
   type PhaseTone,
 } from "@/shared/hud/follow-chrome";
+import { followHeightLine, overheadAheadLine, type FollowHeightLine } from "@/shared/hud/follow-height";
 import { isRecoveryPhase, type FollowState } from "@/shared/hud/nav-types";
+import type { OverheadAhead } from "@/shared/hud/pilot-fields";
 import { FOLLOW_FRESH_MS, formatRange, rangeInterval } from "@/shared/hud/target-state";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -39,9 +42,15 @@ export interface FollowPanelModel {
   mode: string | null;
   /** `18 s · On the way · Behind a trunk or column` while recovering, else null. */
   recovery: string | null;
+  /** `Flying under leaves: 3.9 m` and why, while the follow height is lowered. */
+  height: FollowHeightLine | null;
+  /** `Overhead clearance ahead: 3.9 m in 3 m`, while the pilot reports one. */
+  overhead: string | null;
 }
 
-export function followPanelModel(f: FollowState | null, ageMs: number): FollowPanelModel {
+/** `overhead` is the fresh pilot frame's `overhead_ahead` (null when the
+ *  pilot frame is stale or reports none). */
+export function followPanelModel(f: FollowState | null, ageMs: number, overhead: OverheadAhead | null = null): FollowPanelModel {
   const stale = f === null || ageMs > FOLLOW_FRESH_MS;
   const v = stale ? null : f;
   const rangeM = v?.rangeM ?? null;
@@ -70,6 +79,8 @@ export function followPanelModel(f: FollowState | null, ageMs: number): FollowPa
     latencyWarn: (v?.pipelineLatencyMs ?? 0) > LATENCY_WARN_MS,
     mode: v?.reacquireMode === "smart" || v?.reacquireMode === "strict" ? specText(`follow.mode.${v.reacquireMode}`) : null,
     recovery: v && isRecoveryPhase(v.phase) ? recoveryLine(v) : null,
+    height: followHeightLine(v),
+    overhead: overheadAheadLine(overhead),
   };
 }
 

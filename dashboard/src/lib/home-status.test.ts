@@ -285,6 +285,8 @@ describe("home follow line", () => {
       body: "The search found no match for the subject.",
       actions: ["resume", "stop"],
       resumeSeq: 4,
+      height: null,
+      overhead: null,
     });
   });
 
@@ -303,6 +305,18 @@ describe("home follow line", () => {
   it("has no line while follow is off or unheard", () => {
     expect(homeFollow(null)).toBeNull();
     expect(follow({ active: false })).toBeNull();
+  });
+
+  it("shows the height lowered under leaves and the pilot's overhead clearance ahead while each applies", () => {
+    const under = { active: true, phase: "following", height_setpoint_m: 3.87, height_lowered: true, height_reason: "canopy_floor" };
+    const pilot = parsePilotState({ ...raw, overhead_ahead: { lease_id: 7, fly_under_agl_m: 3.1, ahead_m: 12.4 } });
+    expect(homeFollow(parseFollowState(under), pilot)).toMatchObject({
+      height: { text: "Flying under leaves: 3.9 m", reason: "At the lowest follow height, leaves lower still" },
+      overhead: "Overhead clearance ahead: 3.1 m in 12 m",
+    });
+    const clear = parsePilotState({ ...raw, overhead_ahead: { lease_id: 7, fly_under_agl_m: null, ahead_m: null } });
+    expect(follow({ active: true, phase: "following", height_setpoint_m: 6 })).toMatchObject({ height: null, overhead: null });
+    expect(homeFollow(parseFollowState(under), clear)?.overhead).toBeNull();
   });
 
   for (const c of promptCases) {

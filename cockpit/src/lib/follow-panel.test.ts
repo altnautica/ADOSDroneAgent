@@ -81,6 +81,18 @@ describe("followPanelModel", () => {
     expect(followPanelModel(waiting, 0)).toMatchObject({ phase: "Waiting for you", phaseTone: "crit", recovery: null });
   });
 
+  it("shows the height lowered under leaves and the overhead clearance ahead only while they apply", () => {
+    const under = parseFollowState({ phase: "following", height_setpoint_m: 3.87, height_lowered: true, height_reason: "canopy" })!;
+    const overhead = { leaseId: 7, flyUnderAglM: 3.87, aheadM: 2.5 };
+    expect(followPanelModel(under, 0, overhead)).toMatchObject({
+      height: { text: "Flying under leaves: 3.9 m", reason: "Lowered under the leaves ahead" },
+      overhead: "Overhead clearance ahead: 3.9 m in 3 m",
+    });
+    expect(followPanelModel(f, 0)).toMatchObject({ height: null, overhead: null });
+    // A stale follow report blanks the height like every other value.
+    expect(followPanelModel(under, 2001).height).toBeNull();
+  });
+
   it("carries no second AGL: the bottom row's is the only one on screen", () => {
     const m = followPanelModel(f, 0);
     expect(m).not.toHaveProperty("agl");

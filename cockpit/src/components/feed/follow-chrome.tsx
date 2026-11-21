@@ -17,6 +17,7 @@ import { FollowRangePanel } from "@/components/feed/follow-range-panel";
 import { WhatsLockedChip } from "@/components/feed/whats-locked-chip";
 import { useFollowSkill } from "@/hooks/use-follow-skill";
 import { useNow } from "@/hooks/use-now";
+import { useFreshPilot } from "@/hooks/use-pilot";
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { cameraLabel } from "@/lib/feed-legs";
 import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
@@ -48,6 +49,7 @@ export function FollowStrip({
   const mainCameraId = useFeedStore((s) => s.mainCameraId);
   const pipCameraId = useFeedStore((s) => s.pipCameraId);
   const followSkill = useFollowSkill();
+  const overhead = useFreshPilot()?.overheadAhead ?? null;
   const now = useNow(follow ? 1000 : null);
   const [panelOpen, setPanelOpen] = useState(false);
 
@@ -90,7 +92,12 @@ export function FollowStrip({
       ) : null}
       {following && panelOpen && !awaiting ? (
         <div className="pointer-events-auto absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2">
-          <FollowRangePanel follow={follow?.data ?? null} ageMs={followAgeMs} widthClass={widthClass === "compact" ? "medium" : widthClass} />
+          <FollowRangePanel
+            follow={follow?.data ?? null}
+            ageMs={followAgeMs}
+            widthClass={widthClass === "compact" ? "medium" : widthClass}
+            overhead={overhead}
+          />
         </div>
       ) : null}
     </div>

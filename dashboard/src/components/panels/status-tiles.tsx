@@ -109,9 +109,10 @@ const PILL_TONE = {
   critical: "border-destructive/60 text-destructive",
 } as const;
 
-/** The follow phase word, and while follow holds for the operator the
- *  waiting prompt with the actions this card offers: resume and stop, written
- *  to the follow-me config. */
+/** The follow phase word, the follow height lowered under leaves (its reason
+ *  as the tooltip) and the overhead clearance ahead while each applies, and
+ *  while follow holds for the operator the waiting prompt with the actions
+ *  this card offers: resume and stop, written to the follow-me config. */
 function FollowStatus({ follow }: { follow: HomeFollow }) {
   const [busy, setBusy] = useState(false);
   async function run(a: HomeFollowAction) {
@@ -129,6 +130,16 @@ function FollowStatus({ follow }: { follow: HomeFollow }) {
       <span className="font-mono" style={{ color: chipTextColor(`var(--hud-${follow.tone})`) }}>
         {FOLLOW_LABEL} {follow.word}
       </span>
+      {follow.height ? (
+        <span className="font-mono text-warn" title={follow.height.reason ?? undefined} data-testid="follow-height-lowered">
+          {follow.height.text}
+        </span>
+      ) : null}
+      {follow.overhead ? (
+        <span className="font-mono text-muted-foreground" data-testid="follow-overhead-ahead">
+          {follow.overhead}
+        </span>
+      ) : null}
       {follow.prompt ? (
         <div role="alert" className="flex flex-col gap-1.5 rounded-md border border-destructive/60 p-2" data-testid="follow-prompt">
           <span className="font-medium text-destructive">{follow.prompt}</span>
@@ -197,7 +208,7 @@ function VehicleStatus() {
     );
   };
   const poseAge = poseAgeText(fresh.nav);
-  const follow = homeFollow(fresh.follow);
+  const follow = homeFollow(fresh.follow, fresh.pilot);
   const lines = homeStatusLines({
     ...inputs,
     pilot: fresh.pilot,

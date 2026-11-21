@@ -59,6 +59,20 @@ fn opt<T>(v: Option<T>, fmt: impl Fn(T) -> String) -> String {
     v.map(fmt).unwrap_or_else(|| "–".to_string())
 }
 
+/// `Overhead clearance ahead: 3.9 m in 3 m` while the pilot reports leaves or
+/// a ceiling along the way; `None` otherwise.
+pub(super) fn overhead_line(p: &crate::model::autonomy::Pilot) -> Option<String> {
+    let o = p.overhead_ahead.as_ref()?;
+    let (h, d) = (o.fly_under_agl_m?, o.ahead_m?);
+    Some(spec_text(
+        "pilot.overhead_ahead",
+        &[
+            ("h", &format!("{h:.1}")),
+            ("d", &format!("{:.0}", d.round())),
+        ],
+    ))
+}
+
 /// The detector row: `idle`, or the cameras it runs on, plus ` · always` when
 /// it runs on every camera regardless of demand.
 fn detector_line(core: &Core, d: &Detection) -> Line<'static> {
@@ -203,10 +217,28 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             rows.push(kv_text(t, "Search", LABEL, search.join(" · ")));
         }
         rows.push(kv_text(t, "Range", LABEL, range));
+        // Lowered under leaves: the height flown, then why on its own line.
+        if let Some(h) = follow.height_lowered_m {
+            let text = spec_text("follow.height_lowered", &[("v", &format!("{h:.1}"))]);
+            rows.push(kv(t, "", 0, tone_span(core, Tone::Caution, text)));
+            if let Some(why) = &follow.height_reason {
+                let why = spec_text(&format!("follow.height_reason.{why}"), &[]);
+                rows.push(kv(t, "", 0, Span::styled(why, t.dim())));
+            }
+        }
         rows.push(kv_text(t, "Reacquire", LABEL, reacquire));
         for line in rows {
             out.push(mark_stale(t, line, follow.stale));
         }
+    }
+    // The overhead clearance the pilot reports ahead, only while it is fresh.
+    if let Some(line) = a
+        .pilot
+        .as_ref()
+        .filter(|p| !p.stale)
+        .and_then(overhead_line)
+    {
+        out.push(kv_text(t, "", 0, line));
     }
     if let Some(nav) = &a.nav {
         let health = nav.extnav_health.as_deref().unwrap_or("unknown");

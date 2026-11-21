@@ -164,6 +164,10 @@ class MockNavStream {
         targetSpeedMps: 1.4,
         aglM: 4.1,
         aglSource: "rng",
+        // Lowered under the leaves the pilot reports ahead.
+        heightSetpointM: 3.9,
+        heightLowered: true,
+        heightReason: "canopy",
         reacquireMode: "smart",
         reacquireRemainingS: recovering ? Math.max(0, SEARCH_BUDGET_S - (index - 2) * (PHASE_MS / 1000) - inPhase) : null,
         searchBudgetS: recovering ? SEARCH_BUDGET_S : null,
