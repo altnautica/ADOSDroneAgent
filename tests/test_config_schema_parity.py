@@ -127,6 +127,7 @@ def test_committed_schema_carries_the_closed_sets_and_native_keys() -> None:
         "rknn",
         "hailo",
         "onnx",
+        "onnx-cuda",
         "mock",
     ]
     channel = defs["MeshConfig"]["properties"]["channel"]
