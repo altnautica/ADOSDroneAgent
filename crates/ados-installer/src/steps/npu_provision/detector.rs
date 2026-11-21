@@ -68,7 +68,7 @@ pub(super) struct FetchedDetector {
     pub runtime: String,
     pub model_id: String,
     pub model_path: String,
-    /// Output-head layout (`yolo5` | `yolo8`); empty when the registry names none.
+    /// Output-head layout (`yolo5` | `yolo8` | `yolox`); empty when the registry names none.
     pub head: String,
     /// Input width and height, when the registry names them.
     pub input: Option<(u32, u32)>,
