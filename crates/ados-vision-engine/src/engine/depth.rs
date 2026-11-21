@@ -1,10 +1,17 @@
 //! The engine side of the depth layer: the depth model, its runs on the shared
-//! accelerator, and the records it publishes.
+//! accelerator, and the records it publishes: the depth grid and landing zones
+//! on `vision-depth.sock`, and the metric `vision.depth.v2` frames
+//! ([`metric`] fits each frame to metres, [`frame`] builds it, [`publish`]
+//! paces and broadcasts it).
 //!
 //! A depth run takes the accelerator only when no other inference is waiting
 //! for it: the detector (and every other model) has priority, and a depth run
 //! that cannot get the accelerator within [`DEPTH_PERMIT_WAIT`] skips that
 //! frame. Runs are paced per camera by the caller.
+
+mod frame;
+mod metric;
+mod publish;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -12,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use ados_protocol::framebus::FrameDescriptor;
 use ados_protocol::vision_depth::DepthRecord;
+use ados_protocol::vision_depth_frame::DepthFrame;
 use ados_protocol::vision_status::{CameraDepthStatus, DepthStatus};
 use tokio::sync::SemaphorePermit;
 
@@ -57,6 +65,7 @@ pub(super) struct DepthRuntime {
     state: DepthModelState,
     interval_ms: u64,
     processor: DepthProcessor,
+    frames: publish::MetricFrames,
 }
 
 /// Counts a waiter for the accelerator while it lives, so a depth run can
@@ -93,6 +102,7 @@ impl VisionEngine {
         };
         rt.model_id = setup.model_id;
         rt.interval_ms = setup.interval_ms;
+        rt.frames.configure(setup.geometries.clone());
         rt.processor = DepthProcessor::new(setup.geometries);
     }
 
@@ -126,6 +136,11 @@ impl VisionEngine {
         let _ = self.depth_tx.send(record);
     }
 
+    /// Subscribe to the metric depth frames (`vision.depth.v2`).
+    pub fn subscribe_depth_frames(&self) -> broadcast::Receiver<DepthFrame> {
+        self.depth_runtime().frames.subscribe()
+    }
+
     /// Take the accelerator for a depth run: only while nothing of higher
     /// priority waits for it, giving up after [`DEPTH_PERMIT_WAIT`].
     async fn acquire_after_priority(&self) -> Option<SemaphorePermit<'_>> {
@@ -144,8 +159,9 @@ impl VisionEngine {
     }
 
     /// Run the depth model on one published frame and publish what the
-    /// camera's leases want: the grid while a depth lease is live, the
-    /// landing zones (at most once a second) while a surfaces lease is.
+    /// camera's leases want: the grid and the metric frame (at most every
+    /// 200 ms, and only with a fit) while a depth lease is live, the landing
+    /// zones (at most once a second) while a surfaces lease is.
     /// Returns `Ok(None)` when nothing was wanted, no model is ready, or the
     /// accelerator stayed busy.
     pub async fn run_depth(
@@ -198,6 +214,10 @@ impl VisionEngine {
         let out = {
             let mut rt = self.depth_runtime();
             rt.state = DepthModelState::Ready;
+            if want_depth {
+                rt.frames
+                    .next(&desc.camera_id, &map, aspect, desc.ts_ns, now_ms, &ranging);
+            }
             rt.processor.process(
                 &desc.camera_id,
                 &map,

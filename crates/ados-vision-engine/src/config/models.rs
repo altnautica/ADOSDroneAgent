@@ -211,9 +211,10 @@ impl ReidConfig {
 }
 
 /// The depth model's registry id, and its file name in the models directory
-/// (`.onnx` for the CPU runtime, `.rknn` for the Rockchip accelerator).
-pub const DEFAULT_DEPTH_MODEL_ID: &str = "depth_midas_v21_small";
-pub const DEFAULT_DEPTH_FILE_STEM: &str = "midas_v21_small_256";
+/// (`.onnx` for the CPU runtime, `.rknn` for the Rockchip accelerator):
+/// Depth Anything V2 Small, relative inverse depth, Apache-2.0.
+pub const DEFAULT_DEPTH_MODEL_ID: &str = "depth_anything_v2_small";
+pub const DEFAULT_DEPTH_FILE_STEM: &str = "depth_anything_v2_small_252x196";
 
 /// The depth pace on a CPU runtime and on an accelerator, Hz.
 pub const DEPTH_RATE_CPU_HZ: f32 = 2.0;
@@ -223,8 +224,14 @@ fn default_depth_model_id() -> String {
     DEFAULT_DEPTH_MODEL_ID.to_string()
 }
 
-fn default_depth_dim() -> u32 {
-    256
+/// The default model's input: its ViT reads 14-pixel patches, so the size is
+/// the multiple of 14 nearest 256 x 192.
+fn default_depth_width() -> u32 {
+    252
+}
+
+fn default_depth_height() -> u32 {
+    196
 }
 
 fn default_depth_threads() -> u32 {
@@ -250,9 +257,9 @@ pub struct DepthConfig {
     /// The model file; absent ⇒ the default file in the models directory.
     #[serde(default)]
     pub model_path: Option<String>,
-    #[serde(default = "default_depth_dim")]
+    #[serde(default = "default_depth_width")]
     pub input_width: u32,
-    #[serde(default = "default_depth_dim")]
+    #[serde(default = "default_depth_height")]
     pub input_height: u32,
     /// Runs per second per camera; absent ⇒ 2 on the CPU runtime, 5 on an
     /// accelerator.
@@ -269,8 +276,8 @@ impl Default for DepthConfig {
             enabled: true,
             model_id: default_depth_model_id(),
             model_path: None,
-            input_width: default_depth_dim(),
-            input_height: default_depth_dim(),
+            input_width: default_depth_width(),
+            input_height: default_depth_height(),
             rate_hz: None,
             threads: default_depth_threads(),
         }
@@ -338,12 +345,12 @@ impl DepthConfig {
                 kind: ModelKind::Depth,
                 execution: ModelExecution::EngineRun,
                 input_width: if self.input_width == 0 {
-                    default_depth_dim()
+                    default_depth_width()
                 } else {
                     self.input_width
                 },
                 input_height: if self.input_height == 0 {
-                    default_depth_dim()
+                    default_depth_height()
                 } else {
                     self.input_height
                 },

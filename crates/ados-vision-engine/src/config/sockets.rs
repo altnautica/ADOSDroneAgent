@@ -40,6 +40,15 @@ impl VisionConfig {
         )
     }
 
+    /// The `vision-depth-frames.sock` path: the broadcast of every metric
+    /// depth frame ([`ados_protocol::vision_depth_frame::DepthFrame`]).
+    pub fn depth_frames_socket_path(&self) -> String {
+        format!(
+            "{}/vision-depth-frames.sock",
+            self.socket_dir.trim_end_matches('/')
+        )
+    }
+
     /// The MAVLink broadcast socket the depth fit reads attitude and the
     /// downward rangefinder from.
     pub fn mavlink_socket_path(&self) -> String {

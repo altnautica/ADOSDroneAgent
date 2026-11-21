@@ -4334,7 +4334,7 @@
       "type": "boolean"
     },
     {
-      "default": 256,
+      "default": 196,
       "description": "Input Height",
       "enum": null,
       "key": "vision.depth.input_height",
@@ -4344,7 +4344,7 @@
       "type": "integer"
     },
     {
-      "default": 256,
+      "default": 252,
       "description": "Input Width",
       "enum": null,
       "key": "vision.depth.input_width",
@@ -4354,7 +4354,7 @@
       "type": "integer"
     },
     {
-      "default": "depth_midas_v21_small",
+      "default": "depth_anything_v2_small",
       "description": "Model Id",
       "enum": null,
       "key": "vision.depth.model_id",

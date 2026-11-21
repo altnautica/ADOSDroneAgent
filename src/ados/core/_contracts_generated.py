@@ -31,6 +31,7 @@ CONTRACT_VERSIONS: dict[str, int] = {
     "simclock.v1": 1,
     "nav.voxmap.v1": 1,
     "follow.beacon": 1,
+    "vision.depth.v2": 2,
 }
 
 SIDECAR_VERSIONS: dict[str, int] = {
@@ -249,6 +250,13 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "transport": "event-bus",
         "status": "active",
         "description": "The operator's shared phone position on the plugin.follow.beacon topic: {v, lat, lon (degrees), alt_m (AMSL, null when unknown), vel_ned ([n, e, d] m/s, null when unmeasured), horiz_acc_m, vert_acc_m (null when unknown), stamp_ns (ADOS time at router receipt), source (gcs-phone), sysid, compid}. The router republishes MAVLink FOLLOW_TARGET from an authorised ground link only, at most 10 Hz, dropping fixes older than 2 s or with horizontal accuracy worse than 30 m; it publishes through the seam K publish op as publisher host. Read with event.subscribe plus follow.beacon.read; no plugin may publish it.",
+    },
+    "vision.depth.v2": {
+        "version": 2,
+        "wire": "msgpack",
+        "transport": "unix-stream",
+        "status": "active",
+        "description": "Metric monocular depth frames from the vision engine, broadcast on vision-depth-frames.sock (4-byte big-endian length-prefixed msgpack) for the vision.depth.v2 topic, at most 5 Hz per camera and only while a depth lease is held and a scale fit exists: {v, camera_id, stamp_ns (frame capture, host monotonic), w, h (128 x 96, the whole frame squeezed), fx, fy, cx, cy (pinhole, plane pixels, pixel centres at i + 0.5), pitch_down_deg (camera mount), depth_mm: bin (u16 LE optical-axis depth, 0 unknown), sigma_mm: bin (u16 LE one-sigma, saturating), fit: {scale, shift (1/Z = scale * x + shift on per-frame normalised model values), inliers, residual_m, held_ms (0 fresh, else the held fit's age)}}. A record is at most 64 KiB of msgpack, one plugin event payload.",
     },
 }
 

@@ -69,11 +69,13 @@ class VisionDepthConfig(BaseModel):
     block the engine looks for the default model in ``models_dir``."""
 
     enabled: bool = True
-    model_id: str = "depth_midas_v21_small"
+    model_id: str = "depth_anything_v2_small"
     # The model file; unset is the default file in `models_dir`.
     model_path: str | None = None
-    input_width: int = Field(default=256, ge=0, le=U32_MAX)
-    input_height: int = Field(default=256, ge=0, le=U32_MAX)
+    # The default model reads 14-pixel patches: the multiple of 14 nearest
+    # 256 x 192.
+    input_width: int = Field(default=252, ge=0, le=U32_MAX)
+    input_height: int = Field(default=196, ge=0, le=U32_MAX)
     # Runs per second per camera; unset is 2 on the CPU runtime, 5 on an
     # accelerator.
     rate_hz: float | None = Field(default=None, gt=0)

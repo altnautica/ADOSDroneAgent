@@ -1,9 +1,12 @@
 //! Real-model smoke test for the ONNX depth path. `#[ignore]` by default: it
-//! needs the MiDaS v2.1 small ONNX (`model-small.onnx`, 256x256 input) and the
-//! `onnx` cargo feature. Run it once the model is on disk:
+//! needs the Depth Anything V2 Small ONNX
+//! (`depth_anything_v2_small_252x196.onnx`, built by
+//! `scripts/depth/export_depth_anything.py`) and the `onnx` cargo feature.
+//! Run it once the model is on disk:
 //!
-//!   ADOS_TEST_MIDAS_ONNX=/path/model-small.onnx ORT_DYLIB_PATH=/path/libonnxruntime.so \
-//!     cargo test -p ados-vision-engine --features onnx --test onnx_midas_infer -- --ignored --nocapture
+//!   ADOS_TEST_DEPTH_ONNX=/path/depth_anything_v2_small_252x196.onnx \
+//!     ORT_DYLIB_PATH=/path/libonnxruntime.so \
+//!     cargo test -p ados-vision-engine --features onnx --test onnx_depth_infer -- --ignored --nocapture
 //!
 //! It proves the model loads into a two-thread ORT session, returns a
 //! full-frame relative inverse depth map, ranks a near band below a far one,
@@ -20,11 +23,11 @@ use ados_protocol::framebus::{
 use ados_vision_engine::backend::{OnnxBackend, VisionBackend};
 
 fn model_path() -> PathBuf {
-    if let Ok(p) = std::env::var("ADOS_TEST_MIDAS_ONNX") {
+    if let Ok(p) = std::env::var("ADOS_TEST_DEPTH_ONNX") {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".cache/vision-depth/model-small.onnx")
+    PathBuf::from(home).join(".cache/cameradepth/out/depth_anything_v2_small_252x196.onnx")
 }
 
 /// A 640x360 frame: a smooth bright sky over a coarse ground texture whose
@@ -56,26 +59,26 @@ fn scene() -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "needs the MiDaS small ONNX on disk; run with --ignored"]
-fn midas_small_returns_a_full_frame_map_and_ranks_ground_nearer_than_sky() {
+#[ignore = "needs the Depth Anything V2 Small ONNX on disk; run with --ignored"]
+fn depth_anything_small_returns_a_full_frame_map_and_ranks_ground_nearer_than_sky() {
     let path = model_path();
     assert!(path.is_file(), "model not found at {}", path.display());
     let meta = ModelMetadata {
-        id: "depth_midas_v21_small".into(),
+        id: "depth_anything_v2_small".into(),
         kind: ModelKind::Depth,
         execution: ModelExecution::EngineRun,
-        input_width: 256,
-        input_height: 256,
+        input_width: 252,
+        input_height: 196,
         input_format: FrameFormat::Rgb24,
         output_classes: Vec::new(),
         model_path: Some(path.to_string_lossy().into_owned()),
         head: DetectionHead::Yolo8,
     };
-    let model = OnnxBackend::new(1, 2).load(&meta).expect("load midas onnx");
+    let model = OnnxBackend::new(1, 2).load(&meta).expect("load depth onnx");
     let frame = scene();
     let mut latencies = Vec::new();
     let mut last = None;
-    for _ in 0..6 {
+    for _ in 0..11 {
         let t0 = Instant::now();
         let map = model
             .infer_dense(&frame, 640, 360, FrameFormat::Rgb24)
@@ -84,7 +87,7 @@ fn midas_small_returns_a_full_frame_map_and_ranks_ground_nearer_than_sky() {
         last = Some(map);
     }
     let map = last.unwrap();
-    assert_eq!((map.width, map.height), (256, 256));
+    assert_eq!((map.width, map.height), (252, 196));
     assert!(map.data.iter().all(|v| v.is_finite()));
     let sky = map.at(0.5, 0.15);
     let ground = map.at(0.5, 0.9);
@@ -92,7 +95,7 @@ fn midas_small_returns_a_full_frame_map_and_ranks_ground_nearer_than_sky() {
     latencies.remove(0);
     latencies.sort_by(f64::total_cmp);
     println!(
-        "midas small, 2 threads: median {:.1} ms, max {:.1} ms over {} runs",
+        "depth anything v2 small 252x196, 2 threads: median {:.1} ms, max {:.1} ms over {} runs",
         latencies[latencies.len() / 2],
         latencies[latencies.len() - 1],
         latencies.len()

@@ -444,16 +444,18 @@ async fn main() {
         }));
     }
 
-    // The depth layer: its broadcast, and the planar scan its scale fit reads
-    // off the plugin event export. Only when a depth model runs.
+    // The depth layer: its broadcasts (the grid and zones, and the metric
+    // frames), and the planar scan its scale fit reads off the plugin event
+    // export. Only when a depth model runs.
     if depth_interval_ms > 0 {
         let engine_bus = engine.clone();
         let cancel_bus = cancel.clone();
-        let sock = config.depth_socket_path();
+        let socks = (
+            config.depth_socket_path(),
+            config.depth_frames_socket_path(),
+        );
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = depth_bus::serve(engine_bus, &sock, cancel_bus).await {
-                tracing::error!(error = %e, "vision_depth_serve_failed");
-            }
+            depth_bus::serve_all(engine_bus, &socks.0, &socks.1, cancel_bus).await
         }));
         tasks.push(tokio::spawn(feed::run_scan_reader(
             feed::default_events_socket(),
