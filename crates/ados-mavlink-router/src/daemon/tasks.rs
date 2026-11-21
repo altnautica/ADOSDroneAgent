@@ -26,9 +26,11 @@ pub(super) fn spawn_core(
         crate::pilot_link::start(
             control_mode(),
             std::path::Path::new(dir).join(ados_protocol::paths::PILOT_SOCK),
+            fc.clock().clone(),
         );
         // Pilot death while it flies: the router sets the FC mode for
-        // `pilot.link_loss_action` within DEATH_MS plus one check period.
+        // `pilot.link_loss_action` within DEATH_MS (of ADOS time) plus one
+        // check period.
         let fc = fc.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {

@@ -14,7 +14,10 @@
 //!   mode for `pilot.link_loss_action` ([`PilotLink::death_mode`]). The
 //!   FC's GCS failsafe cannot do it: any sysid-1 heartbeat counts for it (the
 //!   router's own, a VIO component's), so the pilot's heartbeat stopping
-//!   never trips it;
+//!   never trips it. The pilot publishes its state on ADOS time, so its
+//!   silence is measured on the router's ADOS time too: a simulator that
+//!   takes longer than [`DEATH_MS`] of wall time over one step is not a
+//!   dead pilot;
 //! * the swarm loop submits its velocities as `swarm.goal`;
 //! * every client mode command toward the FC (`SET_MODE`, `DO_SET_MODE`,
 //!   `NAV_RETURN_TO_LAUNCH`, `NAV_LAND`), in any control mode, is reported
@@ -32,9 +35,9 @@ use std::time::Duration;
 use ados_protocol::pilot::{self, ControlMode};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-// Steady time for the pilot's liveness and the downlink period, read through
-// Tokio's clock: wall time in a service, simulated time under the in-process
-// simulation's paused runtime (`tests/dst`).
+// Steady time for the downlink period (and the pilot's liveness on a wall
+// clock), read through Tokio's clock: wall time in a service, simulated time
+// under the in-process simulation's paused runtime (`tests/dst`).
 use tokio::time::Instant;
 
 mod downlink;
@@ -55,7 +58,11 @@ const MSG_RC_CHANNELS_OVERRIDE: u32 = 70;
 
 pub struct PilotLink {
     started: Instant,
-    /// Milliseconds since `started` of the last pilot `state` (0 = never).
+    /// The router's ADOS time when it follows the simulator's clock: the
+    /// pilot's state cadence is on that clock, so its liveness is judged on
+    /// it. `None` on wall time, where steady Tokio time serves.
+    sim: Option<crate::clock::RouterClock>,
+    /// [`PilotLink::live_ms`] of the last pilot `state` (0 = never).
     alive_ms: AtomicU64,
     cfg_mode: AtomicU8,
     live_mode: AtomicU8,
@@ -144,10 +151,11 @@ pub fn global() -> Option<&'static PilotLink> {
     LINK.get()
 }
 
-/// Start the link (drone profile). `cfg_mode` is `control.mode` from config.
-pub fn start(cfg_mode: ControlMode, path: PathBuf) {
+/// Start the link (drone profile). `cfg_mode` is `control.mode` from config;
+/// `clock` is the router's ADOS time.
+pub fn start(cfg_mode: ControlMode, path: PathBuf, clock: crate::clock::RouterClock) {
     let (tx, rx) = mpsc::channel(256);
-    let link = PilotLink::new(cfg_mode, tx);
+    let link = PilotLink::with_clock(cfg_mode, tx, clock);
     if LINK.set(link).is_ok() {
         tokio::spawn(run(path, rx));
     }
@@ -157,6 +165,7 @@ impl PilotLink {
     pub fn new(cfg_mode: ControlMode, tx: mpsc::Sender<Vec<u8>>) -> Self {
         Self {
             started: Instant::now(),
+            sim: None,
             alive_ms: AtomicU64::new(0),
             cfg_mode: AtomicU8::new(mode_code(cfg_mode)),
             live_mode: AtomicU8::new(0),
@@ -173,13 +182,37 @@ impl PilotLink {
         }
     }
 
+    /// [`PilotLink::new`] judging the pilot's liveness on the router's ADOS
+    /// time `clock` when that is the simulator's.
+    pub fn with_clock(
+        cfg_mode: ControlMode,
+        tx: mpsc::Sender<Vec<u8>>,
+        clock: crate::clock::RouterClock,
+    ) -> Self {
+        Self {
+            sim: (clock.source() == "sim").then_some(clock),
+            ..Self::new(cfg_mode, tx)
+        }
+    }
+
+    /// Steady milliseconds since the link started, plus one (0 = never).
     fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64 + 1
     }
 
+    /// Milliseconds on the clock the pilot's liveness is judged on, plus one
+    /// (0 = never): the simulator's time when the router follows it, steady
+    /// time otherwise.
+    fn live_ms(&self) -> u64 {
+        match &self.sim {
+            Some(c) => c.now_ns() / 1_000_000 + 1,
+            None => self.now_ms(),
+        }
+    }
+
     pub fn alive(&self) -> bool {
         let t = self.alive_ms.load(Ordering::Relaxed);
-        t != 0 && self.now_ms().saturating_sub(t) <= ALIVE_MS
+        t != 0 && self.live_ms().saturating_sub(t) <= ALIVE_MS
     }
 
     /// The live mode from the pilot's state, else the configured one.
@@ -196,7 +229,7 @@ impl PilotLink {
 
     /// Record a `state` body from the pilot.
     pub fn on_state(&self, body: &rmpv::Value) {
-        self.alive_ms.store(self.now_ms(), Ordering::Relaxed);
+        self.alive_ms.store(self.live_ms(), Ordering::Relaxed);
         self.fired.store(false, Ordering::Relaxed);
         let field = |name: &str| match body {
             rmpv::Value::Map(m) => m
@@ -243,10 +276,11 @@ impl PilotLink {
     }
 
     /// The FC mode to set because the pilot died while flying: its state
-    /// stopped for [`DEATH_MS`] after one that had it flying the vehicle.
+    /// stopped for [`DEATH_MS`] (on the liveness clock,
+    /// [`PilotLink::live_ms`]) after one that had it flying the vehicle.
     /// Fires once per silence; `action` (read from config) only then.
     pub fn death_mode(&self, action: impl FnOnce() -> LossAction) -> Option<u32> {
-        self.death_mode_at(self.now_ms(), action)
+        self.death_mode_at(self.live_ms(), action)
     }
 
     fn death_mode_at(&self, now_ms: u64, action: impl FnOnce() -> LossAction) -> Option<u32> {

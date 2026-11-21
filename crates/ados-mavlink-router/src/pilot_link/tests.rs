@@ -278,6 +278,40 @@ fn unknown_arm_state_keeps_the_pilot_flying() {
     );
 }
 
+/// A bench take in lockstep with the simulator: the pilot published its
+/// state at sim 59.84 s, then the simulator took 1.13 s of wall time to step
+/// to 59.94 s. A router judging the silence on wall time set RTL 1.1 s after
+/// that state and ended the follow; on the simulator's time the pilot was
+/// silent for 100 ms. Its death is still found when sim time passes
+/// without its state.
+#[tokio::test(start_paused = true)]
+async fn a_slow_simulator_step_is_not_a_dead_pilot() {
+    let (clock, feed) = crate::clock::tests::sim_clock();
+    let (tx, _rx) = mpsc::channel(4);
+    let link = PilotLink::with_clock(ControlMode::Ados, tx, clock);
+    let (tx, _rx) = mpsc::channel(4);
+    let wall = PilotLink::new(ControlMode::Ados, tx);
+    crate::clock::tests::advance(&feed, 1, 59_840);
+    let flying = pilot_state("skill", true, false, "multirotor");
+    link.on_state(&flying);
+    wall.on_state(&flying);
+    tokio::time::advance(Duration::from_millis(1_130)).await;
+    assert_eq!(
+        wall.death_mode(|| LossAction::Rth),
+        Some(6),
+        "on wall time the step reads as a dead pilot"
+    );
+    assert_eq!(link.death_mode(|| LossAction::Rth), None);
+    assert!(link.gating(), "still the pilot's motion");
+    crate::clock::tests::advance(&feed, 2, 59_940);
+    link.on_state(&flying);
+    // The pilot gone while the simulator runs on: a second of sim time.
+    crate::clock::tests::advance(&feed, 3, 60_939);
+    assert_eq!(link.death_mode(|| LossAction::Rth), None);
+    crate::clock::tests::advance(&feed, 4, 60_940);
+    assert_eq!(link.death_mode(|| LossAction::Rth), Some(6), "copter RTL");
+}
+
 #[tokio::test]
 async fn gotos_and_swarm_goals_reach_the_pilot_socket() {
     let (tx, mut rx) = mpsc::channel(4);
