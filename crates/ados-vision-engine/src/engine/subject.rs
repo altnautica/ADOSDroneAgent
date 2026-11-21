@@ -10,25 +10,29 @@
 //! [`DEPTH_MAX_SKEW_NS`] of the frame, and the ground under the vehicle from
 //! the downward rangefinder, taken as the ground under the subject (flat
 //! ground). A lock that coasts or holds on ambiguity only moves the estimate
-//! on in time. The estimate is published after every batch while it tracks.
+//! on in time. Queued follow-beacon fixes ([`super::beacon`]) no newer than
+//! the frame fuse first, in time order. Predictions are walked through the
+//! voxel map while it is live ([`super::voxmap_space`]). The estimate is
+//! published after every batch while it tracks.
 //!
 //! A camera without a `cameras[]` entry (no mount, no field of view), or a
 //! frame the flight controller's attitude and position histories do not
 //! cover, publishes nothing: a world position from a guessed geometry would
 //! be a wrong one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use ados_protocol::framebus::{Detection, FrameDescriptor, LockState, TrackState};
 use ados_protocol::vision_depth_frame::DepthFrame;
 use ados_protocol::vision_subject::SubjectState;
 use ados_vision::subject::{
-    depth_cue, GroundCue, OpenSpace, Sighting, SubjectConfig, SubjectEstimator,
+    depth_cue, BeaconFix, GroundCue, Sighting, SubjectConfig, SubjectEstimator,
 };
 use tokio::sync::broadcast;
 
+use super::voxmap_space::VoxSpace;
 use super::VisionEngine;
-use crate::depth::feed::Attitude;
+use crate::depth::feed::{Attitude, FrameTime};
 use crate::depth::geometry::Projector;
 
 /// The largest gap between a frame and the depth frame read with it, ns.
@@ -47,11 +51,17 @@ const BORDER_PX: f32 = 1.0;
 /// States a slow subscriber may fall behind by before it lags.
 const SUBJECT_QUEUE: usize = 32;
 
+/// Beacon fixes held for the next sighting; the oldest goes first.
+const MAX_PENDING_BEACONS: usize = 16;
+
 /// The subject estimates and their broadcast.
 pub(super) struct SubjectRuntime {
     estimators: HashMap<String, SubjectEstimator>,
     depth_rx: Option<broadcast::Receiver<DepthFrame>>,
     depth: HashMap<String, DepthFrame>,
+    /// Beacon fixes not yet fused, in time order.
+    beacons: VecDeque<BeaconFix>,
+    space: VoxSpace,
     tx: broadcast::Sender<SubjectState>,
 }
 
@@ -61,12 +71,23 @@ impl Default for SubjectRuntime {
             estimators: HashMap::new(),
             depth_rx: None,
             depth: HashMap::new(),
+            beacons: VecDeque::new(),
+            space: VoxSpace::default(),
             tx: broadcast::channel(SUBJECT_QUEUE).0,
         }
     }
 }
 
 impl SubjectRuntime {
+    /// Hold a beacon fix for the next sighting not older than it.
+    pub(super) fn queue_beacon(&mut self, fix: BeaconFix) {
+        if self.beacons.len() == MAX_PENDING_BEACONS {
+            self.beacons.pop_front();
+        }
+        let at = self.beacons.partition_point(|b| b.stamp_ns <= fix.stamp_ns);
+        self.beacons.insert(at, fix);
+    }
+
     /// Keep the newest depth frame of every camera.
     fn drain_depth(&mut self) {
         let Some(rx) = &mut self.depth_rx else {
@@ -96,7 +117,7 @@ fn designated(detections: &[Detection]) -> Option<(u32, Option<&Detection>)> {
 }
 
 impl VisionEngine {
-    fn subject_runtime(&self) -> std::sync::MutexGuard<'_, SubjectRuntime> {
+    pub(super) fn subject_runtime(&self) -> std::sync::MutexGuard<'_, SubjectRuntime> {
         self.subject
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -126,11 +147,15 @@ impl VisionEngine {
             .is_none()
             .then(|| self.subscribe_depth_frames());
         let seen = seen.and_then(|d| self.seen(desc, d, stamp_ns));
-        let mut rt = self.subject_runtime();
+        let now_ms = ados_protocol::framebus::mono_ns() / 1_000_000;
+        let vehicle = self.range_feed.position_at(FrameTime::Host(now_ms as f64));
+        let mut guard = self.subject_runtime();
+        let rt = &mut *guard;
         if depth_rx.is_some() {
             rt.depth_rx = depth_rx;
         }
         rt.drain_depth();
+        rt.space.refresh(now_ms, vehicle);
         let sighting = seen.map(|s| {
             s.with_depth(
                 rt.depth
@@ -145,13 +170,17 @@ impl VisionEngine {
         if est.id() != id {
             *est = SubjectEstimator::new(id, SubjectConfig::default());
         }
+        while let Some(fix) = rt.beacons.front().filter(|f| f.stamp_ns <= stamp_ns) {
+            est.fuse_beacon(fix);
+            rt.beacons.pop_front();
+        }
         match &sighting {
             Some(s) => {
                 est.observe(s);
             }
             None => est.coast(stamp_ns),
         }
-        let state = est.state(&desc.camera_id, &OpenSpace)?;
+        let state = est.state(&desc.camera_id, &rt.space)?;
         let _ = rt.tx.send(state.clone());
         Some(state)
     }

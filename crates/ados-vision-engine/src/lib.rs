@@ -43,6 +43,8 @@
 //!   modelled-latency release of results, and each camera's lockstep lane.
 //! - [`subject_bus`] — the `vision-subject.sock` broadcast of the designated
 //!   subject's world state (`vision.subject.v1`).
+//! - [`export_feed`] — what the engine reads off the plugin event export:
+//!   the planar scan for the depth fit and the follow beacon for the subject.
 
 pub mod backend;
 pub mod camera_control;
@@ -53,6 +55,7 @@ pub mod depth;
 pub mod depth_bus;
 pub mod detection_bus;
 pub mod engine;
+pub mod export_feed;
 pub mod frame_bus;
 pub mod perception_scheduler;
 pub mod ring;

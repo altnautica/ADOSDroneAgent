@@ -100,6 +100,18 @@ pub enum FrameTime {
     FlightController(f64),
 }
 
+/// The flight controller's home (`HOME_POSITION`): where it is on the globe
+/// and in the local NED frame, which ties a geodetic fix to that frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Home {
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    /// Above mean sea level, metres.
+    pub alt_m: f64,
+    /// Home in the local NED frame, metres.
+    pub local_ned: [f32; 3],
+}
+
 /// One sample of a history kept on the flight controller's clock.
 #[derive(Debug, Clone, Copy)]
 struct Sample<T> {
@@ -116,6 +128,7 @@ struct Latest {
     down: Option<(f32, u64)>,
     attitudes: VecDeque<Sample<Attitude>>,
     positions: VecDeque<Sample<[f32; 3]>>,
+    home: Option<Home>,
 }
 
 /// Add a sample to a history. A repeated sample is skipped; one older than
@@ -193,6 +206,15 @@ impl RangeFeed {
 
     pub fn set_down(&self, metres: f32, at_ms: u64) {
         self.with(|l| l.down = Some((metres, at_ms)));
+    }
+
+    pub fn set_home(&self, home: Home) {
+        self.with(|l| l.home = Some(home));
+    }
+
+    /// The flight controller's latest home, if it has reported one.
+    pub fn home(&self) -> Option<Home> {
+        self.with(|l| l.home)
     }
 
     /// One `ATTITUDE` sample: the flight controller's `time_boot_ms`, and its
@@ -332,6 +354,24 @@ impl RangeFeed {
                 self.push_position(u64::from(p.time_boot_ms), ned, at_ms);
                 true
             }
+            MavMessage::HOME_POSITION(h) if header.component_id == AUTOPILOT_COMPONENT => {
+                let home = Home {
+                    lat_deg: f64::from(h.latitude) / 1e7,
+                    lon_deg: f64::from(h.longitude) / 1e7,
+                    alt_m: f64::from(h.altitude) / 1000.0,
+                    local_ned: [h.x, h.y, h.z],
+                };
+                // 0, 0 is the "no home yet" a flight controller may send.
+                if !(home.local_ned.iter().all(|v| v.is_finite())
+                    && (h.latitude != 0 || h.longitude != 0)
+                    && home.lat_deg.abs() <= 90.0
+                    && home.lon_deg.abs() <= 180.0)
+                {
+                    return false;
+                }
+                self.set_home(home);
+                true
+            }
             // A reading at the sensor's maximum is its "no return" (the
             // autopilot reports an out-of-range sensor there), not a range.
             MavMessage::DISTANCE_SENSOR(d)
@@ -357,11 +397,15 @@ pub fn default_events_socket() -> PathBuf {
     dir.join(ados_protocol::paths::PLUGIN_EVENTS_SOCK)
 }
 
-async fn scan_session(path: &Path, feed: &RangeFeed) -> std::io::Result<()> {
+/// What an export reader does with each event line: the line and its arrival
+/// on the engine's monotonic clock, ms.
+pub type ExportSink = Arc<dyn Fn(&[u8], u64) + Send + Sync>;
+
+async fn export_session(path: &Path, topics: &[&str], sink: &ExportSink) -> std::io::Result<()> {
     let stream = UnixStream::connect(path).await?;
     let (read, mut write) = stream.into_split();
     let mut req = serde_json::to_vec(&serde_json::json!({
-        "v": 1, "op": "subscribe", "topics": [SCAN_TOPIC],
+        "v": 1, "op": "subscribe", "topics": topics,
     }))
     .unwrap_or_default();
     req.push(b'\n');
@@ -378,24 +422,26 @@ async fn scan_session(path: &Path, feed: &RangeFeed) -> std::io::Result<()> {
             "event export refused the subscription",
         ));
     }
-    tracing::info!(path = %path.display(), "depth_scan_feed_connected");
+    tracing::info!(path = %path.display(), ?topics, "vision_event_export_connected");
     while let Some(line) = read_newline_line(&mut reader, MAX_LINE).await? {
-        feed.apply_event_line(&line, now_ms());
+        sink(&line, now_ms());
     }
     Ok(())
 }
 
-/// Keep the scan current from the export socket until `cancel`.
-pub async fn run_scan_reader(
+/// Read `topics` off the export socket into `sink` until `cancel`,
+/// reconnecting quietly while the socket is absent.
+pub async fn run_export_reader(
     path: PathBuf,
-    feed: Arc<RangeFeed>,
+    topics: Vec<&'static str>,
+    sink: ExportSink,
     cancel: ados_protocol::shutdown::Shutdown,
 ) {
     loop {
         tokio::select! {
-            r = scan_session(&path, &feed) => {
+            r = export_session(&path, &topics, &sink) => {
                 if let Err(e) = r {
-                    tracing::debug!(error = %e, path = %path.display(), "depth_scan_feed_unavailable");
+                    tracing::debug!(error = %e, path = %path.display(), "vision_event_export_unavailable");
                 }
             }
             _ = cancel.wait() => return,
@@ -443,7 +489,8 @@ pub async fn run_mavlink_reader(
 mod tests {
     use super::*;
     use ados_protocol::mavlink::ardupilotmega::{
-        MavDistanceSensor, ATTITUDE_DATA, DISTANCE_SENSOR_DATA, LOCAL_POSITION_NED_DATA,
+        MavDistanceSensor, ATTITUDE_DATA, DISTANCE_SENSOR_DATA, HOME_POSITION_DATA,
+        LOCAL_POSITION_NED_DATA,
     };
     use ados_protocol::mavlink::{serialize_v2, MavHeader};
 
@@ -654,5 +701,34 @@ mod tests {
         let host = feed.position_at(FrameTime::Host(3_095.0)).unwrap();
         assert!((host[0] - 2.75).abs() < 1e-5, "{host:?}");
         assert_eq!(feed.position_at(FrameTime::FlightController(1_300.0)), None);
+    }
+
+    #[test]
+    fn the_autopilot_home_ties_the_globe_to_the_local_frame() {
+        let feed = RangeFeed::default();
+        let home = |lat, lon| {
+            MavMessage::HOME_POSITION(HOME_POSITION_DATA {
+                latitude: lat,
+                longitude: lon,
+                altitude: 12_500,
+                x: 1.0,
+                y: -2.0,
+                z: 0.5,
+                ..HOME_POSITION_DATA::default()
+            })
+        };
+        // No home yet reads as 0, 0.
+        assert!(!feed.apply_mavlink(&frame(&home(0, 0)), 0));
+        assert_eq!(feed.home(), None);
+        assert!(feed.apply_mavlink(&frame(&home(520_000_000, 45_000_000)), 0));
+        assert_eq!(
+            feed.home(),
+            Some(Home {
+                lat_deg: 52.0,
+                lon_deg: 4.5,
+                alt_m: 12.5,
+                local_ned: [1.0, -2.0, 0.5],
+            })
+        );
     }
 }

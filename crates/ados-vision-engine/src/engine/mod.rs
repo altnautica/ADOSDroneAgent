@@ -30,6 +30,7 @@ use crate::camera_control::CameraControls;
 use crate::depth::geometry::CameraMount;
 use crate::ring::{FrameTiming, RingWriter};
 mod batch_times;
+mod beacon;
 mod camera_motion;
 mod camera_tracks;
 mod crop;
@@ -41,6 +42,7 @@ mod roster;
 mod subject;
 mod timing;
 mod tracking;
+mod voxmap_space;
 
 use timing::ModelTiming;
 

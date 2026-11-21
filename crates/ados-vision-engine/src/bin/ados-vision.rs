@@ -36,7 +36,7 @@ use ados_vision_engine::perception_scheduler::PerceptionScheduler;
 use ados_vision_engine::sim_pacing::{frame_clock_ns, SimPacing};
 use ados_vision_engine::source::{AnySource, FrameSource, SimClock};
 use ados_vision_engine::work_status::{self, InputLiveness, WorkStatus, INPUT_SILENCE_TIMEOUT};
-use ados_vision_engine::{subject_bus, visionsock};
+use ados_vision_engine::{export_feed, subject_bus, visionsock};
 
 // A crate root resolves `mod` next to itself, where Cargo would take a file
 // for a binary of its own; the module lives in the binary's own directory.
@@ -445,9 +445,9 @@ async fn main() {
         }));
     }
 
-    // The depth layer: its broadcasts (the grid and zones, and the metric
-    // frames), and the planar scan its scale fit reads off the plugin event
-    // export. Only when a depth model runs.
+    // The depth layer's broadcasts (the grid and zones, and the metric
+    // frames), only when a depth model runs. The plugin event export feeds
+    // the depth fit the planar scan and the subject estimate the beacon.
     if depth_interval_ms > 0 {
         let engine_bus = engine.clone();
         let cancel_bus = cancel.clone();
@@ -458,12 +458,9 @@ async fn main() {
         tasks.push(tokio::spawn(async move {
             depth_bus::serve_all(engine_bus, &socks.0, &socks.1, cancel_bus).await
         }));
-        tasks.push(tokio::spawn(feed::run_scan_reader(
-            feed::default_events_socket(),
-            engine.range_feed(),
-            cancel.clone(),
-        )));
     }
+    let (scan, beacon) = (depth_interval_ms > 0, config.tracker_enabled);
+    tasks.extend(export_feed::spawn(&engine, scan, beacon, &cancel));
     // The attitude, the local position and the downward rangefinder off the
     // MAVLink socket: the depth fit, the tracker (the camera's turn) and the
     // subject estimate (the vehicle's pose at each frame) read them.

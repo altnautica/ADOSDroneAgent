@@ -12,6 +12,7 @@ use super::*;
 use crate::backend::MockBackend;
 use crate::depth::feed::FrameTime;
 use crate::depth::geometry::CameraGeometry;
+use crate::engine::beacon::BEACON_PUBLISHER;
 use crate::engine::CameraMotionSetup;
 use ados_vision::tracker::TrackerConfig;
 
@@ -215,4 +216,60 @@ fn a_new_designation_restarts_the_estimate() {
         .update_subject(&desc(1_100), &[other], 1_100_000_000)
         .unwrap();
     assert_eq!(st.id, 9);
+}
+
+/// The export line of a beacon fix at the subject's feet from `publisher`,
+/// placed through the test home.
+fn beacon_at_feet(publisher: &str) -> Vec<u8> {
+    // Metres per degree at 52 N on the WGS-84 ellipsoid.
+    let (m_lat, m_lon) = (111_262.0, 68_677.0);
+    let h = crate::engine::beacon::tests::home();
+    crate::engine::beacon::tests::line(
+        publisher,
+        h.lat_deg + f64::from(FEET[0] - h.local_ned[0]) / m_lat,
+        h.lon_deg + f64::from(FEET[1] - h.local_ned[1]) / m_lon,
+    )
+}
+
+#[test]
+fn a_beacon_fix_waits_for_a_frame_not_older_than_it_then_fuses() {
+    let e = engine(true);
+    // No home yet: the fix cannot be placed and is dropped.
+    assert!(!e.apply_beacon_line(&beacon_at_feet(BEACON_PUBLISHER), 1_050));
+    e.range_feed()
+        .set_home(crate::engine::beacon::tests::home());
+    // Only the host publishes the beacon.
+    assert!(!e.apply_beacon_line(&beacon_at_feet("com.example.spoof"), 1_050));
+
+    let det = [subject(TrackState::Confirmed, LockState::Locked)];
+    e.update_subject(&desc(1_000), &det, 1_000_000_000).unwrap();
+    assert!(e.apply_beacon_line(&beacon_at_feet(BEACON_PUBLISHER), 1_150));
+    // The frame captured before the fix arrived does not take it.
+    let st = e.update_subject(&desc(1_100), &det, 1_100_000_000).unwrap();
+    assert!(!st.sources.beacon);
+    assert_eq!(e.subject_runtime().beacons.len(), 1);
+    // The next frame does, first, and is not refused as older than it.
+    let st = e.update_subject(&desc(1_200), &det, 1_200_000_000).unwrap();
+    assert!(
+        st.sources.beacon && st.sources.box_height,
+        "{:?}",
+        st.sources
+    );
+    assert_eq!(st.fix_age_ms, 0);
+    assert!(close(st.pos_ned, FEET, 0.2), "{:?}", st.pos_ned);
+    assert!(e.subject_runtime().beacons.is_empty());
+}
+
+#[test]
+fn a_beacon_without_a_designated_subject_never_starts_a_track() {
+    let e = engine(true);
+    e.range_feed()
+        .set_home(crate::engine::beacon::tests::home());
+    assert!(e.apply_beacon_line(&beacon_at_feet(BEACON_PUBLISHER), 900));
+    // A lock whose box is ambiguous: no sighting, and the beacon alone does
+    // not start a track.
+    let ambiguous = [subject(TrackState::Confirmed, LockState::Uncertain)];
+    assert!(e
+        .update_subject(&desc(1_000), &ambiguous, 1_000_000_000)
+        .is_none());
 }
