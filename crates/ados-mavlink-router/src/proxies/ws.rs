@@ -232,12 +232,13 @@ pub(super) async fn handle_ws_client(
     // The admission is re-checked every `AUTH_RECHECK`, so a pair, unpair or
     // key rotation closes a session that no longer passes.
     let mut framer = ClientFramer::default();
+    let link = crate::follow_beacon::LinkId::Ws(crate::follow_beacon::LinkId::next_serial());
     let mut recheck = recheck_interval();
     loop {
         tokio::select! {
             msg = read.next() => match msg {
                 Some(Ok(Message::Binary(data))) => {
-                    forward_client_bytes(&fc, &mut framer, &data, ws_origin, route_ep.as_ref()).await
+                    forward_client_bytes(&fc, &mut framer, &data, ws_origin, route_ep.as_ref(), link).await
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}

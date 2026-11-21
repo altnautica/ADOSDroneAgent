@@ -29,6 +29,14 @@ pub const POSE_INJECT_MSG_IDS: &[u32] = &[
     48,    // SET_GPS_GLOBAL_ORIGIN (moves the EKF origin)
 ];
 
+/// Message ids no plugin may send, whatever it holds. Each one is a message
+/// the agent trusts by where it came from: `FOLLOW_TARGET` is the operator's
+/// phone position, which the router republishes as `plugin.follow.beacon`, so
+/// a plugin sending one would speak for the operator.
+pub const HOST_ONLY_MSG_IDS: &[u32] = &[
+    ados_protocol::follow_beacon::FOLLOW_TARGET_MSG_ID, // FOLLOW_TARGET
+];
+
 /// Component ids the VIO permission covers. Registering one of these requires
 /// `mavlink.component.vio` on top of the matching component kind.
 pub const VIO_COMPONENT_IDS: &[i64] = &[197, 198];
@@ -81,6 +89,8 @@ pub(super) fn mavlink_component_id(frame: &[u8]) -> Option<u8> {
 pub(crate) struct OutboundFrames {
     /// At least one frame carries a pose-injection message id.
     pub requires_pose_cap: bool,
+    /// At least one frame carries a host-only message id ([`HOST_ONLY_MSG_IDS`]).
+    pub host_only: bool,
     /// Every source component id the frame headers claim.
     pub component_ids: BTreeSet<u8>,
 }
@@ -124,6 +134,7 @@ pub(crate) fn scan_outbound(msg_bytes: &[u8]) -> Option<OutboundFrames> {
     }
     let mut scan = OutboundFrames {
         requires_pose_cap: false,
+        host_only: false,
         component_ids: BTreeSet::new(),
     };
     for frame in frames {
@@ -131,6 +142,7 @@ pub(crate) fn scan_outbound(msg_bytes: &[u8]) -> Option<OutboundFrames> {
         // The frame decoded whole, so its header is the message it carries.
         let id = mavlink_msg_id(frame).unwrap_or(u32::MAX);
         scan.requires_pose_cap |= POSE_INJECT_MSG_IDS.contains(&id);
+        scan.host_only |= HOST_ONLY_MSG_IDS.contains(&id);
         scan.component_ids.insert(mavlink_component_id(frame)?);
     }
     Some(scan)

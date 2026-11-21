@@ -109,6 +109,10 @@ class MavlinkConfig(BaseModel):
     # Deliver flight-controller frames addressed to one system id only to the
     # endpoint that owns it, instead of to every client.
     route_aware: bool = False
+    # Also write a ground station's FOLLOW_TARGET (the operator's shared phone
+    # position) to the flight controller, for its own Follow mode. Off, it
+    # reaches only the plugin bus. Read by the native router.
+    follow_target_to_fc: bool = False
     # Sign agent-originated frames with an agent-held MAVLink 2 signing key.
     agent_signing: bool = False
 

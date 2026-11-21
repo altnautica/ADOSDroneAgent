@@ -354,6 +354,34 @@ async fn a_declared_off_box_source_sticks_and_is_not_forwarded() {
     }
 }
 
+#[tokio::test]
+async fn a_declared_plugin_relay_sticks_and_is_not_forwarded() {
+    let path = temp_sock("pluginrelay");
+    let (_server, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+        .await
+        .unwrap();
+    let mut inbound = inbound.expect("inbound channel requested");
+
+    let mut client = connect_with_retry(&path, 10, Duration::from_millis(20))
+        .await
+        .unwrap();
+    for payload in [b"before" as &[u8], IPC_DECLARE_PLUGIN_RELAY, b"after"] {
+        let framed = encode_frame(payload, MAVLINK_MAX_FRAME).unwrap();
+        client.write_all(&framed).await.unwrap();
+    }
+    client.flush().await.unwrap();
+
+    for (expected, relay) in [(&b"before"[..], false), (&b"after"[..], true)] {
+        let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+            .await
+            .unwrap()
+            .expect("a command");
+        assert_eq!(got.payload, expected);
+        assert_eq!(got.peer.plugin_relay, relay);
+        assert!(!got.peer.off_box_source && got.peer.injector.is_none());
+    }
+}
+
 #[test]
 fn encode_injector_declaration_round_trips_through_the_parser() {
     // The producer's encoder and the router's parser must agree byte-for-byte,

@@ -140,8 +140,13 @@ pub(super) async fn build_host(
         ados_time::relay_clock(&gate, &run_dir),
     ));
 
+    // Every router link declares that it relays plugin traffic, whatever the
+    // arbitration setting: everything this host writes there comes from a
+    // plugin, so the router never takes it for an operator's or an agent
+    // service's (the follow beacon drops it).
+    //
     // Injector arbitration (default off). When armed, the MAVLink + MSP links
-    // declare themselves autonomous injectors on every connection so the
+    // also declare themselves autonomous injectors on every connection so the
     // router's PIC gate subjects their commands to an operator's manual-control
     // claim. The ticket attests the id against the pairing key (`None` on an
     // unpaired node, where the verifier accepts the asserted id) and is minted
@@ -151,19 +156,20 @@ pub(super) async fn build_host(
         tracing::info!("injector arbitration armed (mavlink.injector_arbitration)");
     }
     let declarations = move || -> Declarations {
-        if !armed {
-            return Box::new(Vec::new);
-        }
-        Box::new(|| {
-            let ticket = ados_protocol::ws_ticket::mint_scoped_ticket(
-                &pairing_json_path(),
-                &ados_protocol::ws_ticket::crsf_inject_scope(INJECTOR_CLIENT_ID),
-                INJECTOR_TICKET_TTL_SECS,
-            );
-            vec![ados_protocol::ipc::encode_injector_declaration(
-                INJECTOR_CLIENT_ID,
-                ticket.as_deref(),
-            )]
+        Box::new(move || {
+            let mut out = vec![ados_protocol::ipc::IPC_DECLARE_PLUGIN_RELAY.to_vec()];
+            if armed {
+                let ticket = ados_protocol::ws_ticket::mint_scoped_ticket(
+                    &pairing_json_path(),
+                    &ados_protocol::ws_ticket::crsf_inject_scope(INJECTOR_CLIENT_ID),
+                    INJECTOR_TICKET_TTL_SECS,
+                );
+                out.push(ados_protocol::ipc::encode_injector_declaration(
+                    INJECTOR_CLIENT_ID,
+                    ticket.as_deref(),
+                ));
+            }
+            out
         })
     };
 

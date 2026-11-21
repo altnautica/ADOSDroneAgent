@@ -63,10 +63,11 @@ impl OperatorListener {
     }
 }
 
-/// The connecting peer's uid and group set, as the kernel reports them. An
-/// error means the platform would not answer, which the caller treats as a
-/// refusal (see `peer_hung_up_before_accept` for the one exception).
-pub(super) fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, Vec<u32>)> {
+/// The connecting peer's uid and group set (primary first, then the
+/// supplementary groups on Linux), as the kernel reports them. An error means
+/// the platform would not answer, which the caller treats as a refusal (see
+/// `peer_hung_up_before_accept` for the one exception).
+pub fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, Vec<u32>)> {
     let cred = stream.peer_cred()?;
     #[allow(unused_mut)]
     let mut gids = vec![cred.gid()];

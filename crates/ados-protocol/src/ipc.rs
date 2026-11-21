@@ -71,6 +71,14 @@ pub use rpc::*;
 /// declassifies itself. It is consumed by the reader and never forwarded on.
 pub const IPC_DECLARE_OFF_BOX_SOURCE: &[u8] = b"\x00ados-ipc/source=off-box";
 
+/// The control payload a writer sends to declare that it relays plugin
+/// traffic: the bytes it forwards were produced by plugins, not by an operator
+/// or an agent service. Like [`IPC_DECLARE_OFF_BOX_SOURCE`] it is one-way and
+/// downward: a writer can only give up trust with it, it latches for the life
+/// of the connection, and it is consumed by the reader, never forwarded. A
+/// plugin-plane peer ([`is_plugin_peer`]) is marked so whatever it declares.
+pub const IPC_DECLARE_PLUGIN_RELAY: &[u8] = b"\x00ados-ipc/source=plugin-relay";
+
 mod injector;
 pub use injector::{
     encode_injector_declaration, parse_injector_declaration, InjectorClaim,
@@ -94,6 +102,10 @@ pub struct IpcPeer {
     /// The writing process has declared that it is forwarding bytes that
     /// reached this node from somewhere else.
     pub off_box_source: bool,
+    /// The writer relays plugin traffic: it declared so
+    /// ([`IPC_DECLARE_PLUGIN_RELAY`]), or its kernel credentials put it on the
+    /// plugin plane. Independent of `injector`, which only decides PIC gating.
+    pub plugin_relay: bool,
     /// The writer is an autonomous injector, so its commands are subject to
     /// the PIC arbiter: it declared itself one, or its kernel credentials put
     /// it on the plugin plane. `None` = an operator/human writer, never gated.

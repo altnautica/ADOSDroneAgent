@@ -2,12 +2,28 @@
 //! ground station for a follow plugin to fuse with what the camera sees.
 //!
 //! A ground station that the operator lets share its position sends MAVLink
-//! `FOLLOW_TARGET` (#144) toward the vehicle. The MAVLink router accepts it only
-//! from an authorised ground link, drops stale, imprecise and too-frequent
-//! fixes, and republishes each accepted fix on the plugin event bus as one
-//! [`FollowBeacon`] on [`FOLLOW_BEACON_TOPIC`], through the plugin host's
-//! event export socket (publisher `host`). A plugin reads the topic with
-//! `event.subscribe` plus [`FOLLOW_BEACON_READ_CAP`]; no plugin may publish it.
+//! `FOLLOW_TARGET` (#144) toward the vehicle. The MAVLink router judges each
+//! one, republishes an accepted fix on the plugin event bus as one
+//! [`FollowBeacon`] on [`FOLLOW_BEACON_TOPIC`] through the plugin host's event
+//! export socket (publisher `host`), and keeps the message off the flight
+//! controller and every other endpoint. A plugin reads the topic with
+//! `event.subscribe` plus [`FOLLOW_BEACON_READ_CAP`]; no plugin may publish it,
+//! and no plugin may send `FOLLOW_TARGET` through the host.
+//!
+//! **Trust.** A beacon is low-trust: it says only that a ground link the
+//! router admits for commands sent this position. [`FollowBeacon::origin`]
+//! and [`FollowBeacon::link`] are stamped by the router; `sysid`/`compid` are
+//! whatever the sender claimed. A consumer corroborates a beacon with what the
+//! camera sees before acting on it, and anything that would follow on the
+//! beacon alone holds to the one link the router has locked.
+//!
+//! The router accepts a fix only from an authorised ground link, a local
+//! service or the relay (never an unauthenticated network peer, a plugin or the
+//! plugin host's link); locks to one link until it has been silent for
+//! [`LOCK_SILENCE_MS`]; drops fixes older than [`MAX_FIX_AGE_MS`] against the
+//! link's least-delayed fix, repeated or reordered fixes, fixes with an
+//! unknown or worse than [`MAX_HORIZ_ACC_M`] horizontal accuracy, and fixes
+//! closer than [`MIN_INTERVAL_MS`] to the last one published.
 //!
 //! The sender fills `FOLLOW_TARGET` as follows:
 //!
@@ -31,8 +47,14 @@ pub const FOLLOW_BEACON_TOPIC: &str = "plugin.follow.beacon";
 /// The capability a plugin needs, beside `event.subscribe`, to read the topic.
 pub const FOLLOW_BEACON_READ_CAP: &str = "follow.beacon.read";
 
-/// `source` of a fix that a ground station's phone sent as `FOLLOW_TARGET`.
-pub const SOURCE_GCS_PHONE: &str = "gcs-phone";
+/// [`FollowBeacon::origin`]: an authorised network ground link (the
+/// WebSocket, TCP or UDP proxy, past the pairing posture check).
+pub const ORIGIN_GROUND_LINK: &str = "ground_link";
+/// [`FollowBeacon::origin`]: a local service on this node's MAVLink socket.
+pub const ORIGIN_ON_BOX: &str = "on_box";
+/// [`FollowBeacon::origin`]: a relay (the cloud relay, or a ground station
+/// over the radio's aux uplink).
+pub const ORIGIN_RELAY: &str = "relay";
 
 /// MAVLink `FOLLOW_TARGET` message id.
 pub const FOLLOW_TARGET_MSG_ID: u32 = 144;
@@ -46,8 +68,8 @@ pub const EST_ACCEL: u8 = 1 << 2;
 /// `FOLLOW_TARGET.est_capabilities`: attitude and rates are measured.
 pub const EST_ATT_RATES: u8 = 1 << 3;
 
-/// A fix older than this, against the freshest fix seen from the same sender,
-/// is dropped.
+/// A fix older than this, against the least-delayed fix of the same link, is
+/// dropped.
 pub const MAX_FIX_AGE_MS: u64 = 2_000;
 
 /// A fix whose horizontal accuracy is worse than this is dropped.
@@ -55,6 +77,10 @@ pub const MAX_HORIZ_ACC_M: f32 = 30.0;
 
 /// Fewest milliseconds between two published fixes (10 Hz).
 pub const MIN_INTERVAL_MS: u64 = 100;
+
+/// The router follows one link at a time; another link may take over once
+/// the locked one has sent nothing for this long.
+pub const LOCK_SILENCE_MS: u64 = 5_000;
 
 /// One accepted fix, as published on [`FOLLOW_BEACON_TOPIC`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,11 +101,16 @@ pub struct FollowBeacon {
     pub vert_acc_m: Option<f32>,
     /// ADOS time when the router received the fix, ns.
     pub stamp_ns: u64,
-    /// Where the fix came from ([`SOURCE_GCS_PHONE`]).
-    pub source: String,
-    /// MAVLink system id of the sender.
+    /// How the fix reached the router, as the router saw it:
+    /// [`ORIGIN_GROUND_LINK`], [`ORIGIN_ON_BOX`] or [`ORIGIN_RELAY`].
+    pub origin: String,
+    /// The router's id for the connection the fix arrived on (`ws-3`, `tcp-1`,
+    /// `udp-9f2c41d0`, `ipc-12`, `aux`), stable for the life of that connection.
+    /// The router is locked to this link while it publishes from it.
+    pub link: String,
+    /// MAVLink system id the sender claimed.
     pub sysid: u8,
-    /// MAVLink component id of the sender.
+    /// MAVLink component id the sender claimed.
     pub compid: u8,
 }
 
@@ -98,7 +129,8 @@ mod tests {
             horiz_acc_m: 4.0,
             vert_acc_m: None,
             stamp_ns: 12_000_000_000,
-            source: SOURCE_GCS_PHONE.to_string(),
+            origin: ORIGIN_GROUND_LINK.to_string(),
+            link: "ws-3".to_string(),
             sysid: 255,
             compid: 190,
         };
@@ -112,8 +144,9 @@ mod tests {
                 "compid",
                 "horiz_acc_m",
                 "lat",
+                "link",
                 "lon",
-                "source",
+                "origin",
                 "stamp_ns",
                 "sysid",
                 "v",

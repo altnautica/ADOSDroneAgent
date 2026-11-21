@@ -76,7 +76,12 @@ pub(in crate::daemon) fn spawn_command_pumps(
                         // rather than the socket's.
                         Some(InboundCommand { payload, peer }) => {
                             let origin = ClientOrigin::from_ipc_peer(&peer);
+                            let beacon = crate::follow_beacon::BeaconLink {
+                                origin: crate::follow_beacon::Origin::of_ipc(&peer),
+                                id: crate::follow_beacon::LinkId::Ipc(peer.conn),
+                            };
                             for batch in visor_frames(&fc, &mut framers, peer.conn, payload).await {
+                                crate::follow_beacon::observe(beacon, &batch, fc.clock().now_ns());
                                 if let Some((ipc, cloud)) = &route_eps {
                                     let ep = if origin == ClientOrigin::Relayed { cloud } else { ipc };
                                     fc.routes().ingress(ep, &batch);

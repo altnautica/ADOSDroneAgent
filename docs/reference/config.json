@@ -1443,6 +1443,16 @@
     },
     {
       "default": false,
+      "description": "Follow Target To Fc",
+      "enum": null,
+      "key": "mavlink.follow_target_to_fc",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
       "description": "Injector Arbitration",
       "enum": null,
       "key": "mavlink.injector_arbitration",

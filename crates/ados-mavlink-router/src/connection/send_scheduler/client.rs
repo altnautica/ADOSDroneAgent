@@ -130,11 +130,20 @@ impl FcConnection {
             return false;
         }
         let data: &[u8] = &admitted;
-        // A ground station's shared position (`FOLLOW_TARGET`) also goes to the
-        // plugin bus, judged by who wrote it; the bytes still go on below.
-        if let Some(beacon) = crate::follow_beacon::global() {
-            beacon.observe(data, caller, injector.is_some(), self.clock.now_ns());
-        }
+        // The operator's shared position (`FOLLOW_TARGET`) was judged for the
+        // plugin bus where it entered; it reaches neither the flight controller
+        // nor the aux uplink unless the operator opted the FC in for its own
+        // Follow mode.
+        let unbeaconed;
+        let data: &[u8] = if self.cfg.follow_target_to_fc {
+            data
+        } else {
+            unbeaconed = crate::follow_beacon::strip(data);
+            if unbeaconed.is_empty() && !data.is_empty() {
+                return true;
+            }
+            &unbeaconed
+        };
         // Command authority: while the pilot owns motion, client sticks are
         // dropped and client gotos fly through the pilot instead. A
         // `DO_REPOSITION` taken off the FC stream is answered here.

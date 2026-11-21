@@ -126,19 +126,26 @@ impl AcceptErrors {
 /// Forward a client's bytes toward the FC: whole frames only, batched, for a
 /// MAVLink FC; raw for an MSP FC, which does not speak MAVLink. With
 /// route-aware forwarding on, `ep` names the client: each batch is learned
-/// and handed to the other clients.
+/// and handed to the other clients. `link` is the router's id for this
+/// connection: each batch's follow beacons are judged as coming from it.
 pub(super) async fn forward_client_bytes(
     fc: &FcConnection,
     framer: &mut ClientFramer,
     data: &[u8],
     origin: ClientOrigin,
     ep: Option<&crate::routing::Endpoint>,
+    link: crate::follow_beacon::LinkId,
 ) {
     if fc.fc_variant().await.is_some() {
         let _ = fc.send_client_bytes(data, origin, None).await;
         return;
     }
+    let beacon = crate::follow_beacon::BeaconLink {
+        origin: crate::follow_beacon::Origin::of_proxy(origin),
+        id: link,
+    };
     for batch in framer.push(data) {
+        crate::follow_beacon::observe(beacon, &batch, fc.clock().now_ns());
         if let Some(ep) = ep {
             fc.routes().ingress(ep, &batch);
         }

@@ -218,6 +218,13 @@ pub struct MavlinkConfig {
     /// owns it (`mavlink.route_aware`). Off: today's flat fan-out.
     #[serde(default)]
     pub route_aware: bool,
+    /// Whether a ground station's `FOLLOW_TARGET` (the operator's shared phone
+    /// position) is also written to the flight controller, for its own Follow
+    /// mode (`mavlink.follow_target_to_fc`). Off: it reaches only the plugin
+    /// bus as `plugin.follow.beacon`, so it never leaves over the FC's
+    /// telemetry ports. See [`crate::follow_beacon`].
+    #[serde(default)]
+    pub follow_target_to_fc: bool,
     /// Whether agent-originated frames are signed with an agent-held key
     /// (`mavlink.agent_signing`). See [`crate::signing`].
     #[serde(default)]
@@ -326,6 +333,7 @@ impl Default for MavlinkConfig {
             legacy_stream_request: default_legacy_stream_request(),
             injector_arbitration: false,
             route_aware: false,
+            follow_target_to_fc: false,
             agent_signing: false,
             crsf_device: String::new(),
             crsf_module_ports: Vec::new(),

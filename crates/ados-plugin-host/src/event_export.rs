@@ -54,9 +54,13 @@ pub const EVENT_EXPORT_VERSION: u32 = 1;
 /// Most topics one export connection may subscribe to.
 pub const EXPORT_MAX_TOPICS: usize = 32;
 
-/// Most export connections served at once. The consumers are host services,
-/// one long-lived connection each.
-const EXPORT_MAX_CONNECTIONS: usize = 8;
+/// Most subscriber connections served at once. The consumers are host
+/// services, one long-lived connection each.
+const EXPORT_MAX_SUBSCRIBERS: usize = 8;
+
+/// Most connections of any kind: the subscribers plus one kept for a
+/// publisher, so subscribers filling their cap never shut the beacon out.
+const EXPORT_MAX_CONNECTIONS: usize = EXPORT_MAX_SUBSCRIBERS + 1;
 
 /// Longest request line. A subscribe request names at most
 /// [`EXPORT_MAX_TOPICS`] short topics.
@@ -139,6 +143,7 @@ async fn write_line(stream: &mut tokio::net::unix::OwnedWriteHalf, line: &[u8]) 
 pub(crate) async fn serve_connection(
     bus: Arc<EventBus>,
     gate: Arc<PublishGate>,
+    subscribers: Arc<tokio::sync::Semaphore>,
     peer: PublishPeer,
     stream: UnixStream,
 ) {
@@ -157,7 +162,10 @@ pub(crate) async fn serve_connection(
         publish::serve_publisher(&bus, &gate, peer, line, &mut reader, &mut write_half).await;
         return;
     }
-    let parsed = if line.len() > REQUEST_MAX_BYTES {
+    let subscriber = subscribers.try_acquire_owned();
+    let parsed = if subscriber.is_err() {
+        Err("event export at its subscriber cap".to_string())
+    } else if line.len() > REQUEST_MAX_BYTES {
         Err(format!("request exceeds {REQUEST_MAX_BYTES} bytes"))
     } else {
         parse_request(&line)
@@ -227,6 +235,8 @@ pub fn serve_event_export_with(
     let path = export_socket_path(&control_dir);
     let listener = ados_protocol::ipc::bind_command_socket(&path, 0o600)?;
     let permits = Arc::new(tokio::sync::Semaphore::new(EXPORT_MAX_CONNECTIONS));
+    let subscribers = Arc::new(tokio::sync::Semaphore::new(EXPORT_MAX_SUBSCRIBERS));
+    let plane = publish::PluginPlane::resolve();
     let task = tokio::spawn(async move {
         loop {
             let (stream, class) = match listener.accept_classified().await {
@@ -241,10 +251,10 @@ pub fn serve_event_export_with(
                 tracing::warn!("event export socket at its connection cap; dropping a connection");
                 continue;
             };
-            let peer = publish::publish_peer(&stream, class);
-            let (bus, gate) = (bus.clone(), gate.clone());
+            let peer = publish::publish_peer(&stream, class, plane);
+            let (bus, gate, subscribers) = (bus.clone(), gate.clone(), subscribers.clone());
             tokio::spawn(async move {
-                serve_connection(bus, gate, peer, stream).await;
+                serve_connection(bus, gate, subscribers, peer, stream).await;
                 drop(permit);
             });
         }

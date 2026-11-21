@@ -105,13 +105,14 @@ pub(super) async fn handle_tcp_client(
     // client -> FC, whole frames only.
     let mut buf = [0u8; 4096];
     let mut framer = ClientFramer::default();
+    let link = crate::follow_beacon::LinkId::Tcp(crate::follow_beacon::LinkId::next_serial());
     let mut recheck = recheck_interval();
     loop {
         tokio::select! {
             read = rd.read(&mut buf) => match read {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    forward_client_bytes(&fc, &mut framer, &buf[..n], origin, route_ep.as_ref())
+                    forward_client_bytes(&fc, &mut framer, &buf[..n], origin, route_ep.as_ref(), link)
                         .await
                 }
             },

@@ -123,6 +123,12 @@ pub(super) async fn dispatch(
                         continue;
                     }
                 }
+                // The operator's shared position, judged as relayed.
+                let beacon = crate::follow_beacon::BeaconLink {
+                    origin: crate::follow_beacon::Origin::Relay,
+                    id: crate::follow_beacon::LinkId::Aux,
+                };
+                crate::follow_beacon::observe(beacon, frame, deps.fc.clock().now_ns());
                 // Route-aware forwarding: the radio-linked ground station is
                 // the `aux` endpoint; learn it and hand its frame to the
                 // other clients.

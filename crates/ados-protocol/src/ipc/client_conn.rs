@@ -23,6 +23,7 @@ pub(super) fn peer_identity(stream: &UnixStream) -> IpcPeer {
         gid: Some(cred.gid()),
         pid: cred.pid(),
         off_box_source: false,
+        plugin_relay: plugin,
         injector: plugin.then(|| plugin_plane_claim(cred.uid())),
         conn: 0,
     }
@@ -114,6 +115,10 @@ impl IpcBroadcast {
                         // and is not passed on to the flight controller.
                         if payload == IPC_DECLARE_OFF_BOX_SOURCE {
                             peer.off_box_source = true;
+                            continue;
+                        }
+                        if payload == IPC_DECLARE_PLUGIN_RELAY {
+                            peer.plugin_relay = true;
                             continue;
                         }
                         if let Some(claim) = parse_injector_declaration(&payload) {

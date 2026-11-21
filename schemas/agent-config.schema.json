@@ -2025,6 +2025,11 @@
           "title": "Endpoints",
           "type": "array"
         },
+        "follow_target_to_fc": {
+          "default": false,
+          "title": "Follow Target To Fc",
+          "type": "boolean"
+        },
         "injector_arbitration": {
           "default": false,
           "title": "Injector Arbitration",
@@ -3658,9 +3663,9 @@
           "$ref": "#/$defs/VisionDepthConfig",
           "default": {
             "enabled": true,
-            "input_height": 256,
-            "input_width": 256,
-            "model_id": "depth_midas_v21_small",
+            "input_height": 196,
+            "input_width": 252,
+            "model_id": "depth_anything_v2_small",
             "model_path": null,
             "rate_hz": null,
             "threads": 2
@@ -3850,21 +3855,21 @@
           "type": "boolean"
         },
         "input_height": {
-          "default": 256,
+          "default": 196,
           "maximum": 4294967295,
           "minimum": 0,
           "title": "Input Height",
           "type": "integer"
         },
         "input_width": {
-          "default": 256,
+          "default": 252,
           "maximum": 4294967295,
           "minimum": 0,
           "title": "Input Width",
           "type": "integer"
         },
         "model_id": {
-          "default": "depth_midas_v21_small",
+          "default": "depth_anything_v2_small",
           "title": "Model Id",
           "type": "string"
         },
@@ -4686,6 +4691,7 @@
             "type": "websocket"
           }
         ],
+        "follow_target_to_fc": false,
         "injector_arbitration": false,
         "legacy_stream_request": false,
         "raw_proxy_enforce_auth": true,
@@ -5061,9 +5067,9 @@
         "decode_threads": 1,
         "depth": {
           "enabled": true,
-          "input_height": 256,
-          "input_width": 256,
-          "model_id": "depth_midas_v21_small",
+          "input_height": 196,
+          "input_width": 252,
+          "model_id": "depth_anything_v2_small",
           "model_path": null,
           "rate_hz": null,
           "threads": 2

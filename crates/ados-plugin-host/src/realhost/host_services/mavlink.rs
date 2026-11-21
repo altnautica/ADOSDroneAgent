@@ -39,6 +39,14 @@ impl RealHost {
             ));
         };
 
+        // 2b. Host-only messages (the operator's follow beacon): refused
+        //     whatever the caller holds; no capability grants them.
+        if frames.host_only {
+            return Err(HostError::Rpc(
+                "msg_bytes carries a message only the agent may send".to_string(),
+            ));
+        }
+
         // 3. Pose-inject gate: rejects ungranted callers regardless of the
         //    dispatch-level mavlink.write.
         if frames.requires_pose_cap && !granted_caps.contains("estimator.pose.inject") {

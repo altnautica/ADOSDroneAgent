@@ -71,25 +71,47 @@ pub fn publish_peer_allowed(
         && !ados_protocol::ipc::is_plugin_peer(uid, gids, plugin_user_uid, plugin_gid)
 }
 
-/// Classify an accepted export connection for the publish op.
-pub(super) fn publish_peer(stream: &tokio::net::UnixStream, class: PeerClass) -> PublishPeer {
-    let Ok(cred) = stream.peer_cred() else {
+/// The plugin plane's ids: the legacy shared plugin user and the plugin group.
+/// Resolved once when the socket is served, not per connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PluginPlane {
+    pub user_uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
+impl PluginPlane {
+    /// Look the ids up on this host; an absent user or group is `None`.
+    pub fn resolve() -> Self {
+        PluginPlane {
+            user_uid: nix::unistd::User::from_name(ados_protocol::ipc::LEGACY_PLUGIN_USER)
+                .ok()
+                .flatten()
+                .map(|u| u.uid.as_raw()),
+            gid: nix::unistd::Group::from_name(ados_protocol::ipc::PLUGIN_GROUP)
+                .ok()
+                .flatten()
+                .map(|g| g.gid.as_raw()),
+        }
+    }
+}
+
+/// Classify an accepted export connection for the publish op, from the
+/// kernel's credentials including the supplementary groups. Unreadable
+/// credentials may not publish.
+pub(super) fn publish_peer(
+    stream: &tokio::net::UnixStream,
+    class: PeerClass,
+    plane: PluginPlane,
+) -> PublishPeer {
+    let Ok((uid, gids)) = ados_protocol::ipc::peer_credentials(stream) else {
         return PublishPeer {
             allowed: false,
             uid: u32::MAX,
         };
     };
-    let plugin_user = nix::unistd::User::from_name(ados_protocol::ipc::LEGACY_PLUGIN_USER)
-        .ok()
-        .flatten()
-        .map(|u| u.uid.as_raw());
-    let plugin_gid = nix::unistd::Group::from_name(ados_protocol::ipc::PLUGIN_GROUP)
-        .ok()
-        .flatten()
-        .map(|g| g.gid.as_raw());
     PublishPeer {
-        allowed: publish_peer_allowed(class, cred.uid(), &[cred.gid()], plugin_user, plugin_gid),
-        uid: cred.uid(),
+        allowed: publish_peer_allowed(class, uid, &gids, plane.user_uid, plane.gid),
+        uid,
     }
 }
 

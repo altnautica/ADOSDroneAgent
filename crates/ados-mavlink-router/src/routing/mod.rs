@@ -106,16 +106,22 @@ impl RouteHub {
     }
 
     /// A client sent `data` (whole frames): learn its source ids and hand it
-    /// to every other client. A no-op with route-aware forwarding off.
+    /// to every other client. A no-op with route-aware forwarding off. The
+    /// operator's shared position (`FOLLOW_TARGET`) is never handed on: it
+    /// goes to the plugin bus only ([`crate::follow_beacon`]).
     pub fn ingress(&self, ep: &Endpoint, data: &[u8]) {
         if !self.enabled || data.is_empty() {
             return;
         }
+        let data = crate::follow_beacon::strip(data);
+        if data.is_empty() {
+            return;
+        }
         ep.counters.rx.fetch_add(1, Ordering::Relaxed);
-        self.table().learn(ep.id, data, Instant::now());
+        self.table().learn(ep.id, &data, Instant::now());
         let _ = self.lane.send(RoutedFrame::Client {
             src: ep.id,
-            frame: RxFrame::now(bytes::Bytes::copy_from_slice(data)),
+            frame: RxFrame::now(bytes::Bytes::copy_from_slice(&data)),
         });
     }
 

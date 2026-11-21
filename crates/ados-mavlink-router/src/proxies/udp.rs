@@ -132,6 +132,11 @@ pub async fn run_udp_proxy(
                         continue;
                     };
                     peers.touch(addr, Instant::now(), UDP_MAX_PEERS);
+                    let beacon = crate::follow_beacon::BeaconLink {
+                        origin: crate::follow_beacon::Origin::of_proxy(origin),
+                        id: crate::follow_beacon::LinkId::Udp(addr),
+                    };
+                    crate::follow_beacon::observe(beacon, &buf[..n], fc.clock().now_ns());
                     recv_eps.ingress(addr, &buf[..n]);
                     let _ = fc.send_client_bytes(&buf[..n], origin, None).await;
                 }

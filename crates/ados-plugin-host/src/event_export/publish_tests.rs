@@ -40,7 +40,14 @@ fn serve_as(
     peer: PublishPeer,
 ) -> (UnixStream, tokio::task::JoinHandle<()>) {
     let (client, server) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(serve_connection(bus.clone(), gate.clone(), peer, server));
+    let subscribers = Arc::new(tokio::sync::Semaphore::new(1));
+    let task = tokio::spawn(serve_connection(
+        bus.clone(),
+        gate.clone(),
+        subscribers,
+        peer,
+        server,
+    ));
     (client, task)
 }
 
@@ -91,6 +98,85 @@ fn only_a_host_service_off_the_plugin_plane_may_publish() {
         legacy,
         plugins
     ));
+    // The plugin group as a supplementary group counts as much as a primary one.
+    assert!(!publish_peer_allowed(
+        PeerClass::Service,
+        0,
+        &[0, 27, 980],
+        legacy,
+        plugins
+    ));
+}
+
+#[tokio::test]
+async fn the_connected_peer_is_read_with_its_supplementary_groups() {
+    let (a, _b) = UnixStream::pair().unwrap();
+    let me = nix::unistd::geteuid().as_raw();
+    let groups: Vec<u32> = nix::unistd::getgroups()
+        .unwrap()
+        .into_iter()
+        .map(|g| g.as_raw())
+        .collect();
+    let peer = publish_peer(&a, PeerClass::Service, PluginPlane::default());
+    assert!(peer.allowed);
+    assert_eq!(peer.uid, me);
+    // With one of this process's supplementary groups taken as the plugin group,
+    // the same peer is on the plugin plane.
+    if let Some(&g) = groups
+        .iter()
+        .find(|&&g| g != nix::unistd::getegid().as_raw())
+    {
+        let plane = PluginPlane {
+            user_uid: None,
+            gid: Some(g),
+        };
+        assert!(!publish_peer(&a, PeerClass::Service, plane).allowed);
+    }
+}
+
+#[tokio::test]
+async fn subscribers_at_their_cap_leave_a_slot_for_the_publisher() {
+    let dir = tempfile::tempdir().unwrap();
+    let bus = Arc::new(EventBus::new());
+    let mut rx = bus.subscribe();
+    let (path, task) = serve_event_export(bus.clone(), dir.path().join("plugin-host")).unwrap();
+
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        let mut s = UnixStream::connect(&path).await.unwrap();
+        s.write_all(b"{\"v\":1,\"op\":\"subscribe\",\"topics\":[\"a\"]}\n")
+            .await
+            .unwrap();
+        let mut lines = BufReader::new(s).lines();
+        assert!(next_line(&mut lines).await.unwrap().contains("\"ok\""));
+        held.push(lines);
+    }
+    let mut extra = UnixStream::connect(&path).await.unwrap();
+    extra
+        .write_all(b"{\"v\":1,\"op\":\"subscribe\",\"topics\":[\"a\"]}\n")
+        .await
+        .unwrap();
+    let mut extra = BufReader::new(extra).lines();
+    assert!(next_line(&mut extra)
+        .await
+        .unwrap()
+        .contains("subscriber cap"));
+    assert_eq!(next_line(&mut extra).await, None, "refused and closed");
+    drop(extra);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut publisher = UnixStream::connect(&path).await.unwrap();
+    publisher
+        .write_all(&beacon_line(json!({"lat": 1.0})))
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.topic, FOLLOW_BEACON_TOPIC);
+
+    task.abort();
 }
 
 #[tokio::test]
