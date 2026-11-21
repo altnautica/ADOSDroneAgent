@@ -217,6 +217,11 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             rows.push(kv_text(t, "Search", LABEL, search.join(" · ")));
         }
         rows.push(kv_text(t, "Range", LABEL, range));
+        // Flown on the phone's position or a prediction, not the camera.
+        if let Some(src @ ("beacon" | "predicted")) = follow.subject_source.as_deref() {
+            let text = spec_text(&format!("follow.subject_source.{src}"), &[]);
+            rows.push(kv(t, "", 0, tone_span(core, Tone::Caution, text)));
+        }
         // Lowered under leaves: the height flown, then why on its own line.
         if let Some(h) = follow.height_lowered_m {
             let text = spec_text("follow.height_lowered", &[("v", &format!("{h:.1}"))]);

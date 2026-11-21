@@ -298,6 +298,32 @@ fn the_follow_rows_name_the_height_under_leaves_and_the_overhead_ahead() {
     assert!(!text.contains("Overhead clearance"), "{text}");
 }
 
+/// The follow rows say when the follow flies on the phone's position or a
+/// prediction, and nothing on vision.
+#[test]
+fn the_follow_rows_name_a_beacon_or_predicted_subject_source() {
+    for (source, want) in [
+        ("beacon", Some("Following on phone position")),
+        ("predicted", Some("Predicted")),
+        ("vision", None),
+    ] {
+        let mut app = live_app();
+        land(
+            &mut app,
+            ResourceId::NavStatus,
+            follow_status(json!({"phase": "following", "track_id": 7, "subject_source": source})),
+        );
+        let text = draw(&mut app, 160, 48);
+        match want {
+            Some(w) => assert!(text.contains(w), "{source}: {text}"),
+            None => assert!(
+                !text.contains("phone position") && !text.contains("Predicted"),
+                "{source}: {text}"
+            ),
+        }
+    }
+}
+
 #[test]
 fn every_prompt_case_matches_the_shared_fixture() {
     let cases: Value = serde_json::from_str(include_str!(

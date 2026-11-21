@@ -168,6 +168,8 @@ class MockNavStream {
         heightSetpointM: 3.9,
         heightLowered: true,
         heightReason: "canopy",
+        // The agent's own prediction carries the subject while it is unseen.
+        subjectSource: phase === "predicting" ? "predicted" : "vision",
         reacquireMode: "smart",
         reacquireRemainingS: recovering ? Math.max(0, SEARCH_BUDGET_S - (index - 2) * (PHASE_MS / 1000) - inPhase) : null,
         searchBudgetS: recovering ? SEARCH_BUDGET_S : null,

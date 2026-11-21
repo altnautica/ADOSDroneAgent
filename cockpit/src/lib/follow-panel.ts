@@ -10,6 +10,7 @@
 
 import {
   bearing3,
+  followSourceLine,
   intervalBar,
   LATENCY_WARN_MS,
   PHASE_TONE,
@@ -46,6 +47,9 @@ export interface FollowPanelModel {
   height: FollowHeightLine | null;
   /** `Overhead clearance ahead: 3.9 m in 3 m`, while the pilot reports one. */
   overhead: string | null;
+  /** `Following on phone position` or `Predicted` while the follow flies on
+   *  that subject source, else null. */
+  source: string | null;
 }
 
 /** `overhead` is the fresh pilot frame's `overhead_ahead` (null when the
@@ -81,6 +85,7 @@ export function followPanelModel(f: FollowState | null, ageMs: number, overhead:
     recovery: v && isRecoveryPhase(v.phase) ? recoveryLine(v) : null,
     height: followHeightLine(v),
     overhead: overheadAheadLine(overhead),
+    source: followSourceLine(v?.subjectSource),
   };
 }
 

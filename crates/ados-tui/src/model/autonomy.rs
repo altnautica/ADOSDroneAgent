@@ -99,6 +99,9 @@ pub struct Follow {
     pub height_lowered_m: Option<f64>,
     /// Why the height is lowered (`canopy`, `canopy_floor`), when named.
     pub height_reason: Option<String>,
+    /// The subject estimate flown on (`vision`, `beacon`, `predicted`);
+    /// `None` on the follow's own.
+    pub subject_source: Option<String>,
     /// The kind's age at the agent when read; `None` when it reports none.
     pub age_ms: Option<u64>,
     pub stale: bool,
@@ -358,6 +361,7 @@ impl Autonomy {
             height_lowered_m: f(d, "height_setpoint_m")
                 .filter(|_| d.get("height_lowered").and_then(Value::as_bool) == Some(true)),
             height_reason: one_of(d, "height_reason", &["canopy", "canopy_floor"]),
+            subject_source: one_of(d, "subject_source", &["vision", "beacon", "predicted"]),
             age_ms,
             stale,
         });

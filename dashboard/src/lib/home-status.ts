@@ -22,7 +22,7 @@ import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
 import { linkLossLine } from "@/shared/hud/link-loss";
 import { resolveNavSource, type NavSourceResult } from "@/shared/hud/nav-source";
-import { PHASE_TONE, type PhaseTone } from "@/shared/hud/follow-chrome";
+import { followSourceLine, PHASE_TONE, type PhaseTone } from "@/shared/hud/follow-chrome";
 import { followPrompt, type FollowPromptAction } from "@/shared/hud/follow-prompt";
 import { followHeightLine, overheadAheadLine, type FollowHeightLine } from "@/shared/hud/follow-height";
 import { parseFollowState, parseNavState, type FollowPhase, type FollowState, type NavState } from "@/shared/hud/nav-types";
@@ -190,6 +190,8 @@ export interface HomeFollow {
   height: FollowHeightLine | null;
   /** `Overhead clearance ahead: 3.9 m in 3 m`, while the pilot reports one. */
   overhead: string | null;
+  /** `Following on phone position` or `Predicted`, while the follow flies on that source. */
+  source: string | null;
 }
 
 /** The follow line of a fresh follow frame (with the fresh pilot frame's
@@ -209,6 +211,7 @@ export function homeFollow(f: FollowState | null, pilot: PilotState | null = nul
     resumeSeq: f.operatorResumeSeq,
     height: followHeightLine(f),
     overhead: overheadAheadLine(pilot?.overheadAhead ?? null),
+    source: followSourceLine(f.subjectSource),
   };
 }
 

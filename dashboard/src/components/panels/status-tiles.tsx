@@ -109,8 +109,9 @@ const PILL_TONE = {
   critical: "border-destructive/60 text-destructive",
 } as const;
 
-/** The follow phase word, the follow height lowered under leaves (its reason
- *  as the tooltip) and the overhead clearance ahead while each applies, and
+/** The follow phase word, the subject source when it is the phone or a
+ *  prediction, the follow height lowered under leaves (its reason as the
+ *  tooltip) and the overhead clearance ahead while each applies, and
  *  while follow holds for the operator the waiting prompt with the actions
  *  this card offers: resume and stop, written to the follow-me config. */
 function FollowStatus({ follow }: { follow: HomeFollow }) {
@@ -130,6 +131,11 @@ function FollowStatus({ follow }: { follow: HomeFollow }) {
       <span className="font-mono" style={{ color: chipTextColor(`var(--hud-${follow.tone})`) }}>
         {FOLLOW_LABEL} {follow.word}
       </span>
+      {follow.source ? (
+        <span className="font-mono text-warn" data-testid="follow-subject-source">
+          {follow.source}
+        </span>
+      ) : null}
       {follow.height ? (
         <span className="font-mono text-warn" title={follow.height.reason ?? undefined} data-testid="follow-height-lowered">
           {follow.height.text}

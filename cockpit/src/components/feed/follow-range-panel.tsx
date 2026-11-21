@@ -5,8 +5,9 @@
 // row's alone. Rows by width class: one merged line at compact, two rows at
 // medium, four above; while the subject is sought, the recovery line (seconds
 // left, the vantage state, what hides the subject) sits under the range, then
-// the follow height lowered under leaves (with why) and the overhead
-// clearance the pilot reports ahead, each only while it applies.
+// the follow height lowered under leaves (with why), the overhead clearance
+// the pilot reports ahead, and the subject source when the follow flies on
+// the phone's position or a prediction, each only while it applies.
 
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
@@ -46,6 +47,7 @@ export function FollowRangePanel({
     return (
       <div className={cn(plate, "px-[10px] py-[4px] text-[13px] text-hud-ink")} role="status" aria-label={specText("follow.range")}>
         {compactFollowLine(m)} <span className={PHASE_CLASS[m.phaseTone]}>{m.phase}</span>
+        {m.source ? <span className="text-hud-coast" data-testid="follow-subject-source"> · {m.source}</span> : null}
       </div>
     );
   }
@@ -66,6 +68,11 @@ export function FollowRangePanel({
         <span className={cn("text-[11px] font-semibold tracking-hud-tag", PHASE_CLASS[m.phaseTone])}>{m.phase}</span>
       </div>
       {m.recovery ? <div className="text-[12px] text-hud-coast">{m.recovery}</div> : null}
+      {m.source ? (
+        <div className="text-[12px] text-hud-coast" data-testid="follow-subject-source">
+          {m.source}
+        </div>
+      ) : null}
       {m.height ? (
         <div className="flex flex-col text-[12px]" data-testid="follow-height-lowered">
           <span className="text-hud-warn">{m.height.text}</span>

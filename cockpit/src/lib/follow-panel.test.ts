@@ -93,6 +93,15 @@ describe("followPanelModel", () => {
     expect(followPanelModel(under, 2001).height).toBeNull();
   });
 
+  it("names the subject source only while the follow flies on the phone or a prediction", () => {
+    const on = (subject_source: string | null) => parseFollowState({ phase: "following", subject_source })!;
+    expect(followPanelModel(on("beacon"), 0).source).toBe("Following on phone position");
+    expect(followPanelModel(on("predicted"), 0).source).toBe("Predicted");
+    expect(followPanelModel(on("vision"), 0).source).toBeNull();
+    expect(followPanelModel(on(null), 0).source).toBeNull();
+    expect(followPanelModel(on("beacon"), 2001).source).toBeNull();
+  });
+
   it("carries no second AGL: the bottom row's is the only one on screen", () => {
     const m = followPanelModel(f, 0);
     expect(m).not.toHaveProperty("agl");

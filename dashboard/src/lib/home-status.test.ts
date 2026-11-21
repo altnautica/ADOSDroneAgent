@@ -295,6 +295,7 @@ describe("home follow line", () => {
       resumeSeq: 4,
       height: null,
       overhead: null,
+      source: null,
     });
   });
 
@@ -325,6 +326,12 @@ describe("home follow line", () => {
     const clear = parsePilotState({ ...raw, overhead_ahead: { lease_id: 7, fly_under_agl_m: null, ahead_m: null } });
     expect(follow({ active: true, phase: "following", height_setpoint_m: 6 })).toMatchObject({ height: null, overhead: null });
     expect(homeFollow(parseFollowState(under), clear)?.overhead).toBeNull();
+  });
+
+  it("names the subject source while the follow flies on the phone or a prediction", () => {
+    expect(follow({ active: true, phase: "following", subject_source: "beacon" })?.source).toBe("Following on phone position");
+    expect(follow({ active: true, phase: "predicting", subject_source: "predicted" })?.source).toBe("Predicted");
+    expect(follow({ active: true, phase: "following", subject_source: "vision" })?.source).toBeNull();
   });
 
   for (const c of promptCases) {
