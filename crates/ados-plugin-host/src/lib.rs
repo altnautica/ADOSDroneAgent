@@ -49,8 +49,6 @@ pub mod control;
 pub mod control_client;
 #[cfg(unix)]
 pub mod daemon;
-#[cfg(unix)]
-pub mod depth_frames;
 pub mod dispatch;
 pub mod download;
 pub mod errors;
@@ -78,6 +76,8 @@ pub mod systemd;
 pub mod token_secret;
 pub mod vehicle_events;
 pub mod vision_client;
+#[cfg(unix)]
+pub mod vision_topics;
 
 pub use backend::{ServiceBackend, UnitSpec};
 pub use control::{
@@ -132,6 +132,7 @@ pub const HANDLER_GATED_CAPS: &[&str] = &[
     "mavlink.component.vio",
     "mcp.expose",
     "vision.depth.read",
+    "vision.subject.read",
 ];
 
 /// Capabilities enforced by the generated service unit rather than by any wire

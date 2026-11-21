@@ -109,7 +109,16 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
                 .await
         }
         Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
-        Method::VisionRequestDetection => host.vision_request_detection(plugin_id, args).await,
+        // `vision.depth.read` admits this method for a depth lease only;
+        // every other kind needs `vision.track.designate`.
+        Method::VisionRequestDetection => {
+            if !may_request_demand(plugin_id, args, granted_caps) {
+                return Err(HostError::CapabilityDenied(
+                    "vision.track.designate".to_string(),
+                ));
+            }
+            host.vision_request_detection(plugin_id, args).await
+        }
         Method::CameraControlSet => host.camera_control_set(plugin_id, args).await,
         // The event surface, ping, and the streaming subscribe methods never
         // reach here; the server short-circuits `vision.subscribe_frames`,
@@ -128,5 +137,52 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         | Method::DisplayZoneSubscribe
         // telemetry.subscribe arms the paced vehicle-state push in the server.
         | Method::TelemetrySubscribe => Ok(crate::host::not_implemented("event")),
+    }
+}
+
+/// Whether a `vision.request_detection` may go on: always with
+/// `vision.track.designate`, else only a well-formed depth-kind lease.
+pub fn may_request_demand(plugin_id: &str, args: &Value, granted_caps: &BTreeSet<String>) -> bool {
+    if granted_caps.contains("vision.track.designate") {
+        return true;
+    }
+    let stamped = ados_protocol::vision_rpc::with_owner(args, plugin_id);
+    ados_protocol::vision_rpc::decode_request_detection(&stamped)
+        .is_ok_and(|r| r.kind == ados_protocol::vision_rpc::DemandKind::Depth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dispatch::{gate, Gate};
+    use ados_protocol::vision_rpc::{request_demand_args, DemandKind};
+
+    fn caps(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn depth_read_leases_depth_and_nothing_else() {
+        let method = ados_protocol::framebus::methods::REQUEST_DETECTION;
+        let depth_read = caps(&["vision.depth.read"]);
+        assert!(matches!(gate(method, false, &depth_read), Gate::Allow(_)));
+        assert!(matches!(
+            gate(method, false, &caps(&[])),
+            Gate::CapabilityDenied(_)
+        ));
+        let depth = request_demand_args(DemandKind::Depth, "main", 2000);
+        assert!(may_request_demand("com.example.nav", &depth, &depth_read));
+        for kind in [DemandKind::Detection, DemandKind::Surfaces] {
+            let args = request_demand_args(kind, "main", 2000);
+            assert!(!may_request_demand("com.example.nav", &args, &depth_read));
+            let designate = caps(&["vision.track.designate"]);
+            assert!(may_request_demand("com.example.nav", &args, &designate));
+        }
+        // A malformed request without designate is refused, not guessed.
+        assert!(!may_request_demand(
+            "com.example.nav",
+            &Value::from("x"),
+            &depth_read
+        ));
     }
 }

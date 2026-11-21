@@ -76,6 +76,12 @@ from ados.sdk.vision.frames import (
     write_slot,
 )
 from ados.sdk.vision.pose import Odometry, Pose
+from ados.sdk.vision.subject import (
+    VISION_SUBJECT_READ_CAP,
+    VISION_SUBJECT_TOPIC,
+    SubjectPrediction,
+    SubjectState,
+)
 
 log = get_logger("sdk.vision")
 
@@ -113,4 +119,8 @@ __all__ = [
     "DELIVER_DETECTION",
     "VIO_COMPONENT_ID",
     "POSE_COVARIANCE_LEN",
+    "SubjectState",
+    "SubjectPrediction",
+    "VISION_SUBJECT_TOPIC",
+    "VISION_SUBJECT_READ_CAP",
 ]

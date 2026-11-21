@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +38,7 @@ from ados.sdk.vision.frames import (
     FrameCallback,
 )
 from ados.sdk.vision.pose import Odometry, Pose
+from ados.sdk.vision.subject import VISION_SUBJECT_TOPIC, SubjectState
 
 if TYPE_CHECKING:
     from ados.plugins.ipc_client import PluginIpcClient
@@ -182,6 +184,32 @@ class VisionClient:
             SUBSCRIBE_DETECTIONS, "vision.detection.subscribe", sub_args
         )
         await self._ipc.vision_subscribe_detections(_on_batch)
+
+    async def subscribe_subject(
+        self,
+        callback: Callable[[SubjectState], Awaitable[None] | None],
+        *,
+        camera_id: str | None = None,
+    ) -> None:
+        """Receive the designated subject's world state
+        (:data:`VISION_SUBJECT_TOPIC`), optionally from one ``camera_id``.
+        Gated on ``event.subscribe`` plus ``vision.subject.read``. Each event
+        is decoded into a :class:`SubjectState`; one that does not decode is
+        dropped."""
+        want = camera_id
+
+        async def _on_state(payload: dict[str, Any]) -> None:
+            try:
+                state = SubjectState.from_payload(payload)
+            except ValueError:
+                return
+            if want is not None and state.camera_id != want:
+                return
+            result = callback(state)
+            if inspect.isawaitable(result):
+                await result
+
+        await self._ipc.event_subscribe(VISION_SUBJECT_TOPIC, _on_state)
 
     async def designate_track(
         self,

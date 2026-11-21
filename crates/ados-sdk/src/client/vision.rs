@@ -97,6 +97,28 @@ impl PluginIpcClient {
         vision_rpc::decode_request_detection_reply(&reply).map_err(vision_args_error)
     }
 
+    /// Take or renew this plugin's depth lease on `camera_id` for `hold` (a
+    /// zero hold releases it): the engine runs its depth model, and publishes
+    /// `vision.depth.v2` frames, only while some consumer holds one. The
+    /// required cap is `vision.depth.read` (a `vision.track.designate`
+    /// holder may take one too).
+    pub async fn vision_request_depth(
+        &self,
+        camera_id: &str,
+        hold: std::time::Duration,
+    ) -> Result<vision_rpc::DetectionDemandReply, ClientError> {
+        let hold_ms = u64::try_from(hold.as_millis()).unwrap_or(u64::MAX);
+        let reply = self
+            .send_request(
+                ados_protocol::framebus::methods::REQUEST_DETECTION,
+                ados_protocol::vision_depth_frame::VISION_DEPTH_READ_CAP,
+                vision_rpc::request_demand_args(vision_rpc::DemandKind::Depth, camera_id, hold_ms),
+            )
+            .await?
+            .args;
+        vision_rpc::decode_request_detection_reply(&reply).map_err(vision_args_error)
+    }
+
     /// Read this plugin's resolved model-delivery status. Sends
     /// [`framebus::methods::READ_MODEL`](ados_protocol::framebus::methods::READ_MODEL) (gated on `vision.model.read`); the host
     /// returns `{models: [ {state, model_id, runtime, path, reason}, ... ]}` off

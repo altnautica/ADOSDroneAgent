@@ -205,12 +205,12 @@ pub(super) async fn build_host(
     //     that starts after the host or restarts under it heals by itself;
     //     while it is down the request methods answer a transient error.
     host = host.with_vision(Arc::new(VisionClient::spawn(run_dir.join("vision.sock"))));
-    // The engine's metric depth frames, republished as the host-only
-    // `vision.depth.v2` topic for plugins granted `vision.depth.read`.
-    crate::depth_frames::spawn(
-        Arc::clone(bus),
-        run_dir.join(crate::depth_frames::SOCKET_NAME),
-    );
+    // The engine's metric depth frames and designated-subject state,
+    // republished as host-only `vision.` topics for plugins granted their read
+    // capability.
+    for stream in crate::vision_topics::STREAMS {
+        crate::vision_topics::spawn(Arc::clone(bus), &run_dir, stream);
+    }
 
     // (c) Runtime lookup: plugin_id -> (install_dir, subprocess_spawn allowlist).
     //     The install dir is the unpacked plugin dir; the allowlist is read from

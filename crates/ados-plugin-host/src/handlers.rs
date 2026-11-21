@@ -216,13 +216,23 @@ pub const HOST_PLUGIN_TOPICS: &[(&str, &str)] = &[(
     ados_protocol::follow_beacon::FOLLOW_BEACON_READ_CAP,
 )];
 
+/// The capability a plugin needs (beside `event.subscribe`) to read
+/// `vision.subject.v1`.
+pub const VISION_SUBJECT_READ_CAP: &str = "vision.subject.read";
+
 /// Host-published `vision.` topics, each with the capability a plugin needs
 /// beside `event.subscribe` to read it. The host forwards them from the vision
-/// engine (`crate::depth_frames`); no plugin may publish under `vision.`.
-pub const HOST_VISION_TOPICS: &[(&str, &str)] = &[(
-    ados_protocol::vision_depth_frame::VISION_DEPTH_FRAME_TOPIC,
-    ados_protocol::vision_depth_frame::VISION_DEPTH_READ_CAP,
-)];
+/// engine (`crate::vision_topics`); no plugin may publish under `vision.`.
+pub const HOST_VISION_TOPICS: &[(&str, &str)] = &[
+    (
+        ados_protocol::vision_depth_frame::VISION_DEPTH_FRAME_TOPIC,
+        ados_protocol::vision_depth_frame::VISION_DEPTH_READ_CAP,
+    ),
+    (
+        ados_protocol::vision_subject::VISION_SUBJECT_TOPIC,
+        VISION_SUBJECT_READ_CAP,
+    ),
+];
 
 /// Reserved namespaces a plugin must not publish into. The set is enforced inline by
 /// `is_publish_allowed`. The `vision.` prefix is host-publish-only: the engine

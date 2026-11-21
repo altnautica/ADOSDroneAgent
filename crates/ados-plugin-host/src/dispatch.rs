@@ -371,11 +371,20 @@ pub fn gate(method_name: &str, token_is_expired: bool, granted_caps: &BTreeSet<S
         return Gate::UnknownMethod(errors::unknown_method(method_name));
     };
     if let Some(cap) = method.required_cap() {
-        if !granted_caps.contains(cap) {
+        if !granted_caps.contains(cap) && !narrower_grant(method, granted_caps) {
             return Gate::CapabilityDenied(errors::capability_denied(cap));
         }
     }
     Gate::Allow(method)
+}
+
+/// A grant that admits `method` for part of what it does, the rest refused by
+/// its handler: `vision.depth.read` lets a plugin take a depth-kind
+/// `vision.request_detection` lease (the handler refuses every other kind
+/// without `vision.track.designate`).
+fn narrower_grant(method: Method, granted_caps: &BTreeSet<String>) -> bool {
+    method == Method::VisionRequestDetection
+        && granted_caps.contains(ados_protocol::vision_depth_frame::VISION_DEPTH_READ_CAP)
 }
 
 /// Methods in the generated dispatch table that travel HOST -> PLUGIN (the host

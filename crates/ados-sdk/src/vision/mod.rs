@@ -378,6 +378,18 @@ impl VisionClient {
     ) -> Result<ados_protocol::vision_rpc::DetectionDemandReply, ClientError> {
         self.ipc.vision_request_detection(camera_id, hold).await
     }
+
+    /// Keep the engine's depth model running on `camera_id` for `hold` more
+    /// (a zero hold releases this plugin's lease), so its metric depth frames
+    /// flow on `vision.depth.v2`. Needs `vision.depth.read` (or
+    /// `vision.track.designate`). Returns whether depth now runs there.
+    pub async fn request_depth(
+        &self,
+        camera_id: &str,
+        hold: std::time::Duration,
+    ) -> Result<ados_protocol::vision_rpc::DetectionDemandReply, ClientError> {
+        self.ipc.vision_request_depth(camera_id, hold).await
+    }
 }
 
 /// Decode a [`FrameDescriptor`] from a `vision.deliver` envelope `args` map. The
