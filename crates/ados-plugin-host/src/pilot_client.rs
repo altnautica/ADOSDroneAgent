@@ -31,6 +31,11 @@ pub const REVOKED_TOPIC: &str = "flight.lease.revoked";
 /// Bus topic carrying the pilot's progress toward a vantage goal to the
 /// holder.
 pub const GOAL_STATUS_TOPIC: &str = "flight.goal.status";
+/// Bus topic carrying the pilot's overhead report ahead of the goal flown
+/// (`overhead_ahead` on the pilot's state frame: `fly_under_agl_m`,
+/// `ahead_m`) to the holder of the lease it names, with every state frame
+/// that carries one.
+pub const OVERHEAD_TOPIC: &str = "flight.overhead";
 /// Skill id of the implicit lease a legacy setpoint stream takes.
 pub const LEGACY_SKILL: &str = "legacy-setpoint";
 /// A legacy implicit lease is released after this long without a setpoint.
@@ -294,7 +299,10 @@ impl PilotClient {
     /// Handle one message from the pilot.
     fn on_message(&self, op: &str, body: Value) {
         match op {
-            "state" => lock(&self.link).last_state = Some(Instant::now()),
+            "state" => {
+                lock(&self.link).last_state = Some(Instant::now());
+                self.forward_overhead(&body);
+            }
             "lease.acquire" => {
                 if let Some(tx) = lock(&self.link).pending_acquire.take() {
                     let _ = tx.send(body);
@@ -349,6 +357,30 @@ impl PilotClient {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The state frame's `overhead_ahead` to the holder of the lease it
+    /// names, as [`OVERHEAD_TOPIC`].
+    fn forward_overhead(&self, state: &Value) {
+        let Some(o) = get(state, "overhead_ahead").filter(|v| v.is_map()) else {
+            return;
+        };
+        let Some(id) = get(o, "lease_id").and_then(Value::as_u64) else {
+            return;
+        };
+        let target = lock(&self.leases).holder.get(&id).cloned();
+        if let Some(plugin) = target {
+            let field = |k| get(o, k).cloned().unwrap_or(Value::Nil);
+            self.publish(
+                OVERHEAD_TOPIC,
+                &plugin,
+                id,
+                vec![
+                    ("fly_under_agl_m", field("fly_under_agl_m")),
+                    ("ahead_m", field("ahead_m")),
+                ],
+            );
         }
     }
 

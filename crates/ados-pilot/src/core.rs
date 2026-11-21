@@ -9,9 +9,11 @@ mod events;
 mod nav_cap;
 mod no_rc;
 mod operator;
+mod overhead_ahead;
 mod pos_reset;
 mod position_check;
 mod requests;
+mod scan_attitude;
 mod state;
 mod take;
 mod touchdown;
@@ -94,6 +96,15 @@ pub struct Pilot {
     pub fc: FcState,
     pub auth: Authority,
     pub obstacles: Obstacles,
+    /// FC attitudes by host-monotonic arrival, for levelling each scan at
+    /// its capture ([`scan_attitude`]).
+    att_log: scan_attitude::AttitudeLog,
+    /// The host CLOCK_MONOTONIC in ns, the clock scans are stamped on; the
+    /// service sets it, and unset (0) the newest attitude levels every scan.
+    pub mono_ns: fn() -> u64,
+    /// Returns over the swept band lately, for the report of the leaves
+    /// along a skill's way ([`overhead_ahead`]).
+    overhead: overhead_ahead::OverheadLog,
     /// The scanning lidar's scan arrivals and driver status.
     pub lidar: crate::sensor_health::LidarTrack,
     /// The FC IMU feeding the lidar pose (`map_status.imu_feed`).
@@ -165,6 +176,11 @@ pub struct Pilot {
     /// This tick's command of a skill goal or a goto ([`trace`]); `None`
     /// on a tick that flew none.
     command: Option<trace::Tick>,
+    /// The previous tick's [`Pilot::command`]: what was sent last.
+    prev_command: Option<trace::Tick>,
+    /// The obstacle brake's last slewed answer and when
+    /// ([`control::brake_slew`]).
+    brake_sent: Option<([f32; 2], u64)>,
     /// This tick's stick command ([`trace`]); `None` on a tick the
     /// operator's sticks did not fly.
     stick: Option<trace::StickTick>,
@@ -221,6 +237,9 @@ impl Pilot {
             fc: FcState::default(),
             auth: Authority::default(),
             obstacles: Obstacles::new(),
+            att_log: Default::default(),
+            mono_ns: || 0,
+            overhead: Default::default(),
             lidar: Default::default(),
             nav_imu: Default::default(),
             airframe: Default::default(),
@@ -263,6 +282,8 @@ impl Pilot {
             param_asked_ms: HashMap::new(),
             setpoint: None,
             command: None,
+            prev_command: None,
+            brake_sent: None,
             stick: None,
             latch: trace::Latch::default(),
             shadow: None,

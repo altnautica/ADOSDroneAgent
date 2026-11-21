@@ -116,6 +116,10 @@ pub struct Fc {
     pub mission_complete: bool,
     /// The copter makes no progress toward this item (something in the way).
     pub blocked_seq: Option<u32>,
+    /// The most horizontal acceleration the position controller flies,
+    /// m/s² (ArduCopter's lean-angle limit, `ANGLE_MAX`: 30° is
+    /// 9.81·tan 30° = 5.66 m/s²); `None`: the first-order response alone.
+    pub max_acc: Option<f32>,
     /// Gust velocity, m/s (north, east).
     gust: [f32; 2],
     /// Per-run gust strength, m/s.
@@ -172,6 +176,7 @@ impl Fc {
             mission_complete: false,
             blocked_seq: None,
             gust: [0.0; 2],
+            max_acc: None,
             gust_mps: rng.range(0.05, 0.25),
             sp: None,
             ap_guided: false,
@@ -598,11 +603,26 @@ impl Fc {
         for (v, w) in self.vel.iter_mut().zip(want) {
             *v += (w - *v) * k;
         }
+        if let Some(max) = self.max_acc {
+            let dv = [self.vel[0] - before[0], self.vel[1] - before[1]];
+            let a = dv[0].hypot(dv[1]) / dt;
+            if a > max {
+                let s = max / a;
+                self.vel[0] = before[0] + dv[0] * s;
+                self.vel[1] = before[1] + dv[1] * s;
+            }
+        }
         let acc = [
             (self.vel[0] - before[0]) / dt,
             (self.vel[1] - before[1]) / dt,
         ];
-        self.att = [(acc[1] / G).atan(), -(acc[0] / G).atan(), self.att[2]];
+        // The lean that flies that acceleration, in the body frame: pitch
+        // nose down to speed up along the heading, roll right to speed up to
+        // the right.
+        let (sy, cy) = self.att[2].sin_cos();
+        let fwd = acc[0] * cy + acc[1] * sy;
+        let right = -acc[0] * sy + acc[1] * cy;
+        self.att = [(right / G).atan(), -(fwd / G).atan(), self.att[2]];
         let flying = !self.landed || self.vel[2] < -0.05 || self.takeoff_alt.is_some();
         if flying {
             self.pos[0] += (self.vel[0] + self.gust[0]) * dt;

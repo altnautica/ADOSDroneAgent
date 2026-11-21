@@ -226,6 +226,7 @@ impl Pilot {
         s.position_unverified = self.position_unverified(now_ms);
         s.low_battery_action = self.low_batt_action.map(str::to_owned);
         s.battery_reserve = self.sup.energy.reserve.map(|r| r.wire());
+        s.overhead_ahead = self.overhead_ahead(now_ms);
         if owner == Owner::Tuning {
             s.setup_step = self.setup_step.map(str::to_owned);
         }

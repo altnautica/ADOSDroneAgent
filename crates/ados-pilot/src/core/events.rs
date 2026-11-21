@@ -50,19 +50,14 @@ impl Pilot {
                 let Some(ned) = self.pos(now_ms) else {
                     return;
                 };
-                let att = self.fc.fresh_attitude(now_ms).unwrap_or_default();
-                let tilt = [att.roll, att.pitch];
+                let level = self.scan_level(payload, now_ms);
+                let tilt = [level.roll, level.pitch];
                 if returns == 0 && self.empty_scan_unbelievable(ned, tilt) {
                     // Not open air: keep the last scan's obstacles and let
                     // them age to stale rather than read this one as free.
                     return;
                 }
-                let level = crate::obstacles::Level {
-                    roll: att.roll,
-                    pitch: att.pitch,
-                    yaw: att.yaw,
-                    agl: self.agl(now_ms),
-                };
+                self.obstacles.band_climb = self.band_climb(now_ms);
                 // The widest of the brake's per-direction trust bounds on a
                 // standing obstacle's closing speed (`scan_closing_bound`, a
                 // direction along the FC's velocity now); the widest bound
@@ -75,6 +70,7 @@ impl Pilot {
                     .unwrap_or(crate::obstacles::SCAN_CLOSING_MAX_MPS);
                 self.obstacles
                     .ingest_scan(payload, level, [ned[0], ned[1]], closing_max, now_ms);
+                self.note_overhead(level.agl, now_ms);
                 if self.obstacles.scan_age_ms(now_ms) == Some(0) {
                     match self.obstacles.nearest_surface() {
                         Some((range_m, ne, extent_m)) => {
@@ -135,6 +131,9 @@ impl Pilot {
         let first = self.fc.heartbeat_ms == 0;
         let changed = self.fc.update(sysid, compid, msg, now_ms);
         self.check_pos_reset(now_ms);
+        if matches!(msg, MavMessage::ATTITUDE(_)) {
+            self.log_attitude();
+        }
         if matches!(msg, MavMessage::OPTICAL_FLOW(_))
             && sysid == self.fc.sysid
             && compid == self.fc.compid

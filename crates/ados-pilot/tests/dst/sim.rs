@@ -89,9 +89,18 @@ pub struct Sim {
     /// The latest published frame.
     pub state: PilotState,
     scan: Value,
-    /// Vertical trunks the lidar sees, `(centre NE, radius)`: with any set,
-    /// each scan is cast against them from the vehicle ([`Sim::stand_scan`]).
+    /// Vertical trunks the lidar sees, `(centre NE, radius)`: with any trunk
+    /// or crown set, each scan is cast against them from the vehicle
+    /// ([`Sim::stand_scan`]).
     pub stand: Vec<([f32; 2], f32)>,
+    /// Tree crowns the lidar returns from.
+    pub crowns: Vec<Crown>,
+    /// The lidar is fixed to the frame: each scan tilts with the copter's
+    /// lean. Off, every scan is cast level (the planar stands' scenarios).
+    pub tilted_scan: bool,
+    /// The leaf returns' own stream, so crowns leave every other draw of
+    /// the run as it was.
+    scan_rng: Rng,
 }
 
 /// With `DST_TRACE_DIR` set, every run writes its trace there as
@@ -139,6 +148,9 @@ impl Sim {
             state,
             scan,
             stand: Vec::new(),
+            crowns: Vec::new(),
+            tilted_scan: false,
+            scan_rng: Rng::new(seed ^ 0x5CA9_1EAF),
         };
         sim.trace.line(format_args!("{name} seed {seed}"));
         sim
@@ -198,7 +210,7 @@ impl Sim {
                 .on_feed(ados_pilot::router_state::MISSION_TOPIC, &m, now);
         }
         if (now - self.start).is_multiple_of(SCAN_MS) {
-            if !self.stand.is_empty() {
+            if !self.stand.is_empty() || !self.crowns.is_empty() {
                 self.scan = self.stand_scan();
             }
             self.p
@@ -400,31 +412,124 @@ impl Sim {
 
 /// The planar lidar's reach, m (the 12 m class the pilot is built for).
 const LIDAR_RANGE_M: f32 = 12.0;
+/// Leaf extinction in a crown, 1/m: a conifer crown's leaf area density of
+/// 1.0 m²/m³ with a spherical leaf-angle G of 0.5.
+const LEAF_EXTINCTION_PER_M: f32 = 0.5;
+
+/// A tree crown as the World Engine casts it: an upright cylinder of
+/// leaves over the ground (`d = 0`), returning a beam by Beer–Lambert.
+#[derive(Debug, Clone, Copy)]
+pub struct Crown {
+    pub c: [f32; 2],
+    pub r: f32,
+    /// Height of its base and top over the ground, m.
+    pub base_m: f32,
+    pub top_m: f32,
+}
+
+/// Where a beam from `p` along the horizontal unit `u` meets the vertical
+/// disk `(c, r)`: the horizontal distances it enters and leaves at.
+fn disk_span(p: [f32; 2], u: [f32; 2], c: [f32; 2], r: f32) -> Option<(f32, f32)> {
+    let rel = [c[0] - p[0], c[1] - p[1]];
+    let along = rel[0] * u[0] + rel[1] * u[1];
+    let perp2 = rel[0] * rel[0] + rel[1] * rel[1] - along * along;
+    if perp2 >= r * r {
+        return None;
+    }
+    let half = (r * r - perp2).sqrt();
+    (along + half > 0.0).then(|| ((along - half).max(0.0), along + half))
+}
 
 impl Sim {
-    /// One planar scan of the stand from the vehicle: 360 bins clockwise
-    /// from the nose, each the range to the nearest trunk surface along it
-    /// (0 for no return within [`LIDAR_RANGE_M`]).
-    fn stand_scan(&self) -> Value {
+    /// One planar scan from the vehicle: 360 bins clockwise from the nose,
+    /// each beam tilted with the copter's attitude while
+    /// [`Sim::tilted_scan`] (the lidar fixed to the frame) and cast against
+    /// the trunks (vertical cylinders from the
+    /// ground), the crowns (leaf returns at an exponential depth, from the
+    /// scan's own seeded stream) and the ground; the slant range of the
+    /// first return, 0 for none within [`LIDAR_RANGE_M`].
+    fn stand_scan(&mut self) -> Value {
         let t = self.fc.truth();
         let p = [t[0], t[1]];
-        let yaw = self.fc.att[2];
-        let ranges: Vec<f32> = (0..360)
-            .map(|k| {
-                let b = yaw + (k as f32).to_radians();
-                let u = [b.cos(), b.sin()];
-                self.stand
-                    .iter()
-                    .filter_map(|&(c, r)| {
-                        let rel = [c[0] - p[0], c[1] - p[1]];
-                        let along = rel[0] * u[0] + rel[1] * u[1];
-                        let perp2 = rel[0] * rel[0] + rel[1] * rel[1] - along * along;
-                        (along > 0.0 && perp2 < r * r).then(|| along - (r * r - perp2).sqrt())
-                    })
-                    .fold(f32::INFINITY, f32::min)
-            })
-            .map(|d| if d <= LIDAR_RANGE_M { d.max(0.0) } else { 0.0 })
-            .collect();
+        let h0 = -t[2];
+        let [mut roll, mut pitch, yaw] = self.fc.att;
+        if !self.tilted_scan {
+            (roll, pitch) = (0.0, 0.0);
+        }
+        let (sr, cr) = roll.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        let mut ranges = Vec::with_capacity(360);
+        for k in 0..360 {
+            let th = (k as f32).to_radians();
+            // Body FRD beam, rotated by roll then pitch (as the pilot levels
+            // it), then by the heading.
+            let (bx, by) = (th.cos(), th.sin());
+            let (y1, z1) = (by * cr, by * sr);
+            let x2 = bx * cp + z1 * sp;
+            let down = -bx * sp + z1 * cp;
+            let hz = x2.hypot(y1).max(1e-6);
+            // A level scan keeps its bins' own bearings (no atan2 rounding).
+            let b = yaw
+                + if self.tilted_scan {
+                    ados_pilot::geo::atan2(y1, x2)
+                } else {
+                    th
+                };
+            let u = [b.cos(), b.sin()];
+            // Height over the ground after `s` metres of horizontal travel.
+            let rise = -down / hz;
+            let height = |s: f32| h0 + rise * s;
+            let mut best = LIDAR_RANGE_M * hz;
+            if rise < 0.0 {
+                best = best.min(h0 / -rise);
+            }
+            for &(c, r) in &self.stand {
+                if let Some((s, _)) = disk_span(p, u, c, r) {
+                    if height(s) >= 0.0 {
+                        best = best.min(s);
+                    }
+                }
+            }
+            let mut leaves: Vec<(f32, f32)> = self
+                .crowns
+                .iter()
+                .filter_map(|cw| {
+                    let (a, z) = disk_span(p, u, cw.c, cw.r)?;
+                    // The horizontal span inside the crown's height band.
+                    let (lo, hi) = if rise.abs() < 1e-6 {
+                        if (cw.base_m..=cw.top_m).contains(&h0) {
+                            (0.0, f32::INFINITY)
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        let s1 = (cw.base_m - h0) / rise;
+                        let s2 = (cw.top_m - h0) / rise;
+                        (s1.min(s2), s1.max(s2))
+                    };
+                    let (a, z) = (a.max(lo), z.min(hi));
+                    (a < z && a < best).then_some((a, z))
+                })
+                .collect();
+            leaves.sort_by(|x, y| x.0.total_cmp(&y.0));
+            for (a, z) in leaves {
+                if a >= best {
+                    break;
+                }
+                // Exponential depth along the slant beam.
+                let depth = -(1.0 - self.scan_rng.unit()).ln() / LEAF_EXTINCTION_PER_M * hz;
+                if a + depth < z {
+                    best = best.min(a + depth);
+                    break;
+                }
+            }
+            let slant = best / hz;
+            ranges.push(if slant < LIDAR_RANGE_M {
+                slant.max(0.0)
+            } else {
+                0.0
+            });
+        }
         json!({"frame": "body_frd", "angle_start_rad": 0.0,
             "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": ranges})
     }

@@ -5,6 +5,7 @@ mod airframe_world;
 mod battery;
 mod bore_return;
 mod brake_turn;
+mod canopy;
 mod closing;
 mod command_goal;
 mod confined;

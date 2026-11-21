@@ -185,6 +185,7 @@ impl Pilot {
         self.fc_hold = None;
         self.held_route.clear();
         self.obstacles.shift(ne);
+        self.overhead.shift(ne);
         if let Some(p) = self.pos_ne(now_ms) {
             self.obstacles.rebuild(p, now_ms);
         }

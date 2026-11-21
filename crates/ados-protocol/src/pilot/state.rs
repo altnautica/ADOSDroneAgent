@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::command::{PilotCommand, ShadowCommand};
 use super::rc::RcReceiver;
+use super::reserve::{BatteryReserve, OverheadAhead};
 use super::route::{PlaceClass, RouteCheck};
 use super::stick::{ProfileLimits, StickCommand};
 
@@ -272,31 +273,6 @@ pub struct FcStatusText {
     pub age_ms: u64,
 }
 
-/// The charge a return home needs, published every tick airborne.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct BatteryReserve {
-    /// The charge level the low-battery return fires at, whole %: the
-    /// energy estimate of the way home, never below the fixed floor.
-    pub need_pct: u32,
-    /// `energy` (the estimate of the way home sets `need_pct`) or `floor`
-    /// (the fixed floor does: no current measured, no capacity set, or the
-    /// way home is short).
-    pub basis: String,
-    /// Seconds the return home takes, countdown included.
-    pub return_s: u32,
-}
-
-impl BatteryReserve {
-    pub fn new(need_pct: u32, basis: impl Into<String>, return_s: u32) -> Self {
-        Self {
-            need_pct,
-            basis: basis.into(),
-            return_s,
-        }
-    }
-}
-
 /// A horizontal speed cap the pilot enforces on every setpoint it flies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -457,6 +433,10 @@ pub struct PilotState {
     /// omitted on the ground.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub battery_reserve: Option<BatteryReserve>,
+    /// The leaves overhead along the way to a skill goal's subject, while a
+    /// lease goal names one ([`OverheadAhead`]); omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overhead_ahead: Option<OverheadAhead>,
     /// The FC setup engine's active step id (`autotune`, `first_hover`, …)
     /// while the owner is `tuning`; `None` otherwise.
     #[serde(default)]

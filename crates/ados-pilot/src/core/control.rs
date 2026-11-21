@@ -12,6 +12,7 @@ use crate::geo::{self, V2};
 use crate::planner;
 
 mod brake;
+mod brake_slew;
 mod energy;
 mod failsafes;
 mod goal_brake;
@@ -89,8 +90,9 @@ impl Pilot {
             (now_ms.saturating_sub(t) as f32 / 1000.0).clamp(0.001, 0.1)
         });
         self.last_tick_ms = Some(now_ms);
-        // Set again below only while this tick flies a goal or the sticks.
-        self.command = None;
+        // Set again below only while this tick flies a goal or the sticks;
+        // what the last tick sent stays for the brake's slew.
+        self.prev_command = self.command.take();
         self.stick = None;
         if self.failsafe.heartbeat_due(now_ms) {
             self.mav(heartbeat());

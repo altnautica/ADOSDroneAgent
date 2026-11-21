@@ -7,6 +7,7 @@
 //! in that frame, so `LOCAL_POSITION_NED − pose.t` is the shift into the FC's
 //! local frame. Scans arrive in body FRD, bins clockwise from the nose.
 
+mod band;
 mod closing;
 mod grid;
 mod level;
@@ -19,9 +20,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
+pub use band::{band_top_m, Climb, BAND_TOP_M, OVERHEAD_MARGIN_M, WALL_MEMORY_MS};
 pub use grid::{Grid, CELL_M, GRID_N};
 pub use level::level_hit;
-use level::level_return;
 pub use probe::{Bar, LegProbe};
 pub use project::{project_camera, Attitude, Scratch};
 #[cfg(test)]
@@ -41,15 +42,15 @@ pub const FRAME_TOP_M: f32 = 0.03;
 /// the airframe ([`crate::config::CONFINED_TIP_EXTRA_M`]). A return levelled
 /// higher than this over the scan plane met something over the slice: a
 /// tunnel roof a nose-up scan reaches, or the upper part of a tall obstacle
-/// the brake's own nose-up pitch lifts the beam onto. Every safety reader
-/// (the hard stop, the push, the closing speed, the brake's speed caps)
-/// keeps it as an obstacle: a false one there only brakes earlier, and a
-/// pitch of 2° already lifts a column 4 m ahead over the slice. Only the
-/// route check's feasibility ignores it ([`Hit::overhead`]), where a roof
-/// read as a wall beside the leg made a phantom pinch. Nothing below the
-/// plane is set apart this way: the body, guards and props sit under it,
-/// so a return there is collision geometry. The route check judges a leg
-/// only where it runs within this of the scan plane.
+/// the brake's own nose-up pitch lifts the beam onto. The route check's
+/// feasibility ignores it ([`Hit::overhead`]), where a roof read as a wall
+/// beside the leg made a phantom pinch, and judges a leg only where it runs
+/// within this of the scan plane. The brake's readers take the swept band
+/// instead ([`BAND_TOP_M`]): a return over the band is a wall only on a
+/// wall the band held lately, so a column the brake's pitch lifts stays one
+/// while a canopy's underside does not. Nothing below the plane is set
+/// apart this way down to the ground band: the body, guards and props sit
+/// under it, so a return there is collision geometry.
 pub const SLICE_HALF_M: f32 = FRAME_TOP_M + crate::config::CONFINED_TIP_EXTRA_M;
 /// Scans older than this are not used.
 pub const SCAN_MAX_AGE_MS: u64 = 500;
@@ -96,9 +97,11 @@ pub struct Hit {
     pub range_m: f32,
     /// Local NED horizontal position.
     pub ne: V2,
-    /// Levelled more than [`SLICE_HALF_M`] over the scan plane. An obstacle
-    /// to every safety reader; only the route check's feasibility skips it.
+    /// Levelled more than [`SLICE_HALF_M`] over the scan plane. The route
+    /// check's feasibility skips it.
     pub overhead: bool,
+    /// Height over the scan plane after levelling, m (negative below).
+    pub lift_m: f32,
 }
 
 /// The obstacle model.
@@ -109,11 +112,23 @@ pub struct Obstacles {
     tile_cells: usize,
     /// `local − map` horizontal offset.
     offset: Option<V2>,
+    /// The current scan's walls at flight height ([`band`]).
     hits: Vec<Hit>,
-    /// Where each bin of the current scan stops seeing without an obstacle:
-    /// the floor where a tilted beam meets it, or [`SCAN_HORIZON_M`] when
-    /// it returns nothing. Nothing beyond is known free, so the stick brake
-    /// treats these points as possible obstacles.
+    /// The current scan's returns over the swept band on no remembered
+    /// wall: the underside of a canopy. Not walls; kept for what flies
+    /// under them ([`Obstacles::overhead_hits`]).
+    overhead: Vec<Hit>,
+    /// Walls seen in the band lately ([`band::WallMemory`]).
+    walls: band::WallMemory,
+    /// What the band was seen through lately ([`band::SeenFree`]).
+    seen: band::SeenFree,
+    /// The climb the band rises with ([`Climb`]), set before each scan.
+    pub band_climb: Climb,
+    /// Where each bin of the current scan stops telling the band anything:
+    /// where a tilted beam left it (over its top or into the floor's band,
+    /// unless a beam in the band saw further along that bearing lately), or
+    /// [`SCAN_HORIZON_M`] when it returns nothing. Nothing beyond is known
+    /// free, so the stick brake treats these points as possible obstacles.
     horizon: Vec<V2>,
     /// When the current scan arrived (`None`: no scan yet).
     scan_ms: Option<u64>,
@@ -236,25 +251,20 @@ impl Obstacles {
         let Some(ranges) = payload.get("ranges_m").and_then(Value::as_array) else {
             return;
         };
-        self.hits.clear();
-        self.horizon.clear();
-        for (i, r) in ranges.iter().enumerate() {
-            let r = r.as_f64().unwrap_or(0.0) as f32;
-            let theta = start + inc as f32 * i as f32;
-            if r <= MIN_RETURN_M || !r.is_finite() {
-                let far = geo::body_to_ned(
-                    SCAN_HORIZON_M * theta.cos(),
-                    SCAN_HORIZON_M * theta.sin(),
-                    level.yaw,
-                );
-                self.horizon.push(geo::add(pos_ne, far));
-                continue;
-            }
-            match level_return(r, theta, level, pos_ne) {
-                (hit, false) => self.hits.push(hit),
-                (ground, true) => self.horizon.push(ground.ne),
-            }
-        }
+        let sorted = band::sort_scan(
+            ranges,
+            start,
+            inc as f32,
+            level,
+            pos_ne,
+            self.band_climb,
+            &mut self.walls,
+            &mut self.seen,
+            now_ms,
+        );
+        self.hits = sorted.walls;
+        self.overhead = sorted.overhead;
+        self.horizon = sorted.horizon;
         // The scan's own capture time: delivery jitter (two scans arriving
         // 50 ms apart though captured 100 ms apart) must not double a range
         // rate.
@@ -353,10 +363,22 @@ impl Obstacles {
             .filter(move |p| fresh && geo::dist(*p, pos) <= r)
     }
 
-    /// Current (fresh) non-ground scan hits.
+    /// Current (fresh) walls at flight height: the scan's returns in the
+    /// swept band, and over it on a wall seen in the band lately.
     pub fn hits(&self, now_ms: u64) -> &[Hit] {
         if self.scan_fresh(now_ms) {
             &self.hits
+        } else {
+            &[]
+        }
+    }
+
+    /// Current (fresh) returns over the swept band on no remembered wall:
+    /// what the vehicle flies under (a canopy's underside), with their
+    /// height over the scan plane ([`Hit::lift_m`]).
+    pub fn overhead_hits(&self, now_ms: u64) -> &[Hit] {
+        if self.scan_fresh(now_ms) {
+            &self.overhead
         } else {
             &[]
         }
@@ -396,12 +418,14 @@ impl Obstacles {
     /// (the scan, the map-to-local offset) moves with it. The grid follows
     /// at the next [`Obstacles::rebuild`].
     pub fn shift(&mut self, d: V2) {
-        for h in &mut self.hits {
+        for h in self.hits.iter_mut().chain(self.overhead.iter_mut()) {
             h.ne = geo::add(h.ne, d);
         }
         for p in &mut self.horizon {
             *p = geo::add(*p, d);
         }
+        self.walls.shift(d);
+        self.seen.shift(d);
         if let Some(o) = self.offset.as_mut() {
             *o = geo::add(*o, d);
         }

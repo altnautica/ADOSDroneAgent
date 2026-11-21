@@ -67,7 +67,7 @@ fn level_scan_keeps_obstacle_and_drops_ground() {
 }
 
 #[test]
-fn a_return_over_the_flight_slice_stays_an_obstacle_marked_overhead() {
+fn a_return_over_the_band_is_a_wall_only_where_the_band_held_one() {
     let l = |pitch_deg: f32| Level {
         roll: 0.0,
         pitch: pitch_deg.to_radians(),
@@ -75,24 +75,29 @@ fn a_return_over_the_flight_slice_stays_an_obstacle_marked_overhead() {
         agl: Some(1.2),
     };
     // Nose up 4°: a 6.57 m forward return is 0.46 m over the scan plane (a
-    // tunnel roof, or a tall column), past the 0.13 m slice.
+    // tunnel roof, or a tall column), past the 0.13 m slice and the 0.33 m
+    // swept band.
     let over = level_hit(6.57, 0.0, l(4.0), [0.0, 0.0]).expect("kept");
-    assert!(over.overhead);
+    assert!(over.overhead && over.lift_m > BAND_TOP_M);
     // Nose up 1°: 0.11 m over it, inside the slice: a wall.
     assert!(!level_hit(6.57, 0.0, l(1.0), [0.0, 0.0]).unwrap().overhead);
     // Nose down 4°: 0.46 m under it, 0.74 m over the floor: kept, the body
     // and props sit under the plane.
     assert!(!level_hit(6.57, 0.0, l(-4.0), [0.0, 0.0]).unwrap().overhead);
+    let scan = |r: f64| {
+        let mut ranges = vec![0.0f64; 360];
+        ranges[0] = r;
+        json!({"frame": "body_frd", "angle_start_rad": 0.0,
+            "angle_increment_rad": std::f64::consts::TAU / 360.0, "ranges_m": ranges})
+    };
+    // Seen first over the band: something over the vehicle, kept as an
+    // overhead hit, not a wall.
     let mut o = Obstacles::new();
-    let mut ranges = vec![0.0f64; 360];
-    ranges[0] = 6.57;
-    let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
-        "angle_increment_rad": std::f64::consts::TAU / 360.0, "ranges_m": ranges});
-    o.ingest_scan(&scan, l(4.0), [0.0, 0.0], SCAN_CLOSING_MAX_MPS, 1000);
-    // Every safety reader sees it.
-    let near = o.nearest_hit_m().expect("an obstacle");
-    assert!((near - 6.57 * 4f32.to_radians().cos()).abs() < 1e-3);
-    // The route check does not: a leg past it on the plane reads no pinch.
+    o.ingest_scan(&scan(6.57), l(4.0), [0.0, 0.0], SCAN_CLOSING_MAX_MPS, 1000);
+    assert_eq!(o.nearest_hit_m(), None);
+    assert_eq!(o.overhead_hits(1000).len(), 1);
+    // The route check does not read it either: a leg past it on the plane
+    // reads no pinch.
     let bar = Bar {
         margin: 0.477,
         min_term: 0.1,
@@ -102,6 +107,20 @@ fn a_return_over_the_flight_slice_stays_an_obstacle_marked_overhead() {
     let p = o.probe_leg([6.55, -2.0], [6.55, 2.0], &bar, 0.5, 1000);
     assert_eq!(p.nearest, None, "{p:?}");
     assert_eq!(p.first_tight, None);
+    // Seen level first, a surface standing in the band: lifted over it by a
+    // braking pitch it stays a wall for the memory.
+    let mut o = Obstacles::new();
+    o.ingest_scan(&scan(6.56), l(0.0), [0.0, 0.0], SCAN_CLOSING_MAX_MPS, 1000);
+    o.ingest_scan(&scan(6.57), l(4.0), [0.0, 0.0], SCAN_CLOSING_MAX_MPS, 1100);
+    let near = o.nearest_hit_m().expect("a wall");
+    assert!((near - 6.57 * 4f32.to_radians().cos()).abs() < 1e-3);
+    assert!(o.overhead_hits(1100).is_empty());
+    // Lifted for longer than the memory, with no sighting in the band, it
+    // is an overhead hit again.
+    let t = 1000 + WALL_MEMORY_MS + 100;
+    o.ingest_scan(&scan(6.57), l(4.0), [0.0, 0.0], SCAN_CLOSING_MAX_MPS, t);
+    assert_eq!(o.nearest_hit_m(), None);
+    assert_eq!(o.overhead_hits(t).len(), 1);
 }
 
 #[test]

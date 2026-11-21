@@ -14,7 +14,9 @@
 //! the low-battery floor's countdown and SmartRTL return, the supervised
 //! pause, resume and stalled-waypoint skip; and follow flights through
 //! trunks ([`forest`]): a corridor between trunk rows, a gap too narrow to
-//! enter, a held detour round a trunk and a seeded random stand; and FC
+//! enter, a held detour round a trunk, a seeded random stand and the same
+//! stand under a canopy of crowns, scanned by a lidar the copter's lean
+//! tilts; and FC
 //! position resets ([`pos_reset`]): a 21 m EKF step (with a height step)
 //! under the pilot's hold and under a GUIDED target nobody streams, a GPS
 //! glitch's smaller step, and fast flight, climbs and a stepped clock that
@@ -110,6 +112,11 @@ fn dst_forest_detour_round_a_trunk_is_held() {
 #[test]
 fn dst_forest_stand_follows_a_walker_inside_the_margin() {
     matrix("forest_stand");
+}
+
+#[test]
+fn dst_forest_canopy_follows_a_walker_under_the_crowns() {
+    matrix("forest_canopy");
 }
 
 /// A 21 m EKF position reset in the pilot's hold: the copter holds where it

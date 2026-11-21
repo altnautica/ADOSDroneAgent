@@ -239,3 +239,47 @@ async fn goal_status_reaches_only_the_holder() {
 fn goal_status_is_a_holder_topic() {
     assert!(crate::handlers::FLIGHT_TOPICS_FOR_SUBSCRIBE.contains(&GOAL_STATUS_TOPIC));
 }
+
+#[tokio::test]
+async fn the_overhead_report_reaches_only_the_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pilot.sock");
+    let _rx = fake_pilot(path.clone(), true).await;
+    let bus = Arc::new(EventBus::new());
+    let mut events = bus.subscribe();
+    let client = PilotClient::spawn(path, Arc::clone(&bus), Clock::wall());
+    ready(&client).await;
+    let reply = client
+        .acquire("com.example.follow", "follow-me", "motion")
+        .await;
+    assert_eq!(lease_id_of(&reply), Some(7));
+    let state = |v: serde_json::Value| rmpv::ext::to_value(v).unwrap();
+    // A frame with no report, and a report for a lease nobody holds, go nowhere.
+    client.on_message("state", state(serde_json::json!({"armed": true})));
+    client.on_message(
+        "state",
+        state(serde_json::json!({"overhead_ahead": {"lease_id": 8, "fly_under_agl_m": 3.1}})),
+    );
+    client.on_message(
+        "state",
+        state(serde_json::json!({
+            "overhead_ahead": {"lease_id": 7, "fly_under_agl_m": 3.87, "ahead_m": 2.5}
+        })),
+    );
+    let ev = loop {
+        let e = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if e.topic == OVERHEAD_TOPIC {
+            break e;
+        }
+    };
+    assert!(flight_event_for("com.example.follow", &ev.payload));
+    assert!(!flight_event_for("com.example.other", &ev.payload));
+    let p: serde_json::Value = rmpv::ext::from_value(ev.payload.clone()).unwrap();
+    assert_eq!(p["lease_id"], 7);
+    assert!((p["fly_under_agl_m"].as_f64().unwrap() - 3.87).abs() < 1e-6);
+    assert!((p["ahead_m"].as_f64().unwrap() - 2.5).abs() < 1e-6);
+    assert!(crate::handlers::FLIGHT_TOPICS_FOR_SUBSCRIBE.contains(&OVERHEAD_TOPIC));
+}

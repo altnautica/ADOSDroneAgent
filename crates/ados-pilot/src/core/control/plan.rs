@@ -359,9 +359,11 @@ impl Pilot {
         let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
         if let Some((braked, by)) = self.goal_brake(s.pos, fc_ask, s.v_cap, s.speed_by, now_ms) {
             // At the vehicle's own position the FC's position loop adds
-            // nothing: it flies the braked velocity.
+            // nothing: it flies the braked velocity, cut at once, but
+            // speeding up, turning or pushing from the one sent only at the
+            // goal's acceleration.
             *limits |= by;
-            v = braked;
+            v = self.brake_slew(braked, s.gl.a_h, s.dt, now_ms);
             p = s.pos;
             r.cut(p, v);
         }
@@ -400,12 +402,17 @@ impl Pilot {
                 h[1] = pos[1];
             }
         }
-        let push = geofence(
+        let away = geofence(
             pos_ne,
             self.fc.home_ne(),
             self.settings.pilot.max_dist_m,
             self.brake_limit(pos, [0.0, 0.0], now_ms),
         );
+        // The motion toward the obstacle stops at once; the push back out
+        // builds from the velocity sent at the goal's acceleration, so it
+        // does not swing the copter the other way at its lean limit.
+        let a_h = self.limits_now(now_ms).a_h;
+        let push = self.brake_slew(away, a_h, dt, now_ms);
         let mut hold = *self.plan_hold.get_or_insert(pos);
         let mut vel = [0.0; 3];
         if geo::norm(push) >= HOLD_CAPTURE_MPS {
@@ -424,7 +431,7 @@ impl Pilot {
         self.setpoint = Some(hold);
         let pull = geo::scale(geo::sub([hold[0], hold[1]], pos_ne), FC_POS_GAIN);
         let mut extra = limit::HARD_STOP;
-        if geo::norm(push) > 1e-3 {
+        if geo::norm(away) > 1e-3 {
             extra |= limit::PUSH;
         }
         self.command = Some(Tick::hold(

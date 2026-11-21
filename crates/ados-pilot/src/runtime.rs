@@ -228,6 +228,9 @@ impl Daemon {
         ));
         let mut pilot = Pilot::new(self.settings);
         pilot.epoch_offset_ms = epoch_ms();
+        // Scans are stamped on the host's CLOCK_MONOTONIC: FC attitudes are
+        // logged on it to level each scan at its capture.
+        pilot.mono_ns = ados_protocol::framebus::mono_ns;
         let core = Core {
             clock: self.clock,
             lockstep,

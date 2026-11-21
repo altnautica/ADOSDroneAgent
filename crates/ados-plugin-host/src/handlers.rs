@@ -200,6 +200,7 @@ pub const FLIGHT_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
     crate::pilot_client::STICKS_TOPIC,
     crate::pilot_client::REVOKED_TOPIC,
     crate::pilot_client::GOAL_STATUS_TOPIC,
+    crate::pilot_client::OVERHEAD_TOPIC,
 ];
 
 /// Prefix of the host-only pilot lease topics.

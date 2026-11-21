@@ -246,12 +246,14 @@ fn a_roof_a_nose_up_scan_reaches_is_no_obstacle_on_the_legs_ahead() {
     let rc = w.p.state(w.now).route_check.expect("route_check");
     assert_eq!(rc.state, RouteState::Feasible, "{rc:?}");
     assert_eq!(w.set_modes(copter::BRAKE), 0);
-    // The brake still reads it: an obstacle over the slice, not a pinch.
-    let hits = w.p.obstacles.hits(w.now);
-    let roof: Vec<_> = hits.iter().filter(|h| h.range_m < 7.5).collect();
+    // Over the swept band and never seen in it: an overhead hit, not a
+    // wall at flight height.
+    let walls = w.p.obstacles.hits(w.now);
+    assert!(walls.iter().all(|h| h.range_m >= 7.5), "{walls:?}");
+    let over = w.p.obstacles.overhead_hits(w.now);
     assert!(
-        roof.len() == 1 && roof[0].overhead && (roof[0].ne[0] - 6.98).abs() < 0.05,
-        "{hits:?}"
+        over.len() == 1 && over[0].overhead && (over[0].ne[0] - 6.98).abs() < 0.05,
+        "{over:?}"
     );
     // Level, the same return is a wall at flight height on the leg.
     w.pitch = 0.0;
