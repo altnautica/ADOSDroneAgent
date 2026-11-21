@@ -13,13 +13,15 @@
 //! ([`WallMemory`]): a trunk or a column a braking pitch lifts over the band
 //! was seen in it on the approach, and stays a wall through the lean.
 //!
-//! A beam that leaves the band (rising over it, or down into the ground
-//! band) says nothing about the band past where it left: the band there is
-//! unknown, not free. The scan's horizon for that bin (the seen space the
-//! brake keeps its stop inside) is where the beam left the band, unless a
-//! beam that stayed in the band along the same bearing saw further within
-//! the last [`FREE_MEMORY_MS`] ([`SeenFree`]); a lean never reads as
-//! clearance it did not see.
+//! A return reached by a beam that left the band (rising over it, or down
+//! into the ground band) says nothing about the band past where the beam
+//! left: the band there is unknown, not free. The scan's horizon for that
+//! bin (the seen space the brake keeps its stop inside) is where the beam
+//! left the band, unless a beam cast from on the same line that stayed in
+//! the band saw further within the last [`FREE_MEMORY_MS`] ([`SeenFree`]);
+//! a lean never reads as clearance it did not see. A beam with no return
+//! within reach is open air: its horizon is the lidar's reach however the
+//! lean tilts it, so a stop in open air is not cut short by its own pitch.
 
 use std::collections::HashMap;
 
@@ -145,18 +147,25 @@ impl WallMemory {
     }
 }
 
-/// Per world bearing (one-degree bins), where the latest beam that stayed in
-/// the band along it stopped seeing (its return, or the lidar's reach), and
-/// when.
+/// Per world bearing (one-degree bins), the latest beam that stayed in the
+/// band along it: where it was cast from, where it stopped seeing (its
+/// return, or the lidar's reach), and when.
 #[derive(Debug)]
 pub struct SeenFree {
-    ends: Vec<Option<(V2, u64)>>,
+    beams: Vec<Option<Seen>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Seen {
+    from: V2,
+    end: V2,
+    at_ms: u64,
 }
 
 impl Default for SeenFree {
     fn default() -> Self {
         Self {
-            ends: vec![None; FREE_BINS],
+            beams: vec![None; FREE_BINS],
         }
     }
 }
@@ -166,29 +175,57 @@ fn bin_of(dir: V2) -> usize {
     (deg as usize).min(FREE_BINS - 1)
 }
 
+/// `p` lies within [`CELL_M`] of the segment `a`–`b`.
+fn on_ray(p: V2, a: V2, b: V2) -> bool {
+    let ab = geo::sub(b, a);
+    let n2 = geo::dot(ab, ab);
+    let t = if n2 > 1e-9 {
+        (geo::dot(geo::sub(p, a), ab) / n2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    geo::dist(p, geo::add(a, geo::scale(ab, t))) <= CELL_M
+}
+
 impl SeenFree {
-    fn saw(&mut self, dir: V2, end: V2, now_ms: u64) {
-        self.ends[bin_of(dir)] = Some((end, now_ms));
+    fn saw(&mut self, dir: V2, from: V2, end: V2, now_ms: u64) {
+        self.beams[bin_of(dir)] = Some(Seen {
+            from,
+            end,
+            at_ms: now_ms,
+        });
     }
 
     /// The horizon of a beam along `dir` from `pos` that left the band at
-    /// `exit`: the end a beam in the band saw along that bearing within
-    /// [`FREE_MEMORY_MS`] when it is further than `exit`, else `exit`.
-    fn horizon(&self, dir: V2, pos: V2, exit: V2, now_ms: u64) -> V2 {
-        match self.ends[bin_of(dir)] {
-            Some((end, t))
-                if now_ms.saturating_sub(t) <= FREE_MEMORY_MS
-                    && geo::dist(end, pos) > geo::dist(exit, pos) =>
-            {
-                end
-            }
+    /// `exit` and returned at `ret_m` (horizontal m; `None` for no return):
+    /// the end a beam in the band saw along that bearing within
+    /// [`FREE_MEMORY_MS`], when it is further than `exit`. Seen from on
+    /// that beam (`pos` within [`CELL_M`] of it), its end stands. Seen
+    /// from elsewhere it ran along a parallel line, past whatever this
+    /// beam's own return met: the horizon goes no further than that return,
+    /// so a trunk lifted over the band stays the edge of the seen space.
+    /// With no return to bound it, `exit`.
+    fn horizon(&self, dir: V2, pos: V2, exit: V2, ret_m: Option<f32>, now_ms: u64) -> V2 {
+        let exit_m = geo::dist(exit, pos);
+        let Some(s) =
+            self.beams[bin_of(dir)].filter(|s| now_ms.saturating_sub(s.at_ms) <= FREE_MEMORY_MS)
+        else {
+            return exit;
+        };
+        let end_m = geo::dist(s.end, pos);
+        if on_ray(pos, s.from, s.end) {
+            return if end_m > exit_m { s.end } else { exit };
+        }
+        match ret_m.map(|r| r.min(end_m)) {
+            Some(m) if m > exit_m => geo::add(pos, geo::scale(dir, m)),
             _ => exit,
         }
     }
 
     pub fn shift(&mut self, d: V2) {
-        for (p, _) in self.ends.iter_mut().flatten() {
-            *p = geo::add(*p, d);
+        for s in self.beams.iter_mut().flatten() {
+            s.from = geo::add(s.from, d);
+            s.end = geo::add(s.end, d);
         }
     }
 }
@@ -244,32 +281,44 @@ pub(super) fn sort_scan(
         let exit_m = over.into_iter().chain(under).fold(f32::INFINITY, f32::min);
         let at = |m: f32| geo::add(pos_ne, geo::scale(dir, m));
         if r <= MIN_RETURN_M || !r.is_finite() {
+            // No return within reach: open air. A beam the vehicle's own
+            // lean lifts out of the band still found nothing anywhere along
+            // it, so its horizon stays at the lidar's reach along the
+            // heading (a stop in open air is not cut short by its own
+            // pitch); only a beam that stayed in the band is remembered as
+            // seen through.
+            let far = geo::body_to_ned(
+                SCAN_HORIZON_M * theta.cos(),
+                SCAN_HORIZON_M * theta.sin(),
+                level.yaw,
+            );
+            out.horizon.push(geo::add(pos_ne, far));
             let reach = SCAN_HORIZON_M * hz;
-            if exit_m < reach {
-                out.horizon
-                    .push(seen.horizon(dir, pos_ne, at(exit_m), now_ms));
-            } else {
-                out.horizon.push(at(reach));
-                seen.saw(dir, at(reach), now_ms);
+            if exit_m >= reach {
+                seen.saw(dir, pos_ne, at(reach), now_ms);
             }
             continue;
         }
         let (hit, ground) = level_return(r, theta, level, pos_ne);
         if ground {
             let exit = at(exit_m.min(hit.range_m));
-            out.horizon.push(seen.horizon(dir, pos_ne, exit, now_ms));
+            let ret = Some(hit.range_m);
+            out.horizon
+                .push(seen.horizon(dir, pos_ne, exit, ret, now_ms));
             continue;
         }
         if hit.lift_m <= band_top_m(hit.range_m, climb) {
             walls.note(hit.ne, now_ms);
-            seen.saw(dir, hit.ne, now_ms);
+            seen.saw(dir, pos_ne, hit.ne, now_ms);
             out.walls.push(hit);
         } else if walls.holds(hit.ne, now_ms) {
             out.walls.push(hit);
         } else {
             out.overhead.push(hit);
             let exit = at(exit_m.min(hit.range_m));
-            out.horizon.push(seen.horizon(dir, pos_ne, exit, now_ms));
+            let ret = Some(hit.range_m);
+            out.horizon
+                .push(seen.horizon(dir, pos_ne, exit, ret, now_ms));
         }
     }
     out
@@ -308,5 +357,42 @@ mod tests {
             0.0,
             "a descent lowers nothing"
         );
+    }
+
+    #[test]
+    fn seen_free_space_counts_only_from_on_the_beam_that_saw_it() {
+        // A trunk 4 m north is seen in the band, then a sustained lean lifts
+        // its return over the band for longer than the wall memory.
+        let mut walls = WallMemory::default();
+        let mut seen = SeenFree::default();
+        let north = [1.0, 0.0];
+        walls.note([4.0, 0.0], 0);
+        // Earlier, from 1 m east, a beam north stayed in the band to 12 m.
+        seen.saw(north, [0.0, 1.0], [12.0, 1.0], 0);
+        let now = WALL_MEMORY_MS + 500;
+        assert!(!walls.holds([4.0, 0.0], now), "the wall has lapsed");
+        // Now at the origin (moved 1 m sideways), the beam north leaves the
+        // band at 2 m and returns from the trunk over it at 4 m: the stored
+        // ray ran 1 m off this one, past the trunk, so the horizon stops at
+        // the trunk, not at the stored 12 m.
+        let exit = [2.0, 0.0];
+        let h = seen.horizon(north, [0.0, 0.0], exit, Some(4.0), now);
+        assert!(geo::dist(h, [4.0, 0.0]) < 1e-5, "{h:?}");
+        // With no return to bound it, the exit.
+        assert_eq!(seen.horizon(north, [0.0, 0.0], exit, None, now), exit);
+        // From on that stored ray its end stands, past a return.
+        let on = [3.0, 1.0];
+        let h = seen.horizon(north, on, [5.0, 1.0], Some(3.0), now);
+        assert_eq!(h, [12.0, 1.0]);
+        // Within a cell of it too; and the frame shift carries the origin.
+        let h = seen.horizon(north, [3.0, 1.1], [5.0, 1.1], None, now);
+        assert_eq!(h, [12.0, 1.0]);
+        seen.shift([0.0, -1.0]);
+        let h = seen.horizon(north, [3.0, 0.0], [5.0, 0.0], None, now);
+        assert_eq!(h, [12.0, 0.0]);
+        // Stale past the memory: the exit.
+        let late = FREE_MEMORY_MS + 1;
+        let h = seen.horizon(north, [3.0, 0.0], [5.0, 0.0], None, late);
+        assert_eq!(h, [5.0, 0.0]);
     }
 }
