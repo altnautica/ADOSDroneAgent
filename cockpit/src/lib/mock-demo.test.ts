@@ -30,6 +30,7 @@ describe("demo feed", () => {
       const { follow, pilot } = useNavStreamStore.getState();
       expect(pilot).not.toBeNull();
       expect(follow).not.toBeNull();
+      expect(pilot!.data.sensing).toEqual({ tier: "lidar3d", clearRangeM: 11.6, speedLimitMps: 4.2 });
       const owner = pilot!.data.owner;
       seen.add(owner);
       if (follow!.data.active) {

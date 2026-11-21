@@ -291,6 +291,7 @@ function VehicleStatus() {
           </span>
         ) : null}
         {lines.sticks ? <span>{lines.sticks}</span> : null}
+        {lines.sensing ? <span data-testid="status-sensing">{lines.sensing}</span> : null}
         {poseAge ? <span data-testid="pose-age">{poseAge}</span> : null}
         {lines.timeToReserve ? (
           <span title={RESERVE_TITLE}>{lines.timeToReserve}</span>

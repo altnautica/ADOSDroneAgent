@@ -93,6 +93,14 @@ describe("home status card", () => {
     expect(lines.timeToReserve).toBe("10:10 left");
   });
 
+  it("shows the sensing tier and its speed limit only while the pilot reports one", () => {
+    const sensing = { tier: "lidar3d", clear_range_m: 11.6, speed_limit_mps: 4.2 };
+    expect(homeStatusLines({ ...base, pilot: parsePilotState({ ...raw, sensing }), follow: null }).sensing).toBe(
+      "Sensing: 3D lidar · ≤ 4.2 m/s",
+    );
+    expect(homeStatusLines({ ...base, pilot: parsePilotState(raw), follow: null }).sensing).toBeNull();
+  });
+
   it("hides the link-loss, AGL and sticks lines once the pilot frame is stale", () => {
     const pilot = { ...raw, link_loss_in_s: 3.4, link_loss_action: "rth", agl_m: 4.12, agl_source: "home" };
     const follow = { active: true, phase: "tracking", agl_m: 6.0, agl_source: "rng" };

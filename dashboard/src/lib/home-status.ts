@@ -28,6 +28,7 @@ import { followHeightLine, overheadAheadLine, type FollowHeightLine } from "@/sh
 import { parseFollowState, parseNavState, type FollowPhase, type FollowState, type NavState } from "@/shared/hud/nav-types";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
+import { sensingChipText } from "@/shared/hud/sensing";
 import { specText } from "@/shared/hud/spec-text";
 import { storagePct, type StorageStatusFull } from "@/shared/hud/storage";
 import { baseAlerts, controllerLost, pillAlerts, pillSummary, pilotFailsafe, type PillSummary } from "@/shared/hud/status-pill";
@@ -228,6 +229,8 @@ export interface HomeStatusLines {
   sticks: string | null;
   /** `m:ss left` to the battery reserve, or null when the engine has none. */
   timeToReserve: string | null;
+  /** `Sensing: 3D lidar · ≤ 4.2 m/s`, or null while the pilot reports none. */
+  sensing: string | null;
 }
 
 /** `m:ss`, or `h:mm:ss` past an hour (the cockpit's clock format). */
@@ -253,5 +256,6 @@ export function homeStatusLines(
     sticks: label ? specText("flow.sticks_with", { label }) : null,
     timeToReserve:
       reading?.timeToReserveS != null ? specText("cockpit.battery.time_left", { time: fmtClock(reading.timeToReserveS) }) : null,
+    sensing: sensingChipText(i.pilot?.sensing ?? null),
   };
 }

@@ -33,6 +33,7 @@ use crate::ui::widgets::{kv, kv_text};
 use super::autonomy::{mark_stale, LABEL};
 
 mod fit;
+mod sensing;
 pub use fit::{min_rows, render};
 
 /// A Pilot row, and whether it must show on a short terminal.
@@ -361,6 +362,9 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         );
         let label = spec_text("cockpit.row.limits", &[]);
         out.extend(phrase_rows(t, &label, &text, t.bright(), p_stale));
+    }
+    if let Some(text) = sensing::sensing_text(p) {
+        out.push((stale(kv_text(t, "", LABEL, text)), false));
     }
     if let Some(s) = &p.stick {
         let h = |v: [f32; 2]| format!("{:.1}", f64::from(v[0]).hypot(f64::from(v[1])));

@@ -291,6 +291,9 @@ pub struct Pilot {
     /// Leaves or a ceiling overhead along the lease goal's way, while the
     /// pilot reports both the fly-under height and the distance to it.
     pub overhead_ahead: Option<ados_protocol::pilot::OverheadAhead>,
+    /// What the pilot sees obstacles with and the speed that stops inside
+    /// its seen-clear range; `None` from an older agent.
+    pub sensing: Option<ados_protocol::pilot::Sensing>,
     /// Why the cap (`gnss-denied`, `confined-near`), while one applies.
     pub speed_cap_reason: Option<String>,
     /// The operator's place class, `open` or `confined` (absent reads open).

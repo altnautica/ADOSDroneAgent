@@ -6,17 +6,19 @@
 // (its tooltip) or on a tap, which opens it in a small panel whose press
 // opens the Mode sheet. A tap on a chip that fits opens the Mode sheet.
 // Beside it, a "Confined" badge while the pilot flies the confined-place
-// profile.
+// profile, and (outside compact bars) the sensing badge, "Sensing: 3D lidar ·
+// ≤ 4.2 m/s", while the fresh pilot frame reports its sensing tier.
 
 import { useRef, useState } from "react";
 
 import { Overlay } from "@/components/ui/overlay";
-import { useFlightChip } from "@/hooks/use-pilot";
+import { useFlightChip, useFreshPilot } from "@/hooks/use-pilot";
 import { chipButton, chipFullText, chipLines, chipLineTextColor } from "@/lib/chip-view";
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { CHIP_MAX_FRAC, HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
 import { confinedChipText } from "@/shared/hud/route-check";
+import { sensingChipText } from "@/shared/hud/sensing";
 import { specText } from "@/shared/hud/spec-text";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -27,6 +29,7 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   const chip = useFlightChip();
   const radioFallback = useNavStreamStore((s) => s.radioFallback);
   const confined = useNavStreamStore((s) => (s.pilot ? confinedChipText(s.pilot.data) : null));
+  const sensing = sensingChipText(useFreshPilot()?.sensing ?? null);
   const openSheet = useCockpitUiStore((s) => s.openSheet);
   const textRef = useRef<HTMLSpanElement>(null);
   const [fullAt, setFullAt] = useState<DOMRect | null>(null);
@@ -91,6 +94,16 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
           style={{ color: "var(--fs-text)" }}
         >
           {confined}
+        </span>
+      ) : null}
+      {sensing && !compact ? (
+        <span
+          data-testid="sensing-chip"
+          title={sensing}
+          className="h-[var(--fs-control)] min-w-0 shrink truncate whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] px-[8px] leading-[var(--fs-control)]"
+          style={{ color: "var(--fs-text)" }}
+        >
+          {sensing}
         </span>
       ) : null}
       {button ? (

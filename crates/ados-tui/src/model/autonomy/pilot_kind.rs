@@ -163,6 +163,9 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                 serde_json::from_value::<ados_protocol::pilot::OverheadAhead>(v.clone()).ok()
             })
             .filter(|o| o.fly_under_agl_m.is_some() && o.ahead_m.is_some()),
+        sensing: d
+            .get("sensing")
+            .and_then(|v| serde_json::from_value::<ados_protocol::pilot::Sensing>(v.clone()).ok()),
         speed_cap_reason: d
             .get("speed_cap")
             .filter(|c| c.get("v_h_mps").and_then(Value::as_f64).is_some())

@@ -207,6 +207,25 @@ fn an_operation_the_spec_does_not_know_reads_as_other() {
     assert_ne!(super::op_text("goto"), "Other (goto)");
 }
 
+#[test]
+fn the_sensing_tier_and_its_speed_limit_show_only_while_the_pilot_reports_them() {
+    let mut frame: Value = serde_json::from_str(include_str!(
+        "../../../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON");
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 48);
+    assert!(!text.contains("Sensing:"), "{text}");
+
+    frame["sensing"] = json!({"tier": "lidar3d", "clear_range_m": 11.6, "speed_limit_mps": 4.2});
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 48);
+    assert!(text.contains("Sensing: 3D lidar · ≤ 4.2 m/s"), "{text}");
+
+    // A tier this build does not know reads as no sensing.
+    frame["sensing"] = json!({"tier": "radar", "clear_range_m": 11.6, "speed_limit_mps": 4.2});
+    let text = draw(&mut app_with_frame(1, frame), 160, 48);
+    assert!(!text.contains("Sensing:"), "{text}");
+}
+
 // --- the mission stall, from the golden stall frame -------------------------
 
 /// The golden stall frame, its banner slot moved to the far future so it
