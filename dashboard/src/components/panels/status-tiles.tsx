@@ -114,7 +114,7 @@ const PILL_TONE = {
  *  tooltip) and the overhead clearance ahead while each applies, and
  *  while follow holds for the operator the waiting prompt with the actions
  *  this card offers: resume and stop, written to the follow-me config. */
-function FollowStatus({ follow }: { follow: HomeFollow }) {
+export function FollowStatus({ follow }: { follow: HomeFollow }) {
   const [busy, setBusy] = useState(false);
   async function run(a: HomeFollowAction) {
     setBusy(true);

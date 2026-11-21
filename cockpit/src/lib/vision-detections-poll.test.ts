@@ -21,13 +21,13 @@ afterEach(() => {
 describe("ground detection poll", () => {
   it("holds the whole-frame boxes a crop-only reply carries, though the poll never saw that batch", async () => {
     replies.push({
-      v: 3,
+      v: 4,
       camera_id: "main",
       frame_id: 2,
       ts_ms: 1100,
       detections: [det(290, 2)],
       crop_window: { x: 200, y: 50, width: 200, height: 200 },
-      full_frame: { v: 3, camera_id: "main", frame_id: 1, ts_ms: 1000, detections: [det(20, 1), det(280, 2)] },
+      full_frame: { v: 4, camera_id: "main", frame_id: 1, ts_ms: 1000, detections: [det(20, 1), det(280, 2)] },
     });
     const stop = connectGroundDetectionPoll({ peer: "drone" });
     await vi.waitFor(() => expect(useDetectionsStore.getState().latest?.frameId).toBe(2));
