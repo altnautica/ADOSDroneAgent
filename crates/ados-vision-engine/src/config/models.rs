@@ -62,7 +62,8 @@ pub struct DetectorConfig {
     pub input_width: u32,
     #[serde(default = "default_detector_dim")]
     pub input_height: u32,
-    /// Output-head layout: `yolo8` (default) or `yolo5`.
+    /// Output-head layout: `yolo8` (default), `yolo5` or `yolox` (the
+    /// per-stride raw heads the NPU sidecars decode).
     #[serde(default)]
     pub head: String,
     /// Class labels in output-index order (e.g. the COCO-80 list). Empty ⇒
@@ -128,6 +129,7 @@ impl DetectorConfig {
             model_path: Some(self.model_path.clone()),
             head: match self.head.to_ascii_lowercase().as_str() {
                 "yolo5" | "yolov5" => DetectionHead::Yolo5,
+                "yolox" => DetectionHead::Yolox,
                 _ => DetectionHead::Yolo8,
             },
         }

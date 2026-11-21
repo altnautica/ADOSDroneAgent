@@ -42,9 +42,9 @@ from ados.services.vision import sidecar_protocol as proto
 from ados.services.vision.rknn_sidecar import (
     DEFAULT_CONF_THRESHOLD,
     DEFAULT_NMS_IOU,
-    decode_yolo_detections,
 )
 from ados.services.vision.sidecar_protocol import SidecarServer
+from ados.services.vision.yolo_decode import decode_yolo_detections
 
 log = get_logger("vision-hailo")
 

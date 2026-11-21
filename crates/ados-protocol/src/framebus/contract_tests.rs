@@ -60,6 +60,14 @@ fn detection_head_serializes_lowercase() {
         serde_json::to_string(&DetectionHead::Yolo5).unwrap(),
         "\"yolo5\""
     );
+    assert_eq!(
+        serde_json::to_string(&DetectionHead::Yolox).unwrap(),
+        "\"yolox\""
+    );
+    assert_eq!(
+        serde_json::from_str::<DetectionHead>("\"yolox\"").unwrap(),
+        DetectionHead::Yolox
+    );
 }
 
 #[test]

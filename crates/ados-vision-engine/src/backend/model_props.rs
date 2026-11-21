@@ -6,7 +6,7 @@
 //! which writer produced the `vision.detector` block: the file is the authority
 //! on its own graph. Keys:
 //!
-//! - `ados.head`: `yolo8` | `yolo5` (the output-head layout).
+//! - `ados.head`: `yolo8` | `yolo5` | `yolox` (the output-head layout).
 //! - `ados.classes`: comma-separated class labels in output-index order. Used
 //!   only when the configuration supplied no labels.
 //! - `ados.input`: `<width>x<height>` of the model input.
@@ -59,6 +59,7 @@ fn parse_head(raw: &str) -> Option<DetectionHead> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "yolo8" | "yolov8" => Some(DetectionHead::Yolo8),
         "yolo5" | "yolov5" => Some(DetectionHead::Yolo5),
+        "yolox" => Some(DetectionHead::Yolox),
         _ => None,
     }
 }
@@ -129,5 +130,13 @@ mod tests {
         apply_model_props(&mut m, |k| p.get(k).cloned());
         assert_eq!(m.head, DetectionHead::Yolo8);
         assert_eq!((m.input_width, m.input_height), (640, 640));
+    }
+
+    #[test]
+    fn a_raw_heads_file_states_the_yolox_layout() {
+        let p = props(&[(HEAD_KEY, "yolox")]);
+        let mut m = meta(&["person"]);
+        apply_model_props(&mut m, |k| p.get(k).cloned());
+        assert_eq!(m.head, DetectionHead::Yolox);
     }
 }

@@ -33,7 +33,7 @@ class VisionDetectorConfig(BaseModel):
     model_path: str = ""
     input_width: int = Field(default=640, ge=0, le=U32_MAX)
     input_height: int = Field(default=640, ge=0, le=U32_MAX)
-    # Output-head layout: `yolo8` (empty is yolo8) or `yolo5`.
+    # Output-head layout: `yolo8` (empty is yolo8), `yolo5` or `yolox`.
     head: str = ""
     class_labels: list[str] = Field(default_factory=list)
     # Target inference rate per camera; 0 runs on every captured frame.

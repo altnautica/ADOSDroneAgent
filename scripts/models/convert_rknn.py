@@ -8,24 +8,26 @@ written per target platform: a model compiled for one NPU generation does not
 load on another, so the registry lists one variant per platform.
 
 Precision is fp16, not int8. An int8 build needs a calibration image set, and
-the person detectors decode in-graph into one output tensor that carries box
-pixels (0..640) beside probabilities (0..1): per-tensor int8 output
-quantisation would flatten the scores. The RK3588 and RK3576 NPUs run fp16
-natively.
+each person-detector output carries box regressions beside probabilities
+(0..1) in one tensor: per-tensor int8 output quantisation would flatten the
+scores. The RK3588 and RK3576 NPUs run fp16 natively. The detector compiled
+here is the raw-heads export (``export_yolox_person.py --raw-heads``, one
+output per stride): the toolkit cannot compile the in-graph box decoder, and
+the sidecar decodes the heads (head ``yolox``).
 
 The NPU sidecar feeds raw ``uint8`` RGB frames in NHWC order, so the RKNN graph
 takes over the ONNX graph's input normalisation: ``--mean`` and ``--std`` are
 the per-channel values the toolkit applies (``x = (pixel - mean) / std``). The
 defaults (0, 255) match the detectors' ``[0, 1]`` RGB input.
 
-Each converted file is checked against ONNX Runtime on a fixed random image
-through the toolkit's simulator, and its size and sha256 are printed for the
-model registry.
+Each converted file is checked against ONNX Runtime on three synthetic images
+through the toolkit's simulator (every output, relative to its range), and its
+size and sha256 are printed for the model registry.
 
 Usage::
 
-    python convert_rknn.py --onnx yolox_s_person_640.onnx \\
-        --platform rk3588 --platform rk3576 --out-dir out/
+    python convert_rknn.py --onnx yolox_s_person_heads_640.onnx \\
+        --platform rk3588 --platform rk3576 --out-dir out/ --tolerance 0.05
 """
 
 from __future__ import annotations
@@ -188,8 +190,9 @@ def convert(
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     m = np.asarray(mean, np.float32)
     s = np.asarray(std, np.float32)
+    # Every output of every frame (a raw-heads model has one per stride).
     wants = [
-        sess.run(None, {name: np.ascontiguousarray(((f - m) / s).transpose(0, 3, 1, 2))})[0]
+        sess.run(None, {name: np.ascontiguousarray(((f - m) / s).transpose(0, 3, 1, 2))})
         for f in frames
     ]
 
@@ -207,14 +210,15 @@ def convert(
             raise SystemExit(f"exporting {out} failed")
         if rknn.init_runtime() != 0:
             raise SystemExit(f"the {platform} simulator did not start")
-        gots = [rknn.inference(inputs=[f], data_format="nhwc")[0] for f in frames]
+        gots = [rknn.inference(inputs=[f], data_format="nhwc") for f in frames]
     finally:
         rknn.release()
     err = 0.0
-    for want, got in zip(wants, gots, strict=True):
-        got = np.asarray(got, dtype=np.float32).reshape(want.shape)
-        span = float(np.max(want) - np.min(want)) or 1.0
-        err = max(err, float(np.max(np.abs(got - want))) / span)
+    for want_outs, got_outs in zip(wants, gots, strict=True):
+        for want, got in zip(want_outs, got_outs, strict=True):
+            got = np.asarray(got, dtype=np.float32).reshape(want.shape)
+            span = float(np.max(want) - np.min(want)) or 1.0
+            err = max(err, float(np.max(np.abs(got - want))) / span)
     if err > tol:
         raise SystemExit(f"{platform}: simulator output diverges from ONNX ({err:.3e} > {tol})")
     return err

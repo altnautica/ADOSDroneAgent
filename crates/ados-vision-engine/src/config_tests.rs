@@ -269,6 +269,24 @@ fn a_crop_model_registers_beside_the_detector_and_the_whole_frame_rate_is_capped
 }
 
 #[test]
+fn the_detector_head_names_map_to_their_layouts() {
+    use ados_protocol::framebus::DetectionHead;
+    for (name, head) in [
+        ("yolox", DetectionHead::Yolox),
+        ("YOLOX", DetectionHead::Yolox),
+        ("yolov5", DetectionHead::Yolo5),
+        ("yolo8", DetectionHead::Yolo8),
+        ("", DetectionHead::Yolo8),
+    ] {
+        let (_d, p) = write_tmp(&format!(
+            "vision:\n  detector:\n    model_id: det\n    model_path: /m.rknn\n    head: \"{name}\"\n"
+        ));
+        let det = VisionConfig::load_from(&p).detector.unwrap();
+        assert_eq!(det.to_metadata().head, head, "{name}");
+    }
+}
+
+#[test]
 fn reid_absent_by_default_and_parses_to_portrait_metadata() {
     use ados_protocol::framebus::{FrameFormat, ModelExecution, ModelKind};
 

@@ -1,10 +1,12 @@
 name: npu-models
 
 # Builds the person detector files the vision model registry lists: YOLOX-S
-# (Apache-2.0 code and weights) exported to ONNX with in-graph box decoding by
-# scripts/models/export_yolox_person.py, then compiled to RKNN for each Rockchip
-# NPU platform by scripts/models/convert_rknn.py (fp16, checked against ONNX
-# Runtime in the toolkit's simulator).
+# (Apache-2.0 code and weights) exported to ONNX by
+# scripts/models/export_yolox_person.py, with in-graph box decoding for the CPU
+# backend and as raw per-stride heads (`--raw-heads`, head `yolox`) for the NPU,
+# whose sidecar decodes the boxes; the raw heads are compiled to RKNN for each
+# Rockchip NPU platform by scripts/models/convert_rknn.py (fp16, checked
+# against ONNX Runtime in the toolkit's simulator).
 #
 # Manual only: the registry pins every file by sha256, so a release asset is
 # never replaced. A run prints the size and sha256 of each file to the job
@@ -24,7 +26,7 @@ on:
       release_tag:
         description: "Model release tag on the extensions repository"
         required: true
-        default: "vision-models-v3"
+        default: "vision-models-v4"
         type: string
       publish:
         description: "Upload the files to that release (needs the MODELS_RELEASE_TOKEN secret)"
@@ -32,9 +34,9 @@ on:
         default: false
         type: boolean
       rknn:
-        description: "Also compile the RKNN files (does not build yet, see the step)"
+        description: "Also compile the RKNN files"
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -91,10 +93,12 @@ jobs:
               --yolox-src work/YOLOX --model s --checkpoint work/yolox_s.pth \
               --size "${size}" --out "out/yolox_s_person_${size}.onnx"
           done
+          # The NPU form: no decode after the convolutions, which the RKNN
+          # toolkit cannot compile.
+          /tmp/venv-export/bin/python scripts/models/export_yolox_person.py \
+            --yolox-src work/YOLOX --model s --checkpoint work/yolox_s.pth \
+            --raw-heads --size 640 --out out/yolox_s_person_heads_640.onnx
 
-      # Off by default: rknn-toolkit2 2.3.2 fails to build the YOLOX-S graph with
-      # its in-graph box decoder (fold_constant after the head's transpose is
-      # folded away), so no .rknn file can be produced from this export yet.
       - name: Convert to RKNN (rk3588, rk3576)
         if: ${{ inputs.rknn }}
         run: |
@@ -107,9 +111,11 @@ jobs:
           # and onnx.mapping, which onnx 1.17 removed.
           /tmp/venv-rknn/bin/pip install --quiet "rknn-toolkit2==${RKNN_TOOLKIT}" \
             "setuptools<70" "onnx==${RKNN_ONNX}"
+          # fp16 rounding of the raw heads stays within 5 % of each output's
+          # range; the decoded boxes are what the sidecar consumes.
           /tmp/venv-rknn/bin/python scripts/models/convert_rknn.py \
-            --onnx out/yolox_s_person_640.onnx \
-            --platform rk3588 --platform rk3576 --out-dir out
+            --onnx out/yolox_s_person_heads_640.onnx \
+            --platform rk3588 --platform rk3576 --out-dir out --tolerance 0.05
 
       - name: Checksums
         run: |
@@ -143,7 +149,7 @@ jobs:
           fi
           if ! gh release view "${TAG}" --repo "${MODELS_REPO}" >/dev/null 2>&1; then
             gh release create "${TAG}" --repo "${MODELS_REPO}" --title "Vision models ${TAG#vision-models-}" \
-              --notes "Person detectors for the vision engine: YOLOX-S (Apache-2.0) as ONNX for the CPU backend and as fp16 RKNN files for the RK3588 and RK3576 NPUs. Checksums in SHA256SUMS."
+              --notes "Person detectors for the vision engine: YOLOX-S (Apache-2.0) as ONNX for the CPU backend and, from its raw per-stride heads, as fp16 RKNN files for the RK3588 and RK3576 NPUs. Checksums in SHA256SUMS."
           fi
           # No --clobber: the registry pins each file by sha256.
           shopt -s nullglob

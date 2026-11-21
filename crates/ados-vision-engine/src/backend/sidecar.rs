@@ -99,7 +99,7 @@ struct SidecarModel {
     input_h: u32,
     input_format: String,
     class_labels: Vec<String>,
-    /// The output-head layout the sidecar must decode with (`yolov8` | `yolov5`).
+    /// The output-head layout the sidecar must decode with (`yolov8` | `yolov5` | `yolox`).
     head: String,
     /// Whether `load_model` has been sent to the sidecar this session. The
     /// sidecar keeps loaded models across connections, so we send the load

@@ -49,6 +49,8 @@ class DetectionHead(str, enum.Enum):
 
     YOLO8 = "yolo8"
     YOLO5 = "yolo5"
+    YOLOX = "yolox"
+    """One undecoded grid per stride (8, 16, 32), the NPU detector's form."""
 
 
 @dataclass(frozen=True)

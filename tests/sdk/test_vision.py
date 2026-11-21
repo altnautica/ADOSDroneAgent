@@ -226,6 +226,7 @@ def test_model_kind_new_variants_are_lowercase_wire_strings():
     assert ModelKind.REID.value == "reid"
     assert DetectionHead.YOLO8.value == "yolo8"
     assert DetectionHead.YOLO5.value == "yolo5"
+    assert DetectionHead.YOLOX.value == "yolox"
 
 
 def test_detection_batch_carries_frame_size_both_ways():

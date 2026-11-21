@@ -133,6 +133,14 @@ impl VisionBackend for OnnxBackend {
         if let Ok(md) = session.metadata() {
             super::model_props::apply_model_props(&mut meta, |k| md.custom(k));
         }
+        // This backend decodes the model's first output only; the per-stride
+        // raw heads are the NPU sidecars' layout.
+        if meta.kind == ModelKind::Detection && meta.head == DetectionHead::Yolox {
+            return Err(anyhow!(
+                "{path}: the yolox raw-heads layout is decoded by the NPU sidecars; \
+                 the onnx backend reads yolo8 and yolo5 detectors"
+            ));
+        }
         Ok(Box::new(OnnxModel {
             session: Mutex::new(session),
             input: Mutex::new(Vec::new()),

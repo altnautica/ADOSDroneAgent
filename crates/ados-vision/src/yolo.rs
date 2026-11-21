@@ -8,6 +8,9 @@
 //!   is the ultralytics YOLOv8/v11 export.
 //! * [`DetectionHead::Yolo5`], the legacy `[1, anchors, 5+nc]` head: per anchor
 //!   `[cx, cy, w, h, objectness, class_scores...]` (YOLOv5/v7).
+//! * [`DetectionHead::Yolox`], one undecoded grid per stride, is a multi-output
+//!   layout this single-tensor decoder does not read: it decodes to no
+//!   detections. The NPU sidecars decode it.
 //!
 //! The decoder is orientation robust: the raw output is a flat row-major buffer
 //! with a logical 2D shape `(rows, cols)` (after the batch dim is dropped), and
@@ -128,6 +131,7 @@ pub fn decode(data: &[f32], rows: usize, cols: usize, p: &DecodeParams) -> Vec<D
     let cands = match p.head {
         DetectionHead::Yolo8 => decode_v8(data, rows, cols, nc, p.conf_threshold),
         DetectionHead::Yolo5 => decode_v5(data, rows, cols, nc, p.conf_threshold),
+        DetectionHead::Yolox => return Vec::new(),
     };
     if cands.is_empty() {
         return Vec::new();

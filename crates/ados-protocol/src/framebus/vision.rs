@@ -66,7 +66,11 @@ pub enum ModelExecution {
 /// the right axes. `Yolo8` is the transposed `[1, 4+nc, anchors]` head — box
 /// (cx, cy, w, h) plus one score per class, no objectness — that ultralytics
 /// YOLOv8/v11 export. `Yolo5` is the legacy `[1, anchors, 5+nc]` head — box plus
-/// an objectness column plus per-class scores — of YOLOv5/v7. They are decoded
+/// an objectness column plus per-class scores — of YOLOv5/v7. `Yolox` is the
+/// undecoded YOLOX head the NPU compilers take: one `[1, 5+nc, H, W]` output
+/// per stride (8, 16, 32), each cell `(dx, dy, log w, log h)` from the cell in
+/// stride units, then objectness and per-class scores; the consumer turns the
+/// cells into pixel boxes and reads them as `Yolo5`. They are decoded
 /// differently (a v8 model read as v5 shifts every field by one and mistakes the
 /// first class score for objectness), so the layout travels with the model.
 /// Defaults to `Yolo8`, the current export path.
@@ -76,6 +80,7 @@ pub enum DetectionHead {
     #[default]
     Yolo8,
     Yolo5,
+    Yolox,
 }
 
 /// Metadata a plugin supplies when registering a model.

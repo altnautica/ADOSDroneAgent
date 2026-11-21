@@ -20,7 +20,7 @@ import pytest
 # pytest run, which is how a full-suite green report silently excluded this file.
 np = pytest.importorskip("numpy", reason="requires the `vision` extra (numpy)")
 
-from ados.services.vision.rknn_sidecar import decode_yolo_detections  # noqa: E402
+from ados.services.vision.yolo_decode import decode_yolo_detections  # noqa: E402
 
 LABELS = ["drone", "person"]
 

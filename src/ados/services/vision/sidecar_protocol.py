@@ -83,9 +83,10 @@ class LoadModelRequest:
     class_labels: list[str] = field(default_factory=list)
     # Output-head layout for decoding: "yolov8" (the transposed [1, 4+nc,
     # anchors] head with per-class scores and no objectness, the ultralytics
-    # v8/v11 export) or "yolov5" (the legacy [1, anchors, 5+nc] head with an
-    # objectness column). Defaults to yolov8; a request that predates this field
-    # decodes as yolov8.
+    # v8/v11 export), "yolov5" (the legacy [1, anchors, 5+nc] head with an
+    # objectness column) or "yolox" (one undecoded [1, 5+nc, H, W] grid per
+    # stride). Defaults to yolov8; a request that predates this field decodes
+    # as yolov8.
     head: str = "yolov8"
 
     def to_dict(self) -> dict[str, Any]:
