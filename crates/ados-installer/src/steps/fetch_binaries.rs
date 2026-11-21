@@ -141,9 +141,12 @@ impl Step for FetchBinaries {
             Err(e) => return StepOutcome::Failed(format!("could not create temp dir: {e}")),
         };
 
-        // The device-tree model keys the vision-binary variant (a CPU-ONNX board
-        // fetches the onnx-enabled vision build). Read once for the whole fetch.
-        let board_model = crate::steps::npu_provision::read_board_model();
+        // The device-tree model and the configured vision backend key the
+        // vision-binary variant (a CPU-ONNX board, or an NPU board whose
+        // detector fell back to ONNX, fetches the onnx-enabled vision build).
+        // Read once for the whole fetch; the NPU step writes the backend first.
+        let board_model = crate::steps::npu_provision::read_board_identity();
+        let vision_backend = binaries::configured_vision_backend(Path::new(env::CONFIG_YAML));
 
         // Drive the determinate "Downloading components" bar: k of N binaries.
         let sink = ctx.progress.clone();
@@ -286,7 +289,14 @@ impl Step for FetchBinaries {
                     ctx.env.arch
                 ))
             } else {
-                install_service(b, &board_model, &tmp_dir, &sink, source)
+                install_service(
+                    b,
+                    &board_model,
+                    vision_backend.as_deref(),
+                    &tmp_dir,
+                    &sink,
+                    source,
+                )
             };
             let ok = match result {
                 Ok(replaced) => {

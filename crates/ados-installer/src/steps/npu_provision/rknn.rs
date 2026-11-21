@@ -37,6 +37,7 @@ const NPU_BOARD_SUBSTRINGS: &[&str] = &[
     "rk3576",
     "rock-5c",
     "rock5c",
+    "rock 5c",
     "orange-pi-5",
     "orangepi5",
     "orange pi 5",
@@ -50,26 +51,36 @@ pub fn is_npu_board(model: &str) -> bool {
     NPU_BOARD_SUBSTRINGS.iter().any(|k| m.contains(k))
 }
 
-/// Read the board-model string the NPU decision keys on: the persisted override
-/// sentinel first (an operator/installer force), then the kernel device-tree
-/// model. Mirrors the binary's `board_id()` resolution order. Empty when neither
-/// is present (a dev host) — which `is_npu_board` then treats as not-NPU. Shared
-/// with the fetch step, which keys the vision-binary variant on the same string.
-pub(crate) fn read_board_model() -> String {
-    if let Ok(s) = std::fs::read_to_string("/etc/ados/board_override") {
-        let v = s.trim().trim_matches('\0').trim().to_string();
-        if !v.is_empty() {
-            return v;
+/// Read the board string the NPU and vision-build decisions key on: the
+/// persisted override sentinel first (an operator/installer force), else the
+/// kernel device-tree model, then the device-tree `compatible` entries (see
+/// [`board_identity`]). Empty on a dev host with neither, which `is_npu_board`
+/// treats as not-NPU. Shared with the fetch step, which keys the vision-binary
+/// variant on the same string.
+pub(crate) fn read_board_identity() -> String {
+    let model = match std::fs::read_to_string("/etc/ados/board_override") {
+        Ok(s) if !s.trim().trim_matches('\0').trim().is_empty() => {
+            s.trim().trim_matches('\0').trim().to_string()
         }
-    }
-    if let Ok(s) = std::fs::read_to_string("/proc/device-tree/model") {
-        let v = s.replace('\0', "");
-        let v = v.trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    String::new()
+        _ => std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default(),
+    };
+    let compatible = std::fs::read_to_string("/proc/device-tree/compatible").unwrap_or_default();
+    board_identity(&model, &compatible)
+}
+
+/// Join a board model string and the raw device-tree `compatible` property
+/// (NUL-separated, e.g. `radxa,rock-5b-plus\0rockchip,rk3588\0`) into one
+/// space-separated board string. The model names the board for people; the
+/// `compatible` entries name the SoC on every carrier (`rockchip,rk3588`,
+/// `rockchip,rk3588s`, `rockchip,rk3576`), which the model string often does
+/// not ("Radxa ROCK 5B+", "Radxa CM4"). Pure.
+pub fn board_identity(model: &str, compatible: &str) -> String {
+    std::iter::once(model.replace('\0', ""))
+        .chain(compatible.split('\0').map(str::to_string))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Map a venv Python `(major, minor)` to the CPython wheel tag (`cp311`) of a

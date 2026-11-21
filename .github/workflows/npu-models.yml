@@ -1,0 +1,150 @@
+name: npu-models
+
+# Builds the person detector files the vision model registry lists: YOLOX-S
+# (Apache-2.0 code and weights) exported to ONNX with in-graph box decoding by
+# scripts/models/export_yolox_person.py, then compiled to RKNN for each Rockchip
+# NPU platform by scripts/models/convert_rknn.py (fp16, checked against ONNX
+# Runtime in the toolkit's simulator).
+#
+# Manual only: the registry pins every file by sha256, so a release asset is
+# never replaced. A run prints the size and sha256 of each file to the job
+# summary and keeps the files as a workflow artifact. The usual way to
+# publish is by hand: download the artifact and `gh release upload` it to the
+# extensions repository, which hosts every registry model. With the `publish`
+# input the run uploads them itself; that needs a MODELS_RELEASE_TOKEN
+# repository secret holding a token with contents: write on
+# altnautica/ADOSExtensions (GITHUB_TOKEN cannot write to another repository).
+# The secret is not configured by default, so the step fails with that reason
+# until it is. Nothing is ever overwritten: an asset already there fails the
+# upload.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Model release tag on the extensions repository"
+        required: true
+        default: "vision-models-v3"
+        type: string
+      publish:
+        description: "Upload the files to that release (needs the MODELS_RELEASE_TOKEN secret)"
+        required: false
+        default: false
+        type: boolean
+      rknn:
+        description: "Also compile the RKNN files (does not build yet, see the step)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  YOLOX_REPO: "https://github.com/Megvii-BaseDetection/YOLOX.git"
+  YOLOX_COMMIT: "6ddff4824372906469a7fae2dc3206c7aa4bbaee"
+  YOLOX_S_URL: "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth"
+  YOLOX_S_SHA256: "f55ded7181e1b0c13285c56e7790b8f0e8f8db590fe4edb37f0b7f345c913a30"
+  # The export uses a current torch; the RKNN toolkit pins torch <= 2.4, so the
+  # two stages run in separate environments.
+  EXPORT_TORCH: "2.15.0"
+  EXPORT_ONNX: "1.23.2"
+  EXPORT_ORT: "1.32.0"
+  RKNN_TORCH: "2.4.0"
+  RKNN_ONNX: "1.16.1"
+  # Must match the board-side runtime and rknn-toolkit-lite2 the installer pins.
+  RKNN_TOOLKIT: "2.3.2"
+  MODELS_REPO: "altnautica/ADOSExtensions"
+
+jobs:
+  build:
+    name: Export and convert
+    # rknn-toolkit2 ships x86_64 and aarch64 wheels; the x86_64 one carries the
+    # simulator the conversion check runs on.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch the YOLOX source and the YOLOX-S checkpoint
+        run: |
+          set -euo pipefail
+          git clone --quiet "${YOLOX_REPO}" work/YOLOX
+          git -C work/YOLOX checkout --quiet "${YOLOX_COMMIT}"
+          curl -fsSL --retry 3 -o work/yolox_s.pth "${YOLOX_S_URL}"
+          echo "${YOLOX_S_SHA256}  work/yolox_s.pth" | sha256sum -c -
+
+      - name: Export the ONNX detectors
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv-export
+          /tmp/venv-export/bin/pip install --quiet \
+            --index-url https://download.pytorch.org/whl/cpu "torch==${EXPORT_TORCH}"
+          /tmp/venv-export/bin/pip install --quiet numpy loguru \
+            "onnx==${EXPORT_ONNX}" "onnxruntime==${EXPORT_ORT}"
+          mkdir -p out
+          for size in 640 320; do
+            /tmp/venv-export/bin/python scripts/models/export_yolox_person.py \
+              --yolox-src work/YOLOX --model s --checkpoint work/yolox_s.pth \
+              --size "${size}" --out "out/yolox_s_person_${size}.onnx"
+          done
+
+      # Off by default: rknn-toolkit2 2.3.2 fails to build the YOLOX-S graph with
+      # its in-graph box decoder (fold_constant after the head's transpose is
+      # folded away), so no .rknn file can be produced from this export yet.
+      - name: Convert to RKNN (rk3588, rk3576)
+        if: ${{ inputs.rknn }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq libgl1 libglib2.0-0
+          python -m venv /tmp/venv-rknn
+          /tmp/venv-rknn/bin/pip install --quiet \
+            --index-url https://download.pytorch.org/whl/cpu "torch==${RKNN_TORCH}"
+          # The toolkit imports pkg_resources, which current setuptools dropped,
+          # and onnx.mapping, which onnx 1.17 removed.
+          /tmp/venv-rknn/bin/pip install --quiet "rknn-toolkit2==${RKNN_TOOLKIT}" \
+            "setuptools<70" "onnx==${RKNN_ONNX}"
+          /tmp/venv-rknn/bin/python scripts/models/convert_rknn.py \
+            --onnx out/yolox_s_person_640.onnx \
+            --platform rk3588 --platform rk3576 --out-dir out
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd out
+          sha256sum -- * > SHA256SUMS
+          {
+            echo "| file | size_bytes | sha256 |"
+            echo "|---|---|---|"
+            for f in *.onnx $(ls *.rknn 2>/dev/null); do
+              echo "| ${f} | $(stat -c %s "${f}") | $(sha256sum "${f}" | cut -d' ' -f1) |"
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npu-models
+          path: out/
+          if-no-files-found: error
+
+      - name: Publish to the model release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ secrets.MODELS_RELEASE_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "MODELS_RELEASE_TOKEN is not set; nothing published" >&2
+            exit 1
+          fi
+          if ! gh release view "${TAG}" --repo "${MODELS_REPO}" >/dev/null 2>&1; then
+            gh release create "${TAG}" --repo "${MODELS_REPO}" --title "Vision models ${TAG#vision-models-}" \
+              --notes "Person detectors for the vision engine: YOLOX-S (Apache-2.0) as ONNX for the CPU backend and as fp16 RKNN files for the RK3588 and RK3576 NPUs. Checksums in SHA256SUMS."
+          fi
+          # No --clobber: the registry pins each file by sha256.
+          shopt -s nullglob
+          gh release upload "${TAG}" --repo "${MODELS_REPO}" out/*.onnx out/*.rknn out/SHA256SUMS

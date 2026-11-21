@@ -423,8 +423,8 @@ pub fn profile_ships(profile: &str, service: &str) -> bool {
 
 mod vision;
 pub use vision::{
-    board_prefers_onnx_vision, default_vision_binary, vision_binary, PREBUILT_VISION_ONNX,
-    PREBUILT_VISION_ONNX_RUNTIME,
+    board_prefers_onnx_vision, configured_vision_backend, default_vision_binary, vision_binary,
+    wants_onnx_vision, PREBUILT_VISION_ONNX, PREBUILT_VISION_ONNX_RUNTIME,
 };
 
 #[cfg(test)]

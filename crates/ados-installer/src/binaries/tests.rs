@@ -308,7 +308,7 @@ fn a_board_override_stem_selects_the_same_vision_build_as_the_model_string() {
             "override stem {stem} must select the onnx vision build"
         );
         assert_eq!(
-            vision_binary(stem).asset_name("aarch64"),
+            vision_binary(stem, None).asset_name("aarch64"),
             "ados-vision-onnx-aarch64"
         );
     }
@@ -321,17 +321,67 @@ fn vision_binary_resolves_the_variant_by_board() {
     // A CPU-strong board resolves to the onnx build; everything else to the
     // default catalog entry.
     assert_eq!(
-        vision_binary("Raspberry Pi 5 Model B").asset_name("aarch64"),
+        vision_binary("Raspberry Pi 5 Model B", None).asset_name("aarch64"),
         "ados-vision-onnx-aarch64"
     );
     assert_eq!(
-        vision_binary("Radxa ROCK 5C Lite").asset_name("aarch64"),
+        vision_binary("Radxa ROCK 5C Lite", None).asset_name("aarch64"),
         default_vision_binary().asset_name("aarch64")
     );
     assert_eq!(
-        vision_binary("").asset_name("aarch64"),
+        vision_binary("", None).asset_name("aarch64"),
         default_vision_binary().asset_name("aarch64")
     );
+}
+
+#[test]
+fn an_npu_board_whose_detector_fell_back_to_onnx_gets_the_onnx_build() {
+    let onnx = "ados-vision-onnx-aarch64";
+    let default = default_vision_binary().asset_name("aarch64");
+    // Rockchip with the RKNN backend (a platform .rknn detector) or no
+    // config at all keeps the default build that talks to the NPU sidecar.
+    assert_eq!(
+        vision_binary("rock-5c-lite", Some("rknn")).asset_name("aarch64"),
+        default
+    );
+    assert_eq!(
+        vision_binary("Rockchip RK3576 EVB", None).asset_name("aarch64"),
+        default
+    );
+    // Rockchip whose detector fell back to the ONNX CPU backend.
+    assert!(wants_onnx_vision(
+        "Radxa ROCK 5C Lite (RK3582)",
+        Some("onnx")
+    ));
+    assert_eq!(
+        vision_binary("rk3576", Some("onnx")).asset_name("aarch64"),
+        onnx
+    );
+    // A board with no accelerated backend never gets it from the config alone
+    // (Pi 4 runs neither build's ONNX usefully), and a CPU-ONNX board keeps it.
+    assert!(!wants_onnx_vision("Raspberry Pi 4 Model B", Some("onnx")));
+    assert!(wants_onnx_vision("rpi5", Some("rknn")));
+}
+
+#[test]
+fn configured_vision_backend_tolerates_missing_and_partial_configs() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    // Missing file.
+    assert_eq!(configured_vision_backend(&cfg), None);
+    // Not YAML, no vision block, vision without backend, non-string backend.
+    for body in [
+        ":\n  - [",
+        "agent:\n  name: d\n",
+        "vision:\n  enabled: true\n",
+        "vision:\n  backend: 3\n",
+        "vision: off\n",
+    ] {
+        std::fs::write(&cfg, body).unwrap();
+        assert_eq!(configured_vision_backend(&cfg), None, "{body:?}");
+    }
+    std::fs::write(&cfg, "vision:\n  enabled: true\n  backend: ONNX\n").unwrap();
+    assert_eq!(configured_vision_backend(&cfg).as_deref(), Some("onnx"));
 }
 
 #[test]

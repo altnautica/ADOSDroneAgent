@@ -346,8 +346,10 @@ pub(super) fn install_one_with_retry(
 }
 
 /// Install one service's binary. For the vision engine, a board that declares
-/// CPU-ONNX local inference (a strong CPU, no NPU) fetches the onnx-enabled build
-/// so it runs the detector on the CPU; if that variant cannot be fetched the
+/// CPU-ONNX local inference (a strong CPU, no NPU), or an NPU board whose config
+/// runs the ONNX CPU backend (`vision_backend`, see
+/// [`binaries::wants_onnx_vision`]), fetches the onnx-enabled build so it runs
+/// the detector on the CPU; if that variant cannot be fetched the
 /// install falls back to the default build so it never aborts on a missing
 /// variant (the default build still installs and honestly reports no
 /// real inference until the onnx variant is available). Every other service
@@ -360,13 +362,14 @@ pub(super) fn install_one_with_retry(
 pub(super) fn install_service(
     b: &PrebuiltBinary,
     board_model: &str,
+    vision_backend: Option<&str>,
     tmp_dir: &Path,
     sink: &ProgressSink,
     source: &AssetSource<'_>,
 ) -> anyhow::Result<Vec<PathBuf>> {
     if matches!(source, AssetSource::Release { .. })
         && b.service == "ados-vision"
-        && binaries::board_prefers_onnx_vision(board_model)
+        && binaries::wants_onnx_vision(board_model, vision_backend)
     {
         // The onnx binary links the ONNX Runtime dynamically, so the binary AND
         // its shared library are installed together — either both land or the

@@ -12,15 +12,19 @@
 //!   2. the librknnrt runtime library placed at `/usr/lib/librknnrt.so` (a
 //!      separate artifact the wheel does NOT bundle; the sidecar unit gates on
 //!      its presence),
-//!   3. the configured detector model fetched into the model cache (best-effort
-//!      — when no detector is configured yet, the runtime + config still
-//!      provision and the model is deferred, surfaced honestly in the log),
-//!   4. the vision config turned on (`vision.enabled = true`,
-//!      `vision.backend = rknn`) via a real config load → merge → save so no
-//!      other config field is dropped,
-//!   5. the `ados-vision-rknn.service` unit ENABLED (the START is the
-//!      supervisor's job; the unit is PartOf the supervisor and self-gates on
-//!      the runtime library).
+//!   3. the detector model fetched into the model cache (best-effort — when no
+//!      detector runs on this board yet, the runtime + config still provision
+//!      and the model is deferred, surfaced honestly in the log). A `.rknn`
+//!      file built for the board's RKNN platform is preferred; a platform the
+//!      registry has no `.rknn` file for takes the ONNX detector on the CPU,
+//!      never no detector,
+//!   4. the vision config turned on (`vision.enabled = true`, `vision.backend`
+//!      = the fetched detector's runtime) via a real config load → merge → save
+//!      so no other config field is dropped; the fetch step reads that backend
+//!      to install the onnx-enabled vision build for an ONNX fallback,
+//!   5. the `ados-vision-rknn.service` unit ENABLED when the backend is `rknn`
+//!      (the START is the supervisor's job; the unit is PartOf the supervisor
+//!      and self-gates on the runtime library).
 //!
 //! The detection (board substring match) and the URL builders are pure so a
 //! unit test exercises them without a board, the network, or an interpreter.
@@ -36,7 +40,7 @@ mod detector;
 mod rknn;
 
 use detector::{enable_vision_config, fetch_detector_model};
-pub(crate) use rknn::read_board_model;
+pub(crate) use rknn::read_board_identity;
 use rknn::{install_rknn_wheel, provision_librknnrt};
 pub use rknn::{is_npu_board, librknnrt_url, wheel_cp_tag, wheel_filename, wheel_url};
 
@@ -88,7 +92,7 @@ impl Step for NpuProvision {
         if let Some(skip) = crate::host::personal_skip(ctx, "npu_provision") {
             return skip;
         }
-        let model = read_board_model();
+        let model = read_board_identity();
         if !is_npu_board(&model) {
             tracing::info!(
                 board = %model,
@@ -106,18 +110,28 @@ impl Step for NpuProvision {
         if let Err(e) = provision_librknnrt() {
             return StepOutcome::Failed(e);
         }
-        // 3. The detector model (best-effort; a missing config is deferred, not
+        // 3. The detector model (best-effort; nothing runnable is deferred, not
         //    a failure — the runtime + config still provision).
-        if let Err(e) = fetch_detector_model() {
-            return StepOutcome::Failed(e);
-        }
+        let detector_backend = match fetch_detector_model(&model) {
+            Ok(b) => b,
+            Err(e) => return StepOutcome::Failed(e),
+        };
         // 4. Turn the vision config on (load → merge → save, no field dropped).
-        if let Err(e) = enable_vision_config() {
-            return StepOutcome::Failed(e);
-        }
-        // 5. Enable the sidecar unit (the supervisor starts it).
-        if let Err(e) = enable_sidecar_unit() {
-            return StepOutcome::Failed(e);
+        let backend = match enable_vision_config(detector_backend.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return StepOutcome::Failed(e),
+        };
+        // 5. Enable the sidecar unit (the supervisor starts it) when the
+        //    detector runs on the NPU (`auto` resolves to it on this board).
+        if matches!(backend.as_str(), "rknn" | "auto") {
+            if let Err(e) = enable_sidecar_unit() {
+                return StepOutcome::Failed(e);
+            }
+        } else {
+            tracing::info!(
+                backend = %backend,
+                "the vision backend does not use the NPU sidecar; the sidecar stays disabled"
+            );
         }
 
         tracing::info!("NPU inference runtime provisioned");

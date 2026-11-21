@@ -1,5 +1,10 @@
 //! The `ados-vision` binary selection: the default build or the ONNX-enabled
-//! variant for boards that declare CPU-ONNX local inference.
+//! variant for boards that declare CPU-ONNX local inference, and for NPU boards
+//! whose detector fell back to the ONNX CPU backend.
+
+use std::path::Path;
+
+use crate::steps::npu_provision::is_npu_board;
 
 use super::{Gate, PrebuiltBinary, DRONE_VISOR, PREBUILT};
 
@@ -75,6 +80,25 @@ pub fn board_prefers_onnx_vision(model: &str) -> bool {
     ONNX_VISION_BOARD_SUBSTRINGS.iter().any(|k| m.contains(k))
 }
 
+/// The `vision.backend` the agent config names, read without the agent's
+/// config model. `None` when the file is missing, unreadable, not YAML, or has
+/// no string `vision.backend`: the caller then keeps the board-only rule.
+pub fn configured_vision_backend(config_path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config_path).ok()?;
+    let doc: serde_norway::Value = serde_norway::from_str(&text).ok()?;
+    let backend = doc.get("vision")?.get("backend")?.as_str()?.trim();
+    (!backend.is_empty()).then(|| backend.to_ascii_lowercase())
+}
+
+/// Whether the board gets the onnx-enabled vision build: a board that declares
+/// CPU-ONNX local inference always does, and an NPU board does when its config
+/// runs the ONNX CPU backend (the NPU provisioning found no `.rknn` detector for
+/// the board's platform and fell back to ONNX, so the default build, which
+/// cannot run ONNX, would leave it with no detector). Pure.
+pub fn wants_onnx_vision(model: &str, configured_backend: Option<&str>) -> bool {
+    board_prefers_onnx_vision(model) || (is_npu_board(model) && configured_backend == Some("onnx"))
+}
+
 /// The default `ados-vision` catalog entry (the static musl build, no onnx).
 pub fn default_vision_binary() -> &'static PrebuiltBinary {
     PREBUILT
@@ -83,11 +107,11 @@ pub fn default_vision_binary() -> &'static PrebuiltBinary {
         .expect("ados-vision is in the catalog")
 }
 
-/// The `ados-vision` prebuilt to fetch for a board: the ONNX-enabled build when
-/// the board declares CPU-ONNX local inference, else the default build. The fetch
-/// step falls back to the default when the onnx variant cannot be fetched.
-pub fn vision_binary(model: &str) -> &'static PrebuiltBinary {
-    if board_prefers_onnx_vision(model) {
+/// The `ados-vision` prebuilt to fetch for a board and its configured vision
+/// backend (see [`wants_onnx_vision`]). The fetch step falls back to the default
+/// when the onnx variant cannot be fetched.
+pub fn vision_binary(model: &str, configured_backend: Option<&str>) -> &'static PrebuiltBinary {
+    if wants_onnx_vision(model, configured_backend) {
         &PREBUILT_VISION_ONNX
     } else {
         default_vision_binary()

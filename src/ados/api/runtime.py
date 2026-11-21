@@ -301,7 +301,12 @@ class StandaloneApiRuntime:
         try:
             from ados.services.vision.model_manager import ModelManager
 
-            self.model_manager = ModelManager(self.config.vision, npu_tops=self.npu_tops)
+            # The SoC first: it is what names the RKNN platform (rk3588 | rk3576)
+            # a .rknn variant must be compiled for; ModelManager normalises it.
+            board = self.board_soc or self.board_model or self.board_name
+            self.model_manager = ModelManager(
+                self.config.vision, npu_tops=self.npu_tops, board=board
+            )
             log.info("model_manager_initialized", board=self.board_name, npu_tops=self.npu_tops)
         except Exception as e:
             log.warning("model_manager_init_failed", error=str(e))

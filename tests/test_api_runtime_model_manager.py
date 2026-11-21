@@ -63,6 +63,18 @@ def test_board_sidecar_is_read_first(tmp_path, monkeypatch):
     assert runtime.board_soc == "rk3588s"
     assert runtime.board_model == "Radxa"
     assert runtime.model_manager._npu_tops == 6.0
+    # The SoC names the RKNN platform a .rknn variant must be compiled for.
+    assert runtime.model_manager._platform == "rk3588"
+
+
+def test_the_rk3576_soc_names_its_own_rknn_platform(tmp_path):
+    sidecar = tmp_path / "board.json"
+    sidecar.write_text(
+        json.dumps({"name": "Reference Agent Board", "soc": "RK3576", "npu_tops": 6.0}),
+        encoding="utf-8",
+    )
+    runtime = StandaloneApiRuntime(_cfg(tmp_path), state_client=None, log=_Log(), board_json=sidecar)
+    assert runtime.model_manager._platform == "rk3576"
 
 
 def test_board_is_set_when_model_manager_import_fails(tmp_path, monkeypatch):

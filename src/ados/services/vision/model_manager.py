@@ -30,7 +30,9 @@ from ._model_types import (
     available_runtimes,
     board_family,
     registry_auth_headers,
+    rknn_platform,
     sha256_file,
+    variant_fits_platform,
 )
 
 log = get_logger("vision-models")
@@ -39,12 +41,20 @@ log = get_logger("vision-models")
 class ModelManager:
     """Fetches the model registry, manages downloads, and tracks installed models."""
 
-    def __init__(self, config: VisionConfig, npu_tops: float = 0.0) -> None:
+    def __init__(
+        self, config: VisionConfig, npu_tops: float = 0.0, board: str | None = None
+    ) -> None:
         self._config = config
         self._npu_tops = npu_tops
+        # The RKNN platform token (rk3588 | rk3576) the board's NPU runs, from
+        # whatever board string the caller has (SoC, slug or display name); an
+        # rknn variant built for another platform never loads here.
+        self._platform = rknn_platform(board)
         # The runtimes this board can run, most preferred first (None: no
         # preference, the mock backend). Variant selection keys on this first.
-        self._runtimes = available_runtimes(str(getattr(config, "backend", "auto")), npu_tops)
+        self._runtimes = available_runtimes(
+            str(getattr(config, "backend", "auto")), npu_tops, self._platform
+        )
         self._models_dir = Path(config.models_dir)
         self._registry: list[ModelInfo] = []
         self._etag: str = ""
@@ -191,34 +201,46 @@ class ModelManager:
 
         Only a model of that task this board can run (a variant in an
         available runtime with a download URL) and that is not
-        ``benchmark_only`` is a candidate. Among those the registry's
-        ``recommended`` model wins, else the first listed; ``None`` when there
-        is no candidate. This is what lets a board come up already detecting
-        with zero operator steps, and what the depth layer installs:
-        ``select_best_variant`` then chooses the variant.
+        ``benchmark_only`` is a candidate. A candidate is recommended when the
+        registry marks it ``recommended``, or lists the runtime of its best
+        variant here in ``recommended_for`` (the NPU default can be a larger
+        model than the CPU default, which must stay real-time). Among the
+        recommended candidates the one whose variant runs on the board's most
+        preferred runtime wins (the first listed on a tie), else the first
+        candidate; ``None`` when there is none. This is what lets a board come
+        up already detecting with zero operator steps, and what the depth layer
+        installs: ``select_best_variant`` then chooses the variant.
         """
         want = task.lower()
-        candidates = [
-            m
-            for m in self._registry
-            if (m.task or "").lower() == want
-            and not m.benchmark_only
-            and (self.select_best_variant(m.id) or {}).get("url")
+        runtimes = self._runtimes or []
+        candidates: list[tuple[ModelInfo, str]] = []
+        for m in self._registry:
+            if (m.task or "").lower() != want or m.benchmark_only:
+                continue
+            variant = self.select_best_variant(m.id) or {}
+            if variant.get("url"):
+                candidates.append((m, str(variant.get("runtime") or "")))
+        recommended = [
+            (m, rt) for m, rt in candidates if m.recommended or rt in m.recommended_for
         ]
-        for m in candidates:
-            if m.recommended:
-                return m.id
-        return candidates[0].id if candidates else None
+        if recommended:
+            best = min(
+                recommended,
+                key=lambda c: runtimes.index(c[1]) if c[1] in runtimes else len(runtimes),
+            )
+            return best[0].id
+        return candidates[0][0].id if candidates else None
 
     def select_best_variant(self, model_id: str) -> dict[str, Any] | None:
         """Select the variant of ``model_id`` this board should run.
 
         Runtime first: only a variant whose ``runtime`` the board can run is a
         candidate (a variant that names no runtime counts as runnable anywhere),
-        and an earlier runtime in the board's preference order wins. NPU TOPS
-        break the tie within a runtime: the most demanding variant that fits the
-        board, else the least demanding one. ``None`` when the model is unknown
-        or no variant runs here.
+        and an earlier runtime in the board's preference order wins. An ``rknn``
+        variant compiled for one NPU ``platform`` is a candidate only on a board
+        of that platform. NPU TOPS break the tie within a runtime: the most
+        demanding variant that fits the board, else the least demanding one.
+        ``None`` when the model is unknown or no variant runs here.
         """
         model = next((m for m in self._registry if m.id == model_id), None)
         if not model or not model.variants:
@@ -231,7 +253,11 @@ class ModelManager:
                 return len(runtimes or ())
             return runtimes.index(rt) if rt in runtimes else None
 
-        ranked = [(r, v) for v in model.variants if (r := runtime_rank(v)) is not None]
+        ranked = [
+            (r, v)
+            for v in model.variants
+            if variant_fits_platform(v, self._platform) and (r := runtime_rank(v)) is not None
+        ]
         if not ranked:
             return None
         best_rank = min(r for r, _ in ranked)

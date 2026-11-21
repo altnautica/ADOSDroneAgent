@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Export the YOLOX-Tiny person detector the CPU (ONNX) vision backend ships.
+"""Export a YOLOX person detector (Tiny or S) the vision backends ship.
 
 Inputs: an upstream YOLOX source checkout (Apache-2.0) and its released
-``yolox_tiny.pth`` checkpoint (Apache-2.0). Output: one ONNX graph that the
-vision engine's ``yolo5`` head decoder reads without any extra code:
+``yolox_tiny.pth`` or ``yolox_s.pth`` checkpoint (Apache-2.0). Output: one ONNX
+graph that the vision engine's ``yolo5`` head decoder reads without any extra
+code:
 
 * input ``images``: float32 ``[1, 3, S, S]``, RGB, scaled to ``[0, 1]``. This is
   the engine's standard detector preprocessing; the graph itself converts it to
@@ -20,8 +21,10 @@ registry records.
 
 Usage::
 
-    python export_yolox_person.py --yolox-src <YOLOX checkout> \\
+    python export_yolox_person.py --yolox-src <YOLOX checkout> --model tiny \\
         --checkpoint yolox_tiny.pth --out yolox_tiny_person_640.onnx
+    python export_yolox_person.py --yolox-src <YOLOX checkout> --model s \\
+        --checkpoint yolox_s.pth --out yolox_s_person_640.onnx
 """
 
 from __future__ import annotations
@@ -33,9 +36,8 @@ from pathlib import Path
 
 # The COCO index of "person" in the YOLOX class order.
 PERSON_CLASS = 0
-# YOLOX-Tiny scaling (exps/default/yolox_tiny.py).
-TINY_DEPTH = 0.33
-TINY_WIDTH = 0.375
+# (depth, width) multipliers per model (exps/default/yolox_tiny.py, yolox_s.py).
+SCALING = {"tiny": (0.33, 0.375), "s": (0.33, 0.50)}
 
 
 def _sha256(path: Path) -> str:
@@ -46,7 +48,7 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def build(yolox_src: Path, checkpoint: Path):  # noqa: ANN201 - torch types are optional deps
+def build(yolox_src: Path, checkpoint: Path, variant: str):  # noqa: ANN201 - torch types are optional deps
     import torch
     from torch import nn
 
@@ -61,9 +63,10 @@ def build(yolox_src: Path, checkpoint: Path):  # noqa: ANN201 - torch types are 
     sys.modules["yolox.utils"] = utils
     from yolox.models import YOLOPAFPN, YOLOX, YOLOXHead
 
+    depth, width = SCALING[variant]
     in_channels = [256, 512, 1024]
-    backbone = YOLOPAFPN(TINY_DEPTH, TINY_WIDTH, in_channels=in_channels, act="silu")
-    head = YOLOXHead(80, TINY_WIDTH, in_channels=in_channels, act="silu")
+    backbone = YOLOPAFPN(depth, width, in_channels=in_channels, act="silu")
+    head = YOLOXHead(80, width, in_channels=in_channels, act="silu")
     model = YOLOX(backbone, head)
     ckpt = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
@@ -102,6 +105,7 @@ def stamp_metadata(graph, props: dict[str, str]) -> None:  # noqa: ANN001 - onnx
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--yolox-src", type=Path, required=True)
+    ap.add_argument("--model", choices=sorted(SCALING), default="tiny")
     ap.add_argument("--checkpoint", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--size", type=int, default=640)
@@ -113,7 +117,7 @@ def main() -> int:
     import onnxruntime as ort
     import torch
 
-    model = build(args.yolox_src, args.checkpoint)
+    model = build(args.yolox_src, args.checkpoint, args.model)
     dummy = torch.zeros(1, 3, args.size, args.size)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(

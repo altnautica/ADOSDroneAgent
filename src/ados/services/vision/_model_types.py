@@ -67,6 +67,11 @@ class ModelInfo:
     # an operator choosing one. Absent in the registry ⇒ False (nothing is a
     # default unless the registry says so).
     recommended: bool = False
+    # The runtimes this model is the recommended default for (``rknn``,
+    # ``onnx``, ...): a board whose best variant of the model runs on one of
+    # them treats it as recommended. Lets the NPU default (accurate) differ from
+    # the CPU default (real-time). Absent ⇒ empty.
+    recommended_for: list[str] = field(default_factory=list)
     # True when the registry marks the model for benchmarks and explicit
     # operator installs only: its weights carry terms that keep it out of every
     # default (it is never auto-provisioned or recommended). Absent ⇒ False.
@@ -82,6 +87,7 @@ class ModelInfo:
             task=m.get("task", ""),
             variants=m.get("variants", []),
             recommended=bool(m.get("recommended", False)),
+            recommended_for=[str(r) for r in m.get("recommended_for") or []],
             benchmark_only=bool(m.get("benchmark_only", False)),
         )
 
@@ -93,21 +99,51 @@ class ModelInfo:
             "task": self.task,
             "variants": self.variants,
             "recommended": self.recommended,
+            "recommended_for": self.recommended_for,
             "benchmark_only": self.benchmark_only,
         }
 
 
-def available_runtimes(backend: str, npu_tops: float) -> list[str] | None:
+def available_runtimes(
+    backend: str, npu_tops: float, platform: str | None = None
+) -> list[str] | None:
     """The model runtimes this board can run, most preferred first, from the
     configured vision backend: an explicit ``rknn`` / ``hailo`` / ``onnx`` runs
     only that; ``auto`` runs the NPU sidecar (``rknn``) when the board declares
-    NPU TOPS, then the ONNX CPU backend. ``None`` (no preference) for the
-    ``mock`` backend, which runs nothing real."""
+    NPU TOPS or names an RKNN ``platform`` (see :func:`rknn_platform`), then the
+    ONNX CPU backend. ``None`` (no preference) for the ``mock`` backend, which
+    runs nothing real."""
     if backend in ("rknn", "hailo", "onnx"):
         return [backend]
     if backend == "auto":
-        return ["rknn", "onnx"] if npu_tops > 0 else ["onnx"]
+        return ["rknn", "onnx"] if npu_tops > 0 or platform else ["onnx"]
     return None
+
+
+def rknn_platform(board: str | None) -> str | None:
+    """Normalise a board identifier to the RKNN target platform token the
+    registry's ``platform`` field uses (``rk3588`` | ``rk3576``), or ``None``
+    when the board has no RKNN NPU. A ``.rknn`` file built for one NPU
+    generation does not load on another; the RK3582 is a binned RK3588S and runs
+    RK3588 files. Accepts a platform token, a SoC string ("RK3588S2", "RK3582"),
+    a board slug ("rock-5c-lite") or a display name ("Radxa ROCK 5C"),
+    case-insensitively."""
+    b = (board or "").lower()
+    if "rk3576" in b:
+        return "rk3576"
+    if board_family(b) == "rk3588":
+        return "rk3588"
+    return None
+
+
+def variant_fits_platform(variant: dict[str, Any], platform: str | None) -> bool:
+    """Whether a registry variant can load on a board of RKNN ``platform``. Only
+    an ``rknn`` variant that names a ``platform`` is restricted: it loads only on
+    that platform (and never on a board with none). Every other variant fits."""
+    want = variant.get("platform")
+    if variant.get("runtime") != "rknn" or not want:
+        return True
+    return str(want).lower() == platform
 
 
 @runtime_checkable
@@ -182,7 +218,7 @@ def board_family(board_id: str | None) -> str:
         k in b
         for k in (
             "rk3588", "rk3582", "orange-pi-5", "orange pi 5", "orangepi5", "orangepi-5",
-            "rock-5c", "rock5c",
+            "rock-5c", "rock5c", "rock 5c",
         )
     ):
         return "rk3588"
