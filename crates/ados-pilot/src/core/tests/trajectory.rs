@@ -2,7 +2,7 @@
 //! finds blocked, in shadow beside the grid planner and flown under
 //! `pilot.planner = trajectory`.
 
-use ados_protocol::pilot::{AvoidState, Request};
+use ados_protocol::pilot::{AvoidMode, AvoidState, Request};
 
 use super::harness::World;
 use super::safety::wall_scan;
@@ -11,9 +11,10 @@ use crate::modes::copter;
 use crate::planner::{self, Outcome};
 
 /// A goto 20 m north with a 20 m wall 4 m ahead, fed for `ms`.
-fn goto_at_wall(planner: PlannerMode, ms: u64) -> World {
+fn goto_at_wall(planner: PlannerMode, avoid: AvoidMode, ms: u64) -> World {
     let mut w = World::new();
     w.p.settings.pilot.planner = planner;
+    w.p.settings.pilot.avoid = avoid;
     w.airborne(copter::GUIDED);
     w.req(Request::Goto {
         n: 20.0,
@@ -30,11 +31,11 @@ fn goto_at_wall(planner: PlannerMode, ms: u64) -> World {
 }
 
 /// The grid planner finds the wall blocks the goto (a goto has no detour
-/// spots); the trajectory planner in shadow finds the way round its end,
-/// and the goto follows that route instead of holding.
+/// spots); under avoid `bypass` the trajectory planner in shadow finds the
+/// way round its end, and the goto follows that route instead of holding.
 #[test]
 fn a_reactive_goto_behind_a_wall_follows_the_trajectory_route() {
-    let w = goto_at_wall(PlannerMode::Reactive, 1500);
+    let w = goto_at_wall(PlannerMode::Reactive, AvoidMode::Bypass, 1500);
     let s = w.p.state(w.now);
     assert_eq!(s.avoid_state, AvoidState::Detour, "{s:?}");
     assert_eq!(s.hold_reason, None);
@@ -50,6 +51,17 @@ fn a_reactive_goto_behind_a_wall_follows_the_trajectory_route() {
     let margin = w.p.margin();
     let carrot = planner::carrot(&w.p.obstacles.grid, &plan.path, margin, None);
     assert_eq!(plan.target, Some(carrot), "{plan:?}");
+}
+
+/// Under avoid `brake` the same goto stops and holds before the wall: no
+/// route round, no trajectory planner beside the grid planner.
+#[test]
+fn a_reactive_goto_behind_a_wall_holds_under_brake() {
+    let w = goto_at_wall(PlannerMode::Reactive, AvoidMode::Brake, 1500);
+    let s = w.p.state(w.now);
+    assert_eq!(s.avoid_state, AvoidState::Blocked, "{s:?}");
+    assert_eq!(s.hold_reason.as_deref(), Some("blocked"));
+    assert_eq!(w.p.trajectory_outcome(), None);
 }
 
 /// A skill goal behind the same wall: under `reactive` the trajectory
@@ -77,7 +89,7 @@ fn a_skill_goal_gets_the_trajectory_shadow_only_when_configured() {
 /// a committed plan round the wall, and publishes no shadow.
 #[test]
 fn a_trajectory_goto_behind_a_wall_flies_round_it() {
-    let w = goto_at_wall(PlannerMode::Trajectory, 1500);
+    let w = goto_at_wall(PlannerMode::Trajectory, AvoidMode::Brake, 1500);
     let s = w.p.state(w.now);
     assert_eq!(s.avoid_state, AvoidState::Detour, "{s:?}");
     assert_eq!(s.hold_reason, None);

@@ -173,6 +173,7 @@ const GROUND_FIELDS: &[(&str, Option<&[&str]>)] = &[
     ("mission_stall", None),
     ("place_class", None),
     ("route_check", None),
+    ("mission_detour", None),
     ("rc_receiver", None),
     ("link_loss_s", None),
     ("profile_limits", Some(&["profile", "v_h_mps", "margin_m"])),

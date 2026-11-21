@@ -46,6 +46,7 @@ fn returning() -> World {
     p.place_class = PlaceClass::Confined;
     p.prop_tip_radius_m = Some(0.20209);
     w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
+    w.p.fc.params.insert("AVOID_ENABLE".into(), 0.0);
     w.gps_fix = None;
     w.airborne(copter::LOITER);
     w.pos = [0.0, 0.0, -1.0];

@@ -63,12 +63,15 @@ fn position_item(fc: &FcState, now_ms: u64) -> Readiness {
 }
 
 /// Every readiness item for the current state, in a place of `place`, with
-/// the operator's RC declaration `rc`.
+/// the operator's RC declaration `rc` and the pilot's obstacle margin
+/// `margin_m` (the FC's proximity stop follows it).
+#[allow(clippy::too_many_arguments)]
 pub fn items(
     fc: &FcState,
     mode: ControlMode,
     place: PlaceClass,
     rc: RcReceiver,
+    margin_m: f32,
     controller_live: bool,
     sensors: &crate::sensor_readiness::SensorCtx,
     now_ms: u64,
@@ -107,7 +110,7 @@ pub fn items(
         )),
     }
     if let Some(fw) = fc.firmware {
-        out.push(profile_item(fc, fw, mode, place, rc));
+        out.push(profile_item(fc, fw, mode, place, rc, margin_m));
         if fw == Firmware::Ardupilot {
             out.push(crate::batt_failsafe::item_for(fc, mode, place));
             let p = |n: &str| fc.params.get(n).copied();
@@ -137,6 +140,7 @@ fn profile_item(
     mode: ControlMode,
     place: PlaceClass,
     rc: RcReceiver,
+    margin_m: f32,
 ) -> Readiness {
     let class = fc.vehicle_class();
     let mut missing = Vec::new();
@@ -145,7 +149,7 @@ fn profile_item(
     // value depends on the GNSS sources and the place class. The RC
     // failsafe and the fence follow the RC declaration. The rows the pilot
     // sets itself before the flight that needs them are not checked.
-    let rows = crate::no_rc::profile(fw, class, rc)
+    let rows = crate::no_rc::profile(fw, class, rc, margin_m)
         .filter(|r| !r.pilot_sets && !crate::batt_failsafe::ACTIONS.contains(&r.name));
     for row in rows {
         match check_row(&row, place, |n| fc.params.get(n).copied()) {

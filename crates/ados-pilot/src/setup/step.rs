@@ -27,6 +27,10 @@ pub struct PilotInputs {
     /// `pilot.rc_receiver`: with `absent` the `ados_profile` step writes the
     /// RC failsafe off and the FC fence ([`crate::no_rc::profile`]).
     pub rc_receiver: ados_protocol::pilot::RcReceiver,
+    /// The obstacle margin the pilot flies (`None`: the default's): the
+    /// `ados_profile` step writes the FC's proximity stop inside it
+    /// ([`crate::fc_profile::fc_avoid_margin_m`]).
+    pub obstacle_margin_m: Option<f32>,
     /// `pilot.supervised_liftoff`: an ArduPilot multirotor's take-off is the
     /// supervised lift-off, not the FC's own NAV_TAKEOFF.
     pub supervised_liftoff: bool,

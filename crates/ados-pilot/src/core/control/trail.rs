@@ -150,6 +150,7 @@ impl crate::core::Pilot {
         };
         let returning = matches!(self.fc.custom_mode, copter::RTL | copter::SMART_RTL)
             || self.sup.return_req.is_some()
+            || self.sup.routed.is_some()
             || self
                 .sup
                 .hold

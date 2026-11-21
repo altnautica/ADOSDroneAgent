@@ -29,13 +29,16 @@
 
 mod bench;
 mod fc;
+mod fc_avoid;
 mod forest;
 mod goto_wall;
 mod metrics;
+mod mission_route;
 #[path = "../pins/mod.rs"]
 mod pins;
 mod pos_reset;
 mod rng;
+mod rth_wall;
 mod scenarios;
 mod sensors;
 mod shaper_pins;
@@ -59,6 +62,11 @@ fn matrix(name: &str) {
     let mut sim_s = 0.0;
     for seed in SEEDS {
         let s = fly(seed);
+        // The FC's proximity backstop never acts while the pilot flies.
+        assert_eq!(
+            s.fc.prox.trips, 0,
+            "{name} s{seed}: the FC's avoidance acted"
+        );
         sim_s += s.sim_s();
     }
     let wall_s = wall.elapsed().as_secs_f64();

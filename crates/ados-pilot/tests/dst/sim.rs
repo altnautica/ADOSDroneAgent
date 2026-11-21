@@ -195,6 +195,11 @@ impl Sim {
         let now = self.now;
         let dt = TICK_MS as f32 / 1000.0;
         let taking_off = self.launch_taking_off();
+        // The FC's proximity backstop sees what the lidar sees (the trunks;
+        // Navigation streams them as OBSTACLE_DISTANCE).
+        if self.fc.prox.obstacles.len() != self.stand.len() {
+            self.fc.prox.obstacles = self.stand.clone();
+        }
         self.fc.step(now, dt, &mut self.rng, taking_off);
         for m in self.fc.frames(now, &mut self.rng) {
             self.p.on_fc(FC_SYS, FC_COMP, &m, now);

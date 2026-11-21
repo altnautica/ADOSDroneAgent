@@ -55,6 +55,7 @@ fn quad5_confined(w: &mut World) {
     p.place_class = PlaceClass::Confined;
     p.prop_tip_radius_m = Some(QUAD5_TIP_M);
     w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
+    w.p.fc.params.insert("AVOID_ENABLE".into(), 0.0);
     w.gps_fix = None;
     w.lidar = false;
 }

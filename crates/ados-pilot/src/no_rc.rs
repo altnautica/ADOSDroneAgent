@@ -11,13 +11,13 @@
 //! mode of its own. The fence sits 20 m outside the pilot's distance cap and
 //! 10 m above its height cap ([`crate::config::NO_RC_MAX_DIST_M`],
 //! [`crate::config::NO_RC_MAX_ALT_M`]), so it acts only when the pilot does
-//! not. Its avoidance stays off (`AVOID_ENABLE=0` in the profile): it never
-//! fights the pilot's setpoints.
+//! not. Its proximity avoidance is the same backstop with RC or without: a
+//! stop inside the pilot's margin ([`crate::fc_profile::fc_avoid_margin_m`]).
 
 use ados_protocol::pilot::{ControlMode, PlaceClass, RcReceiver, VehicleClass};
 
 use crate::config::{NO_RC_MAX_ALT_M, NO_RC_MAX_DIST_M};
-use crate::fc_profile::{fc_profile, p, Firmware, ProfileParam};
+use crate::fc_profile::{fc_profile, for_margin, p, Firmware, ProfileParam};
 
 /// The FC fence's circle radius from home with no RC transmitter, metres:
 /// the pilot's distance cap plus 20 m, which holds the pilot's stopping
@@ -46,13 +46,16 @@ const COPTER_FENCE: &[ProfileParam] = &[
     p("FENCE_ACTION", &[], 5.0),
 ];
 
-/// The FC profile for `fw`, `class` and the RC declaration: with `absent`,
-/// the RC failsafe off and the fence rows added (ArduCopter only; the
-/// declaration is refused elsewhere, see [`declare_refusal`]).
+/// The FC profile for `fw`, `class`, the RC declaration and the pilot's
+/// obstacle margin `margin_m` (the FC's proximity stop follows it:
+/// [`crate::fc_profile::for_margin`]): with `absent`, the RC failsafe off
+/// and the fence rows added (ArduCopter only; the declaration is refused
+/// elsewhere, see [`declare_refusal`]).
 pub fn profile(
     fw: Firmware,
     class: VehicleClass,
     rc: RcReceiver,
+    margin_m: f32,
 ) -> impl Iterator<Item = ProfileParam> {
     let copter = fw == Firmware::Ardupilot && class == VehicleClass::Multirotor;
     let no_rc = copter && !rc.is_present();
@@ -63,7 +66,7 @@ pub fn profile(
             if no_rc && r.name == FS_THR {
                 ProfileParam { value: 0.0, ..*r }
             } else {
-                *r
+                for_margin(*r, margin_m)
             }
         })
         .chain(fence.iter().copied())
@@ -84,7 +87,8 @@ pub fn declaration_rows(
     rc: RcReceiver,
     current: impl Fn(&str) -> Option<f32>,
 ) -> Vec<ProfileParam> {
-    let mut rows: Vec<ProfileParam> = profile(fw, class, rc)
+    // Only the RC and fence rows: the margin the avoidance row takes is moot.
+    let mut rows: Vec<ProfileParam> = profile(fw, class, rc, 0.0)
         .filter(|r| r.name == FS_THR || r.name.starts_with("FENCE_"))
         .collect();
     let copter = fw == Firmware::Ardupilot && class == VehicleClass::Multirotor;
@@ -137,7 +141,7 @@ mod tests {
     use crate::fc_profile::{check_row, RowCheck};
 
     fn copter(rc: RcReceiver) -> Vec<ProfileParam> {
-        profile(Firmware::Ardupilot, VehicleClass::Multirotor, rc).collect()
+        profile(Firmware::Ardupilot, VehicleClass::Multirotor, rc, 1.5).collect()
     }
 
     fn checks(rows: &[ProfileParam], params: &[(&str, f32)]) -> Vec<(&'static str, RowCheck)> {

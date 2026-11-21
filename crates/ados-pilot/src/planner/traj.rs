@@ -181,6 +181,11 @@ impl TrajPlanner {
         self.look
     }
 
+    /// How far the route held to `goal` still runs from `from`, m.
+    pub fn route_remaining_m(&self, from: V2, goal: V2) -> Option<f32> {
+        self.router.remaining_m(from, goal)
+    }
+
     /// Plan `g` over `obs`'s grid (rebuilt round the vehicle just before),
     /// with `vox` the live 3D voxel map and the flight height (local down)
     /// when a 3D tier's map is the obstacle source. A replan that finds no

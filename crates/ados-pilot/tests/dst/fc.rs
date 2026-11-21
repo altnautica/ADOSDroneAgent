@@ -66,7 +66,10 @@ pub fn params() -> BTreeMap<String, f32> {
         ("GUID_TIMEOUT", 1.0),
         ("RC_OVERRIDE_TIME", 1.0),
         ("OA_TYPE", 0.0),
-        ("AVOID_ENABLE", 0.0),
+        ("AVOID_ENABLE", 2.0),
+        ("AVOID_MARGIN", 1.0),
+        ("AVOID_BEHAVE", 1.0),
+        ("PRX1_TYPE", 2.0),
         ("SRTL_POINTS", 500.0),
         ("SRTL_ACCURACY", 2.0),
         ("GUID_OPTIONS", 0.0),
@@ -140,6 +143,8 @@ pub struct Fc {
     gust: [f32; 2],
     /// Per-run gust strength, m/s.
     gust_mps: f32,
+    /// The proximity avoidance backstop ([`crate::fc_avoid`]).
+    pub prox: crate::fc_avoid::Proximity,
     sp: Option<(u64, SET_POSITION_TARGET_LOCAL_NED_DATA)>,
     /// ArduCopter's GUIDED in the detail a position reset needs: a velocity
     /// target flies a position target integrated from it (stabilised, and
@@ -194,6 +199,7 @@ impl Fc {
             blocked_seq: None,
             gust: [0.0; 2],
             max_acc: None,
+            prox: Default::default(),
             gust_mps: rng.range(0.05, 0.25),
             sp: None,
             ap_guided: false,
@@ -649,6 +655,23 @@ impl Fc {
             want[1] * hs,
             want[2].clamp(-MAX_UP_MPS, MAX_DOWN_MPS),
         ];
+        // The proximity backstop, where ArduCopter applies it horizontally:
+        // LOITER, and GUIDED flying a velocity-only target
+        // (`ModeGuided::velaccel_control_run`); never a position target,
+        // AUTO or a return.
+        let vel_only = self
+            .sp
+            .as_ref()
+            .is_some_and(|(_, s)| s.type_mask.bits() & 0b111 == 0b111);
+        let avoids = self.mode == copter::LOITER || (self.mode == copter::GUIDED && vel_only);
+        let want = if avoids && !self.landed {
+            let t = self.truth();
+            let enable = self.param("AVOID_ENABLE", 0.0);
+            let margin = self.param("AVOID_MARGIN", 2.0);
+            self.prox.limit([t[0], t[1]], want, enable, margin)
+        } else {
+            want
+        };
         let k = (dt / VEL_TAU_S).min(1.0);
         let before = self.vel;
         for (v, w) in self.vel.iter_mut().zip(want) {

@@ -29,6 +29,32 @@ impl BatteryReserve {
     }
 }
 
+/// A return home the pilot flies itself (`return_route` on the state
+/// frame): the FC's return (SmartRTL, RTL) was stopped by an obstacle on
+/// its way, so the pilot holds GUIDED and flies its planner round it to
+/// home, where it lands. The low-battery reserve counts the planned way
+/// (`remaining_m`), not the straight line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ReturnRoute {
+    /// The planned way still to fly to home, horizontal m.
+    pub remaining_m: f32,
+    /// The straight line to home, horizontal m.
+    pub straight_m: f32,
+    /// Wall-clock epoch ms the pilot took the return over.
+    pub since_ms: u64,
+}
+
+impl ReturnRoute {
+    pub fn new(remaining_m: f32, straight_m: f32, since_ms: u64) -> Self {
+        Self {
+            remaining_m,
+            straight_m,
+            since_ms,
+        }
+    }
+}
+
 /// The leaves overhead along the way to the subject a skill's goal names
 /// (`overhead_ahead` on the state frame, while a lease goal names one; the
 /// plugin host passes it to the lease holder as the `flight.overhead`

@@ -45,7 +45,10 @@ impl Pilot {
                 self.owner(),
                 Owner::Pilot | Owner::Skill | Owner::Goto | Owner::Swarm
             );
-            airborne && flying && self.failsafe.link_lost(now_ms, window)
+            airborne
+                && flying
+                && self.sup.routed.is_none()
+                && self.failsafe.link_lost(now_ms, window)
         } else {
             // No RC transmitter: every airborne owner, each operator
             // instance on its own, except while the FC returns or lands or
@@ -60,14 +63,14 @@ impl Pilot {
         }
     }
 
-    /// The FC flies a failsafe of its own, or a return or a landing: with no
-    /// RC transmitter, link loss leaves it alone (a critical-battery Land is
-    /// never turned into a return), and no skill takes the vehicle back from
-    /// it.
+    /// The FC flies a failsafe of its own, or a return or a landing, or the
+    /// pilot routes a blocked return home: with no RC transmitter, link loss
+    /// leaves it alone (a critical-battery Land is never turned into a
+    /// return), and no skill takes the vehicle back from it.
     pub(in crate::core) fn fc_returns_or_lands(&self) -> bool {
         let fam = self.family();
         let mode = self.fc.custom_mode;
-        self.fc_failsafe || fam.is_rtl(mode) || fam.is_land(mode)
+        self.fc_failsafe || fam.is_rtl(mode) || fam.is_land(mode) || self.sup.routed.is_some()
     }
 
     fn link_loss_action(&mut self, now_ms: u64) {
@@ -159,6 +162,7 @@ impl Pilot {
         if (!counting && pct > low_pct && !short)
             || self.low_batt_cancelled
             || matches!(self.owner(), Owner::FcMode)
+            || self.sup.routed.is_some()
         {
             return;
         }

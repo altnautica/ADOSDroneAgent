@@ -87,6 +87,60 @@ pub const OPEN_INPUT_TC_S: (f32, f32) = (0.15, 0.2);
 /// SmartRTL, so its FC-side return lands in place.
 pub const CONFINED_SRTL_ACCURACY_MAX_M: f32 = 2.0 * CONFINED_TIP_EXTRA_M;
 
+/// The FC's proximity stop sits this much inside the pilot's obstacle
+/// margin, metres: the pilot's brake stops first, the FC's only when the
+/// pilot has not.
+pub const FC_AVOID_INSIDE_M: f32 = 0.7;
+/// `AVOID_MARGIN`'s documented minimum, metres (`AC_Avoid`: range 1-10).
+pub const FC_AVOID_MIN_M: f32 = 1.0;
+/// The least gap between the pilot's margin and the FC's stop, metres:
+/// a pilot margin under [`FC_AVOID_MIN_M`] plus this leaves no room for
+/// the FC's stop inside it, so its proximity avoidance is off.
+pub const FC_AVOID_GAP_MIN_M: f32 = 0.3;
+/// The row whose value follows the pilot's margin ([`fc_avoid_margin_m`]).
+pub const AVOID_MARGIN: &str = "AVOID_MARGIN";
+/// The row that turns the FC's proximity avoidance on (bit 1).
+pub const AVOID_ENABLE: &str = "AVOID_ENABLE";
+/// `AVOID_ENABLE` with proximity only.
+const AVOID_PROXIMITY: f32 = 2.0;
+
+/// `AVOID_MARGIN` for a pilot obstacle margin of `pilot_margin_m`:
+/// [`FC_AVOID_INSIDE_M`] inside it, at least [`FC_AVOID_MIN_M`]; `None`
+/// when that is not [`FC_AVOID_GAP_MIN_M`] inside it (a confined place's
+/// margin from the propeller tips): the FC's stop would act before the
+/// pilot's brake, so the backstop is off.
+pub fn fc_avoid_margin_m(pilot_margin_m: f32) -> Option<f32> {
+    let m = (pilot_margin_m - FC_AVOID_INSIDE_M).max(FC_AVOID_MIN_M);
+    (pilot_margin_m - m >= FC_AVOID_GAP_MIN_M - 1e-4).then_some(m)
+}
+
+/// `row` as the pilot flying with margin `pilot_margin_m` wants it:
+/// `AVOID_ENABLE` proximity only and [`AVOID_MARGIN`] at
+/// [`fc_avoid_margin_m`] while the FC's stop fits inside the pilot's
+/// margin; else `AVOID_ENABLE` 0 and any documented `AVOID_MARGIN`. Every
+/// other row is unchanged.
+pub fn for_margin(row: ProfileParam, pilot_margin_m: f32) -> ProfileParam {
+    let fc = fc_avoid_margin_m(pilot_margin_m);
+    match (row.name, fc) {
+        // Rounded to the centimetre the FC stores.
+        (AVOID_MARGIN, Some(m)) => ProfileParam {
+            value: (m * 100.0).round() / 100.0,
+            ..row
+        },
+        (AVOID_MARGIN, None) => ProfileParam {
+            value: FC_AVOID_MIN_M,
+            open_band: Some((FC_AVOID_MIN_M, 10.0)),
+            ..row
+        },
+        (AVOID_ENABLE, Some(_)) => ProfileParam {
+            value: AVOID_PROXIMITY,
+            ..row
+        },
+        (AVOID_ENABLE, None) => ProfileParam { value: 0.0, ..row },
+        _ => row,
+    }
+}
+
 pub(crate) const fn p(
     name: &'static str,
     alt_names: &'static [&'static str],
@@ -211,10 +265,14 @@ impl fmt::Display for Want {
 }
 
 /// ArduCopter. The pilot does its own obstacle avoidance, so the FC's path
-/// planner (`OA_TYPE`) and its fence and proximity avoidance (`AVOID_ENABLE`)
-/// stay off: they would fight the pilot's setpoints. Every FC-side return is
-/// SmartRTL with a Land fallback, back along the flown path, never a straight
-/// line through what the pilot flew around.
+/// planner (`OA_TYPE`) and its fence avoidance stay off: they would fight
+/// the pilot's setpoints. Its proximity avoidance is on as a backstop under
+/// the pilot's brake (`AVOID_ENABLE` 2, stop at `AVOID_MARGIN`, inside the
+/// pilot's margin: [`fc_avoid_margin_m`]), so a pilot that stopped acting
+/// still leaves the vehicle stopping short of what Navigation's
+/// `OBSTACLE_DISTANCE` shows. Every FC-side return is SmartRTL with a Land
+/// fallback, back along the flown path, never a straight line through what
+/// the pilot flew around.
 const COPTER: &[ProfileParam] = &[
     p("MAV_GCS_SYSID", &["SYSID_MYGCS"], 1.0),
     // 4: SmartRTL or Land.
@@ -227,7 +285,15 @@ const COPTER: &[ProfileParam] = &[
     p("BATT_FS_LOW_ACT", &[], 2.0),
     p("BATT_FS_CRT_ACT", &[], 1.0),
     p("OA_TYPE", &[], 0.0).reboots(),
-    p("AVOID_ENABLE", &[], 0.0),
+    // 2: proximity only; 1: stop, never slide. The values here are the
+    // default margin's; the profile takes the flown one (for_margin), and
+    // a margin too small for the FC's stop inside it turns it off.
+    p(AVOID_ENABLE, &[], AVOID_PROXIMITY),
+    p(AVOID_MARGIN, &[], 1.0),
+    p("AVOID_BEHAVE", &[], 1.0),
+    // 2: MAVLink: the proximity library reads Navigation's
+    // OBSTACLE_DISTANCE (PRX_TYPE before ArduPilot 4.3).
+    p("PRX1_TYPE", &["PRX_TYPE"], 2.0).reboots(),
     p("SRTL_POINTS", &[], 500.0)
         .reboots()
         .absent_blocks("SmartRTL not in this firmware: no return along the flown path"),
@@ -477,5 +543,78 @@ mod tests {
             }
         );
         assert_eq!(Want::Bits(8).to_string(), "bits 8 set");
+    }
+}
+
+#[cfg(test)]
+mod backstop_tests {
+    use super::*;
+
+    fn copter_row(name: &str) -> ProfileParam {
+        *fc_profile(Firmware::Ardupilot, VehicleClass::Multirotor)
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_fc_proximity_stop_is_a_backstop_inside_the_pilot_margin() {
+        assert_eq!(copter_row("AVOID_ENABLE").value, 2.0, "proximity only");
+        assert_eq!(copter_row("AVOID_BEHAVE").value, 1.0, "stop");
+        assert_eq!(copter_row("OA_TYPE").value, 0.0, "no FC path planner");
+        let prx = copter_row("PRX1_TYPE");
+        assert_eq!(
+            (prx.value, prx.alt_names, prx.reboot),
+            (2.0, &["PRX_TYPE"][..], true)
+        );
+        // The table's values are the default margin's.
+        let open = crate::config::PilotSection::default().effective_margin_m();
+        assert_eq!(
+            fc_avoid_margin_m(open),
+            Some(copter_row(AVOID_MARGIN).value)
+        );
+        // 0.7 m inside the pilot's margin, never under the documented 1 m,
+        // and always at least 0.3 m inside it: else the backstop is off.
+        for (pilot, fc) in [(1.5, Some(1.0)), (2.0, Some(1.3)), (1.3, Some(1.0))] {
+            assert_eq!(
+                fc_avoid_margin_m(pilot).map(|m| (m * 100.0).round()),
+                fc.map(|m: f32| (m * 100.0).round()),
+                "{pilot}"
+            );
+            let row = for_margin(copter_row(AVOID_MARGIN), pilot);
+            assert!(row.value < pilot - 0.29, "{pilot}: {}", row.value);
+            assert_eq!(for_margin(copter_row(AVOID_ENABLE), pilot).value, 2.0);
+        }
+        // A confined margin (tips + 0.1 m) or a small open one: off.
+        for pilot in [0.48, 0.5, 1.0, 1.25] {
+            assert_eq!(fc_avoid_margin_m(pilot), None, "{pilot}");
+            assert_eq!(for_margin(copter_row(AVOID_ENABLE), pilot).value, 0.0);
+            let m = for_margin(copter_row(AVOID_MARGIN), pilot);
+            assert_eq!(
+                check_row(&m, PlaceClass::Confined, |_| Some(2.0)),
+                RowCheck::Ok
+            );
+        }
+        // Other rows keep their value.
+        let guid = copter_row("GUID_TIMEOUT");
+        assert_eq!(for_margin(guid, 3.0), guid);
+        // The declared profile carries the flown margin's value.
+        let rows: Vec<_> = crate::no_rc::profile(
+            Firmware::Ardupilot,
+            VehicleClass::Multirotor,
+            ados_protocol::pilot::RcReceiver::Present,
+            2.5,
+        )
+        .collect();
+        let m = rows.iter().find(|r| r.name == AVOID_MARGIN).unwrap();
+        assert!((m.value - 1.8).abs() < 1e-4);
+        assert_eq!(
+            check_row(m, PlaceClass::Open, |_| Some(0.8)),
+            RowCheck::Mismatch {
+                name: AVOID_MARGIN,
+                have: 0.8,
+                want: Want::Exactly(1.8)
+            }
+        );
     }
 }

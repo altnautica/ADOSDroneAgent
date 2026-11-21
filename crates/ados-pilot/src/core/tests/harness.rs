@@ -126,7 +126,10 @@ impl World {
             ("BATT_FS_LOW_ACT", 2.0),
             ("BATT_FS_CRT_ACT", 1.0),
             ("OA_TYPE", 0.0),
-            ("AVOID_ENABLE", 0.0),
+            ("AVOID_ENABLE", 2.0),
+            ("AVOID_MARGIN", 1.0),
+            ("AVOID_BEHAVE", 1.0),
+            ("PRX1_TYPE", 2.0),
             ("SRTL_POINTS", 500.0),
             ("SRTL_ACCURACY", 2.0),
             // ArduPilot defaults: the supervised lift-off sets its bits.

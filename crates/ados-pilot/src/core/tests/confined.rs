@@ -95,6 +95,8 @@ pub(super) fn confined(w: &mut World) {
     p.place_class = PlaceClass::Confined;
     p.prop_tip_radius_m = Some(TIP_M);
     w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
+    // The confined margin leaves no room for the FC's stop inside it: off.
+    w.p.fc.params.insert("AVOID_ENABLE".into(), 0.0);
     w.scan_ranges = wall(270, 8.0);
 }
 
@@ -554,7 +556,7 @@ fn the_fc_mission_is_slowed_near_a_wall_and_restored_clear_of_it() {
 fn an_open_place_flies_as_before() {
     // The same flights in an open place, with and without the confined
     // settings filled in, send the same frames and publish no confined
-    // state.
+    // state; the route check is published in every place.
     let fly = |radius: Option<f32>| {
         let mut w = World::new();
         w.p.settings.pilot.prop_tip_radius_m = radius;
@@ -581,10 +583,8 @@ fn an_open_place_flies_as_before() {
     assert_eq!(w.sent, w2.sent);
     assert!(speed_changes(&w).is_empty());
     assert_eq!(w.set_modes(copter::BRAKE), 0);
-    assert!(
-        v.get("place_class").is_none() && v.get("route_check").is_none(),
-        "{v}"
-    );
+    assert!(v.get("place_class").is_none(), "{v}");
+    assert!(v.get("route_check").is_some(), "{v}");
     assert!(v.get("speed_cap").is_none(), "{v}");
 }
 

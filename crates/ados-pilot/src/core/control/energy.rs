@@ -3,7 +3,8 @@
 //! is long.
 //!
 //! The time home is the flown path back (loops pruned, as SmartRTL prunes
-//! them: [`super::trail::Trail::return_len_m`]) plus the way the vehicle
+//! them: [`super::trail::Trail::return_len_m`]; the planned way while the
+//! pilot routes a blocked return itself) plus the way the vehicle
 //! still flies on through the countdown, at the speed SmartRTL retraces it
 //! ([`v_ret_mps`]), the descent at the FC's descent speed down to
 //! `LAND_ALT_LOW`, the rest at its landing speed, the countdown and a few
@@ -223,7 +224,7 @@ impl Pilot {
         let p = &self.fc.params;
         let get = |n: &str| p.get(n).copied().filter(|v| *v > 0.0);
         let home = self.fc.home_ne();
-        let back_m = local.map_or(0.0, |l| self.sup.trail.return_len_m([l.n, l.e], home));
+        let back_m = local.map_or(0.0, |l| self.return_way_m([l.n, l.e], home));
         let wp_mps = self.default_wp_speed().unwrap_or(V_RET_DEFAULT_MPS);
         let way = Way {
             len_m: back_m + v_now * countdown_s,

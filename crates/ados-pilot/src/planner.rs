@@ -29,6 +29,7 @@ pub use commit::{
 };
 use keepout::Bars;
 pub use keepout::Keepout;
+pub use route_goal::{Router, ROUTE_REACH_M};
 pub use traj::{Outcome, TrajGoal, TrajPlanner, TRAJ_PERIOD_MS, TRAJ_ROOM_M};
 
 /// Expansion budget per search.

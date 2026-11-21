@@ -28,6 +28,7 @@ mod pins;
 mod pos_reset;
 mod position_check;
 mod route_hold;
+mod route_home;
 mod route_sigma;
 mod rules;
 mod safety;

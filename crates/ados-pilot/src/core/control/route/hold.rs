@@ -13,7 +13,7 @@ use super::{
 };
 use crate::flows::banner;
 use crate::geo::{self, V2};
-use ados_protocol::pilot::Owner;
+use ados_protocol::pilot::{AvoidMode, Owner};
 
 /// How far a vehicle at `v` m/s flies before a hold that waited stopped it:
 /// for [`ROUTE_HOLD_CONFIRM_MS`] (as long as a pinch can wait for the next
@@ -78,9 +78,15 @@ impl Pilot {
     /// vehicle and asks the operator (the stall flow) once every check has
     /// read it for [`ROUTE_HOLD_CONFIRM_MS`], or at once when the vehicle
     /// could reach where the leg turns tight before a hold that waited
-    /// stopped it.
+    /// stopped it. In a confined place always; in an open one under avoid
+    /// `bypass`, where the detour round the leg follows the hold
+    /// ([`super::detour`]).
     pub(in crate::core) fn route_hold(&mut self, now_ms: u64) {
-        if !self.confined() || !self.mission_flying() || self.owner() != Owner::MissionFc {
+        let bypass = self.settings.pilot.avoid == AvoidMode::Bypass;
+        if !(self.confined() || bypass)
+            || !self.mission_flying()
+            || self.owner() != Owner::MissionFc
+        {
             return;
         }
         let Some(leg) = self.route.infeasible().copied() else {

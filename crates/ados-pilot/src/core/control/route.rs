@@ -1,6 +1,8 @@
-//! The confined-place profile: the route check of the FC mission against the
-//! live occupancy, the hold before an infeasible leg, and the 0.5 m/s cap near
-//! the clearance limit ([`cap`]). Nothing here acts in an `open` place.
+//! The route check of the FC mission against the live occupancy, in every
+//! place class; in a confined place also the 0.5 m/s cap near the clearance
+//! limit ([`cap`]) and the launch refusal. The hold before an infeasible leg
+//! acts in a confined place, and in an open one under avoid `bypass`, where
+//! the detour round the leg follows it ([`detour`]).
 //!
 //! The route is the router's mirrored navigation items in the FC's local NED
 //! frame, cut into the legs the FC flies ([`legs::legs_of`]): between
@@ -47,6 +49,7 @@
 
 mod cap;
 mod clearance;
+mod detour;
 mod hold;
 mod launch;
 mod legs;
@@ -148,6 +151,13 @@ pub struct Route {
     pub cap_mps: f32,
     /// The FC flight the cap slowed.
     pub fc_slowed: Option<Slowed>,
+    /// The detour round a blocked mission leg in flight.
+    pub detour: Option<detour::Detour>,
+    /// What was tried for a blocked leg: its item, the detours flown, the
+    /// last proof.
+    tries: detour::Tries,
+    /// The route search that proves a waypoint unreachable.
+    prover: crate::planner::Router,
 }
 
 impl Route {
@@ -372,26 +382,16 @@ impl Pilot {
         }
     }
 
-    /// Every tick before the supervisor: re-check the route when due, and
-    /// work out the cap.
+    /// Every tick before the supervisor: re-check the route when due (in
+    /// every place class), and in a confined place work out the cap.
     pub(super) fn confined_tick(&mut self, now_ms: u64) {
-        if !self.confined() {
-            if self.route.fc_slowed.is_some()
-                || self.route.cap.is_some()
-                || !self.route.legs.is_empty()
-            {
-                self.release_fc_speed();
-                self.route.legs.clear();
-                self.route.unchecked.clear();
-                self.route.near = false;
-                self.route.cap = None;
-                self.route.logged = None;
-            }
-            self.route.origin = None;
-            self.route.flown = None;
-            self.route.infeasible_since = None;
-            self.route.clear_since = None;
-            return;
+        let confined = self.confined();
+        if !confined
+            && (self.route.fc_slowed.is_some() || self.route.cap.is_some() || self.route.near)
+        {
+            self.release_fc_speed();
+            self.route.near = false;
+            self.route.cap = None;
         }
         // The origin served its item once the FC moved past it.
         let seq = self.mission_seq();
@@ -433,17 +433,15 @@ impl Pilot {
         } else {
             self.note_sigma();
         }
-        self.update_cap(now_ms);
+        if confined {
+            self.update_cap(now_ms);
+        }
     }
 
-    /// The `route_check` of the published state: only in a confined place
-    /// with a mission route.
+    /// The `route_check` of the published state: with a mission route, in
+    /// every place class.
     pub(in crate::core) fn route_check_wire(&self) -> Option<RouteCheck> {
-        if self.confined() {
-            self.route.wire()
-        } else {
-            None
-        }
+        self.route.wire()
     }
 
     /// Set the FC's current mission item (the command form also answers

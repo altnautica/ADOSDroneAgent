@@ -19,6 +19,7 @@ impl Pilot {
             self.control_mode(),
             self.settings.pilot.place_class,
             self.settings.pilot.rc_receiver,
+            self.settings.pilot.effective_margin_m(),
             self.sessions.owner.is_some(),
             &sensors,
             now_ms,

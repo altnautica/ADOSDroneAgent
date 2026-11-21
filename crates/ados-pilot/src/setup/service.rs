@@ -106,6 +106,8 @@ async fn run(
                         .collect(),
                     place_class: status.place_class,
                     rc_receiver: status.rc_receiver,
+                    // 0 until the pilot's first state: the default margin.
+                    obstacle_margin_m: Some(status.obstacle_margin_m).filter(|m| *m > 0.0),
                     supervised_liftoff: status.supervised_liftoff,
                     liftoff_trim: status.liftoff_trim,
                     liftoff_hover: status.liftoff_hover,

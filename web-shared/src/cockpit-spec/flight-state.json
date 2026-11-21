@@ -120,6 +120,11 @@
     "avoidance": {
       "values": ["brake", "bypass", "off"],
       "labels": ["Brake", "Bypass", "Off"],
+      "explain": {
+        "brake": "Stop and hold at obstacles",
+        "bypass": "Route round obstacles",
+        "off": "No obstacle avoidance"
+      },
       "confirm_off": { "kind": "hold", "ms": 1500 }
     },
     "hand_to_fc": {

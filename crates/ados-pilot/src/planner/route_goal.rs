@@ -28,6 +28,9 @@ struct Tiles<'a> {
     need_m: f32,
     /// The vehicle: the tiles it may be leaving are passable.
     from: V2,
+    /// A goal whose own tiles are judged as the vehicle's are (a route
+    /// proof's), if any.
+    to: Option<V2>,
 }
 
 impl TileGrid for Tiles<'_> {
@@ -48,7 +51,8 @@ impl TileGrid for Tiles<'_> {
         // Never under a tile: a thin wall between two tile centres would
         // let the route through it. Round the vehicle only a wall's own
         // tile is blocked, so a vehicle inside the clearance can leave.
-        let need = if geo::dist(c, self.from) <= self.need_m + TILE_M {
+        let end = |p: V2| geo::dist(c, p) <= self.need_m + TILE_M;
+        let need = if end(self.from) || self.to.is_some_and(end) {
             0.5 * TILE_M
         } else {
             self.need_m.max(TILE_M)
@@ -100,6 +104,7 @@ impl Router {
             n,
             need_m,
             from,
+            to: None,
         };
         let held = self.held.as_ref().filter(|(r, g)| {
             geo::dist(*g, goal) < REROUTE_GOAL_M && !needs_replan(r, &tiles, now_ms)
@@ -120,10 +125,58 @@ impl Router {
         let (route, _) = self.held.as_ref().ok_or(PlanError::NoPath)?;
         Ok(along_from(&route.path, from, LOCAL_GOAL_M))
     }
+
+    /// How far the held route to `goal` still runs from `from`: from
+    /// `from` to its nearest point, along it, then on to `goal` (a route
+    /// held a tile short of a goal beyond the reach); `None` without a
+    /// route to `goal`.
+    pub fn remaining_m(&self, from: V2, goal: V2) -> Option<f32> {
+        let (route, _) = self
+            .held
+            .as_ref()
+            .filter(|(_, g)| geo::dist(*g, goal) < REROUTE_GOAL_M)?;
+        let rest = rest_from(&route.path, from)?;
+        let along: f32 = rest.windows(2).map(|w| geo::dist(w[0], w[1])).sum();
+        let end = *rest.last()?;
+        Some(geo::dist(from, rest[0]) + along + geo::dist(end, goal))
+    }
+
+    /// Whether any route joins `from` to `goal` through tiles keeping
+    /// `need_m` (unknown tiles passable at a cost; the tiles round both ends
+    /// judged as the vehicle's are): `Some(true)` a route, `Some(false)` the
+    /// search ended without one (a proof), `None` nothing proven (a goal
+    /// beyond [`ROUTE_REACH_M`], or a search out of budget). The held
+    /// route is untouched.
+    pub fn connects(
+        &mut self,
+        grid: &Grid,
+        from: V2,
+        goal: V2,
+        need_m: f32,
+        now_ms: u64,
+    ) -> Option<bool> {
+        if geo::dist(from, goal) > ROUTE_REACH_M - TILE_M {
+            return None;
+        }
+        let tiles = Tiles {
+            grid,
+            origin: [from[0] - ROUTE_REACH_M, from[1] - ROUTE_REACH_M],
+            n: (2.0 * ROUTE_REACH_M / TILE_M) as u32,
+            need_m,
+            from,
+            to: Some(goal),
+        };
+        match self.router.route(&tiles, from, goal, now_ms) {
+            Ok(_) => Some(true),
+            Err(PlanError::NoPath) => Some(false),
+            Err(_) => None,
+        }
+    }
 }
 
-/// The point `dist` along `path` past the point of it nearest `from`.
-fn along_from(path: &[V2], from: V2, dist: f32) -> V2 {
+/// `path` on from its point nearest `from` (that point first); `None` for
+/// a path of fewer than two points.
+fn rest_from(path: &[V2], from: V2) -> Option<Vec<V2>> {
     let mut best = (f32::INFINITY, 0usize, 0.0f32);
     for (k, w) in path.windows(2).enumerate() {
         let ab = geo::sub(w[1], w[0]);
@@ -139,13 +192,19 @@ fn along_from(path: &[V2], from: V2, dist: f32) -> V2 {
         }
     }
     let (_, k, t) = best;
-    let Some(w) = path.get(k..k + 2) else {
-        return *path.last().unwrap_or(&from);
-    };
+    let w = path.get(k..k + 2)?;
     let start = geo::add(w[0], geo::scale(geo::sub(w[1], w[0]), t));
     let mut rest = vec![start];
     rest.extend_from_slice(&path[k + 1..]);
-    super::along(&rest, dist)
+    Some(rest)
+}
+
+/// The point `dist` along `path` past the point of it nearest `from`.
+fn along_from(path: &[V2], from: V2, dist: f32) -> V2 {
+    match rest_from(path, from) {
+        Some(rest) => super::along(&rest, dist),
+        None => *path.last().unwrap_or(&from),
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +243,39 @@ mod tests {
             r.local_goal(&grid, [0.0, 0.0], [9.0, 0.0], 0.5, 0),
             Err(PlanError::NoPath)
         );
+    }
+
+    #[test]
+    fn a_route_proof_finds_the_way_round_a_wall_and_proves_an_enclosed_goal() {
+        let mut grid = Grid::default();
+        grid.reset([0.0, 0.0]);
+        for k in 0..80 {
+            grid.mark([6.0, -10.0 + k as f32 * 0.25]);
+        }
+        grid.transform();
+        let mut r = Router::new();
+        // A goal against the wall's far side is still joined.
+        assert_eq!(
+            r.connects(&grid, [0.0, 0.0], [7.0, 0.0], 1.0, 0),
+            Some(true)
+        );
+        // Beyond the reach nothing is proven.
+        assert_eq!(r.connects(&grid, [0.0, 0.0], [250.0, 0.0], 1.0, 0), None);
+        let mut grid = Grid::default();
+        grid.reset([0.0, 0.0]);
+        for k in 0..=24 {
+            let s = -3.0 + k as f32 * 0.25;
+            for q in [[6.0, s], [12.0, s], [9.0 + s, -3.0], [9.0 + s, 3.0]] {
+                grid.mark(q);
+            }
+        }
+        grid.transform();
+        assert_eq!(
+            r.connects(&grid, [0.0, 0.0], [9.0, 0.0], 1.0, 0),
+            Some(false)
+        );
+        // The held route is untouched by a proof.
+        assert!(r.held.is_none());
     }
 
     #[test]

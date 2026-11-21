@@ -42,7 +42,15 @@ impl Pilot {
                 .map(|s| s.label.to_uppercase())
                 .unwrap_or_else(|| "SKILL".into()),
             Owner::Goto => match (self.goto, self.pos_ne(now_ms)) {
-                (Some(g), Some(p)) => format!("GOTO · {:.0} m", crate::geo::dist(p, [g[0], g[1]])),
+                (Some(g), Some(p)) => format!(
+                    "{} · {:.0} m",
+                    if self.route.detour.is_some() {
+                        "DETOUR"
+                    } else {
+                        "GOTO"
+                    },
+                    crate::geo::dist(p, [g[0], g[1]])
+                ),
                 _ => "GOTO".into(),
             },
             Owner::Swarm => "SWARM".into(),
@@ -198,6 +206,7 @@ impl Pilot {
         s.mission_stall = self.mission_stall_wire(now_ms);
         s.place_class = self.settings.pilot.place_class;
         s.route_check = self.route_check_wire();
+        s.mission_detour = self.mission_detour_wire();
         // The pilot flies a surface's point only while it owns motion; in
         // `fc_manual` / `elrs` a surface uses the FC's reposition instead.
         if self.control_mode() == ados_protocol::pilot::ControlMode::Ados {
@@ -226,6 +235,7 @@ impl Pilot {
         s.position_unverified = self.position_unverified(now_ms);
         s.low_battery_action = self.low_batt_action.map(str::to_owned);
         s.battery_reserve = self.sup.energy.reserve.map(|r| r.wire());
+        s.return_route = self.return_route_wire();
         s.overhead_ahead = self.overhead_ahead(now_ms);
         if owner == Owner::Tuning {
             s.setup_step = self.setup_step.map(str::to_owned);

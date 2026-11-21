@@ -306,6 +306,7 @@ impl Core {
                             link_lost: self.pilot.link_lost(t),
                             place_class: s.place_class,
                             rc_receiver: self.pilot.rc_receiver(),
+                            obstacle_margin_m: self.pilot.settings.pilot.effective_margin_m(),
                             supervised_liftoff: self.pilot.settings.pilot.supervised_liftoff,
                             liftoff_trim: self.pilot.airframe.trim(),
                             liftoff_hover: self.pilot.liftoff_hover(),

@@ -68,7 +68,20 @@ pub struct Pinch {
     pub required_m: f64,
 }
 
-/// The route check of the FC mission in a confined place.
+/// A detour round a blocked mission leg: the FC is in GUIDED and the pilot
+/// flies its planner to a free point of the leg, then puts the FC back in
+/// AUTO at the item (avoid mode `bypass`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MissionDetour {
+    /// The mission item the detour resumes at.
+    pub seq: u32,
+    /// Where the detour goes: the leg's next free point, local NED, metres.
+    pub target_ned: [f64; 3],
+    /// Wall-clock epoch ms the detour began.
+    pub since_ms: u64,
+}
+
+/// The route check of the FC mission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteCheck {
     pub state: RouteState,

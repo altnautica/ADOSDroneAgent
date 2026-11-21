@@ -289,7 +289,7 @@ impl Pilot {
         self.banner = Some(banner(key, &[("wp", wp_arg(a.seq))], now_ms));
     }
 
-    fn raise_stall(
+    pub(super) fn raise_stall(
         &mut self,
         kind: Kind,
         seq: Option<u32>,
@@ -379,28 +379,50 @@ impl Pilot {
         else {
             return Err("no_stall".into());
         };
-        let total = self.mission.as_ref().and_then(|m| m.total);
         let by = if by_operator { "operator" } else { "timeout" };
+        self.skip_item(
+            seq,
+            by,
+            format!("stall_{by}"),
+            "pilot.banner.mission_wp_skipped",
+            now_ms,
+        );
+        Ok(())
+    }
+
+    /// Skip item `seq` (`by` the operator, the countdown, or a proof that
+    /// it is unreachable), recorded as a coverage gap with `reason` and
+    /// announced with the banner `key`; only the operator's skip resets the
+    /// automatic-skip count. The rest as [`Self::mission_skip`].
+    pub(super) fn skip_item(
+        &mut self,
+        seq: u32,
+        by: &'static str,
+        reason: String,
+        key: &'static str,
+        now_ms: u64,
+    ) {
+        let total = self.mission.as_ref().and_then(|m| m.total);
         let st = &mut self.sup.stall;
         st.gaps.push(MissionGap {
             seq,
-            reason: format!("stall_{by}"),
+            reason,
             at_ms: now_ms + self.epoch_offset_ms,
         });
-        st.auto_skips = if by_operator { 0 } else { st.auto_skips + 1 };
+        st.auto_skips = if by == "operator" {
+            0
+        } else {
+            st.auto_skips + 1
+        };
         st.active = None;
         tracing::info!(target: "ados_pilot", seq, by, "pilot_mission_skip");
         let next = seq + 1;
-        self.banner = Some(banner(
-            "pilot.banner.mission_wp_skipped",
-            &[("wp", wp_arg(Some(seq)))],
-            now_ms,
-        ));
+        self.banner = Some(banner(key, &[("wp", wp_arg(Some(seq)))], now_ms));
         if total.is_some_and(|t| next >= t) {
             self.revoke("rth");
             self.command_return("mission_end", now_ms);
             self.set_owner(Owner::FcMode, "rth");
-            return Ok(());
+            return;
         }
         self.set_mission_current(next);
         self.sup.stall.skip_to = Some(next);
@@ -424,17 +446,16 @@ impl Pilot {
                 return_ms,
             });
             tracing::warn!(target: "ados_pilot", seq = next, "pilot_mission_skip_held");
-            return Ok(());
+            return;
         }
         if !self.confined_auto_clear(next, now_ms) {
             self.hold_route_infeasible(Some(next), now_ms);
-            return Ok(());
+            return;
         }
         self.end_supervision();
         let auto = self.family().auto();
         self.set_mode(auto, now_ms);
         self.set_owner(Owner::MissionFc, "mission_skip");
         self.mission_paused = false;
-        Ok(())
     }
 }

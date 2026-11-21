@@ -11,6 +11,9 @@ pub struct SetupView {
     pub place_class: ados_protocol::pilot::PlaceClass,
     /// `pilot.rc_receiver`: the `ados_profile` step writes its values.
     pub rc_receiver: ados_protocol::pilot::RcReceiver,
+    /// The obstacle margin the pilot flies: the `ados_profile` step writes
+    /// the FC's proximity stop inside it.
+    pub obstacle_margin_m: f32,
     /// `pilot.supervised_liftoff`.
     pub supervised_liftoff: bool,
     /// The airframe's learned trim for the connected FC.

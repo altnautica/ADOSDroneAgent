@@ -52,6 +52,7 @@ fn all(fc: &FcState, mode: ControlMode) -> Vec<Readiness> {
         mode,
         PlaceClass::Open,
         RcReceiver::Present,
+        1.5,
         false,
         &ctx,
         2,
@@ -103,7 +104,10 @@ const PROFILE_REST: &[(&str, f32)] = &[
     ("GUID_TIMEOUT", 1.0),
     ("RC_OVERRIDE_TIME", 1.0),
     ("OA_TYPE", 0.0),
-    ("AVOID_ENABLE", 0.0),
+    ("AVOID_ENABLE", 2.0),
+    ("AVOID_MARGIN", 1.0),
+    ("AVOID_BEHAVE", 1.0),
+    ("PRX1_TYPE", 2.0),
     ("SRTL_POINTS", 500.0),
     ("SRTL_ACCURACY", 2.0),
 ];
@@ -349,6 +353,7 @@ fn profile_in(fc: &FcState, place: PlaceClass) -> Readiness {
         ControlMode::Ados,
         place,
         RcReceiver::Present,
+        1.5,
     )
 }
 
@@ -390,7 +395,10 @@ fn each_avoidance_and_return_row_blocks_when_it_differs() {
     assert!(profile(&copter()).ok);
     for (name, want, wrong) in [
         ("OA_TYPE", 0.0, 1.0),
-        ("AVOID_ENABLE", 0.0, 7.0),
+        ("AVOID_ENABLE", 2.0, 7.0),
+        ("AVOID_MARGIN", 1.0, 2.0),
+        ("AVOID_BEHAVE", 1.0, 0.0),
+        ("PRX1_TYPE", 2.0, 5.0),
         ("FS_GCS_ENABLE", 4.0, 1.0),
         ("FS_THR_ENABLE", 5.0, 1.0),
         ("SRTL_POINTS", 500.0, 300.0),

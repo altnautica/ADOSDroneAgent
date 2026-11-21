@@ -82,6 +82,8 @@ pub struct Supervisor {
     pub return_resumes: u32,
     /// The current average the low-battery return's energy estimate uses.
     pub energy: super::energy::Energy,
+    /// A blocked FC return the pilot flies home itself.
+    pub routed: Option<super::route_home::Routed>,
 }
 
 impl Pilot {
@@ -113,6 +115,7 @@ impl Pilot {
     pub(super) fn supervise(&mut self, now_ms: u64) {
         self.check_return(now_ms);
         self.record_trail(now_ms);
+        self.detour_tick(now_ms);
         if self.sup.hold.is_some() && self.owner() != Owner::Pilot {
             // An action, a failsafe or the operator took the vehicle.
             self.end_supervision();
@@ -330,6 +333,11 @@ impl Pilot {
             return;
         };
         if h.braking_ms.is_some() || !self.in_guided() {
+            return;
+        }
+        // A blocked mission leg: skipped at once when proven unreachable,
+        // or (bypass) flown round.
+        if h.resume == Resume::Mission && self.bypass_blocked_leg(now_ms) {
             return;
         }
         let blocked_return = !h.route

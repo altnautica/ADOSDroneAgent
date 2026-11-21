@@ -21,6 +21,7 @@ mod motion_ref;
 mod obstacle_data;
 mod plan;
 mod route;
+mod route_home;
 mod sensing;
 mod stall;
 mod sticks;
@@ -33,6 +34,8 @@ pub(super) use motion_ref::MotionRef;
 #[cfg(test)]
 pub use route::{check_legs, legs_of, Origin};
 pub use route::{route_of, Route, RouteItem, CONFINED_CAP_MPS};
+#[cfg(test)]
+pub(super) use route_home::Routed;
 pub(super) use subject_guard::SubjectTrack;
 pub use supervisor::{Resume, Supervisor};
 pub use vantage_goal::HOLD_NO_VANTAGE;
@@ -147,6 +150,7 @@ impl Pilot {
         self.confined_tick(now_ms);
         self.sensing_tick(now_ms);
         self.supervise(now_ms);
+        self.route_home(now_ms);
         self.fly(axes, dt, now_ms);
     }
 
@@ -303,17 +307,20 @@ impl Pilot {
                     held,
                     subject,
                 );
-                // The trajectory planner runs beside it for a goto (its
-                // route when blocked), and for a skill goal only with the
-                // shadow configured: it is a full search every replan.
-                if self.owner() == Owner::Goto || self.settings.pilot.planner_shadow {
+                // Under avoid `bypass` the trajectory planner runs beside it
+                // for a goto or a skill goal (its route when blocked); else
+                // only with the shadow configured: it is a full search every
+                // replan. Under `brake` a blocked goal stops and holds.
+                let bypass = self.settings.pilot.avoid == AvoidMode::Bypass;
+                if bypass || self.settings.pilot.planner_shadow {
                     self.shadow_traj(&goal, pos3, now_ms);
                 } else {
                     self.traj.clear();
                 }
-                // A goto has no detour spots: blocked, it follows the
-                // trajectory planner's route when there is one.
-                if self.owner() == Owner::Goto && self.plan.state == AvoidState::Blocked {
+                // A goto has no detour spots and a skill's may all be shut:
+                // blocked, it follows the trajectory planner's route when
+                // there is one.
+                if bypass && self.plan.state == AvoidState::Blocked {
                     if let Some(p) = self.goto_route(pos, now_ms) {
                         self.plan = p;
                     }

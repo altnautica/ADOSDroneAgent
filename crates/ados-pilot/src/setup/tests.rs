@@ -307,6 +307,9 @@ fn full_ground_copter_flow() {
             "GUID_TIMEOUT",
             "OA_TYPE",
             "AVOID_ENABLE",
+            "AVOID_MARGIN",
+            "AVOID_BEHAVE",
+            "PRX1_TYPE",
             "SRTL_POINTS",
             "SRTL_ACCURACY",
             "ATC_INPUT_TC",
@@ -524,7 +527,7 @@ fn ados_profile_and_readiness_agree_on_a_later_external_nav_set() {
 /// The avoidance and return rows of the copter profile, at their targets.
 const RETURN_ROWS: [(&str, f32); 6] = [
     ("OA_TYPE", 0.0),
-    ("AVOID_ENABLE", 0.0),
+    ("AVOID_ENABLE", 2.0),
     ("FS_GCS_ENABLE", 4.0),
     ("FS_THR_ENABLE", 5.0),
     ("SRTL_POINTS", 500.0),

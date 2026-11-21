@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::command::{PilotCommand, ShadowCommand};
 use super::rc::RcReceiver;
-use super::reserve::{BatteryReserve, OverheadAhead};
+use super::reserve::{BatteryReserve, OverheadAhead, ReturnRoute};
 use super::route::{PlaceClass, RouteCheck};
 use super::stick::{ProfileLimits, StickCommand};
 
@@ -64,9 +64,12 @@ pub enum Profile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AvoidMode {
+    /// Stop and hold at obstacles.
     #[default]
     Brake,
+    /// Route round obstacles.
     Bypass,
+    /// No obstacle avoidance.
     Off,
 }
 
@@ -167,7 +170,10 @@ pub struct MissionTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissionGap {
     pub seq: u32,
-    /// `stall_timeout` (skipped after the countdown) or `stall_operator`.
+    /// `stall_timeout` (skipped after the countdown), `stall_operator`, or
+    /// skipped at once as proven unreachable: `unreachable_inside_obstacle`
+    /// (the waypoint lies inside a seen obstacle) or `unreachable_no_path`
+    /// (no route to it within 200 m, unknown space counted passable).
     pub reason: String,
     /// Wall-clock epoch ms of the skip.
     pub at_ms: u64,
@@ -398,10 +404,13 @@ pub struct PilotState {
     /// reads as `open`).
     #[serde(default, skip_serializing_if = "PlaceClass::is_open")]
     pub place_class: PlaceClass,
-    /// The mission route check, while the place is confined and the FC
-    /// holds a mission with at least one leg; omitted otherwise.
+    /// The mission route check, while the FC holds a mission with at least
+    /// one leg; omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_check: Option<RouteCheck>,
+    /// A detour round a blocked mission leg in flight; omitted while none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_detour: Option<super::MissionDetour>,
     /// Pilot actions a ground surface may send on the pilot stream beyond
     /// the safety set (e.g. `goto`).
     pub surface_ops: Vec<String>,
@@ -433,6 +442,10 @@ pub struct PilotState {
     /// omitted on the ground.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub battery_reserve: Option<BatteryReserve>,
+    /// The return home the pilot routes round what blocked the FC's own
+    /// ([`ReturnRoute`]); omitted while none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_route: Option<ReturnRoute>,
     /// The leaves overhead along the way to a skill goal's subject, while a
     /// lease goal names one ([`OverheadAhead`]); omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]

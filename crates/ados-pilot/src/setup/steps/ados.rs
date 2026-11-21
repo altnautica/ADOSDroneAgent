@@ -65,7 +65,7 @@ impl Step for AdosProfile {
         self.needs_reboot = false;
         let rows: Vec<Value> = firmware(cx.adapter.fw)
             .into_iter()
-            .flat_map(|f| crate::no_rc::profile(f, class, cx.inputs.rc_receiver))
+            .flat_map(|f| crate::no_rc::profile(f, class, cx.inputs.rc_receiver, margin(cx)))
             .map(|r| json!({"name": r.name, "value": row_value(cx, &r)}))
             .collect();
         self.core.args.insert("params".into(), Value::Array(rows));
@@ -120,8 +120,12 @@ impl Step for AdosProfile {
         self.applied.clear();
         self.absent.clear();
         self.needs_reboot = false;
-        let declared =
-            crate::no_rc::profile(fw, vehicle_class(cx.adapter.class), cx.inputs.rc_receiver);
+        let declared = crate::no_rc::profile(
+            fw,
+            vehicle_class(cx.adapter.class),
+            cx.inputs.rc_receiver,
+            margin(cx),
+        );
         for row in declared {
             let row = &row;
             let name = std::iter::once(row.name)
@@ -143,6 +147,13 @@ impl Step for AdosProfile {
         self.core.running();
         Ok(())
     }
+}
+
+/// The obstacle margin the pilot flies, for the FC's proximity stop.
+fn margin(cx: &Cx) -> f32 {
+    cx.inputs
+        .obstacle_margin_m
+        .unwrap_or_else(|| crate::config::PilotSection::default().effective_margin_m())
 }
 
 /// The value to write for a profile row, from the same rules the readiness

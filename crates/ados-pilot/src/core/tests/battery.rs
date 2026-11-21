@@ -117,6 +117,7 @@ fn confined(w: &mut World) {
     w.p.settings.pilot.place_class = PlaceClass::Confined;
     w.p.settings.pilot.prop_tip_radius_m = Some(0.377);
     w.p.fc.params.insert("SRTL_ACCURACY".into(), 0.2);
+    w.p.fc.params.insert("AVOID_ENABLE".into(), 0.0);
     w.run(100);
 }
 
