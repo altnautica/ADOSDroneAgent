@@ -165,6 +165,7 @@ fn the_member_count_and_size_caps_are_enforced() {
         entries: 3,
         entry_bytes: 1024,
         total_bytes: 2048,
+        directory_bytes: 1 << 20,
     };
     let many = zip_of(&[
         M::File("a", b"1"),
@@ -207,13 +208,57 @@ fn a_refusal_midway_leaves_no_partial_tree() {
 }
 
 #[test]
-fn a_stale_work_dir_from_an_interrupted_unpack_is_discarded() {
+fn a_work_dir_left_by_an_interrupted_unpack_is_refused_and_kept() {
     let c = case(&zip_of(&[M::File("a", b"x")]));
     let stale = c.dest.with_file_name(".rt.unpack");
     std::fs::create_dir_all(stale.join("junk")).unwrap();
-    std::fs::write(stale.join("junk/planted"), b"y").unwrap();
-    let files = unpack(&c, PayloadCaps::DEFAULT).unwrap();
-    assert_eq!(files.len(), 1);
-    assert!(!c.dest.join("junk").exists());
-    assert!(!stale.exists());
+    let err = unpack(&c, PayloadCaps::DEFAULT).unwrap_err().0;
+    assert!(err.contains("left"), "{err}");
+    assert!(stale.join("junk").is_dir());
+    assert!(!c.dest.exists());
+}
+
+#[test]
+fn long_and_deep_member_names_are_refused() {
+    let long = format!("{}/x", "a".repeat(256));
+    assert!(refused(&zip_of(&[M::File(&long, b"x")]), PayloadCaps::DEFAULT).contains("too long"));
+    let deep = format!("{}x", "d/".repeat(32));
+    assert!(refused(&zip_of(&[M::File(&deep, b"x")]), PayloadCaps::DEFAULT).contains("too deep"));
+    let huge = format!("{}/x", vec!["b".repeat(200); 6].join("/"));
+    assert!(refused(&zip_of(&[M::File(&huge, b"x")]), PayloadCaps::DEFAULT).contains("too long"));
+}
+
+#[test]
+fn directories_created_count_against_the_member_cap() {
+    let caps = PayloadCaps {
+        entries: 4,
+        ..PayloadCaps::DEFAULT
+    };
+    // Two members, but they create five directories and two files.
+    let zip = zip_of(&[M::File("a/b/c/f", b"x"), M::File("d/e/g", b"y")]);
+    assert!(refused(&zip, caps).contains("files and directories"));
+}
+
+#[test]
+fn an_oversized_central_directory_is_refused_before_parsing() {
+    let caps = PayloadCaps {
+        directory_bytes: 64,
+        ..PayloadCaps::DEFAULT
+    };
+    let zip = zip_of(&[M::File("a", b"x"), M::File("b", b"y")]);
+    assert!(refused(&zip, caps).contains("central directory"));
+}
+
+#[test]
+fn a_declared_count_the_directory_disagrees_with_is_refused() {
+    let mut zip = zip_of(&[M::File("a", b"x"), M::File("b", b"y")]);
+    let at = zip.len() - 22;
+    assert_eq!(&zip[at..at + 4], b"PK\x05\x06");
+    zip[at + 8..at + 10].copy_from_slice(&1u16.to_le_bytes());
+    zip[at + 10..at + 12].copy_from_slice(&1u16.to_le_bytes());
+    let err = refused(&zip, PayloadCaps::DEFAULT);
+    assert!(
+        err.contains("declares 1 members") || err.contains("not a valid zip"),
+        "{err}"
+    );
 }

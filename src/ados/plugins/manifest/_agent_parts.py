@@ -365,6 +365,8 @@ class PayloadSpec(_StrictModel):
     @field_validator("path")
     @classmethod
     def _validate_path(cls, v: str) -> str:
+        if "." in v.split("/"):
+            raise ManifestError(f"payload path {v!r} must not hold a '.' segment")
         return _validate_relative_path(v, "payload path")
 
     @field_validator("source")

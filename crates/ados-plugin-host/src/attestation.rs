@@ -44,17 +44,24 @@ pub struct AttestedFile {
     /// For a file unpacked from an archive payload: that payload's path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unpacked_from: Option<String>,
+    /// For a file unpacked from an archive payload: the archive's sha256 the
+    /// signed manifest pins, which ties the file to the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpacked_sha256: Option<String>,
 }
 
 impl AttestedFile {
-    /// A payload file: one fetched as is (`unpacked_from` `None`, the pinned
-    /// sha256) or one unpacked from the archive payload at `unpacked_from`.
-    pub fn payload(path: String, sha256: &str, unpacked_from: Option<String>) -> Self {
+    /// A payload file: one fetched as is (`unpacked` `None`, the pinned
+    /// sha256) or one unpacked from an archive payload, `unpacked` naming
+    /// that payload's path and pinned sha256.
+    pub fn payload(path: String, sha256: &str, unpacked: Option<(String, String)>) -> Self {
+        let (unpacked_from, unpacked_sha256) = unpacked.unzip();
         AttestedFile {
             path,
             sha256: sha256.to_ascii_lowercase(),
             payload: true,
             unpacked_from,
+            unpacked_sha256: unpacked_sha256.map(|s| s.to_ascii_lowercase()),
         }
     }
 }
@@ -83,6 +90,7 @@ impl Attestation {
                 sha256: sha256.clone(),
                 payload: false,
                 unpacked_from: None,
+                unpacked_sha256: None,
             })
             .collect();
         files.extend_from_slice(payloads);

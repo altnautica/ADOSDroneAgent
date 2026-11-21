@@ -86,7 +86,7 @@ pub(super) fn validate_profile_list(field: &str, profiles: &[String]) -> Result<
 
 pub(super) fn validate_payload(payload: &PayloadSpec) -> Result<(), ManifestError> {
     let path = &payload.path;
-    if !is_relative_posix_path(path) {
+    if !is_relative_posix_path(path) || path.split('/').any(|s| s == ".") {
         return Err(ManifestError(format!(
             "agent.payloads path {path:?} must be a relative posix path"
         )));

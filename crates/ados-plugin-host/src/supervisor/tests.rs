@@ -1794,6 +1794,12 @@ fn an_unpacked_payload_lands_whole_and_is_attested_file_by_file() {
         verify_install(&installs, &install),
         Err("lib/runtime/lib/site/mod.py digest mismatch".to_string())
     );
+    std::fs::write(plugin.join("lib/runtime/lib/site/mod.py"), b"VALUE = 1\n").unwrap();
+    std::fs::write(plugin.join("lib/runtime/lib/planted.py"), b"x").unwrap();
+    assert_eq!(
+        verify_install(&installs, &install),
+        Err("lib/runtime/lib/planted.py is not attested".to_string())
+    );
 }
 
 #[test]

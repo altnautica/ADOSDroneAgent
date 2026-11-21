@@ -39,11 +39,9 @@ pub(super) fn place_payloads(
                 &executables,
             )
             .map_err(|e| SupervisorError(format!("plugin {}: {e}", manifest.id)))?;
-            placed.extend(
-                files
-                    .into_iter()
-                    .map(|f| AttestedFile::payload(f.path, &f.sha256, Some(path.clone()))),
-            );
+            placed.extend(files.into_iter().map(|f| {
+                AttestedFile::payload(f.path, &f.sha256, Some((path.clone(), sha256.clone())))
+            }));
             continue;
         }
         if let Some(parent) = dest.parent() {

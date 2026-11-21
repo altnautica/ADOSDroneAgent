@@ -91,10 +91,45 @@ pub fn verify_install(install_dir: &Path, install: &PluginInstall) -> Result<(),
                 file.path
             ));
         }
-        let bytes =
-            std::fs::read(dir.join(rel)).map_err(|e| format!("{} unreadable: {e}", file.path))?;
-        if !hex::encode(Sha256::digest(&bytes)).eq_ignore_ascii_case(&file.sha256) {
+        let mut hasher = Sha256::new();
+        let unreadable = |e: std::io::Error| format!("{} unreadable: {e}", file.path);
+        let mut f = std::fs::File::open(dir.join(rel)).map_err(unreadable)?;
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut f, &mut buf).map_err(unreadable)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        if !hex::encode(hasher.finalize()).eq_ignore_ascii_case(&file.sha256) {
             return Err(format!("{} digest mismatch", file.path));
+        }
+    }
+    // An unpacked payload's directory holds exactly the files it attests:
+    // anything added under it is tampering too.
+    let attested: BTreeSet<&str> = attestation.files.iter().map(|f| f.path.as_str()).collect();
+    let unpacked: BTreeSet<&str> = attestation
+        .files
+        .iter()
+        .filter_map(|f| f.unpacked_from.as_deref())
+        .collect();
+    for root in unpacked {
+        let mut stack = vec![dir.join(root)];
+        while let Some(at) = stack.pop() {
+            let entries = std::fs::read_dir(&at).map_err(|e| format!("{root} unreadable: {e}"))?;
+            for entry in entries {
+                let path = entry.map_err(|e| format!("{root} unreadable: {e}"))?.path();
+                let rel = path
+                    .strip_prefix(&dir)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match path.symlink_metadata() {
+                    Ok(m) if m.is_dir() => stack.push(path),
+                    Ok(m) if m.is_file() && attested.contains(rel.as_str()) => {}
+                    _ => return Err(format!("{rel} is not attested")),
+                }
+            }
         }
     }
     Ok(())
