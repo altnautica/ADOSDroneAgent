@@ -75,11 +75,14 @@ pub const EXTNAV_SETTLE_MS: u64 = 2000;
 /// Navigation `health_reason`s that make a `degraded` external position
 /// unverified. A `degraded` without one of these (a corridor flown on good
 /// flow, a lidar or VIO still initialising) is still flown.
-const UNVERIFYING_DEGRADED_REASONS: [&str; 4] = [
+/// `pose_sigma_wide`: the estimator's own sigma passed a metre (a flow
+/// reading a few percent off down a long corridor stays inside it).
+const UNVERIFYING_DEGRADED_REASONS: [&str; 5] = [
     "corridor_unmeasured",
     "flow_disagrees",
     "ekf_flow_disagree",
     "heading_unconfirmed",
+    "pose_sigma_wide",
 ];
 
 fn degraded_reason_unverifies(reason: Option<&str>) -> bool {

@@ -361,6 +361,29 @@ fn a_degraded_corridor_pose_with_no_reason_is_still_flown() {
     assert!(position_check_msg(&w).is_none());
 }
 
+/// A corridor pose whose own sigma passed a metre (a flow reading a few
+/// percent off down a long corridor) is unverified: the skill stops.
+#[test]
+fn a_degraded_pose_with_a_wide_sigma_is_unverified() {
+    let mut w = extnav_world();
+    w.agl = Some(1.9);
+    nav_state(&mut w, "good", None);
+    let id = w.lease();
+    w.goal(id, 40.0, 0.0);
+    w.run(300);
+    assert_eq!(w.p.owner(), Owner::Skill);
+    w.vel = [2.0, 0.0, 0.0];
+    let end = w.now + 3000;
+    while w.now < end {
+        nav_state(&mut w, "degraded", Some("pose_sigma_wide"));
+        w.goal(id, 40.0, 0.0);
+        run_flow(&mut w, [0.0, 2.0 / 1.9], 60, 200);
+    }
+    let s = w.p.state(w.now);
+    assert!(s.position_unverified.is_some());
+    assert!(w.revoked.iter().any(|(l, _)| *l == id), "{:?}", w.revoked);
+}
+
 /// Navigation going silent after a lost report does not clear the state on
 /// an external-nav source set: stale counts as unknown.
 #[test]
