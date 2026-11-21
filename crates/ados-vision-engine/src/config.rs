@@ -127,7 +127,7 @@ pub struct VisionConfig {
     /// frame size and is not known until a frame arrives.
     #[serde(default = "default_shm_budget_mb")]
     pub shm_budget_mb: u32,
-    /// Backend preference: "auto" (pick by SoC) | "mock" | "onnx" | "rknn" | "hailo".
+    /// Backend preference: "auto" (pick by SoC) | "mock" | "onnx" | "onnx-cuda" | "rknn" | "hailo".
     #[serde(default = "default_backend")]
     pub backend: String,
     /// Bench aid for the mock backend: emit one synthetic `person` detection

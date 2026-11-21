@@ -29,8 +29,8 @@ const LIBRKNNRT_DEST: &str = "/usr/lib/librknnrt.so";
 /// the RKNN inference path for. Matched case-insensitively against the
 /// device-tree model string. The Rockchip RK3588/RK3582/RK3576 family and the
 /// boards built on them carry the 6-TOPS NPU the sidecar targets. Jetson boards
-/// are deliberately absent: there is no in-tree accelerated backend for them,
-/// so they are not provisioned as an NPU board.
+/// are deliberately absent: they have no RKNN NPU, and their CUDA GPU is
+/// provisioned through the `onnx-cuda` backend instead (see `is_cuda_board`).
 const NPU_BOARD_SUBSTRINGS: &[&str] = &[
     "rk3588",
     "rk3582",
@@ -40,6 +40,7 @@ const NPU_BOARD_SUBSTRINGS: &[&str] = &[
     "rock 5c",
     "orange-pi-5",
     "orangepi5",
+    "orangepi 5",
     "orange pi 5",
 ];
 

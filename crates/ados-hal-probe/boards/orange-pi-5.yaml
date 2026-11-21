@@ -23,6 +23,20 @@ hw_video_codecs:
   - av1_dec
   - vp9_dec
 
+# RK3588S: the full RK3588 CPU, GPU and 6 TOPS NPU in the smaller package.
+# The NPU runs RK3588 `.rknn` files through the RKNN sidecar; a board whose
+# registry has no `.rknn` detector falls back to the ONNX detector on the CPU.
+compute:
+  cores: 8
+  core_type: "Cortex-A76 x4 + Cortex-A55 x4"
+  max_freq_mhz: 2400
+  gpu: "Mali-G610 MP4"
+  npu_tops: 6.0
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265", "vp9", "av1"]
+  ram_mb: 8192           # 4/8/16/32 GB SKUs; the 8 GB SKU is the reference
+  ram_type: LPDDR4X
+
 # Orange Pi 5 exposes 2 MIPI CSI ports plus multiple USB hosts. Downward
 # navigation camera lands on the spare CSI lane.
 video:

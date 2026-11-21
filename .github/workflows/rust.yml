@@ -470,8 +470,11 @@ jobs:
           workspaces: crates -> target
           key: gnu-onnx-release
 
+      # `cuda` only compiles in the CUDA execution provider registration for the
+      # `onnx-cuda` backend (a Jetson GPU): no extra dependency or link, and it
+      # engages only when the loaded runtime library carries that provider.
       - name: Build ados-vision with the onnx backend (dynamic load)
-        run: cargo build --release --features onnx -p ados-vision-engine
+        run: cargo build --release --features onnx,cuda -p ados-vision-engine
 
       - name: Fetch the ONNX Runtime shared library (aarch64)
         run: |

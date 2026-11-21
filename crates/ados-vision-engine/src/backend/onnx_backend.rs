@@ -1,4 +1,6 @@
-//! ONNX Runtime backend (opt-in `onnx` feature).
+//! ONNX Runtime backend (opt-in `onnx` feature), on the CPU or, as the
+//! `onnx-cuda` backend, on ONNX Runtime's CUDA execution provider (opt-in
+//! `cuda` feature).
 
 use super::*;
 
@@ -20,6 +22,9 @@ pub struct OnnxBackend {
     detector_threads: usize,
     /// Intra-op threads for a depth model (`vision.depth.threads`).
     depth_threads: usize,
+    /// Run sessions on ONNX Runtime's CUDA execution provider when the build
+    /// and the loaded runtime library both carry it (the `onnx-cuda` backend).
+    cuda: bool,
 }
 
 struct OnnxModel {
@@ -46,7 +51,22 @@ impl OnnxBackend {
         OnnxBackend {
             detector_threads: detector_threads.max(1),
             depth_threads: depth_threads.max(1),
+            cuda: false,
         }
+    }
+
+    /// The same backend asking for ONNX Runtime's CUDA execution provider
+    /// (the `onnx-cuda` backend, a Jetson GPU). Sessions run on the CPU when
+    /// the provider is absent: see [`Self::cuda_active`].
+    pub fn with_cuda(mut self) -> Self {
+        self.cuda = true;
+        self
+    }
+
+    /// Whether sessions run on the CUDA execution provider: asked for, built
+    /// with the `cuda` feature, and offered by the loaded runtime library.
+    pub fn cuda_active(&self) -> bool {
+        self.cuda && cuda_provider_available()
     }
 
     /// The intra-op thread count a session for `kind` gets.
@@ -57,6 +77,74 @@ impl OnnxBackend {
             _ => 1,
         }
     }
+}
+
+/// Whether the loaded ONNX Runtime library offers the CUDA execution provider,
+/// probed once per process. A CPU-only runtime library (the one shipped for
+/// NPU-less boards) answers no, and the backend then runs on the CPU and names
+/// itself `onnx`, so the operator sees where inference really runs.
+#[cfg(feature = "cuda")]
+fn cuda_provider_available() -> bool {
+    static AVAILABLE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(probe_cuda_provider);
+    *AVAILABLE
+}
+
+/// Ask the runtime library for the CUDA execution provider, logging why the
+/// backend falls back to the CPU when it is absent. The library is loaded from
+/// `ORT_DYLIB_PATH` through the fallible loader first: `ort`'s implicit load
+/// panics on a missing file, and naming the backend must never take the engine
+/// down (a model load reports a missing runtime).
+#[cfg(feature = "cuda")]
+fn probe_cuda_provider() -> bool {
+    use ort::ep::ExecutionProvider;
+    let probe = load_runtime_library()
+        .and_then(|()| onnx_environment())
+        .and_then(|_| {
+            ort::ep::CUDA::is_available().map_err(|e| anyhow!("query execution providers: {e}"))
+        });
+    match probe {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::warn!(
+                event = "vision_cuda_unavailable",
+                "the onnx runtime library has no CUDA execution provider; onnx-cuda runs on the CPU"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(
+                event = "vision_cuda_unavailable",
+                error = %e,
+                "the CUDA execution provider could not be probed; onnx-cuda runs on the CPU"
+            );
+            false
+        }
+    }
+}
+
+/// Load the ONNX Runtime library `ORT_DYLIB_PATH` names (the vision unit sets
+/// it), returning an error instead of panicking when it cannot be loaded. A
+/// library already loaded is kept.
+#[cfg(feature = "cuda")]
+fn load_runtime_library() -> Result<()> {
+    let path = std::env::var_os("ORT_DYLIB_PATH")
+        .ok_or_else(|| anyhow!("ORT_DYLIB_PATH does not name the onnx runtime library"))?;
+    ort::init_from(&path)
+        .map(drop)
+        .map_err(|e| anyhow!("load the onnx runtime library {path:?}: {e}"))
+}
+
+/// A build without the `cuda` feature never registers the provider.
+#[cfg(not(feature = "cuda"))]
+fn cuda_provider_available() -> bool {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            event = "vision_cuda_unavailable",
+            "this build does not include the CUDA execution provider (cargo feature `cuda`); onnx-cuda runs on the CPU"
+        );
+    });
+    false
 }
 
 /// The process's ONNX Runtime environment, built on the first model load.
@@ -122,6 +210,14 @@ impl VisionBackend for OnnxBackend {
                 .with_execution_providers([CoreML::default().build()])
                 .map_err(|e| anyhow!("register CoreML execution provider: {e}"))?;
         }
+        // On a CUDA GPU (the `onnx-cuda` backend), register ONNX Runtime's
+        // CUDA execution provider; nodes it cannot take stay on the CPU.
+        #[cfg(feature = "cuda")]
+        if self.cuda_active() {
+            builder = builder
+                .with_execution_providers([ort::ep::CUDA::default().build()])
+                .map_err(|e| anyhow!("register CUDA execution provider: {e}"))?;
+        }
         let session = builder.commit_from_file(path)?;
         let input_name = session
             .inputs()
@@ -150,7 +246,11 @@ impl VisionBackend for OnnxBackend {
         }))
     }
     fn name(&self) -> &str {
-        "onnx"
+        if self.cuda_active() {
+            "onnx-cuda"
+        } else {
+            "onnx"
+        }
     }
 }
 

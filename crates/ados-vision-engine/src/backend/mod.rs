@@ -8,6 +8,8 @@
 //!   tests and hardware-free benches; never a silent stand-in for a real one.
 //! - `OnnxBackend` — an ONNX Runtime backend, compiled in only under the `onnx`
 //!   cargo feature so the default build stays free of the heavy native runtime.
+//!   As `onnx-cuda` it registers ONNX Runtime's CUDA execution provider (the
+//!   `cuda` feature, a Jetson GPU) and runs on the CPU when that is absent.
 //! - [`SidecarBackend`] — an IPC client that forwards load + infer requests
 //!   to the Python accelerator sidecar over `/run/ados/vision-rknn.sock` using
 //!   the same 4-byte big-endian length-prefixed msgpack framing as the other
@@ -236,7 +238,7 @@ pub use unavailable::UnavailableBackend;
 
 /// The minimal config view the picker needs (avoids a config dependency cycle).
 pub struct BackendPrefs<'a> {
-    /// Operator preference: "auto" | "mock" | "onnx" | "rknn" | "hailo".
+    /// Operator preference: "auto" | "mock" | "onnx" | "onnx-cuda" | "rknn" | "hailo".
     pub preference: &'a str,
     /// The accelerator sidecar socket path for the rknn backend.
     pub rknn_socket_path: String,
@@ -258,9 +260,11 @@ const ONNX_COMPILED: bool = cfg!(feature = "onnx");
 /// Pick the backend for a board.
 ///
 /// "auto" resolves by SoC family: a Rockchip part with an NPU (`rk3576`,
-/// `rk3588`, `rk3566`, ...) prefers the accelerator sidecar; any other board
-/// (a Pi-class CPU-only SoC, or a Jetson, which has no accelerated backend)
-/// takes the ONNX CPU backend. An explicit preference is honoured.
+/// `rk3588`, `rk3566`, ...) prefers the accelerator sidecar; an NVIDIA Tegra
+/// (a Jetson) takes the ONNX backend on its CUDA GPU (`onnx-cuda`, which runs
+/// on the CPU when the runtime library has no CUDA provider); any other board
+/// (a Pi-class CPU-only SoC) takes the ONNX CPU backend. An explicit
+/// preference is honoured.
 ///
 /// A requested real backend that cannot exist in this build (ONNX without the
 /// `onnx` feature, an unknown name) resolves to an [`UnavailableBackend`], never
@@ -274,6 +278,8 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
         "auto" => {
             if soc.starts_with("rk") {
                 "rknn"
+            } else if soc.contains("tegra") {
+                "onnx-cuda"
             } else {
                 "onnx"
             }
@@ -288,7 +294,8 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
             prefs.hailo_socket_path.clone(),
             "hailo",
         )),
-        "onnx" => onnx_backend_or_unavailable(prefs.onnx_threads, prefs.depth_threads),
+        "onnx" => onnx_backend_or_unavailable(prefs.onnx_threads, prefs.depth_threads, false),
+        "onnx-cuda" => onnx_backend_or_unavailable(prefs.onnx_threads, prefs.depth_threads, true),
         "mock" => mock_backend(prefs.mock_target),
         unknown => Box::new(UnavailableBackend::new(
             unknown,
@@ -321,20 +328,22 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
     backend
 }
 
-/// The ONNX CPU backend when the build carries it, else an unavailable backend
-/// that says so.
+/// The ONNX backend (on the CUDA execution provider when `cuda`) when the
+/// build carries it, else an unavailable backend that says so.
 fn onnx_backend_or_unavailable(
     #[allow(unused_variables)] threads: usize,
     #[allow(unused_variables)] depth_threads: usize,
+    cuda: bool,
 ) -> Box<dyn VisionBackend> {
     #[cfg(feature = "onnx")]
     {
-        Box::new(OnnxBackend::new(threads, depth_threads))
+        let backend = OnnxBackend::new(threads, depth_threads);
+        Box::new(if cuda { backend.with_cuda() } else { backend })
     }
     #[cfg(not(feature = "onnx"))]
     {
         Box::new(UnavailableBackend::new(
-            "onnx",
+            if cuda { "onnx-cuda" } else { "onnx" },
             "this build does not include the onnx inference runtime (cargo feature `onnx`)",
         ))
     }

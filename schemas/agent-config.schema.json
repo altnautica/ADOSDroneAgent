@@ -3640,6 +3640,7 @@
             "rknn",
             "hailo",
             "onnx",
+            "onnx-cuda",
             "mock"
           ],
           "title": "Backend",

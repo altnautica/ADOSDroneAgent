@@ -5,7 +5,7 @@
 
 import type { TFunction } from "i18next";
 
-export const VISION_BACKENDS = ["auto", "rknn", "hailo", "onnx", "mock"] as const;
+export const VISION_BACKENDS = ["auto", "rknn", "hailo", "onnx", "onnx-cuda", "mock"] as const;
 
 export type VisionBackend = (typeof VISION_BACKENDS)[number];
 

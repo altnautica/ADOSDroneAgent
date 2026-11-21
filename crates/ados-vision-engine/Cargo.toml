@@ -42,6 +42,12 @@ onnx = ["dep:ort", "ort/load-dynamic"]
 # builds (the backend registers it only under target_os = "macos"). Off by
 # default so a Linux/CI build never pulls the CoreML runtime.
 coreml = ["onnx", "ort/coreml"]
+# Register ONNX Runtime's CUDA execution provider for the `onnx-cuda` backend
+# (a Jetson GPU). Implies `onnx`. Adds no dependency and no link: the runtime
+# still loads dynamically, and the provider is used only when the loaded
+# library carries it (a CUDA-enabled ONNX Runtime build); otherwise sessions
+# run on the CPU.
+cuda = ["onnx", "ort/cuda"]
 # Opt-in appearance (re-id) model support for the tracker: builds the
 # sidecar-backed appearance extractor. Compiled out by default so the motion-only
 # tracker carries no extra weight; mirrors `onnx` in being a non-default feature.

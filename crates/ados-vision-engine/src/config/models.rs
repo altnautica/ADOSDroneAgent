@@ -297,7 +297,7 @@ pub enum DepthPlan {
 }
 
 impl DepthConfig {
-    /// Resolve the model for `backend` (`onnx`, `rknn`, `hailo`, `mock`, ...)
+    /// Resolve the model for `backend` (`onnx`, `onnx-cuda`, `rknn`, `hailo`, `mock`, ...)
     /// with files under `models_dir`. `exists` checks a path (injected for
     /// tests).
     pub fn plan(
@@ -311,6 +311,7 @@ impl DepthConfig {
         }
         let (ext, accel) = match backend {
             "rknn" => ("rknn", true),
+            "onnx-cuda" => ("onnx", true),
             "hailo" => {
                 return DepthPlan::None(
                     "the hailo accelerator sidecar does not run depth models".into(),

@@ -4305,6 +4305,7 @@
         "rknn",
         "hailo",
         "onnx",
+        "onnx-cuda",
         "mock"
       ],
       "key": "vision.backend",

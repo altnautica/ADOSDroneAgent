@@ -23,6 +23,21 @@ hw_video_codecs:
   - h265_dec
   - av1_dec
 
+# No NPU: the Orin Nano has no DLA, so npu_tops stays 0.0 and the RKNN
+# runtime is never provisioned on it. Detection runs through the in-process
+# ONNX backend: the installer names the vision engine's `onnx-cuda` backend,
+# which registers ONNX Runtime's CUDA execution provider on the Ampere GPU and
+# runs on the CPU when the runtime library carries no CUDA provider.
+compute:
+  cores: 6
+  core_type: "Cortex-A78AE x6"
+  max_freq_mhz: 1500
+  gpu: "Ampere 1024 CUDA cores, 32 Tensor Cores (512 / 16 on the 4 GB SKU)"
+  npu_tops: 0.0
+  local_inference: onnx
+  ram_mb: 8192           # 4 GB and 8 GB SKUs
+  ram_type: LPDDR5
+
 # Orin Nano devkit exposes 2 MIPI CSI lanes plus 4 USB ports. Spare CSI
 # lane carries the downward navigation camera.
 video:

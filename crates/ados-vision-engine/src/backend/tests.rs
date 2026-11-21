@@ -122,8 +122,25 @@ fn picker_auto_selects_sidecar_on_rockchip() {
     };
     assert_eq!(select_backend("rk3576", &prefs).name(), "rknn");
     assert_eq!(select_backend("RK3588S2", &prefs).name(), "rknn");
-    // A Jetson has no accelerated backend: auto must not route it to the
-    // RKNN sidecar, which cannot run there.
+    // A Jetson has no NPU: auto must not route it to the RKNN sidecar, which
+    // cannot run there. It takes the ONNX backend on its CUDA GPU, which names
+    // itself `onnx` when it runs on the CPU (no CUDA provider in this build or
+    // runtime library), and is unavailable only without the onnx runtime.
+    let jetson = select_backend("Tegra Orin", &prefs);
+    #[cfg(feature = "onnx")]
+    {
+        assert!(
+            matches!(jetson.name(), "onnx" | "onnx-cuda"),
+            "{}",
+            jetson.name()
+        );
+        assert_eq!(jetson.state(), BackendState::Ready);
+    }
+    #[cfg(not(feature = "onnx"))]
+    {
+        assert_eq!(jetson.name(), "onnx-cuda");
+        assert_eq!(jetson.state(), BackendState::Unavailable);
+    }
     assert_ne!(select_backend("tegra234", &prefs).name(), "rknn");
     // A CPU-only SoC under auto takes the ONNX CPU backend when it is compiled
     // in; without it the picker says so (unavailable), never a silent mock.

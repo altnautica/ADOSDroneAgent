@@ -1,10 +1,11 @@
 //! The `ados-vision` binary selection: the default build or the ONNX-enabled
-//! variant for boards that declare CPU-ONNX local inference, and for NPU boards
-//! whose detector fell back to the ONNX CPU backend.
+//! variant for boards that declare CPU-ONNX local inference, CUDA-GPU boards
+//! (whose `onnx-cuda` backend is the same build), and NPU boards whose detector
+//! fell back to the ONNX CPU backend.
 
 use std::path::Path;
 
-use crate::steps::npu_provision::is_npu_board;
+use crate::steps::npu_provision::{is_cuda_board, is_npu_board};
 
 use super::{Gate, PrebuiltBinary, DRONE_VISOR, PREBUILT};
 
@@ -73,11 +74,12 @@ const ONNX_VISION_BOARD_SUBSTRINGS: &[&str] = &[
     "dragon-q6a",
 ];
 
-/// Whether the board model declares CPU-ONNX local inference and should fetch the
-/// onnx-enabled vision build. Pure, case-insensitive substring match.
+/// Whether the board model runs its detector in the in-process ONNX backend
+/// (CPU-ONNX local inference, or a CUDA GPU through `onnx-cuda`) and should
+/// fetch the onnx-enabled vision build. Pure, case-insensitive substring match.
 pub fn board_prefers_onnx_vision(model: &str) -> bool {
     let m = model.to_lowercase();
-    ONNX_VISION_BOARD_SUBSTRINGS.iter().any(|k| m.contains(k))
+    ONNX_VISION_BOARD_SUBSTRINGS.iter().any(|k| m.contains(k)) || is_cuda_board(model)
 }
 
 /// The `vision.backend` the agent config names, read without the agent's

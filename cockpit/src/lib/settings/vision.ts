@@ -5,7 +5,7 @@
 // pass's and the whole frame's) are 0.05..1 fractions edited as whole
 // percents; 0.05 is the detector's decode floor.
 
-export const VISION_BACKENDS = ["auto", "rknn", "hailo", "onnx", "mock"] as const;
+export const VISION_BACKENDS = ["auto", "rknn", "hailo", "onnx", "onnx-cuda", "mock"] as const;
 export type VisionBackend = (typeof VISION_BACKENDS)[number];
 
 export const VISION_KEYS = {

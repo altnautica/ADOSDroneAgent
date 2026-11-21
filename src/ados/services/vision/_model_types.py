@@ -109,12 +109,15 @@ def available_runtimes(
 ) -> list[str] | None:
     """The model runtimes this board can run, most preferred first, from the
     configured vision backend: an explicit ``rknn`` / ``hailo`` / ``onnx`` runs
-    only that; ``auto`` runs the NPU sidecar (``rknn``) when the board declares
+    only that, and ``onnx-cuda`` (the ONNX backend on a CUDA GPU) runs ``onnx``
+    model files; ``auto`` runs the NPU sidecar (``rknn``) when the board declares
     NPU TOPS or names an RKNN ``platform`` (see :func:`rknn_platform`), then the
     ONNX CPU backend. ``None`` (no preference) for the ``mock`` backend, which
     runs nothing real."""
     if backend in ("rknn", "hailo", "onnx"):
         return [backend]
+    if backend == "onnx-cuda":
+        return ["onnx"]
     if backend == "auto":
         return ["rknn", "onnx"] if npu_tops > 0 or platform else ["onnx"]
     return None
@@ -218,6 +221,7 @@ def board_family(board_id: str | None) -> str:
         k in b
         for k in (
             "rk3588", "rk3582", "orange-pi-5", "orange pi 5", "orangepi5", "orangepi-5",
+            "orangepi 5",
             "rock-5c", "rock5c", "rock 5c",
         )
     ):

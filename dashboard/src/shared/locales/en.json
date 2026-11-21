@@ -1335,11 +1335,12 @@
       "backends": {
         "auto": {
           "label": "Auto",
-          "description": "Rockchip NPU on Rockchip boards, else ONNX on the CPU. Never picks Hailo."
+          "description": "Rockchip NPU on Rockchip boards, ONNX on the CUDA GPU on Jetson boards, else ONNX on the CPU. Never picks Hailo."
         },
         "rknn": { "label": "RKNN", "description": "Rockchip NPU." },
         "hailo": { "label": "Hailo", "description": "Hailo-8 accelerator (Pi 5 AI HAT). Choose it explicitly." },
         "onnx": { "label": "ONNX", "description": "CPU inference via ONNX Runtime." },
+        "onnx-cuda": { "label": "ONNX on CUDA", "description": "ONNX Runtime on an NVIDIA CUDA GPU (Jetson). Runs on the CPU when the runtime library has no CUDA support." },
         "mock": { "label": "Mock", "description": "Synthetic detections for bench tests." }
       },
       "confidenceLabel": "Confidence threshold",

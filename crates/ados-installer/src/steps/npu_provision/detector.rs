@@ -130,8 +130,8 @@ pub(super) fn parse_fetch_output(stdout: &str) -> Result<FetchOutcome, String> {
 /// Pick + download a detector model for `board` and WRITE the `vision.detector`
 /// block so the engine comes up already detecting (best-effort). Model selection
 /// and download are the Python AI layer; parsing the result and writing the
-/// config block is Rust. Returns the backend the new detector runs on (`rknn` or
-/// `onnx`) when this call wrote the block, and `None` when it wrote nothing: a
+/// config block is Rust. Returns the model runtime of the new detector (`rknn`
+/// or `onnx`) when this call wrote the block, and `None` when it wrote nothing: a
 /// registry with no detection model is NOT a failure (the runtime + config still
 /// provision and the detector resolves once one is available, logged, never a
 /// silent half-arm), and an operator-configured detector is never clobbered, so
@@ -153,8 +153,8 @@ pub(super) fn fetch_detector_model(board: &str) -> Result<Option<String>, String
     match parse_fetch_output(&res.stdout)? {
         FetchOutcome::Deferred => {
             tracing::info!(
-                "no detection model in the registry runs on this board; the NPU runtime + vision \
-                 config are provisioned and the detector resolves once a model is available"
+                "no detection model in the registry runs on this board; the inference runtime + \
+                 vision config are provisioned and the detector resolves once a model is available"
             );
             Ok(None)
         }
@@ -279,7 +279,8 @@ fn write_config_atomic(path: &Path, body: &[u8]) -> Result<(), String> {
 /// model_dump-with-defaults rewrite that would inject every default). argv[1]
 /// is the backend the newly written detector runs on; when it is empty (no
 /// detector written now) an existing `vision.backend` is kept and an absent one
-/// becomes `rknn`. Prints `OK <backend>` with the backend the file now names.
+/// becomes argv[2], the board's default backend (`rknn` when that is absent
+/// too). Prints `OK <backend>` with the backend the file now names.
 const ENABLE_VISION_PY: &str = r#"
 import os, sys, yaml
 
@@ -302,7 +303,8 @@ if os.path.isfile(CONFIG):
         raw = loaded
 
 current = raw.get("vision") if isinstance(raw.get("vision"), dict) else {}
-backend = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else current.get("backend") or "rknn"
+default = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "rknn"
+backend = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else current.get("backend") or default
 merged = deep_merge(raw, {"vision": {"enabled": True, "backend": backend}})
 
 body = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
@@ -315,13 +317,22 @@ print("OK " + str(backend))
 "#;
 
 /// Turn on the vision config (`vision.enabled = true`, and `vision.backend` set
-/// to `backend` when a detector was just written, see [`ENABLE_VISION_PY`]) via
-/// a real config load → merge → save through the inline writer. Returns the
-/// backend the config now names, or an actionable error string on any failure.
-pub(super) fn enable_vision_config(backend: Option<&str>) -> Result<String, String> {
+/// to `backend` when a detector was just written, else kept, else
+/// `default_backend`; see [`ENABLE_VISION_PY`]) via a real config load → merge
+/// → save through the inline writer. Returns the backend the config now names,
+/// or an actionable error string on any failure.
+pub(super) fn enable_vision_config(
+    backend: Option<&str>,
+    default_backend: &str,
+) -> Result<String, String> {
     let res = exec::run(
         &venv_python(),
-        &["-c", ENABLE_VISION_PY, backend.unwrap_or("")],
+        &[
+            "-c",
+            ENABLE_VISION_PY,
+            backend.unwrap_or(""),
+            default_backend,
+        ],
     );
     if !res.spawned {
         return Err(

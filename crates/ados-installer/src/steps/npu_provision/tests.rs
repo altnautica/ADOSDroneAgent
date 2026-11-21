@@ -91,12 +91,74 @@ fn non_npu_boards_do_not_match() {
     assert!(!is_npu_board("Raspberry Pi 4 Model B"));
     assert!(!is_npu_board("Raspberry Pi Compute Module 4"));
     assert!(!is_npu_board("rk3566"));
-    // No accelerated vision backend exists for Jetson, so it must not be
-    // provisioned (the RKNN runtime and sidecar cannot run there).
+    // A Jetson has no RKNN NPU: the RKNN runtime and sidecar cannot run there.
     assert!(!is_npu_board("NVIDIA Jetson Orin Nano"));
     assert!(!is_npu_board("tegra234"));
     assert!(!is_npu_board(""));
     assert!(!is_npu_board("unknown"));
+    assert_eq!(board_accelerator("Raspberry Pi 4 Model B"), None);
+    assert_eq!(board_accelerator("rk3566"), None);
+    assert_eq!(board_accelerator(""), None);
+}
+
+#[test]
+fn every_orange_pi_5_hal_pattern_resolves_the_npu_detector_with_an_onnx_fallback() {
+    let patterns = hal_model_patterns("orange-pi-5");
+    assert!(!patterns.is_empty());
+    let onnx_build = "ados-vision-onnx-aarch64";
+    for p in patterns.iter().map(String::as_str).chain([
+        "orange-pi-5",
+        "Orange Pi 5 rockchip,rk3588s-orangepi-5 rockchip,rk3588",
+    ]) {
+        let accel = board_accelerator(p);
+        assert_eq!(accel, Some(Accelerator::Rknn), "{p}");
+        let accel = accel.unwrap();
+        // A platform `.rknn` detector runs on the NPU sidecar with the default
+        // (no-ONNX) vision build.
+        assert_eq!(accel.detector_backend("rknn"), "rknn");
+        assert_ne!(
+            crate::binaries::vision_binary(p, Some("rknn")).asset_name("aarch64"),
+            onnx_build,
+            "{p}"
+        );
+        // No platform file: the ONNX detector on the CPU, with the onnx build.
+        let fallback = accel.detector_backend("onnx");
+        assert_eq!(fallback, "onnx");
+        assert_eq!(
+            crate::binaries::vision_binary(p, Some(fallback)).asset_name("aarch64"),
+            onnx_build,
+            "{p}"
+        );
+        assert_eq!(accel.default_backend(), "rknn");
+    }
+}
+
+#[test]
+fn every_jetson_orin_nano_hal_pattern_resolves_the_onnx_cuda_detector() {
+    let patterns = hal_model_patterns("jetson-orin-nano");
+    assert!(!patterns.is_empty());
+    for p in patterns.iter().map(String::as_str).chain([
+        "NVIDIA Jetson Orin Nano Developer Kit nvidia,p3768-0000+p3767-0005 nvidia,tegra234",
+    ]) {
+        assert!(!is_npu_board(p), "{p}");
+        let accel = board_accelerator(p);
+        assert_eq!(accel, Some(Accelerator::Cuda), "{p}");
+        let accel = accel.unwrap();
+        // Every detector file a Jetson fetches is an ONNX one, run on the CUDA
+        // execution provider (the engine falls back to the CPU without it).
+        assert_eq!(accel.detector_backend("onnx"), "onnx-cuda");
+        assert_eq!(accel.default_backend(), "onnx-cuda");
+        // The onnx-enabled vision build carries the onnx-cuda backend.
+        assert_eq!(
+            crate::binaries::vision_binary(p, None).asset_name("aarch64"),
+            "ados-vision-onnx-aarch64",
+            "{p}"
+        );
+    }
+    // The Maxwell-era Jetson Nano is not the Orin: no CUDA provisioning for it.
+    for p in hal_model_patterns("jetson-nano") {
+        assert_eq!(board_accelerator(&p), None, "{p}");
+    }
 }
 
 #[test]

@@ -104,6 +104,49 @@ fn an_npu_board_reports_its_real_tops_and_accelerator_flag() {
 }
 
 #[test]
+fn the_orange_pi_5_publishes_its_rk3588s_npu() {
+    // Vendor and mainline device trees: both resolve to the Orange Pi 5, whose
+    // NPU the installer provisions, so the fingerprint must declare it too.
+    let profiles = load_profiles();
+    for (compatible, model) in [
+        ("rockchip,rk3588s-orangepi-5", "Orange Pi 5"),
+        ("xunlong,orangepi-5", "Xunlong Orange Pi 5"),
+    ] {
+        let fp = resolve(&profiles, &facts(compatible, model));
+        assert_eq!(fp.profile, "orange-pi-5", "{compatible} / {model}");
+        assert_eq!(fp.soc, "RK3588S");
+        assert_eq!(fp.npu_tops, 6.0);
+        assert!(fp.has_accelerator);
+        assert!(!fp.has_local_inference);
+    }
+}
+
+#[test]
+fn the_jetson_orin_nano_runs_its_detector_in_the_onnx_backend_without_an_npu() {
+    // No DLA on the Orin Nano: no NPU TOPS, and the detector runs through the
+    // in-process ONNX backend (on the CUDA GPU when the runtime carries it).
+    let profiles = load_profiles();
+    let fp = resolve(
+        &profiles,
+        &facts(
+            "nvidia,p3768-0000+p3767-0005",
+            "NVIDIA Jetson Orin Nano Developer Kit",
+        ),
+    );
+    assert_eq!(fp.profile, "jetson-orin-nano");
+    assert_eq!(fp.npu_tops, 0.0);
+    assert!(!fp.has_accelerator);
+    assert_eq!(fp.local_inference, "onnx");
+    assert!(fp.has_local_inference);
+    // The Maxwell Jetson Nano is a different board, not a substring match.
+    let nano = resolve(
+        &profiles,
+        &facts("nvidia,p3450-0000", "NVIDIA Jetson Nano Developer Kit"),
+    );
+    assert_eq!(nano.profile, "jetson-nano");
+}
+
+#[test]
 fn the_compatible_token_disambiguates_two_boards_with_one_soc_model() {
     // Every Allwinner A733 board reports the same model string, so only the
     // device-tree compatible token tells the A7S from the A7Z. Matching on

@@ -65,6 +65,7 @@ def _loaded(mgr: ModelManager, entries: list[dict[str, Any]]) -> ModelManager:
         ("auto", 6.0, ["rknn", "onnx"]),
         ("auto", 0.0, ["onnx"]),
         ("onnx", 6.0, ["onnx"]),
+        ("onnx-cuda", 0.0, ["onnx"]),
         ("rknn", 0.0, ["rknn"]),
         ("hailo", 13.0, ["hailo"]),
         ("mock", 0.0, None),

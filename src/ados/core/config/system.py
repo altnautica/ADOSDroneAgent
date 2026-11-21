@@ -12,7 +12,9 @@ from ._bounds import I64_MAX, I64_MIN, U8_MAX, U32_MAX
 
 # The inference backends the native vision engine selects between. A closed
 # set: any other name used to fall through to the mock engine silently.
-VisionBackend = Literal["auto", "rknn", "hailo", "onnx", "mock"]
+# `onnx-cuda` is the ONNX backend with ONNX Runtime's CUDA execution provider
+# (a Jetson GPU); it runs on the CPU when the runtime carries no CUDA provider.
+VisionBackend = Literal["auto", "rknn", "hailo", "onnx", "onnx-cuda", "mock"]
 
 # When the engine runs its detector: only on a camera some consumer holds a
 # lease on (`on_demand`), or on every captured camera (`always`).
