@@ -67,6 +67,7 @@ pub fn dropin_files() -> Vec<&'static str> {
         "/etc/systemd/journald.conf.d/10-ados-persistent.conf",
         "/etc/modules-load.d/ados-display.conf",
         "/etc/udev/rules.d/50-ados-uvc-no-autosuspend.rules",
+        "/etc/udev/rules.d/70-ados-realsense.rules",
         "/etc/udev/rules.d/99-ados-hardware.rules",
         "/etc/udev/rules.d/99-ados-input.rules",
         "/etc/udev/rules.d/99-ados-modem.rules",

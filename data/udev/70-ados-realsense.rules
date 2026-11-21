@@ -1,0 +1,8 @@
+# Intel RealSense D4xx USB depth cameras: group access for plugins.
+#
+# The plugin user is in the ados-plugins group, so this rule lets a plugin
+# open the camera's usbfs node read-write. A plugin's unit still admits
+# /dev/bus/usb only when the plugin holds the hardware.usb grant, so only a
+# granted plugin reaches the camera. Covers the depth stream; the D435i IMU
+# (HID/iio) is not read.
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="8086", ATTR{idProduct}=="0ad1|0ad2|0ad3|0ad4|0ad5|0ad6|0af2|0af6|0afe|0aff|0b00|0b01|0b03|0b07|0b0c|0b3a|0b49|0b4b|0b52|0b5b|0b5c|1155|1156", MODE="0660", GROUP="ados-plugins"
