@@ -1,0 +1,15 @@
+[package]
+name = "ados-planning"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Obstacle-aware motion planning over an occupancy query: jump point search and kinodynamic A* front ends, homotopy alternatives, safe flight corridors, MINCO trajectory optimisation with L-BFGS, backup trajectories, and a coarse global route."
+
+[dependencies]
+
+[dev-dependencies]
+# Thread CPU clock for the replan timing test.
+libc = "0.2"

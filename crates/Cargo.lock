@@ -592,6 +592,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-planning"
+version = "0.124.18"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ados-plugin-host"
 version = "0.124.18"
 dependencies = [
