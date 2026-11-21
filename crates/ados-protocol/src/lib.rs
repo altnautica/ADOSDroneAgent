@@ -22,6 +22,7 @@ pub mod dashboard_session;
 pub mod dispatch;
 pub mod fleet_identity;
 pub mod flight_modes;
+pub mod follow_beacon;
 pub mod frame;
 pub mod framebus;
 pub mod host_kind;

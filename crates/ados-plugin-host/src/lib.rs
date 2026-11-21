@@ -126,6 +126,7 @@ pub const HANDLER_GATED_CAPS: &[&str] = &[
     "estimator.pose.inject",
     "event.publish",
     "event.subscribe",
+    "follow.beacon.read",
     "mavlink.component.vio",
     "mcp.expose",
 ];

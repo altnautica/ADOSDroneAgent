@@ -274,6 +274,11 @@ pub(super) async fn build_extras(
     if let Some(status) = crate::pilot_link::global().and_then(|l| l.downlink_status()) {
         extras.insert("pilot_downlink".into(), status);
     }
+    // The shared phone position: fixes published, dropped per reason, and the
+    // export to the plugin bus. Present only on a drone.
+    if let Some(beacon) = crate::follow_beacon::global() {
+        extras.insert("follow_beacon".into(), beacon.status());
+    }
     // Who the direct-GCS proxies serve (see `proxy_posture`), with each edge's
     // live listening flag.
     extras.insert("mavlink_proxy_posture".into(), proxy_posture.to_value());

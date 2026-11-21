@@ -206,6 +206,16 @@ pub const FLIGHT_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
 /// Prefix of the host-only pilot lease topics.
 const FLIGHT_NAMESPACE: &str = "flight.";
 
+/// Host-published topics under `plugin.`, each with the capability a plugin
+/// needs beside `event.subscribe` to read it. Only the host publishes them: a
+/// plugin's publish under `plugin.` outside its own namespace is refused, no
+/// manifest may declare one as a shared topic, and the event export's publish
+/// op (`event_export::publish`) is allowlisted to exactly these.
+pub const HOST_PLUGIN_TOPICS: &[(&str, &str)] = &[(
+    ados_protocol::follow_beacon::FOLLOW_BEACON_TOPIC,
+    ados_protocol::follow_beacon::FOLLOW_BEACON_READ_CAP,
+)];
+
 /// Reserved namespaces a plugin must not publish into. The set is enforced inline by
 /// `is_publish_allowed`. The `vision.` prefix is host-publish-only: the engine
 /// publishes frame descriptors and detections there, and a plugin reaches the surface
@@ -250,6 +260,9 @@ pub fn is_subscribe_allowed(
 ) -> bool {
     if !granted_caps.contains("event.subscribe") || !topic_well_formed(topic_pattern) {
         return false;
+    }
+    if let Some((_, cap)) = HOST_PLUGIN_TOPICS.iter().find(|(t, _)| *t == topic_pattern) {
+        return granted_caps.contains(*cap);
     }
     if let Some(topic) = shared.find(topic_pattern) {
         return topic.owner == plugin_id || granted_caps.contains(&topic.subscribe_capability);

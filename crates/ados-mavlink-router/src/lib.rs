@@ -23,6 +23,7 @@ pub mod connection;
 pub mod daemon;
 pub mod demo;
 pub mod fc_sensors;
+pub mod follow_beacon;
 pub mod frame_ingest;
 pub mod mission_mirror;
 pub mod param_cache;

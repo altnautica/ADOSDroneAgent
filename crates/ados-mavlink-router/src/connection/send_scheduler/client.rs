@@ -130,6 +130,11 @@ impl FcConnection {
             return false;
         }
         let data: &[u8] = &admitted;
+        // A ground station's shared position (`FOLLOW_TARGET`) also goes to the
+        // plugin bus, judged by who wrote it; the bytes still go on below.
+        if let Some(beacon) = crate::follow_beacon::global() {
+            beacon.observe(data, caller, injector.is_some(), self.clock.now_ns());
+        }
         // Command authority: while the pilot owns motion, client sticks are
         // dropped and client gotos fly through the pilot instead. A
         // `DO_REPOSITION` taken off the FC stream is answered here.

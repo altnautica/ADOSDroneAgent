@@ -99,7 +99,7 @@ pub(super) fn yaw_param(p4: f32) -> Option<f32> {
 }
 
 /// Total length of the frame at `buf[0]`, if its header is complete.
-pub(super) fn frame_len(buf: &[u8]) -> Option<usize> {
+pub(crate) fn frame_len(buf: &[u8]) -> Option<usize> {
     match buf.first()? {
         0xFD if buf.len() >= 3 => Some(12 + buf[1] as usize + if buf[2] & 1 != 0 { 13 } else { 0 }),
         0xFE if buf.len() >= 2 => Some(8 + buf[1] as usize),
@@ -107,7 +107,7 @@ pub(super) fn frame_len(buf: &[u8]) -> Option<usize> {
     }
 }
 
-pub(super) fn frame_id(f: &[u8]) -> u32 {
+pub(crate) fn frame_id(f: &[u8]) -> u32 {
     if f[0] == 0xFD {
         u32::from_le_bytes([f[7], f[8], f[9], 0])
     } else {

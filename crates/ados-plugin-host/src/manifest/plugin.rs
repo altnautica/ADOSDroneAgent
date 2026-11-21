@@ -221,6 +221,15 @@ impl PluginManifest {
                     shared.topic
                 )));
             }
+            if crate::handlers::HOST_PLUGIN_TOPICS
+                .iter()
+                .any(|(t, _)| *t == shared.topic)
+            {
+                return Err(ManifestError(format!(
+                    "agent.contributes.shared_topics topic {:?} is published by the host only",
+                    shared.topic
+                )));
+            }
             let cap = shared.subscribe_capability.as_str();
             if ados_protocol::capabilities::get_agent_capability(cap).is_none()
                 && !declared.contains(cap)

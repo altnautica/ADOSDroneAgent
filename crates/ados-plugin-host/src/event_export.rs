@@ -24,6 +24,9 @@
 //! the events it lagged past (the bus is drop-on-full, never blocking a
 //! publisher); a consumer that stops reading is dropped after
 //! [`WRITE_DEADLINE`].
+//!
+//! A host service may instead open the socket to publish a host-owned topic
+//! (`op: publish`); see [`publish`] for who may and what.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -38,6 +41,12 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 
 use crate::handlers::{topic_well_formed, Event, EventBus};
+
+pub mod publish;
+#[cfg(test)]
+mod publish_tests;
+
+pub use publish::{PublishGate, PublishPeer};
 
 /// The `plugin.events` wire version, carried as `v` on every line.
 pub const EVENT_EXPORT_VERSION: u32 = 1;
@@ -71,6 +80,17 @@ struct SubscribeRequest {
     v: u32,
     op: String,
     topics: Vec<String>,
+}
+
+/// The op of a first line, read before the line is parsed for that op.
+#[derive(Debug, Deserialize)]
+struct OpOnly {
+    op: String,
+}
+
+/// Whether a first line asks to publish.
+fn is_publish(line: &[u8]) -> bool {
+    serde_json::from_slice::<OpOnly>(line).is_ok_and(|o| o.op == "publish")
 }
 
 /// Parse and validate a subscribe request line into its topic set.
@@ -113,21 +133,36 @@ async fn write_line(stream: &mut tokio::net::unix::OwnedWriteHalf, line: &[u8]) 
     )
 }
 
-/// Serve one export connection: read the request, answer it, then forward
-/// every matching bus event until either side goes away.
-async fn serve_connection(bus: Arc<EventBus>, stream: UnixStream) {
+/// Serve one export connection: read the first line; a publish line hands the
+/// connection to [`publish::serve_publisher`], a subscribe request is answered
+/// and then every matching bus event is forwarded until either side goes away.
+pub(crate) async fn serve_connection(
+    bus: Arc<EventBus>,
+    gate: Arc<PublishGate>,
+    peer: PublishPeer,
+    stream: UnixStream,
+) {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let line = match tokio::time::timeout(
         REQUEST_READ_DEADLINE,
-        ados_protocol::ipc::read_newline_line(&mut reader, REQUEST_MAX_BYTES),
+        ados_protocol::ipc::read_newline_line(&mut reader, publish::PUBLISH_LINE_MAX),
     )
     .await
     {
         Ok(Ok(Some(line))) => line,
         _ => return,
     };
-    let topics = match parse_request(&line) {
+    if is_publish(&line) {
+        publish::serve_publisher(&bus, &gate, peer, line, &mut reader, &mut write_half).await;
+        return;
+    }
+    let parsed = if line.len() > REQUEST_MAX_BYTES {
+        Err(format!("request exceeds {REQUEST_MAX_BYTES} bytes"))
+    } else {
+        parse_request(&line)
+    };
+    let topics = match parsed {
         Ok(topics) => topics,
         Err(reason) => {
             let mut body = serde_json::to_vec(&json!({"v": EVENT_EXPORT_VERSION, "error": reason}))
@@ -178,14 +213,24 @@ pub fn serve_event_export(
     bus: Arc<EventBus>,
     control_dir: PathBuf,
 ) -> std::io::Result<(PathBuf, JoinHandle<()>)> {
+    serve_event_export_with(bus, control_dir, Arc::new(PublishGate::default()))
+}
+
+/// [`serve_event_export`] with the publish gate (its rate buckets and refusal
+/// counts) supplied by the caller.
+pub fn serve_event_export_with(
+    bus: Arc<EventBus>,
+    control_dir: PathBuf,
+    gate: Arc<PublishGate>,
+) -> std::io::Result<(PathBuf, JoinHandle<()>)> {
     crate::control::prepare_control_dir(&control_dir)?;
     let path = export_socket_path(&control_dir);
     let listener = ados_protocol::ipc::bind_command_socket(&path, 0o600)?;
     let permits = Arc::new(tokio::sync::Semaphore::new(EXPORT_MAX_CONNECTIONS));
     let task = tokio::spawn(async move {
         loop {
-            let stream = match listener.accept().await {
-                Ok((s, _addr)) => s,
+            let (stream, class) = match listener.accept_classified().await {
+                Ok(accepted) => accepted,
                 Err(e) => {
                     tracing::warn!(error = %e, "event export socket accept failed");
                     tokio::time::sleep(crate::server::ACCEPT_RETRY_INTERVAL).await;
@@ -196,9 +241,10 @@ pub fn serve_event_export(
                 tracing::warn!("event export socket at its connection cap; dropping a connection");
                 continue;
             };
-            let bus = bus.clone();
+            let peer = publish::publish_peer(&stream, class);
+            let (bus, gate) = (bus.clone(), gate.clone());
             tokio::spawn(async move {
-                serve_connection(bus, stream).await;
+                serve_connection(bus, gate, peer, stream).await;
                 drop(permit);
             });
         }

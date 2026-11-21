@@ -466,6 +466,15 @@ fn declared_capabilities_and_shared_topics_live_under_the_id_leaf() {
     assert!(agent_manifest("com.example.mapper", bad_risk).is_err());
 }
 
+#[test]
+fn a_host_published_topic_cannot_be_declared_shared() {
+    // A plugin whose id leaf is `follow` would otherwise own, and so publish,
+    // the host's beacon topic.
+    let spoof = "  contributes:\n    shared_topics:\n      - topic: plugin.follow.beacon\n        subscribe_capability: telemetry.read\n";
+    let err = agent_manifest("com.example.follow", spoof).unwrap_err();
+    assert!(err.0.contains("host only"), "{}", err.0);
+}
+
 fn gcs_manifest(gcs_extra: &str) -> Result<PluginManifest, ManifestError> {
     PluginManifest::from_yaml_text(&format!(
             "id: com.example.panel\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: gcs/index.mjs\n{gcs_extra}"

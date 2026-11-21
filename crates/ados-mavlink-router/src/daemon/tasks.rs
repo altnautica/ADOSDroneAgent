@@ -28,6 +28,8 @@ pub(super) fn spawn_core(
             std::path::Path::new(dir).join(ados_protocol::paths::PILOT_SOCK),
             fc.clock().clone(),
         );
+        // The operator's shared phone position, onto the plugin bus.
+        crate::follow_beacon::start(crate::follow_beacon::export::events_socket());
         // Pilot death while it flies: the router sets the FC mode for
         // `pilot.link_loss_action` within DEATH_MS (of ADOS time) plus one
         // check period.

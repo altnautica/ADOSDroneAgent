@@ -163,6 +163,15 @@
       "side": "agent"
     },
     {
+      "category": "data_network",
+      "description": "Lets the plugin read plugin.follow.beacon: the position, velocity and accuracy of the operator's phone while the operator shares it from a ground station for follow-me. The router publishes only fixes from an authorised ground link; the plugin cannot publish the topic.",
+      "enforced": true,
+      "id": "follow.beacon.read",
+      "label": "Read the operator's shared phone position",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
       "category": "hardware",
       "description": "Lets the plugin capture video frames from CSI-attached cameras on the SBC's camera connector. Required by native camera drivers.",
       "enforced": true,
