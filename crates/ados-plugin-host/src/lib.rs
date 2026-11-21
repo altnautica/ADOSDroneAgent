@@ -49,6 +49,8 @@ pub mod control;
 pub mod control_client;
 #[cfg(unix)]
 pub mod daemon;
+#[cfg(unix)]
+pub mod depth_frames;
 pub mod dispatch;
 pub mod download;
 pub mod errors;
@@ -129,6 +131,7 @@ pub const HANDLER_GATED_CAPS: &[&str] = &[
     "follow.beacon.read",
     "mavlink.component.vio",
     "mcp.expose",
+    "vision.depth.read",
 ];
 
 /// Capabilities enforced by the generated service unit rather than by any wire

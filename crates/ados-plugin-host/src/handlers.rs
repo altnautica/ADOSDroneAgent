@@ -216,6 +216,14 @@ pub const HOST_PLUGIN_TOPICS: &[(&str, &str)] = &[(
     ados_protocol::follow_beacon::FOLLOW_BEACON_READ_CAP,
 )];
 
+/// Host-published `vision.` topics, each with the capability a plugin needs
+/// beside `event.subscribe` to read it. The host forwards them from the vision
+/// engine (`crate::depth_frames`); no plugin may publish under `vision.`.
+pub const HOST_VISION_TOPICS: &[(&str, &str)] = &[(
+    ados_protocol::vision_depth_frame::VISION_DEPTH_FRAME_TOPIC,
+    ados_protocol::vision_depth_frame::VISION_DEPTH_READ_CAP,
+)];
+
 /// Reserved namespaces a plugin must not publish into. The set is enforced inline by
 /// `is_publish_allowed`. The `vision.` prefix is host-publish-only: the engine
 /// publishes frame descriptors and detections there, and a plugin reaches the surface
@@ -261,7 +269,11 @@ pub fn is_subscribe_allowed(
     if !granted_caps.contains("event.subscribe") || !topic_well_formed(topic_pattern) {
         return false;
     }
-    if let Some((_, cap)) = HOST_PLUGIN_TOPICS.iter().find(|(t, _)| *t == topic_pattern) {
+    if let Some((_, cap)) = HOST_PLUGIN_TOPICS
+        .iter()
+        .chain(HOST_VISION_TOPICS)
+        .find(|(t, _)| *t == topic_pattern)
+    {
         return granted_caps.contains(*cap);
     }
     if let Some(topic) = shared.find(topic_pattern) {

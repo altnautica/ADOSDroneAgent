@@ -44,6 +44,10 @@ pub const VISION_DEPTH_FRAME_VERSION: u64 = 2;
 /// The event topic the frames are published on.
 pub const VISION_DEPTH_FRAME_TOPIC: &str = "vision.depth.v2";
 
+/// The capability a plugin needs (beside `event.subscribe`) to read
+/// [`VISION_DEPTH_FRAME_TOPIC`]; only the host publishes the topic.
+pub const VISION_DEPTH_READ_CAP: &str = "vision.depth.read";
+
 /// Published plane width, pixels.
 pub const FRAME_COLS: u16 = 128;
 /// Published plane height, pixels.
