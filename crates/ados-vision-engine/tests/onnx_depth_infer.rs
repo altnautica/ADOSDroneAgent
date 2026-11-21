@@ -23,11 +23,10 @@ use ados_protocol::framebus::{
 use ados_vision_engine::backend::{OnnxBackend, VisionBackend};
 
 fn model_path() -> PathBuf {
-    if let Ok(p) = std::env::var("ADOS_TEST_DEPTH_ONNX") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".cache/cameradepth/out/depth_anything_v2_small_252x196.onnx")
+    PathBuf::from(
+        std::env::var("ADOS_TEST_DEPTH_ONNX")
+            .expect("set ADOS_TEST_DEPTH_ONNX to the depth ONNX model path"),
+    )
 }
 
 /// A 640x360 frame: a smooth bright sky over a coarse ground texture whose
