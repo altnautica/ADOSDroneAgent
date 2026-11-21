@@ -162,7 +162,14 @@ impl Pilot {
         let m = match cmd {
             Command::Hold { .. } if unverified => {
                 self.fc_hold = None;
-                tx.setpoint(MASK_VELOCITY, [0.0; 3], [0.0; 3], 0.0, 0.0)
+                // A tripped flow check measured the EKF's velocity off by
+                // the flow's (an external position that stopped pins it
+                // while the vehicle flies on), so zero on it is not zero
+                // over the ground: ask minus that gap while it is tripped.
+                let v = self
+                    .flow_brake_ne(now_ms)
+                    .map_or([0.0; 3], |v| [v[0], v[1], 0.0]);
+                tx.setpoint(MASK_VELOCITY, [0.0; 3], v, 0.0, 0.0)
             }
             Command::Hold { pos, yaw } => {
                 self.setpoint = Some(pos);

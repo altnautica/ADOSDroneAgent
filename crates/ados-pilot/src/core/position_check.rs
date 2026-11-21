@@ -38,6 +38,15 @@ pub const EXTNAV_STALE_MS: u64 = 3_000;
 const POSXY_EXTNAV: f32 = 6.0;
 /// Horizontal stick speed while the position is unverified.
 pub const UNVERIFIED_MAX_MPS: f32 = 1.0;
+/// The flow-against-estimate gap a tripped check brakes on is averaged over
+/// this, ms: five 10 Hz flow samples smooth a dusty floor's flow, and the
+/// lag stays short of the FC's velocity response (a 1 s average let the
+/// brake overshoot into a 0.3-0.9 m/s backward slide in simulation).
+const BRAKE_WINDOW_MS: u64 = 500;
+/// The most the flow brake asks, m/s: the frozen-pose drifts it stops run
+/// to 3 m/s, and an ask held under the gap leaves the vehicle sliding at
+/// the rest.
+pub const FLOW_BRAKE_MAX_MPS: f32 = 3.0;
 /// `hold_reason` while the position is unverified.
 pub const HOLD_POSITION_UNVERIFIED: &str = "position-unverified";
 
@@ -80,8 +89,9 @@ fn degraded_reason_unverifies(reason: Option<&str>) -> bool {
 /// The flow-against-estimate comparison.
 #[derive(Debug, Clone, Default)]
 pub struct FlowCheck {
-    /// (time, (flow − estimate) × dt) per flow sample inside the window.
-    steps: VecDeque<(u64, V2)>,
+    /// (time, (flow − estimate) × dt, dt ms) per flow sample inside the
+    /// window.
+    steps: VecDeque<(u64, V2, u64)>,
     last_ms: Option<u64>,
     tripped: bool,
     flow_mps: f32,
@@ -105,11 +115,12 @@ impl FlowCheck {
         self.steps.push_back((
             now_ms,
             [(flow_ne[0] - est_ne[0]) * dt, (flow_ne[1] - est_ne[1]) * dt],
+            dt_ms,
         ));
         while self
             .steps
             .front()
-            .is_some_and(|(t, _)| now_ms.saturating_sub(*t) >= WINDOW_MS)
+            .is_some_and(|(t, _, _)| now_ms.saturating_sub(*t) >= WINDOW_MS)
         {
             self.steps.pop_front();
         }
@@ -134,7 +145,7 @@ impl FlowCheck {
         let s = self
             .steps
             .iter()
-            .fold([0.0f32; 2], |a, (_, d)| [a[0] + d[0], a[1] + d[1]]);
+            .fold([0.0f32; 2], |a, (_, d, _)| [a[0] + d[0], a[1] + d[1]]);
         s[0].hypot(s[1])
     }
 
@@ -144,6 +155,36 @@ impl FlowCheck {
             .last_ms
             .is_some_and(|t| now_ms.saturating_sub(t) <= FLOW_STALE_MS);
         (self.tripped && fresh).then_some((self.flow_mps, self.estimate_mps))
+    }
+
+    /// While tripped: the velocity, north-east m/s, to ask the flight
+    /// controller for so that the ground velocity the flow measures goes to
+    /// zero. The FC drives its EKF velocity to the ask, and the ground
+    /// velocity is the EKF's plus the gap (flow − estimate), averaged over
+    /// [`BRAKE_WINDOW_MS`]; so the ask is minus that gap, held to
+    /// [`FLOW_BRAKE_MAX_MPS`]. `None` while not tripped (or the flow is
+    /// stale) or with under 0.2 s of flow in the window: a quality-0 sample
+    /// or a missing range restarts the comparison, and the hold then asks
+    /// zero on the estimate as before.
+    fn brake_ne(&self, now_ms: u64) -> Option<V2> {
+        self.verdict(now_ms)?;
+        let (mut sum, mut span_ms) = ([0.0f32; 2], 0u64);
+        for (_, d, dt) in self
+            .steps
+            .iter()
+            .filter(|(t, _, _)| now_ms.saturating_sub(*t) < BRAKE_WINDOW_MS)
+        {
+            sum = [sum[0] + d[0], sum[1] + d[1]];
+            span_ms += dt;
+        }
+        if span_ms < 200 {
+            return None;
+        }
+        let s = span_ms as f32 / 1000.0;
+        Some(crate::geo::clamp_len(
+            [-sum[0] / s, -sum[1] / s],
+            FLOW_BRAKE_MAX_MPS,
+        ))
     }
 }
 
@@ -209,6 +250,13 @@ impl Pilot {
         }
         let ne = body_to_ne(flow_body_velocity(flow.comp, range), att.yaw);
         self.flow_check.step(ne, [local.vn, local.ve], now_ms);
+    }
+
+    /// While the flow check is tripped, the velocity to ask so the vehicle
+    /// stops over the ground ([`FlowCheck::brake_ne`]); `None` otherwise (a
+    /// hold on an unverified position then asks zero).
+    pub(super) fn flow_brake_ne(&self, now_ms: u64) -> Option<V2> {
+        self.flow_check.brake_ne(now_ms)
     }
 
     /// The active set's `EK3_SRCn_POSXY`, when the parameter has been read.

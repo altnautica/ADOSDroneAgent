@@ -140,10 +140,7 @@ fn walk(s: &mut Sim, trail: &[[f32; 2]], pace: f32, max_mps: f32, tail_ms: u64) 
             w.min_clearance_m = w.min_clearance_m.min(s.stand_clearance_m());
             let [roll, pitch, _] = s.fc.att;
             w.tilt_deg.push(
-                (roll.cos() * pitch.cos())
-                    .clamp(-1.0, 1.0)
-                    .acos()
-                    .to_degrees(),
+                ados_pilot::geo::acos((roll.cos() * pitch.cos()).clamp(-1.0, 1.0)).to_degrees(),
             );
         }
         let p = [s.fc.pos[0], s.fc.pos[1]];

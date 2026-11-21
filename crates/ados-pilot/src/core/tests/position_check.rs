@@ -56,9 +56,103 @@ fn a_hold_the_flow_says_is_moving_is_not_a_calm_hold() {
         position_check_msg(&w).as_deref(),
         Some("Position unverified (nav): flow 5.3 m/s, estimate 0.3 m/s")
     );
-    // The hold is a zero-velocity brake, not a position hold.
+    // The hold is a velocity brake, not a position hold: it asks minus the
+    // flow-against-estimate gap (5.0 m/s north) held to the brake's cap,
+    // so the ground speed the flow measures goes to zero.
     let sp = w.last_setpoint().unwrap();
     assert_eq!(sp.type_mask.bits(), crate::fc::MASK_VELOCITY);
+    let cap = crate::core::position_check::FLOW_BRAKE_MAX_MPS;
+    assert!((sp.vx + cap).abs() < 1e-3 && sp.vy.abs() < 1e-3, "{sp:?}");
+}
+
+/// The FC's velocity response: its EKF velocity follows the asked velocity
+/// with this time constant, s.
+const FC_TAU_S: f32 = 0.25;
+
+/// A frozen external position at 1.9 m, at yaw 0: the vehicle drifts north
+/// at `v0` while the EKF says 0. `pinned` the EKF keeps leaking its
+/// velocity back to 0 (the frozen position pulling it, time constant 1 s);
+/// otherwise it stays off the ground velocity by `v0` throughout. Flow at
+/// 10 Hz measures the ground velocity. Returns the ground velocities from
+/// the trip on, 20 ms apart, and the distance flown after the trip.
+fn frozen_drift(v0: f32, pinned: bool) -> (Vec<f32>, f32) {
+    let mut w = hovering();
+    let agl = w.agl.unwrap();
+    let (mut est, mut ground) = (0.0f32, v0);
+    let mut after = Vec::new();
+    let mut flown = 0.0f32;
+    for tick in 0..1000u32 {
+        w.vel = [est, 0.0, 0.0];
+        if tick % 5 == 0 {
+            w.inbox.push(MavMessage::OPTICAL_FLOW(OPTICAL_FLOW_DATA {
+                flow_comp_m_y: ground / agl,
+                quality: 60,
+                ground_distance: agl,
+                ..Default::default()
+            }));
+        }
+        w.run(20);
+        let tripped = w.p.state(w.now).position_unverified.is_some();
+        let ask = w
+            .last_setpoint()
+            .filter(|sp| sp.type_mask.bits() == crate::fc::MASK_VELOCITY)
+            .map_or(0.0, |sp| sp.vx);
+        let dt = 0.02;
+        let accel = (ask - est) / FC_TAU_S;
+        ground += accel * dt;
+        est = if pinned {
+            est + (accel - est) * dt
+        } else {
+            ground - v0
+        };
+        if tripped || !after.is_empty() {
+            after.push(ground);
+            flown += ground * dt;
+        }
+    }
+    assert!(!after.is_empty(), "v0 {v0}: the flow check never tripped");
+    (after, flown)
+}
+
+/// The frozen-pose slide: the EKF velocity pinned near zero while the flow
+/// measures 1.1-3 m/s over the ground. The tripped hold brakes on the
+/// flow, stopping within 3 m of the trip without hunting about zero.
+#[test]
+fn a_frozen_estimate_is_braked_to_a_stop_on_the_flow() {
+    for pinned in [false, true] {
+        for v0 in [1.1f32, 2.0, 3.0] {
+            let (v, flown) = frozen_drift(v0, pinned);
+            let end = *v.last().unwrap();
+            let back = v.iter().copied().fold(f32::INFINITY, f32::min);
+            // Sign changes of the ground velocity past a 0.05 m/s dead band.
+            let mut flips = 0;
+            let mut sign = 1.0f32;
+            for &g in &v {
+                if g * sign < -0.05 {
+                    sign = -sign;
+                    flips += 1;
+                }
+            }
+            eprintln!(
+                "v0 {v0} pinned {pinned}: {flown:.2} m after the trip, slowest {back:.2} m/s, end {end:.3} m/s, {flips} reversals"
+            );
+            assert!(flown.abs() <= 3.0, "v0 {v0}: {flown:.2} m after the trip");
+            assert!(end.abs() < 0.1, "v0 {v0}: still {end:.2} m/s");
+            assert!(flips <= 1, "v0 {v0}: {flips} reversals");
+            assert!(back > -0.5, "v0 {v0}: slid back at {back:.2} m/s");
+        }
+    }
+}
+
+/// Quality-0 flow restarts the comparison: the brake asks nothing off the
+/// flow it no longer has, and the hold asks zero on the estimate.
+#[test]
+fn the_flow_brake_lets_go_without_flow() {
+    let mut w = hovering();
+    w.vel = [0.3, 0.0, 0.0];
+    run_flow(&mut w, [0.0, 2.8], 41, 2000);
+    run_flow(&mut w, [0.0, 2.8], 0, 100);
+    let sp = w.last_setpoint().unwrap();
     assert_eq!((sp.vx, sp.vy), (0.0, 0.0));
 }
 
