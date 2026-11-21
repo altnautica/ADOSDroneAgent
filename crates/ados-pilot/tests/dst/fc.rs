@@ -20,8 +20,9 @@ const G: f32 = 9.81;
 const VEL_TAU_S: f32 = 0.25;
 /// The position loop's pull toward a position target, 1/s.
 const POS_GAIN: f32 = 1.0;
-/// Speed limits of the simulated position controller, m/s.
-const MAX_H_MPS: f32 = 8.0;
+/// Speed limits of the simulated position controller, m/s: over the
+/// benchmark's fastest goal (10 m/s).
+const MAX_H_MPS: f32 = 12.0;
 const MAX_UP_MPS: f32 = 2.5;
 const MAX_DOWN_MPS: f32 = 1.5;
 /// GUIDED take-off climb rate, m/s.

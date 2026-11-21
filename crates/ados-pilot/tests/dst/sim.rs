@@ -98,6 +98,10 @@ pub struct Sim {
     /// The lidar is fixed to the frame: each scan tilts with the copter's
     /// lean. Off, every scan is cast level (the planar stands' scenarios).
     pub tilted_scan: bool,
+    /// The obstacle sensor the run flies with ([`crate::sensors`]).
+    pub tier: crate::sensors::SensorTier,
+    /// Pedestrians every sensor tier sees.
+    pub walkers: Vec<crate::sensors::Walker>,
     /// The leaf returns' own stream, so crowns leave every other draw of
     /// the run as it was.
     scan_rng: Rng,
@@ -150,6 +154,8 @@ impl Sim {
             stand: Vec::new(),
             crowns: Vec::new(),
             tilted_scan: false,
+            tier: crate::sensors::SensorTier::Planar,
+            walkers: Vec::new(),
             scan_rng: Rng::new(seed ^ 0x5CA9_1EAF),
         };
         sim.trace.line(format_args!("{name} seed {seed}"));
@@ -210,8 +216,11 @@ impl Sim {
                 .on_feed(ados_pilot::router_state::MISSION_TOPIC, &m, now);
         }
         if (now - self.start).is_multiple_of(SCAN_MS) {
-            if !self.stand.is_empty() || !self.crowns.is_empty() {
-                self.scan = self.stand_scan();
+            if !self.stand.is_empty() || !self.crowns.is_empty() || !self.walkers.is_empty() {
+                self.scan = match self.tier {
+                    crate::sensors::SensorTier::Planar => self.stand_scan(),
+                    t => self.flat_scan(t),
+                };
             }
             self.p
                 .on_feed(ados_pilot::events::TOPIC_SCAN, &self.scan, now);
@@ -448,7 +457,7 @@ impl Sim {
     /// ground), the crowns (leaf returns at an exponential depth, from the
     /// scan's own seeded stream) and the ground; the slant range of the
     /// first return, 0 for none within [`LIDAR_RANGE_M`].
-    fn stand_scan(&mut self) -> Value {
+    pub fn stand_scan(&mut self) -> Value {
         let t = self.fc.truth();
         let p = [t[0], t[1]];
         let h0 = -t[2];
@@ -486,6 +495,13 @@ impl Sim {
             for &(c, r) in &self.stand {
                 if let Some((s, _)) = disk_span(p, u, c, r) {
                     if height(s) >= 0.0 {
+                        best = best.min(s);
+                    }
+                }
+            }
+            for w in &self.walkers {
+                if let Some((s, _)) = disk_span(p, u, w.at(self.now), crate::sensors::WALKER_R_M) {
+                    if (0.0..=crate::sensors::WALKER_H_M).contains(&height(s)) {
                         best = best.min(s);
                     }
                 }

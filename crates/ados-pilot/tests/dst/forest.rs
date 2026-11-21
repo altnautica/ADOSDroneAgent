@@ -23,7 +23,7 @@ const WALK_MPS: f32 = 1.4;
 /// The skill's goal period, ms (the follow skill's 10 Hz).
 const GOAL_MS: u64 = 100;
 
-fn lease(s: &mut Sim) -> u64 {
+pub(crate) fn lease(s: &mut Sim) -> u64 {
     let r = s.request(Request::LeaseAcquire {
         holder: Holder {
             plugin_id: "com.example.follow".into(),

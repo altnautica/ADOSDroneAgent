@@ -27,13 +27,16 @@
 //!
 //! Every test name starts `dst_`: `cargo test -p ados-pilot dst` runs them.
 
+mod bench;
 mod fc;
 mod forest;
+mod metrics;
 #[path = "../pins/mod.rs"]
 mod pins;
 mod pos_reset;
 mod rng;
 mod scenarios;
+mod sensors;
 mod shaper_pins;
 mod sim;
 
