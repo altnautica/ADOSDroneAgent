@@ -96,11 +96,15 @@ impl Pilot {
                 .tx()
                 .setpoint(MASK_VELOCITY, [0.0; 3], [0.0; 3], 0.0, 0.0);
             self.mav(m);
+            // A height-only step (a rangefinder or barometer switch near the
+            // ground) leaves every horizontal point where it was: the moved
+            // heights are enough, and what flies goes on.
+            let horizontal = r.shift_ne() != [0.0, 0.0];
             match owner {
-                Owner::Skill | Owner::Goto | Owner::Swarm => {
+                Owner::Skill | Owner::Goto | Owner::Swarm if horizontal => {
                     self.brake_hold(Some(HOLD_POSITION_RESET));
                 }
-                Owner::Pilot if self.sessions.owner.is_none() && !self.landing => {
+                Owner::Pilot if horizontal && self.sessions.owner.is_none() && !self.landing => {
                     if let Some(pos) = self.pos(now_ms) {
                         let yaw = self.yaw(now_ms);
                         self.mr.hold_here(pos, yaw);
@@ -142,6 +146,9 @@ impl Pilot {
             self.plan_hold.as_mut(),
             self.stale_hold.as_mut(),
             self.setpoint.as_mut(),
+            // A goto flying on through a height-only step keeps its height
+            // against the vehicle.
+            self.goto.as_mut(),
             // Home keeps its place against the vehicle (the height above
             // it too) until the FC answers with its own.
             self.fc.home_local.as_mut(),
@@ -159,6 +166,12 @@ impl Pilot {
         {
             lo.rebase(d);
         }
+        // The touchdown's floor, so a step on the ground is no climb, and the
+        // ground under a subject, so the floor over them keeps its height.
+        if let Some(f) = self.touchdown.floor_d.as_mut() {
+            *f += d[2];
+        }
+        self.subject_track.rebase(d);
         self.sup.trail.shift(ne);
         if self.fc.home_local.is_some() {
             let m = self.tx().command(

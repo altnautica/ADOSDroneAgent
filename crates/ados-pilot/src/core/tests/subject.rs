@@ -597,3 +597,34 @@ fn the_climb_floor_follows_rising_ground() {
     let up = w.pos[0] - foot.unwrap();
     assert!(up > 50.0, "followed {up:.1} m up the slope");
 }
+
+/// The estimate steps 1.2 m up (a height-source switch) while the vehicle
+/// holds the climb floor over the subject: the ground taken under them moves
+/// with it, so every setpoint keeps its true 3.4 m over the ground, and the
+/// skill flies on.
+#[test]
+fn a_height_reset_keeps_the_floor_over_the_subject() {
+    let (mut w, id) = flying();
+    w.pos[2] = -1.5;
+    w.agl = Some(1.5);
+    let s = [w.pos[0] + 3.5, w.pos[1]];
+    for _ in 0..10 {
+        fly_for(&mut w, id, 200, |_, _| follow(0.0, Some(s), -1.5));
+        w.pos[2] = setpoint(&w).1;
+        w.agl = Some(-w.pos[2]);
+    }
+    assert!((setpoint(&w).1 + FLOOR_AGL).abs() < 0.05, "at the floor");
+    w.fc_clock = true;
+    fly_for(&mut w, id, 200, |_, _| follow(0.0, Some(s), -1.5));
+    // The vehicle and its rangefinder stay; the estimate reads 1.2 m higher.
+    w.pos[2] -= 1.2;
+    for _ in 0..10 {
+        fly_for(&mut w, id, 200, |_, _| follow(0.0, Some(s), -1.5));
+        let over_ground = -(setpoint(&w).1 + 1.2);
+        assert!(
+            over_ground >= FLOOR_AGL - 0.05,
+            "the setpoint is {over_ground:.2} m over the ground"
+        );
+    }
+    assert_eq!(w.p.owner(), ados_protocol::pilot::Owner::Skill);
+}

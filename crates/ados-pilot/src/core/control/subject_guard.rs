@@ -87,7 +87,13 @@ pub struct SubjectTrack {
     named_ms: u64,
     climbing: bool,
     ground_d: Option<GroundTake>,
+    /// When the track was last flown on: a take older than
+    /// [`SUBJECT_TAKE_STALE_MS`] is from another engagement.
+    seen_ms: u64,
 }
+
+/// A ground take not flown on for this long is taken again, ms.
+const SUBJECT_TAKE_STALE_MS: u64 = 500;
 
 /// The ground's down position `d` and the height-above-ground reading it was
 /// taken at, and the first take of the climb (`d0` at north, east `ne0`)
@@ -98,6 +104,19 @@ struct GroundTake {
     read: f32,
     d0: f32,
     ne0: V2,
+}
+
+impl SubjectTrack {
+    /// The FC's estimate stepped by `s` (north, east, down; an EKF position
+    /// reset): the ground taken under the subject moves with it, so the
+    /// floor over them keeps its true height.
+    pub fn rebase(&mut self, s: [f32; 3]) {
+        if let Some(g) = self.ground_d.as_mut() {
+            g.d += s[2];
+            g.d0 += s[2];
+            g.ne0 = geo::add(g.ne0, [s[0], s[1]]);
+        }
+    }
 }
 
 /// One tick's subject: where it is, the horizontal distance kept from it
@@ -140,6 +159,10 @@ impl Pilot {
                 ..SubjectTrack::default()
             };
         }
+        if now_ms.saturating_sub(t.seen_ms) > SUBJECT_TAKE_STALE_MS {
+            t.ground_d = None;
+        }
+        t.seen_ms = now_ms;
         // A subject that is not a number is no position: the last one named
         // stands, with its velocity and its goal's arrival, so the next
         // finite subject is judged against it; with none there is no

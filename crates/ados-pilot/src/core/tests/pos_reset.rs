@@ -520,3 +520,54 @@ fn the_flown_path_and_home_move_with_the_reset() {
         &w.sent[from..]
     );
 }
+
+/// A height-only reset (a rangefinder or barometer switch near the ground)
+/// gets the zero velocity and moves the heights, and the skill flies on: no
+/// position-reset hold.
+#[test]
+fn a_height_only_reset_lets_a_skill_fly_on() {
+    let mut w = World::new();
+    w.p.settings.pilot.avoid = AvoidMode::Off;
+    w.airborne(copter::GUIDED);
+    w.fc_clock = true;
+    w.fly = true;
+    let id = w.lease();
+    for _ in 0..5 {
+        w.goal(id, 30.0, 0.0);
+        w.run(200);
+    }
+    let from = w.sent.len();
+    w.pos[2] -= 1.2;
+    for _ in 0..5 {
+        w.goal(id, 30.0, 0.0);
+        w.run(200);
+    }
+    kicked(&w, from);
+    assert_eq!(w.p.owner(), Owner::Skill);
+    assert!(w.revoked.is_empty(), "{:?}", w.revoked);
+    assert_ne!(
+        w.p.state(w.now).hold_reason.as_deref(),
+        Some(HOLD_POSITION_RESET)
+    );
+    assert_eq!(banner(&w).map(|b| b.0).as_deref(), Some(BANNER));
+}
+
+/// On the ground after the pilot's landing, a height step is no climb: the
+/// touchdown's floor moves with the estimate and the touchdown holds.
+#[test]
+fn a_height_step_on_the_ground_keeps_the_touchdown() {
+    let mut w = World::new();
+    w.armed = true;
+    w.landed = false;
+    w.mode = copter::LAND;
+    w.agl = Some(0.1);
+    w.run(200);
+    w.p.touchdown.floor_d = Some(w.pos[2]);
+    w.p.touchdown.floor_agl = Some(0.1);
+    w.fc_clock = true;
+    w.run(200);
+    assert!(w.p.landed(), "the touchdown holds");
+    w.pos[2] -= 1.2;
+    w.run(500);
+    assert!(w.p.landed(), "a height step read as a climb");
+}
