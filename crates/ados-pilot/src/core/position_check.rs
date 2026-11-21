@@ -30,6 +30,8 @@ use ados_protocol::pilot::{ControlMode, PlaceClass, PositionUnverified, Readines
 
 use super::Pilot;
 use crate::geo::V2;
+pub use flow_check::FlowCheck;
+use flow_check::{body_to_ne, flow_body_velocity};
 
 /// A `plugin.navigation.state` older than this no longer speaks for Navigation.
 pub const EXTNAV_STALE_MS: u64 = 3_000;
