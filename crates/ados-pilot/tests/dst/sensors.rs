@@ -53,6 +53,20 @@ impl SensorTier {
             Self::CameraOnly => "camera",
         }
     }
+
+    /// One standard deviation of the range noise the tier's model puts on
+    /// a return `z` metres out (along the optical axis for the cameras):
+    /// none on the planar scan, [`MID360_NOISE_M`] on the Mid-360,
+    /// [`DEPTH_NOISE_PER_M`]`·z²` on the depth camera, [`CAMERA_NOISE`]
+    /// times that on the camera.
+    pub fn range_sigma_m(self, z: f32) -> f32 {
+        match self {
+            Self::Planar => 0.0,
+            Self::Mid360 => MID360_NOISE_M,
+            Self::Depth => DEPTH_NOISE_PER_M * z * z,
+            Self::CameraOnly => DEPTH_NOISE_PER_M * CAMERA_NOISE * z * z,
+        }
+    }
 }
 
 /// A pedestrian: an upright cylinder ([`WALKER_R_M`], [`WALKER_H_M`]) walking
@@ -179,6 +193,11 @@ const MID360_EL_DEG: (f32, f32) = (-7.0, 52.0);
 const DEPTH_FOV_DEG: (f32, f32) = (87.0, 58.0);
 const DEPTH_PX: (usize, usize) = (160, 120);
 const DEPTH_RANGE_M: (f32, f32) = (0.3, 10.0);
+/// The depth camera's range noise: one standard deviation of a pixel's
+/// depth `z` is this times `z²` (0.25 m at 5 m).
+const DEPTH_NOISE_PER_M: f32 = 0.01;
+/// The Mid-360's range noise, one standard deviation, m.
+const MID360_NOISE_M: f32 = 0.02;
 /// The camera tier's reach and depth noise against the depth camera's.
 const CAMERA_REACH: f32 = 0.6;
 const CAMERA_NOISE: f32 = 2.0;
@@ -258,7 +277,7 @@ impl Sim {
                     let body = [el.cos() * az.cos(), el.cos() * az.sin(), -el.sin()];
                     let w = world(body);
                     let ret = cast(o, w, &cyls, MID360_RANGE_M)
-                        .map(|(r, ground)| (r + 0.02 * hash_normal(k), ground));
+                        .map(|(r, ground)| (r + MID360_NOISE_M * hash_normal(k), ground));
                     f(Ray {
                         body,
                         world: w,
@@ -271,7 +290,11 @@ impl Sim {
                 let cam = tier == SensorTier::CameraOnly;
                 let (near_m, far_m) = DEPTH_RANGE_M;
                 let far_m = if cam { far_m * CAMERA_REACH } else { far_m };
-                let noise = if cam { 0.01 * CAMERA_NOISE } else { 0.01 };
+                let noise = if cam {
+                    DEPTH_NOISE_PER_M * CAMERA_NOISE
+                } else {
+                    DEPTH_NOISE_PER_M
+                };
                 let cyls = self.cylinders(far_m / (DEPTH_FOV_DEG.0 / 2.0).to_radians().cos());
                 let fx = (DEPTH_PX.0 as f32 / 2.0) / (DEPTH_FOV_DEG.0 / 2.0).to_radians().tan();
                 let fy = (DEPTH_PX.1 as f32 / 2.0) / (DEPTH_FOV_DEG.1 / 2.0).to_radians().tan();
@@ -493,10 +516,13 @@ fn dst_bench_3d_tiers_fly_on_the_voxel_map() {
             "{}: wall at {near}, face {face}",
             tier.name()
         );
-        // Facing the trunk, the seen range ends in its shadow.
+        // Facing the trunk, the seen range ends in its shadow: within 0.6 m
+        // of the face (the trunk's 0.4 m and a voxel), plus the returns the
+        // tier's range noise puts behind the face, up to 3σ at its range.
+        let past = 0.6 + 3.0 * tier.range_sigma_m(face);
         assert!(
-            sensing.clear_range_m <= face + 0.6,
-            "{}: {sensing:?}",
+            sensing.clear_range_m <= face + past,
+            "{}: {sensing:?}, face {face}, {past} m past it allowed",
             tier.name()
         );
     }

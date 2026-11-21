@@ -18,6 +18,13 @@ const SWEEP_EXTRA_M: f32 = 1.0;
 /// the nearest point of a surface steps by up to this as the vehicle moves
 /// along it (scan noise, a trunk's curve).
 pub(super) const SWEEP_DEPTH_SLACK_M: f32 = 0.05;
+/// A path passing a point inside the creep slack's band while keeping the
+/// margin is slowed to no less than this share of [`Sweep::speed`]. The
+/// margin is measured from the near face of the point's grid cell, and the
+/// surface may lie up to a cell beyond it: a pass at the margin's edge
+/// halves the speed rather than stopping hard, whose braking pitch also
+/// tilts a planar lidar's beams out of the band.
+const PASS_FLOOR_SHARE: f32 = 0.5;
 /// Constraints the brake solves at most: one radial cap per sector, one cap
 /// per stop path.
 pub(super) const BRAKE_CAPS: usize = BRAKE_SECTORS + SWEEP_PATHS;
@@ -34,17 +41,27 @@ pub(super) struct Sweep {
     /// A path passing a point nearer than this caps (the keep-out, or less
     /// when the vehicle is already that near something).
     pass: f32,
+    /// A path passing a point nearer than this enters its margin (measured
+    /// from the near face of the point's cell): it stops short of the
+    /// keep-out.
+    inner: f32,
+    /// The speed a path passing a point between [`Sweep::inner`] and
+    /// [`Sweep::pass`] is slowed from in proportion ([`Sweep::cap`]).
+    speed: f32,
     /// The paths drawn so far: (unit direction, length).
     pub(super) paths: [(V2, f32); SWEEP_PATHS],
     pub(super) n: usize,
 }
 
 impl Sweep {
-    pub(super) fn new(a: f32, radius: f32, pass: f32) -> Self {
+    pub(super) fn new(a: f32, radius: f32, pass: f32, inner: f32, speed: f32) -> Self {
+        let pass = pass.min(radius);
         Self {
             a,
             radius,
-            pass: pass.min(radius),
+            pass,
+            inner: inner.min(pass),
+            speed,
             paths: [([0.0; 2], 0.0); SWEEP_PATHS],
             n: 0,
         }
@@ -73,10 +90,22 @@ impl Sweep {
         true
     }
 
-    /// How far path `k` runs before it enters the keep-out disk of the point
-    /// at `rel`; `None` when it passes the point no nearer than
-    /// [`Sweep::pass`] or ends before.
-    pub(super) fn room(&self, k: usize, rel: V2) -> Option<f32> {
+    /// The most speed along path `k` the point at `rel` allows while the
+    /// vehicle still closes at `closing` over the FC's lag; `None` when the
+    /// path passes the point no nearer than [`Sweep::pass`] or ends before
+    /// it enters the point's keep-out disk.
+    ///
+    /// A path coming nearer than [`Sweep::inner`] would bring the vehicle
+    /// inside the margin: it stops short of the keep-out disk
+    /// ([`super::room_cap`]). One passing between [`Sweep::inner`] and
+    /// [`Sweep::pass`] keeps the margin all along and enters only the creep
+    /// slack's band: its speed is held to a share of [`Sweep::speed`] that
+    /// rises with its passing distance across that band, from
+    /// [`PASS_FLOOR_SHARE`] at `inner` to all of it at `pass`, never below
+    /// the stop short of the keep-out. A corridor the vehicle barely fits
+    /// slows it in proportion instead of stopping it, and no stop along
+    /// such a path ends inside the margin.
+    pub(super) fn cap(&self, k: usize, rel: V2, closing: f32) -> Option<f32> {
         let (e, len) = self.paths[k];
         let along = geo::dot(rel, e);
         let perp = (rel[0] * e[1] - rel[1] * e[0]).abs();
@@ -84,6 +113,42 @@ impl Sweep {
             return None;
         }
         let room = along - (self.radius * self.radius - perp * perp).sqrt();
-        (room < len).then_some(room.max(0.0))
+        if room >= len {
+            return None;
+        }
+        let stop = super::room_cap(room.max(0.0), closing, self.a);
+        let band = self.pass - self.inner;
+        if perp < self.inner || band <= 1e-6 {
+            return Some(stop);
+        }
+        let share = (perp - self.inner) / band;
+        let floor = PASS_FLOOR_SHARE;
+        Some(stop.max(self.speed * (floor + (1.0 - floor) * share)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_point_passed_inside_the_creep_slack_slows_the_path_in_proportion() {
+        // Keep-out 1.705 m, margin from the cell's near face 1.625 m, flying
+        // north at 3 m/s with a point just ahead on the left.
+        let mut s = Sweep::new(3.0, 1.705, 1.705, 1.625, 3.0);
+        assert!(s.add([3.0, 0.0], 3.0));
+        let at = |perp: f32| s.cap(0, [0.3, -perp], 3.0);
+        // Passed beyond the keep-out: no cap.
+        assert_eq!(at(1.71), None);
+        // Passed keeping the margin, inside the creep slack: a share of the
+        // speed rising across the band from half at the margin's edge.
+        let c = at(1.68).expect("caps");
+        let share = 0.055 / 0.08;
+        assert!((c - 3.0 * (0.5 + 0.5 * share)).abs() < 1e-3, "{c}");
+        let edge = at(1.626).expect("caps");
+        assert!(edge < c && edge > 1.5, "{edge}");
+        // Passed inside the margin: stopped short of the keep-out, which
+        // this point's lies across the path at once.
+        assert_eq!(at(1.6), Some(0.0));
     }
 }

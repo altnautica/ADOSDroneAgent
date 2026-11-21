@@ -4,16 +4,17 @@
 //! (`lidar3d`, `depth`, `camera`), else `planar`. The seen-clear range is
 //! how far the sensors have seen along the vehicle's motion (its velocity;
 //! from a hover, the way to the plan's target, else the nose): on a 3D
-//! tier, rays through the map at flight height to the first voxel never
-//! observed (an obstacle's shadow, a camera's unseen side, the window's
-//! edge); on the planar tier, the scans' horizon beside that line (where
-//! they stop seeing). Obstacles inside the seen space are the brake's and
-//! the planner's: they do not shorten the range. The speed limit is the one
-//! that still stops inside it: `v·0.3 + v²/(2·a_brk) ≤ clear − margin`,
-//! with the camera tier's range taken at 0.6 and the planar tier held to
-//! 3 m/s (a planar lidar sees nothing over or under its band). A goal flies
-//! under it while avoidance is on (`command.limits` code `sensing` when it
-//! binds), and the state publishes it as `sensing`.
+//! tier, rays through the map at flight height, across the body's width a
+//! voxel apart, to the first voxel never observed (an obstacle's shadow, a
+//! camera's unseen side, the window's edge); on the planar tier, the scans'
+//! horizon beside that line (where they stop seeing). Obstacles inside the
+//! seen space are the brake's and the planner's: they do not shorten the
+//! range. The speed limit is the one that still stops inside it:
+//! `v·0.3 + v²/(2·a_brk) ≤ clear − margin`, with the camera tier's range
+//! taken at 0.6 and the planar tier held to 3 m/s (a planar lidar sees
+//! nothing over or under its band). A goal flies under it while avoidance
+//! is on (`command.limits` code `sensing` when it binds), and the state
+//! publishes it as `sensing`.
 
 use ados_protocol::pilot::{AvoidMode, Sensing, SensingTier};
 
@@ -30,6 +31,8 @@ pub const CAMERA_RANGE_SHARE: f32 = 0.6;
 pub const PLANAR_MAX_MPS: f32 = 3.0;
 /// Slower than this the vehicle's velocity names no direction, m/s.
 const MOVING_MPS: f32 = 0.3;
+/// The most gaps between the seen-range rays across the body.
+const MAX_RAY_GAPS: f32 = 16.0;
 /// A planar horizon point this near the line of motion ends its seen
 /// range, m (as a scan hit ends [`crate::obstacles::Obstacles::ray_distance`]).
 const LATERAL_M: f32 = 0.35;
@@ -115,16 +118,20 @@ impl Pilot {
         geo::bearing_unit(self.yaw(now_ms))
     }
 
-    /// The range the map is seen along `dir` at flight height: three rays,
-    /// through the centre and the body's two sides, from the body's edge
-    /// (the vehicle's own voxels are where it is, seen or not).
+    /// The range the map is seen along `dir` at flight height: rays across
+    /// the body's width from side to side, no further apart than a voxel (a
+    /// narrow obstacle's shadow between sparser rays would read as seen),
+    /// from the body's edge (the vehicle's own voxels are where it is, seen
+    /// or not); the shortest.
     fn world_clear_m(&self, pos: [f32; 3], dir: V2) -> f32 {
         let body = self.settings.pilot.body_radius_m();
         let side = [-dir[1], dir[0]];
         let len = WORLD_SCAN_MAX_M - body;
-        [0.0, body, -body]
-            .iter()
-            .map(|&off| {
+        let res = self.world.snapshot().meta.res_m;
+        let gaps = (2.0 * body / res).ceil().clamp(2.0, MAX_RAY_GAPS) as usize;
+        (0..=gaps)
+            .map(|k| {
+                let off = body * (2.0 * k as f32 / gaps as f32 - 1.0);
                 let s = [
                     pos[0] + dir[0] * body + side[0] * off,
                     pos[1] + dir[1] * body + side[1] * off,

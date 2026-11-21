@@ -106,9 +106,12 @@ fn sector_of(dir: V2) -> usize {
 /// the disk, allowing for [`BRAKE_LAG_S`], the FC's response, and for the
 /// speed it already closes along the path ([`stop_cap`]). Trunks beside a
 /// clear corridor cap nothing; a trunk the path meets slows it, to a stop
-/// outside the margin when the path ends on it. Every point of the scan's
-/// horizon (where each beam stops seeing: the floor a pitched beam meets, or
-/// the lidar's range) caps the velocity component toward it ([`stop_cap`]),
+/// outside the margin when the path ends on it; one the path passes keeping
+/// the margin but not the creep slack beyond it slows it in proportion to
+/// how much of that slack it keeps, to half its speed at the margin's edge
+/// ([`Sweep::cap`]). Every point of the scan's horizon (where each beam
+/// stops seeing: the floor a pitched beam meets, or the lidar's range) caps
+/// the velocity component toward it ([`stop_cap`]),
 /// per 5° bearing sector the most restrictive, what lies beyond it being
 /// unknown in any direction: the vehicle never goes faster than it can stop
 /// within the space it has seen free. Inside the margin of anything, every
@@ -217,12 +220,19 @@ pub fn brake_limit(
     // margin and the keep-out (the creep slack and a cell's quantisation), a
     // path caps only for the points it passes nearer than the vehicle is now
     // to anything, so flying on along a trunk row it drifted toward is not
-    // flying into it; a point the path meets still stops it short of the
+    // flying into it; a point the path passes keeping the margin slows it in
+    // proportion, and one the path meets still stops it short of the
     // keep-out.
     let inside_at = margin + crate::obstacles::CELL_M / 2.0;
     let inside = r_min < inside_at;
     let pass = (r_min - SWEEP_DEPTH_SLACK_M).max(inside_at).min(keep_out);
-    let mut sweep = Sweep::new(a_h, keep_out, pass);
+    let mut sweep = Sweep::new(
+        a_h,
+        keep_out,
+        pass,
+        inside_at,
+        geo::norm(v).max(geo::norm(vel)),
+    );
     let asked_path = sweep.add(v, 0.0);
     // The flown path as long as the stop from the speed the scans see the
     // vehicle close along it, when that is faster than the estimate: an
@@ -249,8 +259,7 @@ pub fn brake_limit(
         let closing = closing_along(e).0;
         let cap = points()
             .filter(|p| p.4)
-            .filter_map(|(rel, ..)| sweep.room(0, rel))
-            .map(|room| room_cap(room, closing, a_h))
+            .filter_map(|(rel, ..)| sweep.cap(0, rel, closing))
             .fold(f32::INFINITY, f32::min);
         geo::clamp_len(v, cap)
     } else {
@@ -284,10 +293,9 @@ pub fn brake_limit(
                 continue;
             }
             for (k, &(closing, by_scan)) in along.iter().enumerate().take(sweep.n) {
-                let Some(room) = sweep.room(k, rel) else {
+                let Some(cap) = sweep.cap(k, rel, closing) else {
                     continue;
                 };
-                let cap = room_cap(room, closing, a_h);
                 let slot = BRAKE_SECTORS + k;
                 if caps[slot].is_none_or(|(_, c)| cap < c) {
                     caps[slot] = Some((sweep.paths[k].0, cap));
@@ -309,8 +317,8 @@ pub fn brake_limit(
         let closing = closing_along(e).0;
         let breaks = points().filter(|p| p.4).any(|(rel, ..)| {
             sweep
-                .room(k, rel)
-                .is_some_and(|room| geo::dot(e, out) > room_cap(room, closing, a_h) + 1e-3)
+                .cap(k, rel, closing)
+                .is_some_and(|cap| geo::dot(e, out) > cap + 1e-3)
         });
         if !breaks {
             break;
