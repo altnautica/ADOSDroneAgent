@@ -458,12 +458,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Seven `#[ignore]`d Rust tests. Adding an ignore used to be a free way to
+      # Eight `#[ignore]`d Rust tests. Adding an ignore used to be a free way to
       # make a test stop mattering, so the count is pinned and the set is a
       # reviewed decision: removing an ignore is always fine, adding one
       # requires updating this number and saying why in the same change.
       #
-      # The seven, and why each is ignored:
+      # The eight, and why each is ignored:
       #   - ados-vision-engine/tests/onnx_coco_infer.rs (two cases): need the
       #     COCO ONNX model sideloaded; deep-tests.yml runs them with --ignored.
       #   - ados-vision-engine/tests/onnx_depth_infer.rs: needs the Depth
@@ -473,6 +473,9 @@ jobs:
       #     benchmark (every density, speed, sensor tier and seed) takes minutes
       #     and writes a scored table; it measures, it does not gate. Its stand
       #     generator and one scored run per family run by default.
+      #   - ados-pilot/tests/dst/bench.rs `shadow_cost`: times the background
+      #     trajectory planner against the reactive replan on a dense stand; a
+      #     release-build timing, meaningless in a debug test run.
       #   - ados-vision/tests/tracker_adversarial.rs
       #     `sparse_two_in_three_sighting_does_not_confirm_a_lock`: the recorded
       #     robustness limit of the tracker's confirm rule (identity-safe; its
@@ -492,7 +495,7 @@ jobs:
       - name: Ignored-test count matches the reviewed inventory
         run: |
           set -uo pipefail
-          EXPECTED=7
+          EXPECTED=8
 
           # Attribute position only: a doc comment that mentions the attribute
           # is prose, not an ignored test.
