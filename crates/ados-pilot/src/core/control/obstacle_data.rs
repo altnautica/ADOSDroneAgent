@@ -7,11 +7,11 @@ use ados_protocol::pilot::{AvoidMode, AvoidState, PlaceClass};
 use super::super::Pilot;
 
 impl Pilot {
-    /// A lidar is expected on this vehicle: it scanned this boot or the
-    /// capture service reports one. The one place that decides "never had"
-    /// from "lost".
+    /// A lidar is expected on this vehicle: it scanned this boot, the
+    /// capture service reports one, or a voxel map arrived. The one place
+    /// that decides "never had" from "lost".
     pub(in crate::core) fn lidar_expected(&self) -> bool {
-        self.lidar.expected()
+        self.lidar.expected() || self.world.seen()
     }
 
     /// A scan with no return taken at `ned`, tilted `tilt` (roll, pitch),

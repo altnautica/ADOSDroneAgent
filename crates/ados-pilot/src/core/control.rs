@@ -21,6 +21,7 @@ mod motion_ref;
 mod obstacle_data;
 mod plan;
 mod route;
+mod sensing;
 mod stall;
 mod sticks;
 mod subject_guard;
@@ -138,6 +139,7 @@ impl Pilot {
             self.replan(now_ms);
         }
         self.confined_tick(now_ms);
+        self.sensing_tick(now_ms);
         self.supervise(now_ms);
         self.fly(axes, dt, now_ms);
     }

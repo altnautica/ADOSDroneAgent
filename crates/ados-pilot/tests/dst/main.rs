@@ -39,6 +39,7 @@ mod scenarios;
 mod sensors;
 mod shaper_pins;
 mod sim;
+mod voxmap;
 
 use std::time::Instant;
 

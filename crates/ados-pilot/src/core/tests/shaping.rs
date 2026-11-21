@@ -251,11 +251,13 @@ fn a_heading_step_turns_at_the_goal_rate() {
 /// the safety brake's cap and only the soft brake slows the goal. Every
 /// frame whose command names the seen-space limit reports the goal slowed
 /// (`detour`), never `clear`. Before, the soft brake left the avoid state
-/// clear while it held the vehicle back.
+/// clear while it held the vehicle back. The margin is wide, so the seen
+/// space binds below the planar tier's 3 m/s sensing ceiling.
 #[test]
 fn a_goal_slowed_by_the_soft_brake_reports_it() {
     let (mut w, id) = flying();
     w.p.settings.pilot.avoid = AvoidMode::Brake;
+    w.p.settings.pilot.obstacle_margin_m = 8.0;
     let empty = serde_json::json!({"frame": "body_frd", "angle_start_rad": 0.0,
         "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": vec![0.0f32; 360]});
     let mut braked = 0;

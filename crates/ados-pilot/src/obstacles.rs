@@ -1,5 +1,6 @@
-//! The obstacle model (C2): live occupancy tiles plus the current planar scan,
-//! levelled with attitude, rasterised into a 128×128 grid at 0.25 m around the
+//! The obstacle model (C2): live occupancy tiles plus the current planar scan
+//! (or a live 3D voxel map's slab read as one, [`world`]), levelled with
+//! attitude, rasterised into a 128×128 grid at 0.25 m around the
 //! vehicle with a chamfer 3-4 clearance transform.
 //!
 //! Frames: occupancy tiles arrive in `map_ned` (north-aligned NED whose origin
@@ -14,7 +15,9 @@ mod level;
 mod probe;
 mod project;
 mod sight;
+mod surface;
 mod tiles;
+mod world;
 
 use std::collections::{HashMap, HashSet};
 
@@ -168,6 +171,8 @@ pub struct Obstacles {
     pose_lost: bool,
     /// When σ last rose: the pose then rode something no scan checked.
     sigma_rose_ms: Option<u64>,
+    /// A live 3D map's occupied columns in the wall slab ([`world`]).
+    world_cells: Vec<V2>,
 }
 
 /// Attitude and height used to level a scan.
@@ -297,41 +302,6 @@ impl Obstacles {
         self.hits.iter().map(|h| h.range_m).reduce(f32::min)
     }
 
-    /// The current scan's nearest non-floor return as (horizontal range,
-    /// local NE position, extent). The extent is the length of the unbroken
-    /// run of returns through it: walking outward by bearing from the
-    /// nearest return until neighbours are more than [`SURFACE_GAP_M`]
-    /// apart. A wall, a car or a room around the vehicle reads metres long;
-    /// a pole, a person, a drone, or several of them apart, read short.
-    pub fn nearest_surface(&self) -> Option<(f32, V2, f32)> {
-        let n = self.hits.len();
-        let (i0, near) = self
-            .hits
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.range_m.total_cmp(&b.1.range_m))?;
-        // The hits are in bearing order and the scan wraps at the nose:
-        // walk `step` (1 or n - 1) at most `max` neighbours, returning the
-        // run's length and how many it took.
-        let walk = |step: usize, max: usize| {
-            let (mut at, mut len, mut taken) = (i0, 0.0, 0);
-            while taken < max {
-                let next = (at + step) % n;
-                let gap = geo::dist(self.hits[at].ne, self.hits[next].ne);
-                if gap > SURFACE_GAP_M {
-                    break;
-                }
-                len += gap;
-                taken += 1;
-                at = next;
-            }
-            (len, taken)
-        };
-        let (fwd, taken) = walk(1, n - 1);
-        let (back, _) = walk(n - 1, n - 1 - taken);
-        Some((near.range_m, near.ne, fwd + back))
-    }
-
     /// Closing speed toward the world direction `dir` (unit) measured from
     /// the scans: the largest of its sector and the two beside it, m/s.
     pub fn scan_closing(&self, dir: V2, now_ms: u64) -> f32 {
@@ -406,8 +376,9 @@ impl Obstacles {
         }
         let fresh = self.scan_fresh(now_ms);
         if fresh {
-            for h in &self.hits {
-                self.grid.mark(h.ne);
+            let walls = self.hits.iter().map(|h| h.ne);
+            for p in walls.chain(self.world_cells.iter().copied()) {
+                self.grid.mark(p);
             }
         }
         self.grid.transform();
@@ -421,7 +392,7 @@ impl Obstacles {
         for h in self.hits.iter_mut().chain(self.overhead.iter_mut()) {
             h.ne = geo::add(h.ne, d);
         }
-        for p in &mut self.horizon {
+        for p in self.horizon.iter_mut().chain(self.world_cells.iter_mut()) {
             *p = geo::add(*p, d);
         }
         self.walls.shift(d);

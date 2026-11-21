@@ -243,6 +243,7 @@ impl Daemon {
             owner_tx: self.owner_tx,
             status_tx: self.status_tx,
             deferred: HashMap::new(),
+            vox: crate::world::VoxSource::default(),
         };
         tokio::select! {
             r = server => r.unwrap_or_else(|e| Err(std::io::Error::other(e))),
@@ -266,6 +267,8 @@ struct Core {
     clock: ados_time::Clock,
     /// The core's part in the simulator's lockstep barrier.
     lockstep: Option<Lockstep>,
+    /// Navigation's voxel map (seam M), read before every tick.
+    vox: crate::world::VoxSource,
 }
 
 impl Core {
@@ -286,6 +289,9 @@ impl Core {
                     ticked = true;
                     let t = now();
                     self.pilot.sim_speed = clock.speed();
+                    if let Some(snap) = self.vox.read(t) {
+                        self.pilot.on_voxmap(snap, t);
+                    }
                     self.pilot.tick(t);
                     let _ = self.axes_tx.send(self.pilot.tuning_axes);
                     if t.saturating_sub(state_ms) >= STATE_PERIOD_MS {

@@ -100,6 +100,13 @@ pub struct Sim {
     pub tilted_scan: bool,
     /// The obstacle sensor the run flies with ([`crate::sensors`]).
     pub tier: crate::sensors::SensorTier,
+    /// The 3D tiers fly on Navigation's flattened scan instead of the voxel
+    /// map (the comparison `DST_BENCH_FLAT=1` selects).
+    pub flatten_3d: bool,
+    /// The 3D tiers' voxel map, from their first frame.
+    pub vox: Option<crate::voxmap::DstVoxmap>,
+    /// The snapshot the map is published into, reused.
+    pub vox_buf: ados_protocol::voxmap::VoxSnapshot,
     /// Pedestrians every sensor tier sees.
     pub walkers: Vec<crate::sensors::Walker>,
     /// The leaf returns' own stream, so crowns leave every other draw of
@@ -155,6 +162,9 @@ impl Sim {
             crowns: Vec::new(),
             tilted_scan: false,
             tier: crate::sensors::SensorTier::Planar,
+            flatten_3d: false,
+            vox: None,
+            vox_buf: Default::default(),
             walkers: Vec::new(),
             scan_rng: Rng::new(seed ^ 0x5CA9_1EAF),
         };
@@ -216,14 +226,19 @@ impl Sim {
                 .on_feed(ados_pilot::router_state::MISSION_TOPIC, &m, now);
         }
         if (now - self.start).is_multiple_of(SCAN_MS) {
-            if !self.stand.is_empty() || !self.crowns.is_empty() || !self.walkers.is_empty() {
-                self.scan = match self.tier {
-                    crate::sensors::SensorTier::Planar => self.stand_scan(),
-                    t => self.flat_scan(t),
-                };
+            let planar = self.tier == crate::sensors::SensorTier::Planar;
+            if !planar && !self.flatten_3d {
+                self.feed_voxmap();
+            } else {
+                if !self.stand.is_empty() || !self.crowns.is_empty() || !self.walkers.is_empty() {
+                    self.scan = match self.tier {
+                        crate::sensors::SensorTier::Planar => self.stand_scan(),
+                        t => self.flat_scan(t),
+                    };
+                }
+                self.p
+                    .on_feed(ados_pilot::events::TOPIC_SCAN, &self.scan, now);
             }
-            self.p
-                .on_feed(ados_pilot::events::TOPIC_SCAN, &self.scan, now);
         }
         self.p.tick(now);
         self.collect();

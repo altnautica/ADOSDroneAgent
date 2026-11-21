@@ -127,9 +127,10 @@ fn a_flown_goal_publishes_its_command() {
     assert!(limits(cmd).is_empty(), "{cmd}");
 }
 
-/// A goal 30 m out over a scan with no return: the brake holds the speed to
-/// what the vehicle can stop from inside the space it has seen, and the
-/// command names that limit and keeps what was asked.
+/// A goal 30 m out over a scan with no return: the planar tier's sensing
+/// ceiling holds the speed to 3 m/s, inside what the vehicle can stop from
+/// in the space it has seen, and the command names that limit and keeps
+/// what was asked.
 #[test]
 fn a_braked_goal_names_the_limit_that_cut_it() {
     let mut w = World::new();
@@ -143,13 +144,15 @@ fn a_braked_goal_names_the_limit_that_cut_it() {
     let v = frame(&w);
     let cmd = &v["command"];
     let lim = limits(cmd);
-    assert!(lim.iter().any(|l| l == "seen_space"), "{cmd}");
+    assert_eq!(lim.first().map(String::as_str), Some("sensing"), "{cmd}");
+    assert_eq!(cmd["v_cap_mps"].as_f64(), Some(3.0));
     assert!(!lim.iter().any(|l| l == "hold"), "{cmd}");
     let ask = pair(&cmd["ask_vel_ne"]);
     let flown = pair(&cmd["cmd_vel_ne"]);
     assert!(ask[0] > 6.0, "asked {ask:?}");
-    assert!(flown[0] > 1.0 && flown[0] < ask[0], "flown {flown:?}");
-    assert!(geo::dist(flown, fc_ask(&w, [0.0, 0.0])) < 1e-3);
+    assert!(flown[0] > 1.0 && flown[0] <= 3.0 + 1e-3, "flown {flown:?}");
+    // The pull toward the reference is held inside the 3 m/s limit.
+    assert!(geo::norm(flown) <= geo::norm(fc_ask(&w, [0.0, 0.0])) + 1e-3);
 }
 
 /// A wall across a goto holds the vehicle: the command is a hold that keeps
@@ -222,7 +225,10 @@ fn a_blocked_follow_keeps_what_it_asked() {
         geo::dist(ask, geo::add([3.0, 0.0], pull(to))) < 1e-2,
         "asked {ask:?}, target {target:?}"
     );
-    assert_eq!(cmd["v_cap_mps"].as_f64(), Some(6.0));
+    // The planar tier's sensing rule holds the goal's 6 m/s limit to what
+    // the wall 4 m ahead leaves, under its 3 m/s ceiling.
+    let cap = cmd["v_cap_mps"].as_f64().unwrap();
+    assert!((0.5..=3.0).contains(&cap), "{cmd}");
     let flown = pair(&cmd["cmd_vel_ne"]);
     assert!(geo::norm(flown) < 1.0, "flown {flown:?}");
 }
@@ -328,25 +334,34 @@ fn open_scan() -> Value {
            "angle_increment_rad": TAU / 360.0, "ranges_m": vec![0.0f32; 360]})
 }
 
-/// A feed-forward faster than the goal's own limit is held to it.
+/// A feed-forward faster than the goal's own limit is held to it. With
+/// avoidance off the sensing rule does not apply and the goal's own limit
+/// binds; with it on, the planar tier's sensing ceiling binds first.
 #[test]
 fn the_goal_speed_limit_is_named_when_it_binds() {
-    let mut w = World::new();
-    w.airborne(copter::GUIDED);
-    let id = w.lease();
-    w.req(Request::Goal {
-        lease_id: id,
-        goal: follow_goal([2.0, 0.0, -5.0], [8.0, 0.0]),
-    });
-    w.run(300);
-    let cmd = &frame(&w)["command"];
-    assert_eq!(
-        limits(cmd).first().map(String::as_str),
-        Some("speed"),
-        "{cmd}"
-    );
-    let sp = pair(&cmd["sp_vel_ned"]);
-    assert!(geo::norm(sp) <= 6.0 + 1e-3, "{sp:?}");
+    for (avoid, first, cap) in [
+        (AvoidMode::Off, "speed", 6.0),
+        (AvoidMode::Brake, "sensing", 3.0),
+    ] {
+        let mut w = World::new();
+        w.p.settings.pilot.avoid = avoid;
+        w.airborne(copter::GUIDED);
+        let id = w.lease();
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: follow_goal([2.0, 0.0, -5.0], [8.0, 0.0]),
+        });
+        w.run(300);
+        let cmd = &frame(&w)["command"];
+        assert_eq!(
+            limits(cmd).first().map(String::as_str),
+            Some(first),
+            "{avoid:?}: {cmd}"
+        );
+        assert_eq!(cmd["v_cap_mps"].as_f64(), Some(cap), "{avoid:?}: {cmd}");
+        let sp = pair(&cmd["sp_vel_ned"]);
+        assert!(geo::norm(sp) <= cap as f32 + 1e-3, "{avoid:?}: {sp:?}");
+    }
 }
 
 /// A stick tick publishes its command: what the sticks asked, the shaped

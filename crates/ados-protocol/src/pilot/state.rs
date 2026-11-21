@@ -449,6 +449,10 @@ pub struct PilotState {
     /// The horizontal speed cap in force, omitted while there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_cap: Option<SpeedCap>,
+    /// The sensing tier, the seen-clear range along the vehicle's motion and
+    /// the speed limit it allows; omitted while no obstacle sensor is seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensing: Option<super::Sensing>,
     /// Flow, downward range and lidar health; `None` (JSON `null`) while the
     /// FC link is down.
     #[serde(default)]

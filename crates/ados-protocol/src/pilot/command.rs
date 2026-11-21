@@ -69,7 +69,9 @@ pub struct PilotCommand {
 }
 
 /// The [`PilotCommand::limits`] codes, in the order the pilot applies them:
-/// `speed` (the goal's speed limit), `nav_cap` (the `speed_cap`), `shaper`
+/// `speed` (the goal's speed limit), `nav_cap` (the `speed_cap`), `sensing`
+/// (the speed that stops inside the range the sensing tier sees clear along
+/// the motion, [`super::Sensing`]), `shaper`
 /// (the goal's acceleration and jerk limits held the setpoint's velocity
 /// more than 0.05 m/s from the one asked), `hard_stop` (an obstacle inside
 /// the hard-stop distance), `obstacle` (the stopping distance to an
@@ -81,9 +83,10 @@ pub struct PilotCommand {
 /// names, `subject_ne`: the speed toward it that still stops outside that
 /// distance, or the push back out of it), `geofence` and `hold` (no motion
 /// toward the goal: `hold_reason` says why).
-pub const COMMAND_LIMITS: [&str; 12] = [
+pub const COMMAND_LIMITS: [&str; 13] = [
     "speed",
     "nav_cap",
+    "sensing",
     "shaper",
     "hard_stop",
     "obstacle",

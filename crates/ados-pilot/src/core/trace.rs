@@ -17,16 +17,17 @@ use crate::model::{StickAsk, StickLimits};
 pub mod limit {
     pub const SPEED: u16 = 1 << 0;
     pub const NAV_CAP: u16 = 1 << 1;
-    pub const SHAPER: u16 = 1 << 2;
-    pub const HARD_STOP: u16 = 1 << 3;
-    pub const OBSTACLE: u16 = 1 << 4;
-    pub const OBSTACLE_CLOSING: u16 = 1 << 5;
-    pub const SEEN_SPACE: u16 = 1 << 6;
-    pub const CLEARANCE: u16 = 1 << 7;
-    pub const PUSH: u16 = 1 << 8;
-    pub const SUBJECT: u16 = 1 << 9;
-    pub const GEOFENCE: u16 = 1 << 10;
-    pub const HOLD: u16 = 1 << 11;
+    pub const SENSING: u16 = 1 << 2;
+    pub const SHAPER: u16 = 1 << 3;
+    pub const HARD_STOP: u16 = 1 << 4;
+    pub const OBSTACLE: u16 = 1 << 5;
+    pub const OBSTACLE_CLOSING: u16 = 1 << 6;
+    pub const SEEN_SPACE: u16 = 1 << 7;
+    pub const CLEARANCE: u16 = 1 << 8;
+    pub const PUSH: u16 = 1 << 9;
+    pub const SUBJECT: u16 = 1 << 10;
+    pub const GEOFENCE: u16 = 1 << 11;
+    pub const HOLD: u16 = 1 << 12;
 }
 
 /// A shadow command older than this is no longer published.
@@ -70,8 +71,8 @@ pub(crate) struct Tick {
     /// [`limit`] bits.
     pub limits: u16,
     /// The [`limit`] bit of the speed limit that bound this tick
-    /// ([`limit::SPEED`] or [`limit::NAV_CAP`]), 0 when none did; it is
-    /// published first.
+    /// ([`limit::SPEED`], [`limit::NAV_CAP`] or [`limit::SENSING`]), 0 when
+    /// none did; it is published first.
     pub bound_by: u16,
 }
 

@@ -18,6 +18,7 @@ mod state;
 mod take;
 mod touchdown;
 mod trace;
+mod world_feed;
 pub(crate) use trace::limit;
 pub use trace::{ShadowCmd, SHADOW_MAX_AGE_MS};
 
@@ -96,6 +97,11 @@ pub struct Pilot {
     pub fc: FcState,
     pub auth: Authority,
     pub obstacles: Obstacles,
+    /// The newest voxel map from Navigation ([`world_feed`]).
+    pub world: crate::world::VoxWorld,
+    /// This tick's sensing tier, seen-clear range and speed limit
+    /// ([`control`]'s `sensing`); `None` without an obstacle sensor.
+    sensing: Option<ados_protocol::pilot::Sensing>,
     /// FC attitudes by host-monotonic arrival, for levelling each scan at
     /// its capture ([`scan_attitude`]).
     att_log: scan_attitude::AttitudeLog,
@@ -237,6 +243,8 @@ impl Pilot {
             fc: FcState::default(),
             auth: Authority::default(),
             obstacles: Obstacles::new(),
+            world: Default::default(),
+            sensing: None,
             att_log: Default::default(),
             mono_ns: || 0,
             overhead: Default::default(),

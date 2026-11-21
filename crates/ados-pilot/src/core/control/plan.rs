@@ -128,14 +128,9 @@ impl Pilot {
                 }
             }
         }
-        let (v_cap, own_cap) = self.goal_v_cap(max_speed, now_ms);
-        // The speed limit that binds: the nav cap when it is below the
-        // goal's own limit.
-        let speed_by = if v_cap < own_cap - 1e-3 {
-            limit::NAV_CAP
-        } else {
-            limit::SPEED
-        };
+        // The speed limit that binds: the nav cap or the sensing rule when
+        // it is below the goal's own limit.
+        let (v_cap, own_cap, speed_by) = self.goal_v_cap(max_speed, now_ms);
         let shape = Shape {
             pos: pos_ne,
             dt,

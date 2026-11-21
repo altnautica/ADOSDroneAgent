@@ -1119,7 +1119,11 @@ fn goal_brake_keeps_open_goals_and_caps_them_to_seen_space() {
     );
     assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Clear);
     // A scan with no return: free space to the lidar's range only. A goal
-    // 30 m out asks more than the vehicle can stop from inside it.
+    // 30 m out asks more than the vehicle can stop from inside it. The
+    // margin is wide, so the seen space binds below the planar tier's 3 m/s
+    // sensing ceiling.
+    const MARGIN_M: f32 = 8.0;
+    w.p.settings.pilot.obstacle_margin_m = MARGIN_M;
     let empty = json!({"frame": "body_frd", "angle_start_rad": 0.0,
                        "angle_increment_rad": TAU / 360.0, "ranges_m": vec![0.0f32; 360]});
     let mut ask_max = 0.0f32;
@@ -1128,7 +1132,7 @@ fn goal_brake_keeps_open_goals_and_caps_them_to_seen_space() {
         w.p.on_feed(crate::events::TOPIC_SCAN, &empty, w.now);
         fly_to(&mut w, [30.0, 0.0], 100);
         let ask = fc_ask(&w, [w.pos[0], w.pos[1]]);
-        let seen = stop_cap(crate::obstacles::SCAN_HORIZON_M, 0.0, 3.0, 1.5);
+        let seen = stop_cap(crate::obstacles::SCAN_HORIZON_M, 0.0, 3.0, MARGIN_M);
         assert!(
             ask[0] <= seen + 0.05,
             "flies {ask:?}, seen space allows {seen:.2}"

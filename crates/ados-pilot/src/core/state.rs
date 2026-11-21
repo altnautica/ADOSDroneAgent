@@ -254,6 +254,7 @@ impl Pilot {
         } else {
             None
         };
+        s.sensing = self.sensing.filter(|_| fc_linked);
         s.sensors = fc_linked.then(|| {
             crate::sensor_health::snapshot(
                 &self.fc.flow_track,

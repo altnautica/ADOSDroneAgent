@@ -172,6 +172,7 @@ pub fn bench_forest(
 ) -> RunMetrics {
     let mut s = Sim::new(name, seed, |_| {});
     s.tier = tier;
+    s.flatten_3d = flatten_3d();
     s.stand = poisson_stand(seed, lambda, AREA_M, TRUNK_R_M);
     fly(&mut s, FOREST_ALT_M, speed, None)
 }
@@ -180,6 +181,7 @@ pub fn bench_forest(
 pub fn bench_crossing(tier: SensorTier, speed: f32, seed: u64) -> RunMetrics {
     let mut s = Sim::new("bench_crossing", seed, |_| {});
     s.tier = tier;
+    s.flatten_3d = flatten_3d();
     fly(&mut s, STREET_ALT_M, speed, Some(2 + (seed % 5) as usize))
 }
 
@@ -188,6 +190,12 @@ fn env_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// `DST_BENCH_FLAT=1`: the 3D tiers fly on Navigation's flattened scan, as
+/// before the pilot read the voxel map (for comparison).
+fn flatten_3d() -> bool {
+    std::env::var("DST_BENCH_FLAT").is_ok_and(|v| v == "1")
 }
 
 #[test]

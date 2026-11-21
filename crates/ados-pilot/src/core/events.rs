@@ -47,6 +47,12 @@ impl Pilot {
             TOPIC_SCAN => {
                 let returns = crate::obstacles::scan_returns(payload);
                 self.lidar.on_scan(returns, now_ms);
+                // A live 3D map is the obstacle source; its slab holds what
+                // this scan saw ([`super::world_feed`]).
+                if self.world.live_3d(now_ms) {
+                    return;
+                }
+                self.obstacles.clear_world();
                 let Some(ned) = self.pos(now_ms) else {
                     return;
                 };
@@ -58,16 +64,7 @@ impl Pilot {
                     return;
                 }
                 self.obstacles.band_climb = self.band_climb(now_ms);
-                // The widest of the brake's per-direction trust bounds on a
-                // standing obstacle's closing speed (`scan_closing_bound`, a
-                // direction along the FC's velocity now); the widest bound
-                // without a finite one.
-                let closing_max = self
-                    .fc
-                    .fresh_local(now_ms)
-                    .map(|l| super::control::scan_closing_bound_max(l.vn.hypot(l.ve)))
-                    .filter(|v| v.is_finite())
-                    .unwrap_or(crate::obstacles::SCAN_CLOSING_MAX_MPS);
+                let closing_max = self.scan_closing_max(now_ms);
                 self.obstacles
                     .ingest_scan(payload, level, [ned[0], ned[1]], closing_max, now_ms);
                 self.note_overhead(level.agl, now_ms);

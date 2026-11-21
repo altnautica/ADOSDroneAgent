@@ -2,13 +2,19 @@
 //! position does not come from GNSS. ArduPilot does not clamp guided velocity
 //! targets, so the pilot enforces it on every setpoint it flies.
 //!
+//! The speed is the flat `gnss_denied_max_speed_mps`, except on a `lidar3d`
+//! or `depth` sensing tier while the position is trusted (Navigation reports
+//! its external position good and nothing unverifies it): there the
+//! tier's own speed rule ([`super::control`]'s `sensing`) sets it whenever it
+//! allows more. The acceleration cap holds on every tier.
+//!
 //! The pilot knows the active EKF source set only from Navigation's
 //! `plugin.navigation.state`: it keeps the last set named there (the FC keeps a set until
 //! told otherwise), and the boot set 1 before any. A source-set switch made
 //! by an RC switch or a ground station does not reach the pilot, which keeps
 //! flying under the last set it heard of.
 
-use ados_protocol::pilot::{PlaceClass, Profile, SpeedCap};
+use ados_protocol::pilot::{PlaceClass, Profile, SensingTier, SpeedCap};
 
 use super::{Pilot, TICK_MS};
 use crate::geo::{self, V2};
@@ -31,12 +37,34 @@ impl Pilot {
     /// The cap in force, `None` while the EKF's horizontal position comes
     /// from GNSS ([`Pilot::nav_capped`]), for the published state.
     pub fn nav_cap(&self, now_ms: u64) -> Option<SpeedCap> {
-        self.nav_capped(now_ms).then(|| {
-            SpeedCap::new(
-                REASON_GNSS_DENIED,
-                self.settings.pilot.gnss_denied_max_speed_mps,
-            )
-        })
+        self.nav_capped(now_ms)
+            .then(|| SpeedCap::new(REASON_GNSS_DENIED, self.nav_cap_mps(now_ms)))
+    }
+
+    /// The GNSS-denied cap's horizontal speed: the flat
+    /// `gnss_denied_max_speed_mps`, or the sensing speed limit when it is
+    /// faster on a `lidar3d` or `depth` tier with the position trusted.
+    pub fn nav_cap_mps(&self, now_ms: u64) -> f32 {
+        let flat = self.settings.pilot.gnss_denied_max_speed_mps;
+        match self.sensing {
+            Some(s)
+                if matches!(s.tier, SensingTier::Lidar3d | SensingTier::Depth)
+                    && self.pose_good(now_ms) =>
+            {
+                flat.max(s.speed_limit_mps)
+            }
+            _ => flat,
+        }
+    }
+
+    /// Navigation reports its external position good, freshly, and nothing
+    /// unverifies the position.
+    fn pose_good(&self, now_ms: u64) -> bool {
+        self.position_unverified(now_ms).is_none()
+            && self.extnav.as_ref().is_some_and(|n| {
+                now_ms.saturating_sub(n.at_ms) <= super::position_check::EXTNAV_STALE_MS
+                    && n.health.as_deref() == Some("good")
+            })
     }
 
     /// Whether the cap is in force, without allocating (the control loop
@@ -72,7 +100,7 @@ impl Pilot {
     pub fn limits_now(&self, now_ms: u64) -> Limits {
         let mut l = limits(self.settings.pilot.profile);
         if self.nav_capped(now_ms) {
-            l.v_h = l.v_h.min(self.settings.pilot.gnss_denied_max_speed_mps);
+            l.v_h = l.v_h.min(self.nav_cap_mps(now_ms));
             l.a_h = l.a_h.min(self.settings.pilot.gnss_denied_max_accel_mps2);
         }
         if self.confined_near() {
@@ -105,7 +133,7 @@ impl Pilot {
         let mut l = profile;
         if self.nav_capped(now_ms) {
             let a = self.settings.pilot.gnss_denied_max_accel_mps2;
-            l.v_h = l.v_h.min(self.settings.pilot.gnss_denied_max_speed_mps);
+            l.v_h = l.v_h.min(self.nav_cap_mps(now_ms));
             l.a_acc = l.a_acc.min(a);
         }
         if self.confined_near() {

@@ -6,7 +6,7 @@ use ados_protocol::pilot::{AvoidState, Goal, GoalKind, VelMode};
 use super::super::motion_ref::{approach, APPROACH_DECEL_SHARE};
 use super::DETOUR_MIN_MPS;
 use crate::core::trace::Ask;
-use crate::core::Pilot;
+use crate::core::{limit, Pilot};
 use crate::geo::{self, V2};
 use crate::model::{limits, GoalLimits};
 use crate::planner::{self, Plan};
@@ -16,14 +16,28 @@ use crate::planner::{self, Plan};
 pub const DETOUR_STRETCH_MAX: f32 = 1.5;
 
 impl Pilot {
-    /// The goal's speed limit, `max_speed` held to the profile's limit and to
-    /// any nav cap, and its own limit without the nav cap.
-    pub(super) fn goal_v_cap(&self, max_speed: f32, now_ms: u64) -> (f32, f32) {
-        let v_cap = max_speed.min(self.limits_now(now_ms).v_h).max(0.5);
+    /// The goal's speed limit, its own limit without the caps, and the
+    /// [`limit`] bit of the one that binds: `max_speed` held to the
+    /// profile's limit (`speed`), to any nav cap (`nav_cap`) and to the
+    /// sensing rule's speed (`sensing`), never under 0.5 m/s (the brake's
+    /// seen-space limit stops the rest).
+    pub(super) fn goal_v_cap(&self, max_speed: f32, now_ms: u64) -> (f32, f32, u16) {
+        let mut v_cap = max_speed.min(self.limits_now(now_ms).v_h).max(0.5);
         let own = max_speed
             .min(limits(self.settings.pilot.profile).v_h)
             .max(0.5);
-        (v_cap, own)
+        let mut by = if v_cap < own - 1e-3 {
+            limit::NAV_CAP
+        } else {
+            limit::SPEED
+        };
+        if let Some(s) = self.sensing_cap().map(|s| s.max(0.5)) {
+            if s < v_cap - 1e-3 {
+                v_cap = s;
+                by = limit::SENSING;
+            }
+        }
+        (v_cap, own, by)
     }
 
     /// The velocity a goal asks with its target `to` away, before any
