@@ -20,6 +20,7 @@ pub(super) fn head_str(h: DetectionHead) -> &'static str {
     match h {
         DetectionHead::Yolo8 => "yolov8",
         DetectionHead::Yolo5 => "yolov5",
+        DetectionHead::Yolox => "yolox",
     }
 }
 
