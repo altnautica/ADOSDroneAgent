@@ -285,7 +285,8 @@ pub struct FcStatusText {
 pub struct SpeedCap {
     /// Why: `gnss-denied` while the EKF's horizontal position does not come
     /// from GNSS; `confined-near` in a confined place while an obstacle is
-    /// near the clearance limit or the mission leg flown is not yet seen.
+    /// near the clearance limit or the leg flown is unseen; `position-uncertain`
+    /// while `pose_uncertainty_m`'s cap is the slowest.
     pub reason: String,
     /// The horizontal speed limit in m/s.
     pub v_h_mps: f32,
@@ -473,6 +474,10 @@ pub struct PilotState {
     /// The horizontal position is not trusted, omitted while it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_unverified: Option<PositionUnverified>,
+    /// The position's 1-sigma uncertainty (m) while over 1 m and within the
+    /// pilot's `max_pose_sigma_m` (flown, slowed); omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pose_uncertainty_m: Option<f32>,
     /// The pilot's latest command of a skill goal or a goto, omitted while
     /// it flies none.
     #[serde(default, skip_serializing_if = "Option::is_none")]

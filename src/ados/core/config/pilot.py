@@ -107,6 +107,10 @@ class PilotConfig(BaseModel):
     # every setpoint it flies while the EKF's horizontal position is not GNSS.
     gnss_denied_max_speed_mps: float = Field(default=2.0, ge=0.5, le=15.0)
     gnss_denied_max_accel_mps2: float = Field(default=1.5, ge=0.5, le=6.0)
+    # The external position's 1-sigma horizontal uncertainty (m) above which
+    # the pilot treats it as unverified; between 1 m and this it keeps
+    # flying with a speed cap that tightens as the sigma grows.
+    max_pose_sigma_m: float = Field(default=5.0, ge=1.5, le=50.0)
     # A mission waypoint (or a return) that comes less than
     # ``stall_min_progress_m`` closer in ``stall_window_s`` holds the vehicle
     # and alerts the operator; with no answer the waypoint is skipped after

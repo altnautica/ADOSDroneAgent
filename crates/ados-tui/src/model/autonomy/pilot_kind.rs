@@ -157,6 +157,7 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                 detail: s(p, "detail"),
             })
         }),
+        pose_uncertainty_m: d.get("pose_uncertainty_m").and_then(Value::as_f64),
         overhead_ahead: d
             .get("overhead_ahead")
             .and_then(|v| {

@@ -233,6 +233,7 @@ impl Pilot {
         s.fc_failsafe = self.fc_failsafe;
         s.failsafe_cause = self.failsafe_cause.map(str::to_owned);
         s.position_unverified = self.position_unverified(now_ms);
+        s.pose_uncertainty_m = self.pose_uncertainty_m(now_ms);
         s.low_battery_action = self.low_batt_action.map(str::to_owned);
         s.battery_reserve = self.sup.energy.reserve.map(|r| r.wire());
         s.return_route = self.return_route_wire();

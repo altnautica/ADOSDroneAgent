@@ -255,6 +255,10 @@ export interface PilotState {
   /** The pilot does not trust the horizontal position (an older agent sends
    *  none), or null. */
   positionUnverified: PositionUnverified | null;
+  /** The position's one-sigma uncertainty (m) while it is over a metre yet
+   *  within the pilot's limit: flown on, slowed (`pose_uncertainty_m`; an
+   *  older agent sends none), or null. */
+  poseUncertaintyM: number | null;
   /** Leaves or a ceiling the pilot sees overhead along the lease goal's way
    *  (`overhead_ahead`), or null while nothing lies ahead. */
   overheadAhead: OverheadAhead | null;
@@ -357,6 +361,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     routeCheck: parseRouteCheck(p.route_check),
     sensors: p.sensors ?? null,
     positionUnverified: parsePositionUnverified(p.position_unverified),
+    poseUncertaintyM: num(p.pose_uncertainty_m),
     overheadAhead: parseOverheadAhead(p.overhead_ahead),
     sensing: parseSensing(p.sensing),
     profileLimits: parseProfileLimits(p.profile_limits),

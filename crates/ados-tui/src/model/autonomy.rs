@@ -291,6 +291,9 @@ pub struct Pilot {
     /// The pilot does not trust the horizontal position; `None` while it
     /// does (or an older agent says nothing).
     pub position_unverified: Option<PositionUnverified>,
+    /// The position's one-sigma uncertainty (m) while it is over a metre
+    /// yet within the pilot's limit (`pose_uncertainty_m`): flown, slowed.
+    pub pose_uncertainty_m: Option<f64>,
     /// Leaves or a ceiling overhead along the lease goal's way, while the
     /// pilot reports both the fly-under height and the distance to it.
     pub overhead_ahead: Option<ados_protocol::pilot::OverheadAhead>,

@@ -19,18 +19,22 @@ pub const DETOUR_STRETCH_MAX: f32 = 1.5;
 impl Pilot {
     /// The goal's speed limit, its own limit without the caps, and the
     /// [`limit`] bit of the one that binds: `max_speed` held to the
-    /// profile's limit (`speed`), to any nav cap (`nav_cap`) and to the
-    /// sensing rule's speed (`sensing`), never under 0.5 m/s (the brake's
-    /// seen-space limit stops the rest).
+    /// profile's limit (`speed`), to any nav cap (`nav_cap`, or
+    /// `position_uncertain` when the uncertain-position cap is the one) and
+    /// to the sensing rule's speed (`sensing`), never under 0.5 m/s (the
+    /// brake's seen-space limit stops the rest).
     pub(super) fn goal_v_cap(&self, max_speed: f32, now_ms: u64) -> (f32, f32, u16) {
         let mut v_cap = max_speed.min(self.limits_now(now_ms).v_h).max(0.5);
         let own = max_speed
             .min(limits(self.settings.pilot.profile).v_h)
             .max(0.5);
-        let mut by = if v_cap < own - 1e-3 {
-            limit::NAV_CAP
-        } else {
-            limit::SPEED
+        let uncertain = self
+            .uncertain_cap_mps(now_ms)
+            .is_some_and(|u| u <= v_cap + 1e-3);
+        let mut by = match v_cap < own - 1e-3 {
+            true if uncertain => limit::POSITION_UNCERTAIN,
+            true => limit::NAV_CAP,
+            false => limit::SPEED,
         };
         if let Some(s) = self.sensing_cap().map(|s| s.max(0.5)) {
             if s < v_cap - 1e-3 {

@@ -22,7 +22,7 @@ mod secondary;
 mod words;
 
 pub use secondary::chip_secondary;
-use secondary::{Clearance, CommandLimit, InputAge, Keyed, SpeedPart};
+use secondary::{Clearance, CommandLimit, InputAge, Keyed, KeyedPart, SpeedPart};
 use words::{fill, word_label};
 
 /// The spec file, byte for byte.
@@ -85,6 +85,7 @@ struct Secondary {
     order: Vec<String>,
     fc_failsafe: Styled,
     speed_cap: Styled,
+    pose_uncertainty: KeyedPart,
     mission_paused_line: Conditional,
     avoid_state: BTreeMap<String, Option<Styled>>,
     hold_reason: Styled,
@@ -176,7 +177,8 @@ pub struct ChipFacts {
     pub hold_reason: Option<String>,
     /// The pilot's horizontal speed cap in m/s, while one applies.
     pub speed_cap_mps: Option<f64>,
-    /// Why the cap (`gnss-denied`, `confined-near`), while one applies.
+    /// Why the cap (`gnss-denied`, `confined-near`, `position-uncertain`),
+    /// while one applies.
     pub speed_cap_reason: Option<String>,
     pub avoid_state: Option<String>,
     /// The step of a running launch sequence (not `done`, no error).
@@ -186,6 +188,9 @@ pub struct ChipFacts {
     /// The pilot's position-unverified label key (its `detail` when the spec
     /// labels it, else its `reason`); `None` while the position is trusted.
     pub position_unverified: Option<String>,
+    /// The position's one-sigma uncertainty (m) while the pilot flies on it
+    /// slowed (`pose_uncertainty_m`).
+    pub pose_uncertainty_m: Option<f64>,
     /// The horizontal limit the sticks fly at (m/s), from `profile_limits`.
     pub profile_limit_mps: Option<f64>,
     /// The vehicle's horizontal and vertical (+ up) speed (m/s), when the
@@ -414,6 +419,7 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         speed_cap_mps: p.speed_cap_mps,
         speed_cap_reason: p.speed_cap_reason.clone(),
         avoid_state: p.avoid_state.clone(),
+        pose_uncertainty_m: p.pose_uncertainty_m,
         launch_step: p.launch_step.clone(),
         fc_failsafe: p.fc_failsafe,
         position_unverified: p.position_unverified.as_ref().map(|u| match &u.detail {

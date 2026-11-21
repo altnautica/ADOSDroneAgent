@@ -70,6 +70,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Pilot: a wide external-position sigma no longer stops the flight by itself. Navigation's `pose_sigma_wide` is graded on the numeric sigma it now sends (`pose_sigma_m` on `plugin.navigation.state`): over 1 m and up to the new setting `pilot.max_pose_sigma_m` (default 5.0 m) the pilot keeps flying skills, gotos and sticks under a speed cap that falls linearly from the flat GNSS-denied speed (at most 3 m/s) at 1 m to the unverified-position 1 m/s at the limit, publishes `pose_uncertainty_m` on its state, `speed_cap` reason `position-uncertain` while that cap is the slowest, and the `command.limits` code `position_uncertain` while it binds a goal. Past the limit, or on a `pose_sigma_wide` report that carries no sigma, the position is unverified as before (detail `pose_sigma_wide`). The cockpit, dashboard, Mission Control, Android and the TUI show "Position uncertain ±X m" and "Position uncertain: V m/s max".
+
 - Pilot: under the `reactive` planner the trajectory planner no longer runs beside the grid planner for every skill goal; it runs for skill goals and gotos under avoid `bypass` (whose blocked goals follow its route round the obstacle), and otherwise only when the new setting `pilot.planner_shadow` is on (default off), its plan then published as the `trajectory` shadow as before. Under `brake` a blocked goto now stops and holds.
 
 - Pilot: the mission route check runs, and is published as `route_check`, in every place class, not only in a confined place; the confined speed cap and the confined launch refusal stay confined-only.

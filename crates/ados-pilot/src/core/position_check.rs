@@ -8,6 +8,12 @@
 //!   pulls the EKF velocity to rest while the aircraft flies on; the flow
 //!   still measures the ground going by, whatever its quality.
 //!
+//! A third, graded: Navigation's pose sigma (`pose_sigma_m`). Over
+//! [`UNCERTAIN_SIGMA_M`] and up to `pilot.max_pose_sigma_m` the position is
+//! uncertain, not unverified: everything keeps flying under a speed cap
+//! that tightens with the sigma ([`super::nav_cap`]); past the limit it is
+//! unverified.
+//!
 //! While the position is unverified the pilot never holds a position on it:
 //! a hold is a zero-velocity brake, stick flight is held to
 //! [`UNVERIFIED_MAX_MPS`], a goto, skill or swarm goal stops, and nothing new
@@ -75,15 +81,22 @@ pub const EXTNAV_SETTLE_MS: u64 = 2000;
 /// Navigation `health_reason`s that make a `degraded` external position
 /// unverified. A `degraded` without one of these (a corridor flown on good
 /// flow, a lidar or VIO still initialising) is still flown.
-/// `pose_sigma_wide`: the estimator's own sigma passed a metre (a flow
-/// reading a few percent off down a long corridor stays inside it).
-const UNVERIFYING_DEGRADED_REASONS: [&str; 5] = [
+/// [`POSE_SIGMA_WIDE`] is graded on the sigma instead
+/// ([`Pilot::position_unverified`]).
+const UNVERIFYING_DEGRADED_REASONS: [&str; 4] = [
     "corridor_unmeasured",
     "flow_disagrees",
     "ekf_flow_disagree",
     "heading_unconfirmed",
-    "pose_sigma_wide",
 ];
+
+/// Navigation's `health_reason` while its pose's one-sigma uncertainty is
+/// over [`UNCERTAIN_SIGMA_M`] (a flow reading a few percent off down a long
+/// corridor grows it with the distance flown).
+pub const POSE_SIGMA_WIDE: &str = "pose_sigma_wide";
+/// Over this one-sigma uncertainty (m) the position is uncertain: flown,
+/// slowed ([`Pilot::pose_uncertainty_m`]).
+pub const UNCERTAIN_SIGMA_M: f32 = 1.0;
 
 fn degraded_reason_unverifies(reason: Option<&str>) -> bool {
     reason.is_some_and(|r| UNVERIFYING_DEGRADED_REASONS.contains(&r) || r.starts_with("imu_feed"))
@@ -198,6 +211,9 @@ pub struct ExtNav {
     /// `good`, `degraded` or `lost`; `None` while Navigation named none.
     pub health: Option<String>,
     pub reason: Option<String>,
+    /// The pose's one-sigma horizontal uncertainty (`pose_sigma_m`, m; the
+    /// along-track sigma in a corridor), `None` while Navigation gives none.
+    pub sigma_m: Option<f32>,
     pub at_ms: u64,
 }
 
@@ -208,6 +224,11 @@ impl ExtNav {
             mode: s("mode")?.to_owned(),
             health: s("extnav_health").map(str::to_owned),
             reason: s("health_reason").map(str::to_owned),
+            sigma_m: payload
+                .get("pose_sigma_m")
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32)
+                .filter(|v| v.is_finite() && *v >= 0.0),
             at_ms: now_ms,
         })
     }
@@ -312,12 +333,47 @@ impl Pilot {
         }
         let reason = match nav.health.as_deref()? {
             "lost" => REASON_EXTNAV_LOST,
+            _ if self.sigma_past_limit(nav) => {
+                return Some(
+                    PositionUnverified::new(REASON_EXTNAV_DEGRADED)
+                        .with_detail(Some(POSE_SIGMA_WIDE.to_owned())),
+                );
+            }
             "degraded" if degraded_reason_unverifies(nav.reason.as_deref()) => {
                 REASON_EXTNAV_DEGRADED
             }
             _ => return None,
         };
         Some(PositionUnverified::new(reason).with_detail(nav.reason.clone()))
+    }
+
+    /// The pose's sigma is past `max_pose_sigma_m`. A `pose_sigma_wide`
+    /// report with no sigma counts as past it: an uncertainty the pilot
+    /// cannot size is not flown on, as before the limit existed.
+    fn sigma_past_limit(&self, nav: &ExtNav) -> bool {
+        match nav.sigma_m {
+            Some(s) => s > self.settings.pilot.max_pose_sigma_m,
+            None => {
+                nav.health.as_deref() == Some("degraded")
+                    && nav.reason.as_deref() == Some(POSE_SIGMA_WIDE)
+            }
+        }
+    }
+
+    /// The pose's one-sigma uncertainty (m, one decimal) while it is over
+    /// [`UNCERTAIN_SIGMA_M`] on a fresh external position the active source
+    /// set flies on and nothing unverifies the position: the pilot flies
+    /// on, slowed ([`Pilot::uncertain_cap_mps`]). `None` otherwise.
+    pub fn pose_uncertainty_m(&self, now_ms: u64) -> Option<f32> {
+        let nav = self
+            .extnav
+            .as_ref()
+            .filter(|n| now_ms.saturating_sub(n.at_ms) <= EXTNAV_STALE_MS)
+            .filter(|n| self.on_extnav(n))?;
+        let s = nav.sigma_m.filter(|s| *s > UNCERTAIN_SIGMA_M)?;
+        self.position_unverified(now_ms)
+            .is_none()
+            .then_some(round1(s))
     }
 
     /// While the position is unverified, a goal flown on it stops: the skill

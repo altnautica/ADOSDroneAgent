@@ -111,6 +111,10 @@ pub struct PilotSection {
     pub gnss_denied_max_speed_mps: f32,
     /// Horizontal acceleration cap (m/s²) under the same condition.
     pub gnss_denied_max_accel_mps2: f32,
+    /// The external position's one-sigma horizontal uncertainty (m) above
+    /// which the pilot treats it as unverified. Between 1 m and this the
+    /// pilot keeps flying, slowed (the pilot core's `nav_cap` speed rule).
+    pub max_pose_sigma_m: f32,
     /// No progress to a mission waypoint (or on a return) over this window
     /// raises a stall.
     pub stall_window_s: u32,
@@ -252,6 +256,7 @@ impl Default for PilotSection {
             link_loss_action: LinkLossAction::Rth,
             gnss_denied_max_speed_mps: 2.0,
             gnss_denied_max_accel_mps2: 1.5,
+            max_pose_sigma_m: 5.0,
             stall_window_s: 15,
             stall_min_progress_m: 1.0,
             stall_skip_after_s: 45,

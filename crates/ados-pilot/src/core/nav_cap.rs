@@ -8,6 +8,13 @@
 //! tier's own speed rule ([`super::control`]'s `sensing`) sets it whenever it
 //! allows more. The acceleration cap holds on every tier.
 //!
+//! An uncertain position ([`Pilot::pose_uncertainty_m`]: Navigation's sigma
+//! over 1 m, within `max_pose_sigma_m`) adds its own speed cap
+//! ([`uncertain_cap`]): the flat GNSS-denied speed (at most
+//! [`UNCERTAIN_MAX_MPS`]) at a 1 m sigma, falling linearly to the
+//! unverified-position speed at the limit, so the speed meets the
+//! unverified regime where it begins and is never faster than the flat cap.
+//!
 //! The pilot knows the active EKF source set only from Navigation's
 //! `plugin.navigation.state`: it keeps the last set named there (the FC keeps a set until
 //! told otherwise), and the boot set 1 before any. A source-set switch made
@@ -16,6 +23,7 @@
 
 use ados_protocol::pilot::{PlaceClass, Profile, SensingTier, SpeedCap};
 
+use super::position_check::{UNCERTAIN_SIGMA_M, UNVERIFIED_MAX_MPS};
 use super::{Pilot, TICK_MS};
 use crate::geo::{self, V2};
 use crate::model::{fc_capped, limits, stick_limits, Limits, StickLimits};
@@ -32,13 +40,44 @@ pub const GPS_FIX_STALE_MS: u64 = 3_000;
 const FIX_3D: u8 = 3;
 /// The `speed_cap.reason` while the position source is not GNSS.
 pub const REASON_GNSS_DENIED: &str = "gnss-denied";
+/// The `speed_cap.reason` while the uncertain-position cap is the slowest.
+pub const REASON_POSITION_UNCERTAIN: &str = "position-uncertain";
+/// The uncertain-position cap's ceiling, m/s (the planar sensing tier's).
+pub const UNCERTAIN_MAX_MPS: f32 = 3.0;
+
+/// The speed cap of a position with one-sigma uncertainty `sigma_m` under a
+/// `limit_m` past which it is unverified: `base` (the flat GNSS-denied
+/// speed, held to [`UNCERTAIN_MAX_MPS`]) at [`UNCERTAIN_SIGMA_M`], falling
+/// linearly to [`UNVERIFIED_MAX_MPS`] (never above `base`) at `limit_m`.
+pub fn uncertain_cap(sigma_m: f32, limit_m: f32, base_mps: f32) -> f32 {
+    let hi = base_mps.min(UNCERTAIN_MAX_MPS);
+    let lo = UNVERIFIED_MAX_MPS.min(hi);
+    let span = (limit_m - UNCERTAIN_SIGMA_M).max(1e-3);
+    let t = ((sigma_m - UNCERTAIN_SIGMA_M) / span).clamp(0.0, 1.0);
+    hi - (hi - lo) * t
+}
 
 impl Pilot {
-    /// The cap in force, `None` while the EKF's horizontal position comes
-    /// from GNSS ([`Pilot::nav_capped`]), for the published state.
+    /// The cap in force, for the published state: the uncertain-position
+    /// cap when it is the slower (or the only) one, else the GNSS-denied
+    /// cap; `None` with neither.
     pub fn nav_cap(&self, now_ms: u64) -> Option<SpeedCap> {
-        self.nav_capped(now_ms)
-            .then(|| SpeedCap::new(REASON_GNSS_DENIED, self.nav_cap_mps(now_ms)))
+        let gnss = self.nav_capped(now_ms).then(|| self.nav_cap_mps(now_ms));
+        match (gnss, self.uncertain_cap_mps(now_ms)) {
+            (g, Some(u)) if g.is_none_or(|g| u < g) => {
+                Some(SpeedCap::new(REASON_POSITION_UNCERTAIN, u))
+            }
+            (Some(g), _) => Some(SpeedCap::new(REASON_GNSS_DENIED, g)),
+            _ => None,
+        }
+    }
+
+    /// The uncertain-position speed cap ([`uncertain_cap`]) while the
+    /// position is uncertain, `None` otherwise.
+    pub fn uncertain_cap_mps(&self, now_ms: u64) -> Option<f32> {
+        let p = &self.settings.pilot;
+        self.pose_uncertainty_m(now_ms)
+            .map(|s| uncertain_cap(s, p.max_pose_sigma_m, p.gnss_denied_max_speed_mps))
     }
 
     /// The GNSS-denied cap's horizontal speed: the flat
@@ -88,20 +127,23 @@ impl Pilot {
     }
 
     /// Whether any horizontal speed cap is in force on the setpoints the
-    /// pilot flies: the GNSS-denied one, or the confined place's near the
-    /// clearance limit.
+    /// pilot flies: the GNSS-denied one, the uncertain-position one, or the
+    /// confined place's near the clearance limit.
     pub fn speed_capped(&self, now_ms: u64) -> bool {
-        self.nav_capped(now_ms) || self.confined_near()
+        self.nav_capped(now_ms) || self.confined_near() || self.uncertain_cap_mps(now_ms).is_some()
     }
 
     /// The profile's limits, with the caps in force applied: the GNSS-denied
-    /// cap to the horizontal speed and acceleration, the confined cap to the
-    /// speed.
+    /// cap to the horizontal speed and acceleration, the uncertain-position
+    /// and confined caps to the speed.
     pub fn limits_now(&self, now_ms: u64) -> Limits {
         let mut l = limits(self.settings.pilot.profile);
         if self.nav_capped(now_ms) {
             l.v_h = l.v_h.min(self.nav_cap_mps(now_ms));
             l.a_h = l.a_h.min(self.settings.pilot.gnss_denied_max_accel_mps2);
+        }
+        if let Some(u) = self.uncertain_cap_mps(now_ms) {
+            l.v_h = l.v_h.min(u);
         }
         if self.confined_near() {
             l.v_h = l.v_h.min(super::control::CONFINED_CAP_MPS);
@@ -135,6 +177,9 @@ impl Pilot {
             let a = self.settings.pilot.gnss_denied_max_accel_mps2;
             l.v_h = l.v_h.min(self.nav_cap_mps(now_ms));
             l.a_acc = l.a_acc.min(a);
+        }
+        if let Some(u) = self.uncertain_cap_mps(now_ms) {
+            l.v_h = l.v_h.min(u);
         }
         if self.confined_near() {
             l.v_h = l.v_h.min(super::control::CONFINED_CAP_MPS);

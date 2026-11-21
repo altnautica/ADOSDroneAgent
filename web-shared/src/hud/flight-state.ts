@@ -39,6 +39,7 @@ const CHIP_SECONDARY = flightStateJson.secondary as {
   order: string[];
   fc_failsafe: { text: string; color: string };
   speed_cap: { text: string; color: string };
+  pose_uncertainty: ChipTextPart;
   mission_paused_line: { match: Record<string, string | number | boolean>; text: string; color: string };
   avoid_state: Record<string, { text: string; color: string } | null>;
   hold_reason: { text: string; color: string };
@@ -104,7 +105,11 @@ export interface ChipFacts {
   /** The pilot's position-unverified label key (its `detail` when the spec
    *  labels it, else its `reason`), or null while the position is trusted. */
   positionUnverified: string | null;
-  /** Why the cap (`gnss-denied`, `confined-near`), or null with none. */
+  /** The position's one-sigma uncertainty (m) while the pilot flies on it
+   *  slowed (`pose_uncertainty_m`), or null. */
+  poseUncertaintyM: number | null;
+  /** Why the cap (`gnss-denied`, `confined-near`, `position-uncertain`), or
+   *  null with none. */
   speedCapReason: string | null;
   /** The horizontal limit the sticks fly at (m/s), or null without limits. */
   profileLimitMps: number | null;
@@ -293,6 +298,9 @@ export function chipSecondary(f: ChipFacts): ChipLine[] {
     } else if ((part === "h_speed" || part === "v_speed") && f.owner === CHIP_SECONDARY[part].owner) {
       const v = part === "h_speed" ? f.hSpeedMps : f.vSpeedMps;
       if (v !== null) out.push({ id: part, text: specText(CHIP_SECONDARY[part].text_key, { v: fmtSigned1(v) }), color: colorOf(CHIP_SECONDARY[part].color) });
+    } else if (part === "pose_uncertainty" && f.poseUncertaintyM !== null) {
+      const u = CHIP_SECONDARY.pose_uncertainty;
+      out.push({ id: part, text: specText(u.text_key, { m: f.poseUncertaintyM.toFixed(1) }), color: colorOf(u.color) });
     } else if (part === "speed_cap" && f.speedCapMps !== null) {
       // The reason's own spec line; the spec's default line for a reason it
       // does not name.
@@ -408,6 +416,7 @@ export function chipFacts(
     fcFailsafe: p.fcFailsafe,
     speedCapMps: p.speedCap?.vHMps ?? null,
     positionUnverified: positionUnverifiedKey(p.positionUnverified),
+    poseUncertaintyM: p.poseUncertaintyM,
     speedCapReason: p.speedCap?.reason ?? null,
     profileLimitMps: p.profileLimits?.vHMps ?? null,
     hSpeedMps: extra.speed?.hMps ?? null,

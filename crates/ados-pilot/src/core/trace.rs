@@ -28,6 +28,7 @@ pub mod limit {
     pub const SUBJECT: u16 = 1 << 10;
     pub const GEOFENCE: u16 = 1 << 11;
     pub const HOLD: u16 = 1 << 12;
+    pub const POSITION_UNCERTAIN: u16 = 1 << 13;
 }
 
 /// A shadow command older than this is no longer published.
@@ -71,7 +72,8 @@ pub(crate) struct Tick {
     /// [`limit`] bits.
     pub limits: u16,
     /// The [`limit`] bit of the speed limit that bound this tick
-    /// ([`limit::SPEED`], [`limit::NAV_CAP`] or [`limit::SENSING`]), 0 when
+    /// ([`limit::SPEED`], [`limit::NAV_CAP`], [`limit::POSITION_UNCERTAIN`]
+    /// or [`limit::SENSING`]), 0 when
     /// none did; it is published first.
     pub bound_by: u16,
 }

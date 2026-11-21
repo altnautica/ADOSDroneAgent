@@ -26,6 +26,7 @@ mod overhead;
 #[path = "../../tests/pins/mod.rs"]
 mod pins;
 mod pos_reset;
+mod pose_sigma;
 mod position_check;
 mod route_hold;
 mod route_home;

@@ -1,6 +1,7 @@
 //! The chip's secondary line, in the spec's order, as `flight-state.ts`
 //! builds it: FC failsafe, the obstacle clearance, a late stick input, the
-//! pilot's speed cap, the limit that cut the commanded speed, a mission the
+//! position's uncertainty, the pilot's speed cap, the limit that cut the
+//! commanded speed, a mission the
 //! pilot holds paused, hold reason, avoidance state, control mode, then the
 //! horizontal and vertical speed while the sticks fly.
 
@@ -67,6 +68,13 @@ pub(super) struct InputAge {
     color: String,
 }
 
+/// A part worded by a spec string, in one colour.
+#[derive(Debug, Deserialize)]
+pub(super) struct KeyedPart {
+    text_key: String,
+    color: String,
+}
+
 /// A speed part, shown only while `owner` flies.
 #[derive(Debug, Deserialize)]
 pub(super) struct SpeedPart {
@@ -109,6 +117,15 @@ pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
                     out.push(ChipLine {
                         text: spec_text(&s.text_key, &[("v", &signed1(v))]),
                         color: s.color.clone(),
+                    });
+                }
+            }
+            "pose_uncertainty" => {
+                let u = &sec.pose_uncertainty;
+                if let Some(m) = f.pose_uncertainty_m {
+                    out.push(ChipLine {
+                        text: spec_text(&u.text_key, &[("m", &format!("{m:.1}"))]),
+                        color: u.color.clone(),
                     });
                 }
             }
