@@ -35,8 +35,8 @@ use ados_vision_engine::frame_bus;
 use ados_vision_engine::perception_scheduler::PerceptionScheduler;
 use ados_vision_engine::sim_pacing::{frame_clock_ns, SimPacing};
 use ados_vision_engine::source::{AnySource, FrameSource, SimClock};
-use ados_vision_engine::visionsock;
 use ados_vision_engine::work_status::{self, InputLiveness, WorkStatus, INPUT_SILENCE_TIMEOUT};
+use ados_vision_engine::{subject_bus, visionsock};
 
 // A crate root resolves `mod` next to itself, where Cargo would take a file
 // for a binary of its own; the module lives in the binary's own directory.
@@ -428,6 +428,7 @@ async fn main() {
             }
         }));
     }
+    tasks.extend(subject_bus::spawn(&engine, &config, &cancel));
 
     // The vision-frames.sock broadcast: every published frame descriptor is
     // re-framed onto a Unix socket an on-box service (the world-model capture
@@ -463,9 +464,9 @@ async fn main() {
             cancel.clone(),
         )));
     }
-    // The attitude and the downward rangefinder off the MAVLink socket: the
-    // depth fit reads them, and the tracker reads the attitude history to
-    // take the camera's own turn out of a track's motion.
+    // The attitude, the local position and the downward rangefinder off the
+    // MAVLink socket: the depth fit, the tracker (the camera's turn) and the
+    // subject estimate (the vehicle's pose at each frame) read them.
     if depth_interval_ms > 0 || config.tracker_enabled {
         tasks.push(tokio::spawn(feed::run_mavlink_reader(
             config.mavlink_socket_path().into(),

@@ -82,6 +82,7 @@ cameras:
         "/tmp/run/vision-detections.sock"
     );
     assert_eq!(c.frames_socket_path(), "/tmp/run/vision-frames.sock");
+    assert_eq!(c.subject_socket_path(), "/tmp/run/vision-subject.sock");
 }
 
 #[test]

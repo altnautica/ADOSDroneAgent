@@ -41,6 +41,8 @@
 //!   landing zones; [`depth_bus`] re-publishes it on `vision-depth.sock`.
 //! - [`sim_pacing`] — vision on the simulator's clock: the frame clock, the
 //!   modelled-latency release of results, and each camera's lockstep lane.
+//! - [`subject_bus`] — the `vision-subject.sock` broadcast of the designated
+//!   subject's world state (`vision.subject.v1`).
 
 pub mod backend;
 pub mod camera_control;
@@ -57,6 +59,7 @@ pub mod ring;
 pub mod sei;
 pub mod sim_pacing;
 pub mod source;
+pub mod subject_bus;
 pub mod trigger;
 pub mod visionsock;
 mod work_rate;

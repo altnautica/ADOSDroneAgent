@@ -78,6 +78,18 @@ impl VisionEngine {
             .unwrap_or(0)
     }
 
+    /// `desc`'s camera geometry and its exposure time on the clock the
+    /// flight controller's histories read; `None` for a camera without a
+    /// `cameras[]` entry.
+    pub(super) fn camera_frame(
+        &self,
+        desc: &FrameDescriptor,
+    ) -> Option<(CameraGeometry, FrameTime)> {
+        let m = self.camera_motion();
+        let geometry = *m.setup.geometries.get(&desc.camera_id)?;
+        Some((geometry, frame_time(desc, m.setup.fc_on_sim_clock)))
+    }
+
     /// Before the batch on `desc`: move the camera's track by the vehicle's
     /// turn since the previous batch's frame. Returns the shift applied, in
     /// pixels; `None` when there was nothing to move (no tracker, no geometry

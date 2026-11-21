@@ -38,7 +38,11 @@ mod depth;
 mod embeddings;
 mod models;
 mod roster;
+mod subject;
+mod timing;
 mod tracking;
+
+use timing::ModelTiming;
 
 pub use camera_motion::CameraMotionSetup;
 pub use demand::{
@@ -89,51 +93,6 @@ fn run_blocking<T>(f: impl FnOnce() -> T) -> T {
 /// One camera's published surface: the ring writer it writes frames into.
 struct CameraRing {
     writer: RingWriter,
-}
-
-/// Rolling per-model inference timing for the telemetry surface. EWMA-smoothed so
-/// one slow frame does not spike the reported latency/fps. All-zero until the
-/// model runs (the honest "no data" reading, never a claim of zero throughput).
-#[derive(Debug, Clone, Copy, Default)]
-struct ModelTiming {
-    ewma_latency_ms: f32,
-    ewma_interval_ms: f32,
-    last_infer_ms: Option<i64>,
-    samples: u64,
-}
-
-impl ModelTiming {
-    /// EWMA weight for a new sample (a light smoothing so the reading tracks the
-    /// current rate without jitter).
-    const ALPHA: f32 = 0.2;
-
-    fn record(&mut self, latency_ms: f32, now: i64) {
-        self.ewma_latency_ms = if self.samples == 0 {
-            latency_ms
-        } else {
-            Self::ALPHA * latency_ms + (1.0 - Self::ALPHA) * self.ewma_latency_ms
-        };
-        if let Some(last) = self.last_infer_ms {
-            let interval = (now - last).max(0) as f32;
-            if interval > 0.0 {
-                self.ewma_interval_ms = if self.ewma_interval_ms == 0.0 {
-                    interval
-                } else {
-                    Self::ALPHA * interval + (1.0 - Self::ALPHA) * self.ewma_interval_ms
-                };
-            }
-        }
-        self.last_infer_ms = Some(now);
-        self.samples = self.samples.saturating_add(1);
-    }
-
-    fn fps(&self) -> f32 {
-        if self.ewma_interval_ms > 0.0 {
-            1000.0 / self.ewma_interval_ms
-        } else {
-            0.0
-        }
-    }
 }
 
 /// The shared engine state.
@@ -202,6 +161,8 @@ pub struct VisionEngine {
     camera_mounts: std::sync::Mutex<HashMap<String, CameraMount>>,
     /// Results paced on the simulator's clock ([`crate::sim_pacing`]).
     sim_pacing: std::sync::OnceLock<Arc<crate::sim_pacing::SimPacing>>,
+    /// The designated subject's world estimate per camera, and its broadcast.
+    subject: std::sync::Mutex<subject::SubjectRuntime>,
 }
 
 /// How a camera ring is sized.
@@ -312,6 +273,7 @@ impl VisionEngine {
             capture_ids: std::sync::Mutex::new(Vec::new()),
             camera_mounts: std::sync::Mutex::new(HashMap::new()),
             sim_pacing: std::sync::OnceLock::new(),
+            subject: std::sync::Mutex::new(subject::SubjectRuntime::default()),
         })
     }
 

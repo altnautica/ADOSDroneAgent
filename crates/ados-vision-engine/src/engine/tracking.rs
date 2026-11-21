@@ -46,10 +46,12 @@ impl VisionEngine {
     /// through the camera's trackers, advanced by the frame's capture time:
     /// every tracked detection carries a stable `track_id` and its
     /// `track_state`, and the locked object its `lock_state` (see
-    /// [`CameraTracks`]). Embeddings are extracted once per frame, when the
-    /// re-id tracker or a subscriber needs them, and put on the detections only
-    /// for a subscriber. The batch's inference time is recorded as the
-    /// detector's latency, and its stage times on the camera's status.
+    /// [`CameraTracks`]); the designated subject's world estimate then moves
+    /// on to the frame (see [`super::subject`]). Embeddings are extracted
+    /// once per frame, when the re-id tracker or a subscriber needs them, and
+    /// put on the detections only for a subscriber. The batch's inference
+    /// time is recorded as the detector's latency, and its stage times on the
+    /// camera's status.
     pub async fn infer_and_publish(
         &self,
         model_id: &str,
@@ -136,6 +138,7 @@ impl VisionEngine {
             let tracked = self
                 .track(&desc.camera_id, detections, apps, pixels, Some(ts))
                 .await;
+            self.update_subject(desc, &tracked, ts);
             if plan.subject.is_some() {
                 let associated = self
                     .trackers

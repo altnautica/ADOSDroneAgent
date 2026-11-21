@@ -72,6 +72,7 @@ pub mod vision_depth_frame;
 pub mod vision_detector;
 pub mod vision_rpc;
 pub mod vision_status;
+pub mod vision_subject;
 pub mod voxmap;
 pub mod wfb_status;
 pub mod wfb_tables;

@@ -49,6 +49,16 @@ impl VisionConfig {
         )
     }
 
+    /// The `vision-subject.sock` path: the last-state broadcast of the
+    /// designated subject's world state
+    /// ([`ados_protocol::vision_subject::SubjectState`]).
+    pub fn subject_socket_path(&self) -> String {
+        format!(
+            "{}/vision-subject.sock",
+            self.socket_dir.trim_end_matches('/')
+        )
+    }
+
     /// The MAVLink broadcast socket the depth fit reads attitude and the
     /// downward rangefinder from.
     pub fn mavlink_socket_path(&self) -> String {

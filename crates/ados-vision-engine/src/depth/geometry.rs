@@ -94,6 +94,13 @@ impl Projector {
         ]
     }
 
+    /// The line of sight through image point `(u, v)` in the local NED
+    /// frame at vehicle attitude `at`, scaled like [`Self::ray`]: its
+    /// optical-axis component is 1.
+    pub fn ray_ned(&self, u: f32, v: f32, at: &Attitude) -> [f32; 3] {
+        mat_vec(&body_to_ned(at), self.ray(u, v))
+    }
+
     /// Where the line of sight through image point `(u, v)` at vehicle
     /// attitude `from` lands in the image at attitude `to`: the image shift
     /// of a pure turn of the vehicle (and the camera fixed to it). The

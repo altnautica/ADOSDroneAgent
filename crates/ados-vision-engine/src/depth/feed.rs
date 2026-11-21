@@ -11,12 +11,14 @@
 //!
 //! The scan and the rangefinder keep only the latest value with its arrival
 //! time on the engine's monotonic clock; [`RangeFeed::snapshot`] hands out
-//! what is fresh. The attitude keeps a few seconds of samples on the flight
-//! controller's own clock (`time_boot_ms`), so the tracker can ask how the
-//! vehicle was turned when a given frame was exposed
-//! ([`RangeFeed::attitude_at`]). A missing socket is normal (no plugin host,
-//! no flight controller yet): the reader retries quietly, the depth layer
-//! runs unscaled and the tracker does without the camera's turn.
+//! what is fresh. The attitude and the local position (`LOCAL_POSITION_NED`)
+//! keep a few seconds of samples on the flight controller's own clock
+//! (`time_boot_ms`), so the tracker can ask how the vehicle was turned, and
+//! the subject estimate where it was, when a given frame was exposed
+//! ([`RangeFeed::attitude_at`], [`RangeFeed::position_at`]). A missing socket
+//! is normal (no plugin host, no flight controller yet): the reader retries
+//! quietly, the depth layer runs unscaled and the tracker does without the
+//! camera's turn.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -98,20 +100,76 @@ pub enum FrameTime {
     FlightController(f64),
 }
 
+/// One sample of a history kept on the flight controller's clock.
 #[derive(Debug, Clone, Copy)]
-struct AttitudeSample {
+struct Sample<T> {
     /// `time_boot_ms`.
     fc_ms: u64,
     /// Arrival on the engine's monotonic clock.
     rx_ms: u64,
-    attitude: Attitude,
+    value: T,
 }
 
 #[derive(Debug, Default)]
 struct Latest {
     scan: Option<(Arc<Scan>, u64)>,
     down: Option<(f32, u64)>,
-    attitudes: VecDeque<AttitudeSample>,
+    attitudes: VecDeque<Sample<Attitude>>,
+    positions: VecDeque<Sample<[f32; 3]>>,
+}
+
+/// Add a sample to a history. A repeated sample is skipped; one older than
+/// the newest means the flight controller restarted, and the history starts
+/// over. Samples older than [`ATTITUDE_HISTORY_MS`] before it are dropped.
+fn push_sample<T>(h: &mut VecDeque<Sample<T>>, s: Sample<T>) {
+    match h.back() {
+        Some(last) if last.fc_ms == s.fc_ms => return,
+        Some(last) if last.fc_ms > s.fc_ms => h.clear(),
+        _ => {}
+    }
+    let fc_ms = s.fc_ms;
+    h.push_back(s);
+    while h
+        .front()
+        .is_some_and(|x| x.fc_ms + ATTITUDE_HISTORY_MS < fc_ms)
+    {
+        h.pop_front();
+    }
+}
+
+/// The two samples around the instant `at` and how far it lies from the
+/// first to the second (`0..1`; the newest twice when `at` is just past
+/// it). `None` when the history does not cover that instant: older than its
+/// first sample, newer than its last by more than [`ATTITUDE_MAX_HOLD_MS`],
+/// or inside a gap of more than [`ATTITUDE_MAX_GAP_MS`].
+fn locate<T: Copy>(s: &VecDeque<Sample<T>>, at: FrameTime) -> Option<(T, T, f32)> {
+    let fc = match at {
+        FrameTime::FlightController(ms) => ms,
+        // The sample that arrived soonest after its stamp fixes the offset
+        // between the clocks; later arrivals only queued.
+        FrameTime::Host(ms) => {
+            let offset = s
+                .iter()
+                .map(|x| x.rx_ms as f64 - x.fc_ms as f64)
+                .min_by(f64::total_cmp)?;
+            ms - offset
+        }
+    };
+    let first = s.front()?;
+    let last = s.back()?;
+    if fc < first.fc_ms as f64 || fc > last.fc_ms as f64 + ATTITUDE_MAX_HOLD_MS {
+        return None;
+    }
+    if fc >= last.fc_ms as f64 {
+        return Some((last.value, last.value, 0.0));
+    }
+    let i = s.partition_point(|x| (x.fc_ms as f64) <= fc);
+    let (a, b) = (s[i - 1], s[i]);
+    let span = (b.fc_ms - a.fc_ms) as f64;
+    if span > ATTITUDE_MAX_GAP_MS {
+        return None;
+    }
+    Some((a.value, b.value, ((fc - a.fc_ms as f64) / span) as f32))
 }
 
 /// The latest ranging, shared by the readers and the depth runs.
@@ -138,75 +196,58 @@ impl RangeFeed {
     }
 
     /// One `ATTITUDE` sample: the flight controller's `time_boot_ms`, and its
-    /// arrival on the engine's clock. A repeated sample is skipped; one older
-    /// than the newest means the flight controller restarted, and the
-    /// history starts over.
+    /// arrival on the engine's clock (see [`push_sample`]).
     pub fn push_attitude(&self, fc_ms: u64, attitude: Attitude, rx_ms: u64) {
         self.with(|l| {
-            match l.attitudes.back() {
-                Some(last) if last.fc_ms == fc_ms => return,
-                Some(last) if last.fc_ms > fc_ms => l.attitudes.clear(),
-                _ => {}
-            }
-            l.attitudes.push_back(AttitudeSample {
-                fc_ms,
-                rx_ms,
-                attitude,
-            });
-            while l
-                .attitudes
-                .front()
-                .is_some_and(|s| s.fc_ms + ATTITUDE_HISTORY_MS < fc_ms)
-            {
-                l.attitudes.pop_front();
-            }
+            push_sample(
+                &mut l.attitudes,
+                Sample {
+                    fc_ms,
+                    rx_ms,
+                    value: attitude,
+                },
+            )
+        });
+    }
+
+    /// One `LOCAL_POSITION_NED` sample (north, east, down metres), stamped
+    /// like [`Self::push_attitude`].
+    pub fn push_position(&self, fc_ms: u64, ned: [f32; 3], rx_ms: u64) {
+        self.with(|l| {
+            push_sample(
+                &mut l.positions,
+                Sample {
+                    fc_ms,
+                    rx_ms,
+                    value: ned,
+                },
+            )
         });
     }
 
     /// The attitude when a frame was exposed at `at`, interpolated between
-    /// the two samples around it. `None` when the history does not cover
-    /// that instant: older than its first sample, newer than its last by
-    /// more than [`ATTITUDE_MAX_HOLD_MS`], or inside a gap of more than
-    /// [`ATTITUDE_MAX_GAP_MS`].
+    /// the two samples around it; `None` when the history does not cover
+    /// that instant (see [`locate`]).
     pub fn attitude_at(&self, at: FrameTime) -> Option<Attitude> {
         self.with(|l| {
-            let s = &l.attitudes;
-            let fc = match at {
-                FrameTime::FlightController(ms) => ms,
-                // The sample that arrived soonest after its stamp fixes the
-                // offset between the clocks; later arrivals only queued.
-                FrameTime::Host(ms) => {
-                    let offset = s
-                        .iter()
-                        .map(|x| x.rx_ms as f64 - x.fc_ms as f64)
-                        .min_by(f64::total_cmp)?;
-                    ms - offset
-                }
-            };
-            let first = s.front()?;
-            let last = s.back()?;
-            if fc < first.fc_ms as f64 || fc > last.fc_ms as f64 + ATTITUDE_MAX_HOLD_MS {
-                return None;
-            }
-            if fc >= last.fc_ms as f64 {
-                return Some(last.attitude);
-            }
-            let i = s.partition_point(|x| (x.fc_ms as f64) <= fc);
-            let (a, b) = (s[i - 1], s[i]);
-            let span = (b.fc_ms - a.fc_ms) as f64;
-            if span > ATTITUDE_MAX_GAP_MS {
-                return None;
-            }
-            let f = ((fc - a.fc_ms as f64) / span) as f32;
+            let (a, b, f) = locate(&l.attitudes, at)?;
             let lerp = |x: f32, y: f32| x + f * (y - x);
-            let dyaw = (b.attitude.yaw - a.attitude.yaw + std::f32::consts::PI)
-                .rem_euclid(std::f32::consts::TAU)
+            let dyaw = (b.yaw - a.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
                 - std::f32::consts::PI;
             Some(Attitude {
-                roll: lerp(a.attitude.roll, b.attitude.roll),
-                pitch: lerp(a.attitude.pitch, b.attitude.pitch),
-                yaw: a.attitude.yaw + f * dyaw,
+                roll: lerp(a.roll, b.roll),
+                pitch: lerp(a.pitch, b.pitch),
+                yaw: a.yaw + f * dyaw,
             })
+        })
+    }
+
+    /// The vehicle's local NED position when a frame was exposed at `at`,
+    /// interpolated like [`Self::attitude_at`].
+    pub fn position_at(&self, at: FrameTime) -> Option<[f32; 3]> {
+        self.with(|l| {
+            let (a, b, f) = locate(&l.positions, at)?;
+            Some([0, 1, 2].map(|i| a[i] + f * (b[i] - a[i])))
         })
     }
 
@@ -224,7 +265,7 @@ impl RangeFeed {
                 .attitudes
                 .back()
                 .filter(|a| fresh(a.rx_ms))
-                .map(|a| (a.attitude.roll, a.attitude.pitch)),
+                .map(|a| (a.value.roll, a.value.pitch)),
         })
     }
 
@@ -260,9 +301,9 @@ impl RangeFeed {
     }
 
     /// Apply one raw MAVLink frame. Returns whether it updated the feed. The
-    /// attitude is taken from the autopilot component only: another
-    /// component's `ATTITUDE` (a gimbal, a companion estimator) runs on its
-    /// own clock and describes something else.
+    /// attitude and the position are taken from the autopilot component
+    /// only: another component's `ATTITUDE` (a gimbal, a companion
+    /// estimator) runs on its own clock and describes something else.
     pub fn apply_mavlink(&self, frame: &[u8], at_ms: u64) -> bool {
         let Ok((header, msg)) = parse_any(frame) else {
             return false;
@@ -281,6 +322,14 @@ impl RangeFeed {
                     return false;
                 }
                 self.push_attitude(u64::from(a.time_boot_ms), attitude, at_ms);
+                true
+            }
+            MavMessage::LOCAL_POSITION_NED(p) if header.component_id == AUTOPILOT_COMPONENT => {
+                let ned = [p.x, p.y, p.z];
+                if !ned.iter().all(|v| v.is_finite()) {
+                    return false;
+                }
+                self.push_position(u64::from(p.time_boot_ms), ned, at_ms);
                 true
             }
             // A reading at the sensor's maximum is its "no return" (the
@@ -394,7 +443,7 @@ pub async fn run_mavlink_reader(
 mod tests {
     use super::*;
     use ados_protocol::mavlink::ardupilotmega::{
-        MavDistanceSensor, ATTITUDE_DATA, DISTANCE_SENSOR_DATA,
+        MavDistanceSensor, ATTITUDE_DATA, DISTANCE_SENSOR_DATA, LOCAL_POSITION_NED_DATA,
     };
     use ados_protocol::mavlink::{serialize_v2, MavHeader};
 
@@ -579,5 +628,31 @@ mod tests {
             feed.attitude_at(FrameTime::FlightController(10.0)),
             att(0.0, 0.0, 1.5)
         ));
+    }
+
+    #[test]
+    fn the_autopilot_local_position_is_interpolated_at_a_frame() {
+        let feed = RangeFeed::default();
+        assert_eq!(feed.position_at(FrameTime::FlightController(0.0)), None);
+        let pos = |ms, x: f32, y: f32| {
+            MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
+                time_boot_ms: ms,
+                x,
+                y,
+                z: -5.0,
+                ..LOCAL_POSITION_NED_DATA::default()
+            })
+        };
+        assert!(feed.apply_mavlink(&frame(&pos(1_000, 2.0, 0.0)), 3_020));
+        assert!(feed.apply_mavlink(&frame(&pos(1_100, 3.0, 1.0)), 3_120));
+        assert!(!feed.apply_mavlink(&frame(&pos(1_200, f32::NAN, 1.0)), 3_220));
+        let mid = feed
+            .position_at(FrameTime::FlightController(1_050.0))
+            .unwrap();
+        assert!((mid[0] - 2.5).abs() < 1e-5 && (mid[1] - 0.5).abs() < 1e-5 && mid[2] == -5.0);
+        // On the engine's clock, through the 20 ms arrival delay.
+        let host = feed.position_at(FrameTime::Host(3_095.0)).unwrap();
+        assert!((host[0] - 2.75).abs() < 1e-5, "{host:?}");
+        assert_eq!(feed.position_at(FrameTime::FlightController(1_300.0)), None);
     }
 }
