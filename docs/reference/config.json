@@ -2201,6 +2201,16 @@
       "type": "number"
     },
     {
+      "default": 5.0,
+      "description": "Max Pose Sigma M",
+      "enum": null,
+      "key": "pilot.max_pose_sigma_m",
+      "maximum": 50.0,
+      "minimum": 1.5,
+      "secret": false,
+      "type": "number"
+    },
+    {
       "default": 30.0,
       "description": "Min Agl Fw M",
       "enum": null,

@@ -2446,6 +2446,13 @@
           "title": "Max Dist M",
           "type": "number"
         },
+        "max_pose_sigma_m": {
+          "default": 5.0,
+          "maximum": 50.0,
+          "minimum": 1.5,
+          "title": "Max Pose Sigma M",
+          "type": "number"
+        },
         "min_agl_fw_m": {
           "default": 30.0,
           "maximum": 300.0,
