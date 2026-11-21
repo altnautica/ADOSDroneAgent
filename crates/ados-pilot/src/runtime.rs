@@ -231,6 +231,7 @@ impl Daemon {
         // Scans are stamped on the host's CLOCK_MONOTONIC: FC attitudes are
         // logged on it to level each scan at its capture.
         pilot.mono_ns = ados_protocol::framebus::mono_ns;
+        let vox = crate::world::VoxFeed::spawn(crate::world::VoxSource::default())?;
         let core = Core {
             clock: self.clock,
             lockstep,
@@ -243,7 +244,7 @@ impl Daemon {
             owner_tx: self.owner_tx,
             status_tx: self.status_tx,
             deferred: HashMap::new(),
-            vox: crate::world::VoxSource::default(),
+            vox,
         };
         tokio::select! {
             r = server => r.unwrap_or_else(|e| Err(std::io::Error::other(e))),
@@ -267,8 +268,9 @@ struct Core {
     clock: ados_time::Clock,
     /// The core's part in the simulator's lockstep barrier.
     lockstep: Option<Lockstep>,
-    /// Navigation's voxel map (seam M), read before every tick.
-    vox: crate::world::VoxSource,
+    /// Navigation's voxel map (seam M), read off the loop on its own thread
+    /// and swapped in before every tick.
+    vox: crate::world::VoxFeed,
 }
 
 impl Core {
@@ -289,8 +291,9 @@ impl Core {
                     ticked = true;
                     let t = now();
                     self.pilot.sim_speed = clock.speed();
-                    if let Some(snap) = self.vox.read(t) {
-                        self.pilot.on_voxmap(snap, t);
+                    if let Some(mut snap) = self.vox.take() {
+                        self.pilot.on_voxmap(&mut snap, t);
+                        self.vox.recycle(snap);
                     }
                     self.pilot.tick(t);
                     let _ = self.axes_tx.send(self.pilot.tuning_axes);

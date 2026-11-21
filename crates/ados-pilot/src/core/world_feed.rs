@@ -26,8 +26,10 @@ pub const WORLD_SCAN_MAX_M: f32 = 20.0;
 
 impl Pilot {
     /// A new publication of the voxel map, at `now_ms` on the pilot's clock
-    /// (the runtime's [`crate::world::VoxSource`], or the simulation).
-    pub fn on_voxmap(&mut self, snap: &VoxSnapshot, now_ms: u64) {
+    /// (the runtime's [`crate::world::VoxFeed`], or the simulation). Taken,
+    /// it is swapped in and `snap` comes back with the previous map's
+    /// buffers for reuse.
+    pub fn on_voxmap(&mut self, snap: &mut VoxSnapshot, now_ms: u64) {
         let local = self.pos(now_ms);
         if self.world.offer(snap, local, now_ms) {
             self.world_obstacles(now_ms);
@@ -81,5 +83,7 @@ impl Pilot {
             closing_max,
             now_ms,
         );
+        // The leaves over the way, as a planar scan's overhead returns are.
+        self.note_overhead(self.agl(now_ms), now_ms);
     }
 }

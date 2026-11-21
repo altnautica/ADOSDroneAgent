@@ -50,10 +50,10 @@ fn column(s: &mut VoxSnapshot, ne: [f32; 2]) {
     }
 }
 
-/// A world holding `s`, the vehicle at local (0, 0, −4) and at map `body`.
+/// A world holding a copy of `s`, the vehicle at local (0, 0, −4).
 fn world(s: &VoxSnapshot) -> VoxWorld {
     let mut w = VoxWorld::default();
-    assert!(w.offer(s, Some([0.0, 0.0, -4.0]), 1_000));
+    assert!(w.offer(&mut s.clone(), Some([0.0, 0.0, -4.0]), 1_000));
     w
 }
 
@@ -63,18 +63,19 @@ fn a_map_is_live_only_while_its_seq_advances() {
     let mut w = world(&s);
     assert!(w.live(1_000) && w.live(1_300) && w.live_3d(1_300));
     assert!(!w.live(1_301), "300 ms without a new seq is stale");
-    // The same publication again does not refresh it.
-    assert!(!w.offer(&s, Some([0.0, 0.0, -4.0]), 1_200));
+    // The same publication again does not refresh it, and is handed back.
+    let mut again = s.clone();
+    assert!(!w.offer(&mut again, Some([0.0, 0.0, -4.0]), 1_200));
+    assert_eq!(again.seq, 2);
     assert!(!w.live(1_301));
-    assert!(w.offer(
-        &snap(4, VoxTier::Lidar3d, VOX_FREE, [0.0, 0.0, -4.0]),
-        Some([0.0, 0.0, -4.0]),
-        1_250
-    ));
+    // A taken one is swapped in: the caller gets the previous map back.
+    let mut next = snap(4, VoxTier::Lidar3d, VOX_FREE, [0.0, 0.0, -4.0]);
+    assert!(w.offer(&mut next, Some([0.0, 0.0, -4.0]), 1_250));
+    assert_eq!((next.seq, w.snapshot().seq), (2, 4));
     assert!(w.live(1_550) && !w.live(1_551));
     // No local position: not tied to the frame, not live.
     assert!(w.offer(
-        &snap(6, VoxTier::Lidar3d, VOX_FREE, [0.0, 0.0, -4.0]),
+        &mut snap(6, VoxTier::Lidar3d, VOX_FREE, [0.0, 0.0, -4.0]),
         None,
         1_600
     ));
@@ -82,7 +83,7 @@ fn a_map_is_live_only_while_its_seq_advances() {
     // A torn copy is never taken.
     let mut torn = snap(8, VoxTier::Lidar3d, VOX_FREE, [0.0, 0.0, -4.0]);
     torn.valid = false;
-    assert!(!w.offer(&torn, Some([0.0; 3]), 1_700));
+    assert!(!w.offer(&mut torn, Some([0.0; 3]), 1_700));
 }
 
 #[test]
@@ -250,6 +251,31 @@ fn the_source_reads_each_publication_once() {
     assert!(src.read(40).is_none(), "nothing new");
     writer.publish(&s.meta, |_, _| {}).unwrap();
     assert!(src.read(60).is_some_and(|g| g.seq > seq));
+    // Handed out by a swap, a publication is not copied out again.
+    writer.publish(&s.meta, |_, _| {}).unwrap();
+    let mut spare = VoxSnapshot::default();
+    assert!(src.take_fresh(80, &mut spare));
+    let taken = spare.seq;
+    assert!(taken > seq && spare.occupancy.len() == s.occupancy.len());
+    let mut spare2 = VoxSnapshot::default();
+    assert!(!src.take_fresh(100, &mut spare2), "nothing new");
+    // The reader thread hands each new publication over once.
+    let feed = VoxFeed::spawn(VoxSource::new(path.clone(), false)).unwrap();
+    let wait_take = || {
+        (0..200).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            feed.take()
+        })
+    };
+    let first = wait_take().expect("the thread reads the file");
+    assert_eq!(first.seq, taken);
+    feed.recycle(first);
+    writer.publish(&s.meta, |_, _| {}).unwrap();
+    let second = wait_take().expect("the next publication");
+    assert!(second.seq > taken);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(feed.take().is_none(), "each publication once");
+    drop(feed);
     // The trusted open takes the file from the owner its directory records
     // (this process, here), and never from a directory others may write.
     assert!(VoxSource::new(path.clone(), true).read(0).is_some());

@@ -1,13 +1,15 @@
 //! The pilot's 3D world model: the voxel map Navigation publishes on seam M
 //! (`nav.voxmap.v1`, [`ados_protocol::voxmap`]).
 //!
-//! The runtime reads the map file ([`VoxSource`]) and hands every new
-//! publication to the core ([`crate::core::Pilot::on_voxmap`]), which keeps
-//! its own copy here: the core stays pure, and the in-process simulation
-//! hands it maps the same way. A map is used only while it is live: a whole
-//! seqlock copy, tied to the local frame, and its `seq` advanced within
-//! [`STALE_MS`] on the pilot's own clock. The writer's `stamp_ns` is ADOS
-//! time of another process and is never compared with the pilot's clock.
+//! A reader thread copies each new publication out of the map file
+//! ([`VoxFeed`]) and the runtime hands it to the core
+//! ([`crate::core::Pilot::on_voxmap`]), which swaps it in here: the control
+//! loop never copies a map, the core stays pure, and the in-process
+//! simulation hands it maps the same way. A map is used only while it is
+//! live: a whole seqlock copy, tied to the local frame, and its `seq`
+//! advanced within [`STALE_MS`] on the pilot's own clock. The writer's
+//! `stamp_ns` is ADOS time of another process and is never compared with
+//! the pilot's clock.
 //!
 //! Frames: Navigation's map frame and the FC's local NED are both
 //! north-aligned, so they differ by a translation, taken on every new
@@ -23,7 +25,7 @@ mod source;
 
 pub use query::RayHit;
 pub use scan::{ScanBin, WORLD_SCAN_BINS};
-pub use source::VoxSource;
+pub use source::{VoxFeed, VoxSource};
 
 use ados_protocol::pilot::SensingTier;
 use ados_protocol::voxmap::{VoxSnapshot, VoxTier};
@@ -73,9 +75,10 @@ pub struct VoxWorld {
 impl VoxWorld {
     /// Take a new publication at `now_ms`, `local` the vehicle's local NED
     /// position now. A snapshot that is not whole, is malformed, or repeats
-    /// the `seq` held is refused (`false`). The planes are copied into the
-    /// buffers already held, so a steady window size allocates nothing.
-    pub fn offer(&mut self, snap: &VoxSnapshot, local: Option<[f32; 3]>, now_ms: u64) -> bool {
+    /// the `seq` held is refused (`false`, `snap` untouched). A taken one is
+    /// swapped in, not copied: `snap` comes back holding the previous map's
+    /// buffers for the caller to reuse.
+    pub fn offer(&mut self, snap: &mut VoxSnapshot, local: Option<[f32; 3]>, now_ms: u64) -> bool {
         let m = &snap.meta;
         let n = m.voxel_count();
         let sane = snap.valid
@@ -87,12 +90,8 @@ impl VoxWorld {
         if !sane || (self.snap.valid && snap.seq == self.snap.seq) {
             return false;
         }
-        self.snap.valid = true;
-        self.snap.seq = snap.seq;
-        self.snap.meta = snap.meta;
-        self.snap.occupancy.clone_from(&snap.occupancy);
-        self.snap.esdf_dm.clone_from(&snap.esdf_dm);
-        let t = m.map_from_body;
+        std::mem::swap(&mut self.snap, snap);
+        let t = self.snap.meta.map_from_body;
         self.offset = local.map(|v| [t[0] - v[0], t[1] - v[1], t[2] - v[2]]);
         self.advanced_ms = Some(now_ms);
         true

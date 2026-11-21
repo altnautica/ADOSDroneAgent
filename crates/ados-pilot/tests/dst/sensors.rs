@@ -375,7 +375,7 @@ impl Sim {
         map.insert(t, &rays);
         let mut snap = std::mem::take(&mut self.vox_buf);
         map.publish(self.now, body_pose(t, self.fc.att), &mut snap);
-        self.p.on_voxmap(&snap, self.now);
+        self.p.on_voxmap(&mut snap, self.now);
         self.vox_buf = snap;
         self.vox = Some(map);
     }
@@ -500,4 +500,59 @@ fn dst_bench_3d_tiers_fly_on_the_voxel_map() {
             tier.name()
         );
     }
+}
+
+/// A crown over the way to the subject, in the voxel map: the pilot reports
+/// the height to fly under it while the map is the obstacle source, as it
+/// does from a planar lidar's overhead returns.
+#[test]
+fn dst_bench_voxel_map_reports_the_crown_over_the_way() {
+    use ados_protocol::pilot::{Goal, GoalKind, Request};
+    let mut s = Sim::new("sensors_crown", 1, |_| {});
+    s.tier = SensorTier::Mid360;
+    s.boot();
+    crate::scenarios::launch_to_hold(&mut s, 4.0);
+    let id = crate::forest::lease(&mut s);
+    let t = s.fc.truth();
+    // The crown's underside 2 m over the vehicle, 3-7 m north of it.
+    let crown: Vec<([f32; 3], bool)> = (0..40)
+        .flat_map(|i| {
+            (-4..=4).map(move |j| {
+                (
+                    [
+                        t[0] + 3.0 + i as f32 * 0.1,
+                        t[1] + j as f32 * 0.1,
+                        t[2] - 2.05,
+                    ],
+                    true,
+                )
+            })
+        })
+        .collect();
+    for _ in 0..30 {
+        let mut g = Goal::new(GoalKind::Follow, [t[0], t[1], t[2]], 1.0);
+        g.subject_ne = Some([t[0] + 10.0, t[1]]);
+        s.request(Request::Goal {
+            lease_id: id,
+            goal: g,
+        });
+        if let Some(v) = s.vox.as_mut() {
+            v.insert(t, &crown);
+        }
+        for _ in 0..5 {
+            s.step();
+        }
+    }
+    assert!(s.p.world.live_3d(s.now), "the map is the obstacle source");
+    let o = s
+        .state
+        .overhead_ahead
+        .clone()
+        .expect("a lease goal names a subject");
+    let under = o.fly_under_agl_m.expect("the crown over the way");
+    // The vehicle's height (4 m) plus the crown's 2 m, less the band's top,
+    // within a voxel.
+    assert!((under - (6.0 - 0.33)).abs() < 0.3, "{o:?}");
+    let ahead = o.ahead_m.expect("how far along");
+    assert!((2.5..=7.5).contains(&ahead), "{o:?}");
 }

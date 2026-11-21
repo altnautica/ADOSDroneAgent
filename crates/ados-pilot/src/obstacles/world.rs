@@ -1,9 +1,11 @@
 //! A live 3D voxel map's slab read as the current scan
 //! ([`crate::world::VoxWorld::scan`]): its walls are the scan's hits, the
-//! edge of its seen space the scan's horizon, and its occupied columns
+//! edge of its seen space the scan's horizon, the lowest voxel over the slab
+//! along each bearing an overhead return (a canopy's underside, height over
+//! the vehicle), and its occupied columns
 //! ([`crate::world::VoxWorld::slice`]) go into the grid with them. The
-//! brake, the planner and the published sectors read them as they read a
-//! planar scan.
+//! brake, the planner, the overhead report and the published sectors read
+//! them as they read a planar scan.
 
 use std::f32::consts::TAU;
 
@@ -35,6 +37,15 @@ impl Obstacles {
         for (i, b) in bins.iter().enumerate() {
             let body = i as f32 * TAU / n;
             let dir = geo::bearing_unit(yaw + body);
+            if let Some((r, lift_m)) = b.overhead {
+                self.overhead.push(Hit {
+                    body_bearing: body,
+                    range_m: r,
+                    ne: geo::add(pos, geo::scale(dir, r)),
+                    overhead: true,
+                    lift_m,
+                });
+            }
             match b.hit_m {
                 Some(r) => self.hits.push(Hit {
                     body_bearing: body,
