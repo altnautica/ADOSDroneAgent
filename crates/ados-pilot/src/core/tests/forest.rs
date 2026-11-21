@@ -172,7 +172,7 @@ fn the_straight_way_at_the_margins_edge_does_not_flip_the_route() {
             fresh_flips += 1;
         }
         last_fresh = Some(fresh);
-        plan_committed(&o, &goal, from, MARGIN, moving(k), &mut held);
+        plan_committed(&o, &goal, from, MARGIN, moving(k), &mut held, None);
     }
     assert!(fresh_flips >= 10, "the jitter never flipped a fresh plan");
     assert!(held.switches <= 1, "{} route switches", held.switches);
@@ -190,7 +190,7 @@ fn a_goal_behind_a_trunk_gets_one_held_detour() {
     let mut states = Vec::new();
     let mut sides = Vec::new();
     for k in 0..60 {
-        let p = plan_committed(&o, &goal, pos, MARGIN, moving(k), &mut held);
+        let p = plan_committed(&o, &goal, pos, MARGIN, moving(k), &mut held, None);
         states.push(p.state);
         let Some(t) = p.target else { break };
         if p.state == AvoidState::Detour && (5.0..7.0).contains(&pos[0]) {
@@ -216,6 +216,60 @@ fn a_goal_behind_a_trunk_gets_one_held_detour() {
         "passed the trunk on both sides: {sides:?}"
     );
     assert!(geo::dist(pos, [13.0, 0.0]) < 0.5, "ended at {pos:?}");
+}
+
+#[test]
+fn a_detour_round_trunks_never_passes_within_the_kept_distance_of_the_subject() {
+    // The subject stands between two trunks with the goal on their far side,
+    // the straight way over their head. Treated as an obstacle (kept 2.3 m
+    // off: body, vehicle, room and twice a 0.5 m sigma), the route goes
+    // round the trunks instead, and nothing flown or planned comes inside
+    // that distance.
+    const KEEP: f32 = 2.3;
+    let subject = [6.0, 0.0];
+    let o = stand(&[([6.0, 2.4], 0.3), ([6.0, -2.4], 0.3)]);
+    let goal = follow_goal([12.0, 0.0], subject);
+    let near = |path: &[V2]| {
+        path.windows(2)
+            .flat_map(|w| {
+                (0..=20)
+                    .map(move |k| geo::add(w[0], geo::scale(geo::sub(w[1], w[0]), k as f32 / 20.0)))
+            })
+            .map(|p| geo::dist(p, subject))
+            .fold(f32::INFINITY, f32::min)
+    };
+    // Without the subject kept out, the route flies over them.
+    let blind = planner::plan(&o, &goal, [0.0, 0.0], MARGIN);
+    assert!(near(&blind.path) < 1.0, "{blind:?}");
+    let mut held = Commit::default();
+    let mut pos = [0.0, 0.0];
+    let mut detoured = false;
+    for k in 0..120 {
+        let keep = planner::Keepout::new(subject, KEEP, MARGIN, pos);
+        let p = plan_committed(&o, &goal, pos, MARGIN, moving(k), &mut held, keep);
+        assert_ne!(p.state, AvoidState::Blocked, "replan {k} at {pos:?}");
+        detoured |= p.state == AvoidState::Detour;
+        let least = near(&p.path);
+        assert!(
+            least >= KEEP - 0.2,
+            "replan {k} routes {least:.2} m off: {:?}",
+            p.path
+        );
+        let Some(t) = p.target else { break };
+        let step = geo::sub(t, pos);
+        let d = geo::norm(step);
+        if d < 0.05 {
+            break;
+        }
+        pos = geo::add(pos, geo::scale(step, 0.4f32.min(d) / d));
+        let off = geo::dist(pos, subject);
+        assert!(
+            off >= KEEP - 0.2,
+            "flew to {pos:?}, {off:.2} m from the subject"
+        );
+    }
+    assert!(detoured, "never detoured");
+    assert!(geo::dist(pos, [12.0, 0.0]) < 0.5, "ended at {pos:?}");
 }
 
 /// True when the segments `a → b` and `c → d` cross.
@@ -273,10 +327,10 @@ fn a_straight_way_flown_at_a_crawl_is_chosen_again() {
     let least = least_clearance(&o, from, target);
     assert!((MARGIN..room()).contains(&least), "{least} m on the way");
     let mut held = Commit::default();
-    let first = plan_committed(&o, &goal, from, MARGIN, moving(0), &mut held);
+    let first = plan_committed(&o, &goal, from, MARGIN, moving(0), &mut held, None);
     assert_eq!(first.state, AvoidState::Clear, "{first:?}");
     let plans: Vec<_> = (1..=u64::from(planner::STALL_PLANS))
-        .map(|k| plan_committed(&o, &goal, from, MARGIN, crawling(k), &mut held))
+        .map(|k| plan_committed(&o, &goal, from, MARGIN, crawling(k), &mut held, None))
         .collect();
     let (p, before) = plans.split_last().expect("plans");
     assert!(before.iter().all(|p| p.state == AvoidState::Clear));
@@ -288,7 +342,7 @@ fn a_straight_way_flown_at_a_crawl_is_chosen_again() {
         assert!(c >= room().min(here), "{c} m near the stall: {:?}", p.path);
     }
     // Held while the vehicle flies it: one route change in all.
-    let held_on = plan_committed(&o, &goal, from, MARGIN, moving(11), &mut held);
+    let held_on = plan_committed(&o, &goal, from, MARGIN, moving(11), &mut held, None);
     assert_eq!(held_on.state, AvoidState::Detour, "{held_on:?}");
     assert_eq!(held.switches, 1, "one route change");
 }
@@ -316,7 +370,7 @@ fn narrows_that_are_the_only_way_out_stay_routed() {
     );
     let mut held = Commit::default();
     for k in 0..3 * u64::from(planner::STALL_PLANS) {
-        let p = plan_committed(&o, &goal, from, MARGIN, crawling(k), &mut held);
+        let p = plan_committed(&o, &goal, from, MARGIN, crawling(k), &mut held, None);
         assert_ne!(p.state, AvoidState::Blocked, "replan {k}: {p:?}");
         let through = p.path.windows(2).any(|w| crosses(w[0], w[1], a, b));
         assert!(through, "replan {k} left the only way: {:?}", p.path);

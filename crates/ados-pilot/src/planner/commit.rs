@@ -20,7 +20,9 @@
 
 use ados_protocol::pilot::{AvoidState, Goal};
 
-use super::{clearance, detour, direct, segment_clear, Choose, Plan, Spot, ROUTE_ROOM_M};
+use super::{
+    clearance, detour, direct, segment_clear, Bars, Choose, Keepout, Plan, Spot, ROUTE_ROOM_M,
+};
 use crate::geo::{self, V2};
 use crate::obstacles::{Grid, Obstacles};
 
@@ -151,7 +153,8 @@ impl Commit {
 /// otherwise route to the cheapest reachable detour candidate on the skill's
 /// ring with A* over the clearance grid; a held detour stays held, and a
 /// route the vehicle crawls along (`motion`) is chosen again, as the module
-/// describes.
+/// describes. Every route, the straight way included, keeps its margin from
+/// the `subject`'s disk too.
 pub fn plan_committed(
     obs: &Obstacles,
     goal: &Goal,
@@ -159,8 +162,9 @@ pub fn plan_committed(
     margin: f32,
     motion: Motion,
     held: &mut Commit,
+    subject: Option<Keepout>,
 ) -> Plan {
-    let plan = plan_held(obs, goal, from, margin, motion.now_ms, held);
+    let plan = plan_held(obs, goal, from, margin, motion.now_ms, held, subject);
     let far = geo::dist(from, [goal.n, goal.e]) > STALL_FAR_M;
     let crawling = plan.state != AvoidState::Blocked && far && motion.speed_mps < STALL_MPS;
     held.stalled = if crawling {
@@ -179,7 +183,7 @@ pub fn plan_committed(
     if let Some((spot, _)) = held.detour {
         held.detour = Some((spot, [f32::INFINITY; 2]));
     }
-    plan_held(obs, goal, from, margin, motion.now_ms, held)
+    plan_held(obs, goal, from, margin, motion.now_ms, held, subject)
 }
 
 fn plan_held(
@@ -189,14 +193,21 @@ fn plan_held(
     margin: f32,
     now_ms: u64,
     held: &mut Commit,
+    subject: Option<Keepout>,
 ) -> Plan {
     let grid = &obs.grid;
     let target = [goal.n, goal.e];
     let gc = clearance(grid, target);
     let narrows = held.narrows(grid, from, margin, now_ms);
+    let bars = Bars {
+        narrows: narrows.as_ref(),
+        subject,
+    };
     let narrows = narrows.as_ref();
     // The straight way, and the same with the stall's narrows kept out of.
-    let open = gc >= margin && segment_clear(grid, from, target, margin);
+    let open = gc >= margin
+        && segment_clear(grid, from, target, margin)
+        && subject.is_none_or(|s| s.segment_clear(from, target, margin));
     let straight = open && narrows.is_none_or(|n| n.segment_clear(grid, from, target));
     let Some((spot, chosen_at)) = held.detour else {
         if straight {
@@ -209,7 +220,7 @@ fn plan_held(
             margin,
             Choose::Any { side: 0.0 },
             &[],
-            narrows,
+            bars,
         ) {
             Some((plan, spot)) => {
                 held.hold(&plan, spot, target);
@@ -221,7 +232,10 @@ fn plan_held(
         };
     };
     let room = margin + RELEASE_ROOM_M;
-    let roomy = straight && gc >= room && segment_clear(grid, from, target, room);
+    let roomy = straight
+        && gc >= room
+        && segment_clear(grid, from, target, room)
+        && subject.is_none_or(|s| s.segment_clear(from, target, room));
     held.direct_clear = if roomy {
         held.direct_clear.saturating_add(1)
     } else {
@@ -235,7 +249,7 @@ fn plan_held(
     // The same spot, re-routed from here, while the goal has not moved far.
     if geo::dist(target, chosen_at) < RECHOOSE_GOAL_M {
         let only = Choose::Only(spot);
-        if let Some((plan, spot)) = detour(obs, goal, from, margin, only, &prefer, narrows) {
+        if let Some((plan, spot)) = detour(obs, goal, from, margin, only, &prefer, bars) {
             held.hold(&plan, spot, chosen_at);
             return plan;
         }
@@ -243,15 +257,7 @@ fn plan_held(
     // Blocked, the goal moved on or the vehicle stalled: choose again, near
     // the route flown and round the same side.
     let side = if spot.0 == 0.0 { 0.0 } else { spot.0.signum() };
-    match detour(
-        obs,
-        goal,
-        from,
-        margin,
-        Choose::Any { side },
-        &prefer,
-        narrows,
-    ) {
+    match detour(obs, goal, from, margin, Choose::Any { side }, &prefer, bars) {
         Some((plan, spot)) => {
             held.hold(&plan, spot, target);
             plan

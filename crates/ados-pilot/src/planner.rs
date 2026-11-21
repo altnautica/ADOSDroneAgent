@@ -16,14 +16,19 @@ use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
 mod backup;
 mod carrot;
 mod commit;
+mod keepout;
 mod map2d;
 mod route_goal;
 mod traj;
 pub use backup::{Committed, TrajRef, CARROT_S};
+pub(crate) use carrot::decimate;
+pub use carrot::{along, carrot};
 pub use commit::{
     plan_committed, Commit, Motion, Narrows, RECHOOSE_GOAL_M, RELEASE_PLANS, RELEASE_ROOM_M,
     STALL_MPS, STALL_MS, STALL_PLANS, STALL_RADIUS_M,
 };
+use keepout::Bars;
+pub use keepout::Keepout;
 pub use traj::{Outcome, TrajGoal, TrajPlanner, TRAJ_PERIOD_MS, TRAJ_ROOM_M};
 
 /// Expansion budget per search.
@@ -146,14 +151,22 @@ fn ring(goal: &Goal, from: V2, side: f32) -> Vec<(V2, f32, Spot)> {
     out
 }
 
-/// Plan one goal from `from`, with no route held from before
-/// ([`plan_committed`] with a fresh [`Commit`]).
+/// Plan one goal from `from`, with no route held from before and no subject
+/// kept out of ([`plan_committed`] with a fresh [`Commit`]).
 pub fn plan(obs: &Obstacles, goal: &Goal, from: V2, margin: f32) -> Plan {
     let motion = Motion {
         speed_mps: f32::INFINITY,
         now_ms: 0,
     };
-    plan_committed(obs, goal, from, margin, motion, &mut Commit::default())
+    plan_committed(
+        obs,
+        goal,
+        from,
+        margin,
+        motion,
+        &mut Commit::default(),
+        None,
+    )
 }
 
 /// The straight plan to the goal's own point `target` (clearance `gc`).
@@ -185,14 +198,14 @@ enum Choose {
 
 /// The cheapest reachable detour candidate of those `choose` allows, routed
 /// from `from` with the search staying near `prefer` (the route flown
-/// before; empty for none) and out of `narrows` (a stall's, for none),
-/// with [`ROUTE_ROOM_M`] beyond the margin when any candidate is reachable
-/// with it. A candidate off the grid (a subject more than half the grid
-/// away) is routed toward through the grid's edge ([`Flood::exit_toward`]):
-/// the grid knows nothing beyond it, so the way out that leaves the least
-/// straight distance still to go is flown. When `narrows` leaves no
-/// candidate reachable, the route ignores them: they never shut the only
-/// way out.
+/// before; empty for none) and out of `bars` (a stall's narrows, the
+/// subject), with [`ROUTE_ROOM_M`] beyond the margin when any candidate is
+/// reachable with it. A candidate off the grid (a subject more than half
+/// the grid away) is routed toward through the grid's edge
+/// ([`Flood::exit_toward`]): the grid knows nothing beyond it, so the way
+/// out that leaves the least straight distance still to go is flown. When
+/// the narrows leave no candidate reachable, the route ignores them: they
+/// never shut the only way out. The subject is never ignored.
 fn detour(
     obs: &Obstacles,
     goal: &Goal,
@@ -200,15 +213,19 @@ fn detour(
     margin: f32,
     choose: Choose,
     prefer: &[V2],
-    narrows: Option<&Narrows>,
+    bars: Bars<'_>,
 ) -> Option<(Plan, Spot)> {
-    let at = |m, n| route(obs, goal, from, m, choose, prefer, n);
+    let at = |m, b| route(obs, goal, from, m, choose, prefer, b);
     let room = margin + ROUTE_ROOM_M;
-    let found = at(room, narrows).or_else(|| at(margin, narrows));
-    match narrows {
+    let found = at(room, bars).or_else(|| at(margin, bars));
+    let open = Bars {
+        narrows: None,
+        ..bars
+    };
+    match bars.narrows {
         Some(_) => found
-            .or_else(|| at(room, None))
-            .or_else(|| at(margin, None)),
+            .or_else(|| at(room, open))
+            .or_else(|| at(margin, open)),
         None => found,
     }
 }
@@ -221,7 +238,7 @@ fn route(
     margin: f32,
     choose: Choose,
     prefer: &[V2],
-    narrows: Option<&Narrows>,
+    bars: Bars<'_>,
 ) -> Option<(Plan, Spot)> {
     let grid = &obs.grid;
     let subject = goal.subject_ne;
@@ -233,7 +250,7 @@ fn route(
     };
     for (cand, _, spot) in ring(goal, from, side) {
         let other = matches!(choose, Choose::Only(o) if o != spot);
-        if other || clearance(grid, cand) < margin {
+        if other || bars.clearance(cand, clearance(grid, cand)) < margin {
             continue;
         }
         if let Some(s) = subject {
@@ -242,25 +259,17 @@ fn route(
             }
         }
         let path = match grid.cell(cand) {
-            Some(cell) => search(
-                grid,
-                from,
-                Some(cell),
-                margin,
-                MAX_EXPANSIONS,
-                prefer,
-                narrows,
-            )
-            .and_then(|f| f.path(grid, cand)),
+            Some(cell) => search(grid, from, Some(cell), margin, MAX_EXPANSIONS, prefer, bars)
+                .and_then(|f| f.path(grid, cand)),
             None => flooded
                 .get_or_insert_with(|| {
-                    search(grid, from, None, margin, GRID_N * GRID_N, prefer, narrows)
+                    search(grid, from, None, margin, GRID_N * GRID_N, prefer, bars)
                 })
                 .as_ref()
                 .and_then(|f| f.exit_toward(grid, cand)),
         };
         if let Some(path) = path {
-            let wp = carrot::carrot(grid, &path, margin);
+            let wp = carrot::carrot(grid, &path, margin, bars.subject);
             let minc = path
                 .iter()
                 .map(|p| clearance(grid, *p))
@@ -364,11 +373,12 @@ fn dist_to_path(path: &[V2], p: V2) -> f32 {
 /// `len·(1 + gap) + 0.5 / max(clearance, 0.25)`, where `gap` grows to
 /// [`GAP_COST`] as the clearance falls to the margin ([`GAP_ROOM_M`]), plus
 /// [`PREFER_COST`] per metre of distance from `prefer` (a route flown
-/// before; empty for none); cells under `margin` clearance are blocked
-/// except near the start, and so are the cells `narrows` bars
-/// ([`Narrows::bars`]). With a `goal` it is A* and stops there; without
-/// one it floods every reachable cell. `None` when `from` is off the grid,
-/// or a goal was given and not reached within `max_expansions`.
+/// before; empty for none); the clearance counts the subject's disk, cells
+/// under `margin` clearance are blocked except near the start, and so are
+/// the cells the narrows bar ([`Narrows::bars`]). With a `goal` it is A*
+/// and stops there; without one it floods every reachable cell. `None` when
+/// `from` is off the grid, or a goal was given and not reached within
+/// `max_expansions`.
 fn search(
     grid: &Grid,
     from: V2,
@@ -376,7 +386,7 @@ fn search(
     margin: f32,
     max_expansions: usize,
     prefer: &[V2],
-    narrows: Option<&Narrows>,
+    bars: Bars<'_>,
 ) -> Option<Flood> {
     let (si, sj) = grid.cell(from)?;
     let idx = |i: usize, j: usize| i * GRID_N + j;
@@ -425,12 +435,12 @@ fn search(
                 continue;
             }
             let (ni, nj) = (ni as usize, nj as usize);
-            let c = grid.clearance_cell(ni, nj).unwrap_or(f32::INFINITY);
             let p = grid.center_of(ni, nj);
+            let c = bars.clearance(p, grid.clearance_cell(ni, nj).unwrap_or(f32::INFINITY));
             if c < margin && geo::dist(p, from) >= margin {
                 continue;
             }
-            if narrows.is_some_and(|n| n.bars(p, c)) {
+            if bars.narrows.is_some_and(|n| n.bars(p, c)) {
                 continue;
             }
             let len = if di != 0 && dj != 0 {
@@ -459,35 +469,20 @@ fn search(
 /// Every cell reachable from `from` at `margin`, in one search: routes to
 /// many candidate points cost one flood instead of one A* each.
 pub fn flood(grid: &Grid, from: V2, margin: f32) -> Option<Flood> {
-    search(grid, from, None, margin, GRID_N * GRID_N, &[], None)
+    search(
+        grid,
+        from,
+        None,
+        margin,
+        GRID_N * GRID_N,
+        &[],
+        Bars::default(),
+    )
 }
 
 fn ordered(v: f32) -> u32 {
     // Non-negative floats order like their bit patterns.
     v.max(0.0).to_bits()
-}
-
-/// The point `dist` metres along a polyline.
-pub fn along(path: &[V2], dist: f32) -> V2 {
-    let mut left = dist;
-    for w in path.windows(2) {
-        let seg = geo::dist(w[0], w[1]);
-        if seg >= left && seg > 0.0 {
-            return geo::add(w[0], geo::scale(geo::sub(w[1], w[0]), left / seg));
-        }
-        left -= seg;
-    }
-    *path.last().unwrap_or(&[0.0, 0.0])
-}
-
-pub(crate) fn decimate(path: &[V2], max: usize) -> Vec<V2> {
-    if path.len() <= max {
-        return path.to_vec();
-    }
-    let step = (path.len() - 1) as f32 / (max - 1) as f32;
-    (0..max)
-        .map(|k| path[((k as f32 * step).round() as usize).min(path.len() - 1)])
-        .collect()
 }
 
 #[cfg(test)]

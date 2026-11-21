@@ -2247,6 +2247,16 @@
       "type": "string"
     },
     {
+      "default": false,
+      "description": "Planner Shadow",
+      "enum": null,
+      "key": "pilot.planner_shadow",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": "normal",
       "description": "Profile",
       "enum": [

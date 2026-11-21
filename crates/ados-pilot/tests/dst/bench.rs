@@ -127,8 +127,15 @@ fn goal(subject: [f32; 2], speed: f32, alt_m: f32, max_mps: f32) -> Goal {
 }
 
 /// Fly one run: up to `alt_m`, then the goal to [`GOAL_M`] north at
-/// `speed`, until reached or timed out.
-fn fly(s: &mut Sim, alt_m: f32, speed: f32, crossing: Option<usize>) -> RunMetrics {
+/// `speed`, until reached or timed out; with `timing`, each tick of the
+/// goal's flight timed into it, seconds of wall time.
+fn fly(
+    s: &mut Sim,
+    alt_m: f32,
+    speed: f32,
+    crossing: Option<usize>,
+    mut timing: Option<&mut Vec<f64>>,
+) -> RunMetrics {
     s.boot();
     launch_to_hold(s, alt_m);
     let lease_id = lease(s);
@@ -147,7 +154,11 @@ fn fly(s: &mut Sim, alt_m: f32, speed: f32, crossing: Option<usize>) -> RunMetri
         let g = goal(subject, if moving { speed } else { 0.0 }, alt_m, speed);
         s.request(Request::Goal { lease_id, goal: g });
         for _ in 0..GOAL_MS / ados_pilot::core::TICK_MS {
+            let at = std::time::Instant::now();
             s.step();
+            if let Some(t) = timing.as_deref_mut() {
+                t.push(at.elapsed().as_secs_f64());
+            }
             let t = s.fc.truth();
             meter.tick(
                 [t[0], t[1]],
@@ -230,7 +241,7 @@ pub fn bench_forest(
     s.tier = tier;
     s.flatten_3d = flatten_3d();
     s.stand = poisson_stand(seed, lambda, AREA_M, TRUNK_R_M);
-    fly(&mut s, FOREST_ALT_M, speed, None)
+    fly(&mut s, FOREST_ALT_M, speed, None, None)
 }
 
 /// One street run: 2-6 pedestrians by seed.
@@ -238,7 +249,61 @@ pub fn bench_crossing(tier: SensorTier, speed: f32, seed: u64) -> RunMetrics {
     let mut s = Sim::new("bench_crossing", seed, |_| {});
     s.tier = tier;
     s.flatten_3d = flatten_3d();
-    fly(&mut s, STREET_ALT_M, speed, Some(2 + (seed % 5) as usize))
+    fly(
+        &mut s,
+        STREET_ALT_M,
+        speed,
+        Some(2 + (seed % 5) as usize),
+        None,
+    )
+}
+
+/// The `p`-quantile of `v` (sorted in place).
+fn quantile(v: &mut [f64], p: f64) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v[((v.len() - 1) as f64 * p).round() as usize]
+}
+
+/// What the trajectory planner in shadow costs beside the grid planner: a
+/// forest run (one tree per 25 m², 3 m/s, planar tier) flown with
+/// `pilot.planner_shadow` off and on. The shadow is never flown, so both
+/// flights are the same tick for tick; each replan period's ticks are
+/// summed and the difference between the two runs, period by period, is
+/// the shadow's cost per replan.
+#[test]
+#[ignore = "timing: run with --ignored --nocapture shadow_cost"]
+fn shadow_cost() {
+    let per = (ados_pilot::core::PLAN_PERIOD_MS / ados_pilot::core::TICK_MS) as usize;
+    let run = |shadow: bool| {
+        let mut s = Sim::new("bench_forest_l25", 1, |c| c.pilot.planner_shadow = shadow);
+        s.tier = SensorTier::Planar;
+        s.stand = poisson_stand(1, 1.0 / 25.0, AREA_M, TRUNK_R_M);
+        let mut t = Vec::new();
+        let m = fly(&mut s, FOREST_ALT_M, 3.0, None, Some(&mut t));
+        let blocks: Vec<f64> = t.chunks_exact(per).map(|c| c.iter().sum()).collect();
+        (m, blocks)
+    };
+    let (off_m, off) = run(false);
+    let (on_m, on) = run(true);
+    let (off_m, on_m) = (format!("{off_m:?}"), format!("{on_m:?}"));
+    assert_eq!(off_m, on_m, "the shadow changed the flight");
+    let mut diff: Vec<f64> = on.iter().zip(&off).map(|(a, b)| (a - b) * 1e3).collect();
+    let (mut on_ms, mut off_ms): (Vec<f64>, Vec<f64>) = (
+        on.iter().map(|x| x * 1e3).collect(),
+        off.iter().map(|x| x * 1e3).collect(),
+    );
+    println!(
+        "shadow_cost: {} replans; per replan period, ms: off p50 {:.3} p95 {:.3}, \
+         on p50 {:.3} p95 {:.3}; shadow p50 {:.3} p95 {:.3} max {:.3}",
+        diff.len(),
+        quantile(&mut off_ms, 0.5),
+        quantile(&mut off_ms, 0.95),
+        quantile(&mut on_ms, 0.5),
+        quantile(&mut on_ms, 0.95),
+        quantile(&mut diff, 0.5),
+        quantile(&mut diff, 0.95),
+        quantile(&mut diff, 1.0),
+    );
 }
 
 fn env_usize(key: &str, default: usize) -> usize {

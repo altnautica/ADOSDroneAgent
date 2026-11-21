@@ -4,6 +4,7 @@
 use ados_protocol::pilot::{AvoidState, Goal, GoalKind, VelMode};
 
 use super::super::motion_ref::{approach, APPROACH_DECEL_SHARE};
+use super::super::subject_guard::{subject_keep, SUBJECT_SOFT_EXTRA_M};
 use super::DETOUR_MIN_MPS;
 use crate::core::trace::Ask;
 use crate::core::{limit, Pilot};
@@ -41,16 +42,27 @@ impl Pilot {
     }
 
     /// The velocity a goal asks with its target `to` away, before any
-    /// limit. A commanded velocity is asked as it is ([`VelMode::Command`]);
-    /// a feed-forward gets the pilot's pull toward the target, slowing into
-    /// it on the goal limits ([`approach`]). On a detour, and for a vantage
-    /// goal, the pilot flies its path toward the target with no feed-forward:
-    /// a commanded velocity then only sets the speed (at least
-    /// [`DETOUR_MIN_MPS`]), and a commanded stop stays a stop. A detour's
-    /// target is a point [`planner::LOOKAHEAD_M`] along its route, moved on
-    /// every replan: the approach slows into the route's end, not into that
-    /// point, so a detour is not flown at the speed of a stop 2 m ahead.
-    pub(super) fn goal_ask(&self, goal: Option<&Goal>, to: V2, gl: &GoalLimits, dt: f32) -> V2 {
+    /// limit, for the vehicle at `pos`. A commanded velocity is asked as it
+    /// is ([`VelMode::Command`]); a feed-forward gets the pilot's pull
+    /// toward the target, slowing into it on the goal limits ([`approach`]).
+    /// On a detour, and for a vantage goal, the pilot flies its path toward
+    /// the target with no feed-forward: a commanded velocity then only sets
+    /// the speed (at least [`DETOUR_MIN_MPS`]), and a commanded stop stays a
+    /// stop, except that near the subject its part backing away is kept
+    /// ([`backing_away`]). A detour's target is its carrot, a point on its
+    /// route up to [`planner::LOOKAHEAD_M`] along it, moved on every
+    /// replan. The approach slows into the route's end, counting the route
+    /// past the full lookahead even when the carrot is pulled back nearer
+    /// ([`route_beyond_target`]): a detour is not flown at the speed of a
+    /// stop just ahead, yet the vehicle still slows into a bend.
+    pub(super) fn goal_ask(
+        &self,
+        goal: Option<&Goal>,
+        pos: V2,
+        to: V2,
+        gl: &GoalLimits,
+        dt: f32,
+    ) -> V2 {
         let a_dec = APPROACH_DECEL_SHARE * gl.a_h;
         let detour = self.plan.state == AvoidState::Detour
             || goal.is_some_and(|g| g.kind == GoalKind::Vantage);
@@ -76,7 +88,11 @@ impl Pilot {
         match (command, detour) {
             (true, false) => gv,
             (true, true) if geo::norm(gv) < 1e-3 => [0.0, 0.0],
-            (true, true) => approach(to, a_dec, geo::norm(gv).max(DETOUR_MIN_MPS) * longer, dt),
+            (true, true) => {
+                let route = approach(to, a_dec, geo::norm(gv).max(DETOUR_MIN_MPS) * longer, dt);
+                let keep = subject_keep(self.settings.pilot.body_radius_m(), g.subject_sigma_m);
+                backing_away(g.subject_ne, keep + SUBJECT_SOFT_EXTRA_M, pos, gv, route)
+            }
             (false, false) => geo::add(gv, approach(to, a_dec, f32::INFINITY, dt)),
             (false, true) => approach(to, a_dec, f32::INFINITY, dt),
         }
@@ -99,15 +115,41 @@ impl Pilot {
         let gl = self.goal_limits_now(now_ms);
         Ask {
             target_ne: Some(target),
-            vel: self.goal_ask(goal, geo::sub(target, pos_ne), &gl, dt),
+            vel: self.goal_ask(goal, pos_ne, geo::sub(target, pos_ne), &gl, dt),
             v_cap: self.goal_v_cap(max_speed, now_ms).0,
         }
     }
 }
 
-/// How much of a detour's route lies beyond its target, metres.
+/// `ask` with at least the part of the skill's commanded velocity `gv` that
+/// backs the vehicle at `pos` away from the `subject`, while it is within
+/// `zone` of them (the kept distance and the soft tier's extra): the route
+/// the pilot flies sets the way, but never drops the skill's ask to back
+/// off a person it is too near.
+fn backing_away(subject: Option<V2>, zone: f32, pos: V2, gv: V2, ask: V2) -> V2 {
+    let Some(s) = subject.filter(|s| s.iter().all(|x| x.is_finite())) else {
+        return ask;
+    };
+    let rel = geo::sub(pos, s);
+    let d = geo::norm(rel);
+    if d >= zone || d < 1e-6 {
+        return ask;
+    }
+    let u = geo::scale(rel, 1.0 / d);
+    let away = geo::dot(gv, u);
+    if away <= 0.0 {
+        return ask;
+    }
+    geo::add(ask, geo::scale(u, (away - geo::dot(ask, u)).max(0.0)))
+}
+
+/// How much of a detour's route lies beyond its target, metres, taken as
+/// the route past [`planner::LOOKAHEAD_M`] along it even when the carrot is
+/// pulled back nearer.
 fn route_beyond_target(plan: &Plan) -> f32 {
     let len: f32 = plan.path.windows(2).map(|w| geo::dist(w[0], w[1])).sum();
+    // Deliberately the full lookahead: the route between a pulled-back
+    // carrot and 2 m is not counted, so the vehicle slows into the bend.
     (len - planner::LOOKAHEAD_M).max(0.0)
 }
 
@@ -147,12 +189,45 @@ mod tests {
         g.vel_mode = VelMode::Command;
         g.vn = 1.4;
         let gl = goal_limits(p.settings.pilot.profile);
-        let ask = p.goal_ask(Some(&g), [1.6, 1.2], &gl, 0.02);
+        let ask = p.goal_ask(Some(&g), [0.0, 0.0], [1.6, 1.2], &gl, 0.02);
         assert!((geo::norm(ask) - 1.75).abs() < 1e-3, "{ask:?}");
         assert!(geo::dot(ask, [0.8, 0.6]) > geo::norm(ask) - 1e-3, "{ask:?}");
         // A detour no longer than the straight way keeps the commanded speed.
         p.plan.goal = Some([16.0, 0.0]);
-        let ask = p.goal_ask(Some(&g), [1.6, 1.2], &gl, 0.02);
+        let ask = p.goal_ask(Some(&g), [0.0, 0.0], [1.6, 1.2], &gl, 0.02);
         assert!((geo::norm(ask) - 1.4).abs() < 1e-3, "{ask:?}");
+    }
+
+    #[test]
+    fn a_commanded_back_off_from_the_subject_is_kept_on_a_detour() {
+        // The detour leads north-east, toward a subject 1.8 m off; the
+        // skill commands backing away from them at 1.4 m/s. The pilot flies
+        // its route but keeps the whole of that backing away.
+        let mut p = Pilot::new(Settings::default());
+        p.plan = Plan {
+            state: AvoidState::Detour,
+            target: Some([1.6, 1.2]),
+            goal: Some([8.0, 0.0]),
+            path: vec![[0.0, 0.0], [4.0, 3.0], [8.0, 0.0]],
+            min_clearance: None,
+        };
+        let subject = [1.0, 1.5];
+        let away = geo::scale(subject, -1.0 / geo::norm(subject));
+        let mut g = Goal::new(GoalKind::Follow, [8.0, 0.0, -4.0], 3.0);
+        g.vel_mode = VelMode::Command;
+        g.subject_ne = Some(subject);
+        g.subject_sigma_m = Some(0.5);
+        [g.vn, g.ve] = geo::scale(away, 1.4);
+        let gl = goal_limits(p.settings.pilot.profile);
+        let ask = p.goal_ask(Some(&g), [0.0, 0.0], [1.6, 1.2], &gl, 0.02);
+        assert!(geo::dot(ask, away) >= 1.4 - 1e-3, "{ask:?}");
+        // Without the subject the route alone sets the way, toward them.
+        g.subject_ne = None;
+        let ask = p.goal_ask(Some(&g), [0.0, 0.0], [1.6, 1.2], &gl, 0.02);
+        assert!(geo::dot(ask, away) < 0.0, "{ask:?}");
+        // Far from the subject the route alone sets the way too.
+        g.subject_ne = Some(geo::scale(subject, 4.0));
+        let ask = p.goal_ask(Some(&g), [0.0, 0.0], [1.6, 1.2], &gl, 0.02);
+        assert!(geo::dot(ask, [0.8, 0.6]) > geo::norm(ask) - 1e-3, "{ask:?}");
     }
 }

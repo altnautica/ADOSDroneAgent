@@ -63,9 +63,10 @@ impl LinkLossAction {
 #[serde(rename_all = "snake_case")]
 pub enum PlannerMode {
     /// The grid planner: the goal while its way is clear, else a detour
-    /// spot on the skill's ring; the trajectory planner runs beside it in
-    /// shadow (published, never flown). A goto the grid planner finds
-    /// blocked follows the trajectory planner's route.
+    /// spot on the skill's ring. A goto the grid planner finds blocked
+    /// follows the trajectory planner's route (planned beside it for
+    /// gotos); with `pilot.planner_shadow` the trajectory planner also runs
+    /// beside it for skill goals, published as a shadow and never flown.
     #[default]
     Reactive,
     /// The trajectory planner flies: a smooth trajectory replanned at
@@ -80,6 +81,11 @@ pub struct PilotSection {
     pub avoid: AvoidMode,
     /// Which planner flies skill goals and gotos ([`PlannerMode`]).
     pub planner: PlannerMode,
+    /// Under the `reactive` planner, also run the trajectory planner beside
+    /// it for skill goals and publish its plan as the `trajectory` shadow
+    /// (never flown), for comparing the two. Off by default: it costs a
+    /// full trajectory search every replan.
+    pub planner_shadow: bool,
     pub height_ref: HeightRef,
     pub obstacle_margin_m: f32,
     /// The kind of place flown: `open`, or `confined` (a margin from the
@@ -233,6 +239,7 @@ impl Default for PilotSection {
             profile: Profile::Normal,
             avoid: AvoidMode::Brake,
             planner: PlannerMode::Reactive,
+            planner_shadow: false,
             height_ref: HeightRef::Agl,
             obstacle_margin_m: 1.5,
             place_class: PlaceClass::Open,

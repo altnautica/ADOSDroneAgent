@@ -239,7 +239,7 @@ impl Pilot {
         }
         let asked = match &traj {
             Some(t) => t.v,
-            None => self.goal_ask(goal.as_ref(), geo::sub(target, r.p), &shape.gl, dt),
+            None => self.goal_ask(goal.as_ref(), pos_ne, geo::sub(target, r.p), &shape.gl, dt),
         };
         // Every limit that changes what was asked, for the published command:
         // the speed limit that binds when the ask is over it, and the goal's

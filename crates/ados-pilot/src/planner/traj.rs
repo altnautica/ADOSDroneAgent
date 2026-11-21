@@ -18,7 +18,7 @@ use ados_protocol::pilot::AvoidState;
 use super::backup::{Committed, TrajRef};
 use super::map2d::{seen_ranges, PlanMap, Seen, OWN_M};
 use super::route_goal::Router;
-use super::{decimate, Plan};
+use super::{decimate, Keepout, Plan};
 use crate::geo::{self, V2};
 use crate::obstacles::{Obstacles, CELL_M};
 use crate::world::VoxWorld;
@@ -78,6 +78,19 @@ fn look_along(p: &ados_planning::Plan, start: V2) -> f32 {
     geo::bearing_of(geo::sub(far, start))
 }
 
+/// The heading to look along after a plan the forward view alone turned
+/// down, whose way bears `b`: the one `held` while `b` lies within the
+/// view's half-angle of it (the vehicle keeps turning to one heading, never
+/// hunting between near ones), else `b` (a plan turned down in another
+/// direction is looked at, so the vehicle never holds a heading that no
+/// longer sees the way).
+fn next_look(held: Option<f32>, b: f32) -> f32 {
+    match held {
+        Some(h) if geo::wrap_pi(b - h).abs() <= FORWARD_VIEW_HALF_RAD => h,
+        _ => b,
+    }
+}
+
 /// The plan's start when the reference lies within a cell of the vehicle:
 /// the space the vehicle itself takes up ([`PlanMap::own`]).
 fn own_point(g: &TrajGoal) -> Option<V2> {
@@ -98,6 +111,8 @@ pub struct TrajGoal {
     /// The vehicle's heading when its sensors see forward only (the depth
     /// and camera tiers): the sure part of a plan keeps inside that view.
     pub heading: Option<f32>,
+    /// The subject's disk, kept out of like an obstacle.
+    pub subject: Option<Keepout>,
     pub limits: Limits,
     pub now_ms: u64,
 }
@@ -190,6 +205,7 @@ impl TrajPlanner {
                 pos: g.pos,
                 seen,
                 own: own_point(g),
+                subject: g.subject,
             };
             let clear = self.committed.plan().is_none_or(|p| {
                 let t = g.now_ms.saturating_sub(p.made_ms) as f32 / 1000.0;
@@ -224,6 +240,7 @@ impl TrajPlanner {
             pos: g.pos,
             seen,
             own: own_point(g),
+            subject: g.subject,
         };
         let world = FixedHeight::new(&map, 0.0);
         let speed = geo::norm(g.goal_vel);
@@ -262,10 +279,10 @@ impl TrajPlanner {
                         if !keeps_out(&p, &map, g.margin, g.heading, &g.limits, 0.0) {
                             // Out of the forward view only: look that way.
                             if g.heading.is_some()
-                                && self.look.is_none()
                                 && keeps_out(&p, &map, g.margin, None, &g.limits, 0.0)
                             {
-                                self.look = Some(look_along(&p, g.start[0]));
+                                let b = look_along(&p, g.start[0]);
+                                self.look = Some(next_look(self.look, b));
                             }
                             return Outcome::Kept(PlanError::NoBackup);
                         }
@@ -470,5 +487,24 @@ fn keeps_out(
         sure(&plan.exec, from_s, t_c) && sure(&plan.backup, 0.0, dur)
     } else {
         sure(&plan.backup, (from_s - t_c).min(dur), dur)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_look_moves_to_a_plan_turned_down_in_another_direction() {
+        let deg = |d: f32| d.to_radians();
+        // None held: the plan's bearing.
+        assert_eq!(next_look(None, deg(30.0)), deg(30.0));
+        // A bearing inside the view of the one held keeps it.
+        assert_eq!(next_look(Some(deg(30.0)), deg(60.0)), deg(30.0));
+        assert_eq!(next_look(Some(deg(170.0)), deg(-170.0)), deg(170.0));
+        // One beyond the view's half-angle replaces it: the vehicle turned
+        // to the first and a new obstacle sent the next plan elsewhere.
+        assert_eq!(next_look(Some(deg(30.0)), deg(-60.0)), deg(-60.0));
+        assert_eq!(next_look(Some(deg(0.0)), deg(180.0)), deg(180.0));
     }
 }

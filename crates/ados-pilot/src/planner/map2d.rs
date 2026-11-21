@@ -13,6 +13,7 @@ use std::f32::consts::TAU;
 
 use ados_planning::{Cell, PlanarQuery};
 
+use super::Keepout;
 use crate::geo::{self, V2};
 use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
 use crate::world::VoxWorld;
@@ -90,6 +91,8 @@ pub struct PlanMap<'a> {
     /// does anything within [`OWN_M`] of it. What a plan does inside that
     /// cell is held to the forward view where there is one.
     pub own: Option<V2>,
+    /// The subject's disk ([`Keepout`]), occupied like an obstacle.
+    pub subject: Option<Keepout>,
 }
 
 impl PlanMap<'_> {
@@ -136,13 +139,15 @@ impl PlanarQuery for PlanMap<'_> {
         match self.grid.cell(p) {
             None => Cell::Unknown,
             Some((i, j)) if self.grid.occupied(i, j) => Cell::Occupied,
+            Some(_) if self.subject.is_some_and(|k| k.clearance(p) <= 0.0) => Cell::Occupied,
             Some(_) if self.seen_free(p) => Cell::Free,
             Some(_) => Cell::Unknown,
         }
     }
 
     fn clearance(&self, p: [f32; 2]) -> f32 {
-        self.grid.clearance(p).unwrap_or(0.0)
+        let c = self.grid.clearance(p).unwrap_or(0.0);
+        self.subject.map_or(c, |k| c.min(k.clearance(p)))
     }
 }
 
@@ -171,6 +176,7 @@ mod tests {
             pos: [0.0, 0.0],
             seen: Seen::Ranges(&seen),
             own: None,
+            subject: None,
         };
         assert_eq!(m.state([2.0, 0.0]), Cell::Free);
         assert_eq!(m.state([5.0, 0.0]), Cell::Occupied);
@@ -178,5 +184,24 @@ mod tests {
         assert_eq!(m.state([0.0, 8.0]), Cell::Free);
         assert_eq!(m.state([0.0, 11.0]), Cell::Unknown);
         assert!((m.clearance([3.0, 0.0]) - 2.0).abs() < 0.3);
+    }
+
+    #[test]
+    fn the_subjects_disk_reads_occupied_and_counts_in_the_clearance() {
+        let mut grid = Grid::default();
+        grid.reset([0.0, 0.0]);
+        grid.transform();
+        let seen = vec![10.0; SEEN_BINS];
+        let m = PlanMap {
+            grid: &grid,
+            pos: [0.0, 0.0],
+            seen: Seen::Ranges(&seen),
+            own: None,
+            subject: Keepout::new([4.0, 0.0], 2.3, 0.5, [0.0, 0.0]),
+        };
+        assert_eq!(m.state([4.0, 1.0]), Cell::Occupied);
+        assert_eq!(m.state([4.0, 2.0]), Cell::Free);
+        // The margin from the disk is the kept distance from the subject.
+        assert!((m.clearance([4.0, 2.3]) - 0.5).abs() < 1e-4);
     }
 }

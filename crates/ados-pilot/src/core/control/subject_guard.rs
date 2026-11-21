@@ -8,11 +8,12 @@
 //! no obstacle sensor, so it holds with avoidance off too. While the subject
 //! is near, the vehicle also climbs to fly clear over them.
 
-use ados_protocol::pilot::{AvoidState, Owner};
+use ados_protocol::pilot::{AvoidState, Goal, Owner};
 
 use super::{progress, stop_cap, STOPPED_MPS};
 use crate::core::Pilot;
 use crate::geo::{self, V2};
+use crate::planner;
 
 /// The subject's body: a cylinder of this radius standing on the ground,
 /// metres.
@@ -73,6 +74,10 @@ const SUBJECT_GROUND_READ_M: f32 = 0.05;
 /// at most [`SUBJECT_GROUND_READ_M`] from the first take, never ratcheting
 /// it away.
 const SUBJECT_TERRAIN_GRADE: f32 = 0.5;
+/// A route passes over the subject only while the vehicle flies at least
+/// this high over their head, metres; otherwise it keeps the subject
+/// brake's distance from them.
+pub const ROUTE_OVER_SUBJECT_M: f32 = 3.4;
 
 /// What the pilot keeps of the subject across ticks: the lease whose goals
 /// named it, the latest subject and its goal's arrival, its smoothed
@@ -202,18 +207,7 @@ impl Pilot {
         };
         let armed = now_ms >= t.named_ms + SUBJECT_ARM_MS;
         let body = self.settings.pilot.body_radius_m();
-        // A sigma that is not a number widens the kept distance the most.
-        let sigma = sigma.map_or(0.0, |s| {
-            if s.is_nan() {
-                f32::INFINITY
-            } else {
-                s.max(0.0)
-            }
-        });
-        let keep = SUBJECT_BODY_RADIUS_M
-            + body
-            + SUBJECT_MARGIN_M
-            + (SUBJECT_SIGMAS * sigma).min(SUBJECT_SIGMA_MAX_M);
+        let keep = subject_keep(body, sigma);
         let d = geo::dist([pos[0], pos[1]], ne);
         let agl = self.agl(now_ms);
         let t = &mut self.subject_track;
@@ -267,6 +261,30 @@ impl Pilot {
             armed,
         };
         Some((subject, floor_d))
+    }
+
+    /// The subject of `goal` as a disk the planner's routes keep out of
+    /// ([`planner::Keepout`]), kept the distance the subject brake keeps,
+    /// with `margin` the route's obstacle margin and the vehicle at `pos`
+    /// (local NED). `None` with no subject, or while the vehicle flies at
+    /// least [`ROUTE_OVER_SUBJECT_M`] over the subject's head (known only
+    /// while it climbs clear over them: unknown, the subject is kept out).
+    pub(in crate::core) fn route_keepout(
+        &self,
+        goal: &Goal,
+        pos: [f32; 3],
+        margin: f32,
+    ) -> Option<planner::Keepout> {
+        let ne = goal.subject_ne?;
+        let head_d = self
+            .subject_track
+            .ground_d
+            .map(|g| g.d - SUBJECT_BODY_HEIGHT_M);
+        if head_d.is_some_and(|h| h - pos[2] >= ROUTE_OVER_SUBJECT_M) {
+            return None;
+        }
+        let keep = subject_keep(self.settings.pilot.body_radius_m(), goal.subject_sigma_m);
+        planner::Keepout::new(ne, keep, margin, [pos[0], pos[1]])
     }
 
     /// The direction from `pos` to the subject, the most a velocity may go
@@ -375,6 +393,25 @@ impl Pilot {
         };
         Some((cut, capped))
     }
+}
+
+/// The horizontal distance kept from the subject (centre to the vehicle's
+/// CG) for a vehicle of `body` radius and a subject known to `sigma`: its
+/// body, the vehicle's, [`SUBJECT_MARGIN_M`] and [`SUBJECT_SIGMAS`] of the
+/// sigma (at most [`SUBJECT_SIGMA_MAX_M`]; a sigma that is not a number
+/// widens it the most).
+pub(super) fn subject_keep(body: f32, sigma: Option<f32>) -> f32 {
+    let sigma = sigma.map_or(0.0, |s| {
+        if s.is_nan() {
+            f32::INFINITY
+        } else {
+            s.max(0.0)
+        }
+    });
+    SUBJECT_BODY_RADIUS_M
+        + body
+        + SUBJECT_MARGIN_M
+        + (SUBJECT_SIGMAS * sigma).min(SUBJECT_SIGMA_MAX_M)
 }
 
 /// `v` with its part along `u` held to at most `cap` and to `v_cap` either

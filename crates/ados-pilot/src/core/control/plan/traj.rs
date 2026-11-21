@@ -91,6 +91,7 @@ impl Pilot {
             goal_vel: [goal.vn, goal.ve],
             margin,
             heading: forward.then(|| self.yaw(now_ms)),
+            subject: self.route_keepout(goal, pos, margin),
             limits: Limits {
                 v_max: v_cap,
                 a_max,
@@ -132,17 +133,23 @@ impl Pilot {
     }
 
     /// A goto the grid planner found blocked: the trajectory planner's
-    /// committed path, made in shadow, as the detour route, flown toward a
-    /// point [`planner::LOOKAHEAD_M`] along it. `None` when it has none:
-    /// blocked, or nothing committed (a plan kept from before is dropped
-    /// once what it still flies for sure meets what is seen now).
+    /// committed path, made in shadow, as the detour route, flown toward its
+    /// carrot ([`planner::carrot`]: up to [`planner::LOOKAHEAD_M`] along it,
+    /// nearer where the straight line would cut a bend). `None` when it has
+    /// none: blocked, or nothing committed (a plan kept from before is
+    /// dropped once what it still flies for sure meets what is seen now).
     pub(in crate::core) fn goto_route(&self, pos: V2, now_ms: u64) -> Option<planner::Plan> {
         if matches!(self.traj.last, None | Some(Outcome::Blocked)) {
             return None;
         }
         let mut p = self.traj.view(&self.obstacles, pos, now_ms);
         p.target?;
-        p.target = Some(planner::along(&p.path, planner::LOOKAHEAD_M));
+        p.target = Some(planner::carrot(
+            &self.obstacles.grid,
+            &p.path,
+            self.margin(),
+            None,
+        ));
         p.state = AvoidState::Detour;
         Some(p)
     }

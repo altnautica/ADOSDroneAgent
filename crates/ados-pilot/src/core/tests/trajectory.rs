@@ -8,7 +8,7 @@ use super::harness::World;
 use super::safety::wall_scan;
 use crate::config::PlannerMode;
 use crate::modes::copter;
-use crate::planner::Outcome;
+use crate::planner::{self, Outcome};
 
 /// A goto 20 m north with a 20 m wall 4 m ahead, fed for `ms`.
 fn goto_at_wall(planner: PlannerMode, ms: u64) -> World {
@@ -45,6 +45,32 @@ fn a_reactive_goto_behind_a_wall_follows_the_trajectory_route() {
     );
     let frame = serde_json::to_value(&s).unwrap();
     assert_eq!(frame["shadow"]["source"], "trajectory", "{frame}");
+    // Flown toward the route's carrot: the straight line to it cuts no bend.
+    let plan = &w.p.plan;
+    let margin = w.p.margin();
+    let carrot = planner::carrot(&w.p.obstacles.grid, &plan.path, margin, None);
+    assert_eq!(plan.target, Some(carrot), "{plan:?}");
+}
+
+/// A skill goal behind the same wall: under `reactive` the trajectory
+/// planner runs beside the grid planner only with `pilot.planner_shadow`.
+#[test]
+fn a_skill_goal_gets_the_trajectory_shadow_only_when_configured() {
+    for shadow in [false, true] {
+        let mut w = World::new();
+        w.p.settings.pilot.planner_shadow = shadow;
+        w.airborne(copter::GUIDED);
+        let lease_id = w.lease();
+        let end = w.now + 1500;
+        while w.now < end {
+            w.goal(lease_id, 20.0, 0.0);
+            w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(4.0), w.now);
+            w.run(20);
+        }
+        let frame = serde_json::to_value(w.p.state(w.now)).unwrap();
+        assert_eq!(frame.get("shadow").is_some(), shadow, "{frame}");
+        assert_eq!(w.p.trajectory_outcome().is_some(), shadow);
+    }
 }
 
 /// Flown by the trajectory planner: the same goto replans at 10 Hz, flies

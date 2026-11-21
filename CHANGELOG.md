@@ -64,6 +64,10 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Pilot: under the `reactive` planner the trajectory planner no longer runs beside the grid planner for every skill goal; it runs for skill goals only when the new setting `pilot.planner_shadow` is on (default off), and its plan is then published as the `trajectory` shadow as before. A goto still plans on it beside the grid planner, so a blocked goto still follows its route round the obstacle.
+
+- Pilot: a blocked goto following the trajectory planner's route now aims where a grid-planner detour does, at the farthest point up to 2 m along the route that the straight line reaches without cutting a bend. On a forward-looking depth or camera sensor, the heading the vehicle turns to so it can see the next plan now moves when a new obstacle sends the plan off in another direction, instead of staying on the first one and holding.
+
 - Pilot: a grid-planner detour is flown toward the farthest point up to 2 m along its route that the straight line from the vehicle reaches as clear as the route does (up to the margin plus 0.25 m), instead of the point 2 m along it whatever the line cuts. Cutting the inside of a bend round a trunk carried the vehicle into the band between the margin and the obstacle brake's keep-out that the route kept out of, where the brake held it to a stop-go creep.
 
 - The in-process simulation's flight controller turns the copter: a GUIDED setpoint's heading is flown at ArduCopter's yaw angle gain (4.5) and heading slew limit (60°/s), a yaw-rate setpoint up to 90°/s, both through a 0.15 s input time constant, and ATTITUDE reports the yaw rate. Every sensor model turns with it, so a forward depth camera looks where the pilot points it. The shaper pins are recorded again with the heading flown.
@@ -87,6 +91,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 - The obstacle brake trusts the scans' closing speed per direction: up to twice the estimated velocity toward that direction, plus 0.3 m/s, rising with the cosine to the flight line to 1 m/s straight ahead once the estimate reads 0.5 m/s (an estimate trailing a start still brakes as the true speed). It trusted 1 m/s plus twice the speed in every direction, so a vehicle hovering among trunks read occlusion steps as closing and lost its stop cap 2 m from every trunk.
 
 ### Fixed
+
+- Pilot: a route round obstacles no longer takes the vehicle over the person it follows. Both planners now keep the same distance from the subject as the subject brake does (their body, the vehicle's, 0.5 m and twice the subject's position uncertainty), unless the vehicle is known to fly at least 3.4 m above the subject's head; a straight way over the subject is replaced by a route round them. While the pilot flies its own route (a detour or a vantage goal) close to the subject, it keeps the part of the skill's commanded velocity that backs away from them instead of dropping it.
 
 - A hold on an unverified position stops the vehicle over the ground when the flow check tripped it. The hold asked zero velocity, and the flight controller drives its EKF velocity to the ask; with an external position that stopped, that velocity is pinned near zero while the vehicle flies on, so zero on it held the slide. While the flow check is tripped the hold now asks minus the flow-against-estimate gap averaged over 0.5 s, held to 3 m/s, so the ground velocity the flow measures goes to zero; with stale or quality-0 flow it asks zero as before. In the pilot's test model a frozen estimate drifting at 1.1-3 m/s stops within 3 m of the trip without reversing.
 

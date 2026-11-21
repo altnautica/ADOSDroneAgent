@@ -2478,6 +2478,11 @@
           "title": "Planner",
           "type": "string"
         },
+        "planner_shadow": {
+          "default": false,
+          "title": "Planner Shadow",
+          "type": "boolean"
+        },
         "profile": {
           "default": "normal",
           "enum": [

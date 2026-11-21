@@ -292,10 +292,25 @@ impl Pilot {
                     .fresh_local(now_ms)
                     .map_or(0.0, |l| l.vn.hypot(l.ve));
                 let motion = planner::Motion { speed_mps, now_ms };
+                let subject = self.route_keepout(&goal, pos3, margin);
                 let held = &mut self.held_route;
-                self.plan =
-                    planner::plan_committed(&self.obstacles, &goal, pos, margin, motion, held);
-                self.shadow_traj(&goal, pos3, now_ms);
+                self.plan = planner::plan_committed(
+                    &self.obstacles,
+                    &goal,
+                    pos,
+                    margin,
+                    motion,
+                    held,
+                    subject,
+                );
+                // The trajectory planner runs beside it for a goto (its
+                // route when blocked), and for a skill goal only with the
+                // shadow configured: it is a full search every replan.
+                if self.owner() == Owner::Goto || self.settings.pilot.planner_shadow {
+                    self.shadow_traj(&goal, pos3, now_ms);
+                } else {
+                    self.traj.clear();
+                }
                 // A goto has no detour spots: blocked, it follows the
                 // trajectory planner's route when there is one.
                 if self.owner() == Owner::Goto && self.plan.state == AvoidState::Blocked {
