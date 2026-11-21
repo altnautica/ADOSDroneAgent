@@ -1705,6 +1705,97 @@ fn payload_modes_follow_the_exec_header_rule() {
     assert_eq!(mode("models/empty"), 0o644);
 }
 
+fn runtime_zip() -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = SimpleFileOptions::default();
+        w.start_file("bin/python3", opts).unwrap();
+        w.write_all(b"\x7fELF\x02python").unwrap();
+        w.start_file("lib/site/mod.py", opts).unwrap();
+        w.write_all(b"VALUE = 1\n").unwrap();
+        w.finish().unwrap();
+    }
+    buf
+}
+
+fn unpack_manifest(sha256: &str, size: usize) -> String {
+    format!(
+        "id: com.altnautica.unpack\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: bin/tool\n  runtime: rust\n  payloads:\n    - path: lib/runtime\n      source: https://github.com/example/releases/download/v1/runtime.zip\n      sha256: {sha256}\n      size_bytes: {size}\n      unpack: zip\n"
+    )
+}
+
+/// An `unpack: zip` payload lands as a directory of verified files: refused
+/// whole on a digest mismatch (nothing unpacked, nothing left behind), and on
+/// a match every file is in the tree with the archive modes, listed in the
+/// attestation with the payload it came from, and checked by the integrity
+/// verifier like any other file.
+#[test]
+fn an_unpacked_payload_lands_whole_and_is_attested_file_by_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let body = runtime_zip();
+    let sha = hex::encode(Sha256::digest(&body));
+    let source = Arc::new(crate::download::StaticDownloadSource::default().with(
+        "https://github.com/example/releases/download/v1/runtime.zip",
+        body.clone(),
+    ));
+    let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+        .with_backend(Arc::new(RecordingBackend::default()))
+        .with_download_source(source);
+    let tool: &[(&str, &[u8])] = &[("bin/tool", b"#!/bin/sh\n")];
+    let plugin = dir.path().join("plugins/com.altnautica.unpack");
+
+    let wrong = unpack_manifest(&"a".repeat(64), body.len());
+    let err = sup
+        .install_contents(
+            parse_archive_bytes(archive_with(&wrong, tool)).unwrap(),
+            Path::new("/tmp/unpack.adosplug"),
+        )
+        .unwrap_err();
+    assert!(format!("{err}").contains("sha256 mismatch"), "{err}");
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("plugins"))
+        .map(|d| d.filter_map(Result::ok).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    sup.install_contents(
+        parse_archive_bytes(archive_with(&unpack_manifest(&sha, body.len()), tool)).unwrap(),
+        Path::new("/tmp/unpack.adosplug"),
+    )
+    .unwrap();
+    let python = plugin.join("lib/runtime/bin/python3");
+    assert_eq!(std::fs::read(&python).unwrap(), b"\x7fELF\x02python");
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(&python), 0o755);
+    assert_eq!(mode(&plugin.join("lib/runtime/lib/site/mod.py")), 0o644);
+    assert_eq!(mode(&plugin.join("lib/runtime/lib")), 0o755);
+    assert!(!plugin.join("lib/.runtime.unpack").exists());
+
+    let attestation = sup.attestation("com.altnautica.unpack").unwrap();
+    let unpacked: Vec<(&str, Option<&str>)> = attestation
+        .files
+        .iter()
+        .filter(|f| f.payload)
+        .map(|f| (f.path.as_str(), f.unpacked_from.as_deref()))
+        .collect();
+    assert_eq!(
+        unpacked,
+        [
+            ("lib/runtime/bin/python3", Some("lib/runtime")),
+            ("lib/runtime/lib/site/mod.py", Some("lib/runtime")),
+        ]
+    );
+    let install = sup.find_install("com.altnautica.unpack").unwrap().clone();
+    let installs = dir.path().join("plugins");
+    assert_eq!(verify_install(&installs, &install), Ok(()));
+    std::fs::write(plugin.join("lib/runtime/lib/site/mod.py"), b"VALUE = 2\n").unwrap();
+    assert_eq!(
+        verify_install(&installs, &install),
+        Err("lib/runtime/lib/site/mod.py digest mismatch".to_string())
+    );
+}
+
 #[test]
 fn services_run_only_on_the_profiles_they_name() {
     let dir = tempfile::tempdir().unwrap();

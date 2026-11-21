@@ -791,7 +791,7 @@
     },
     "PayloadSpec": {
       "additionalProperties": false,
-      "description": "A large file fetched at install time instead of shipped in the archive\n(model weights, maps). The installer downloads ``source``, checks the\nsize and SHA-256, and places it at ``path`` under the plugin directory.\n``profiles`` / ``arch_os`` narrow which nodes fetch it; ``None`` means\nevery node the plugin installs on.",
+      "description": "A large file fetched at install time instead of shipped in the archive\n(model weights, maps). The installer downloads ``source``, checks the\nsize and SHA-256, and places it at ``path`` under the plugin directory.\n``profiles`` / ``arch_os`` narrow which nodes fetch it; ``None`` means\nevery node the plugin installs on. ``unpack: zip`` marks the file as a\nzip archive of regular files and directories, unpacked into the\ndirectory ``path`` (a runtime of many files) once its digest is checked.",
       "properties": {
         "arch_os": {
           "anyOf": [
@@ -846,6 +846,19 @@
           "minLength": 1,
           "title": "Source",
           "type": "string"
+        },
+        "unpack": {
+          "anyOf": [
+            {
+              "const": "zip",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unpack"
         }
       },
       "required": [

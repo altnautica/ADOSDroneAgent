@@ -122,6 +122,12 @@ rule = "payload path is relative"
 [payload-size-zero]
 rule = "payload size_bytes is 1..=1 GiB"
 
+[payload-unpack-onto-binary]
+rule = "an unpacked payload is not an agent.binaries path"
+
+[payload-unpack-unknown-format]
+rule = "payload unpack is zip"
+
 [per-drone-config-not-bool]
 rule = "per_drone_config is a boolean"
 

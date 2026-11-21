@@ -350,7 +350,9 @@ class PayloadSpec(_StrictModel):
     (model weights, maps). The installer downloads ``source``, checks the
     size and SHA-256, and places it at ``path`` under the plugin directory.
     ``profiles`` / ``arch_os`` narrow which nodes fetch it; ``None`` means
-    every node the plugin installs on."""
+    every node the plugin installs on. ``unpack: zip`` marks the file as a
+    zip archive of regular files and directories, unpacked into the
+    directory ``path`` (a runtime of many files) once its digest is checked."""
 
     path: str = Field(..., min_length=1)
     source: str = Field(..., min_length=1)
@@ -358,6 +360,7 @@ class PayloadSpec(_StrictModel):
     size_bytes: int = Field(..., ge=1, le=1_073_741_824)
     profiles: list[Profile] | None = None
     arch_os: str | None = None
+    unpack: Literal["zip"] | None = None
 
     @field_validator("path")
     @classmethod

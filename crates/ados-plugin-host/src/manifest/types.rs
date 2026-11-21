@@ -183,7 +183,8 @@ impl ResourceLimits {
 /// `manifest.yaml`, so a payload is as trusted as a packed file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PayloadSpec {
-    /// Archive-relative destination inside the plugin's install dir.
+    /// Archive-relative destination inside the plugin's install dir: the file,
+    /// or with `unpack` the directory the archive's members land under.
     pub path: String,
     /// `https://` URL on the download allowlist.
     pub source: String,
@@ -197,6 +198,21 @@ pub struct PayloadSpec {
     /// The `<arch>-<os>` host this payload is fetched on; absent means any.
     #[serde(default)]
     pub arch_os: Option<String>,
+    /// Set: the file is an archive of that format, unpacked into the directory
+    /// `path` once its digest is checked (a runtime of many files, such as an
+    /// interpreter with its libraries). Absent: the file lands at `path` as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpack: Option<PayloadUnpack>,
+}
+
+/// The archive format of an unpacked payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PayloadUnpack {
+    /// A zip archive of regular files and directories (no symlinks, no
+    /// special files), unpacked under the archive rules
+    /// ([`crate::archive::unpack_payload_zip`]).
+    Zip,
 }
 
 impl PayloadSpec {

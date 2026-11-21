@@ -1,0 +1,20 @@
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+agent:
+  entrypoint: bin:corpus
+  runtime: rust
+  isolation: subprocess
+  binaries:
+    corpus:
+      x86_64-linux: bin/x86_64/corpus
+  payloads:
+    - path: bin/x86_64/corpus
+      source: https://example.com/corpus.zip
+      sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      size_bytes: 10
+      arch_os: x86_64-linux
+      unpack: zip

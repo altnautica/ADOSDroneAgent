@@ -332,6 +332,14 @@
       "type": "string"
     },
     {
+      "default": null,
+      "description": "Unpack",
+      "enum": null,
+      "path": "agent.payloads[].unpack",
+      "required": false,
+      "type": "string|null"
+    },
+    {
       "default": false,
       "description": "Per Drone Config",
       "enum": null,

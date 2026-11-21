@@ -353,9 +353,14 @@ fn read_signature(
     Ok((Some(lines[0].to_string()), Some(lines[1].to_string())))
 }
 
+mod payload;
 mod unpack;
 
+pub use payload::*;
 pub use unpack::*;
+
+#[cfg(test)]
+mod payload_tests;
 
 #[cfg(test)]
 mod tests;

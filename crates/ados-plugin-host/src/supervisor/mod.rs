@@ -64,7 +64,7 @@ use sha2::{Digest, Sha256};
 use crate::archive::{
     open_archive, parse_archive_bytes, unpack_to, ArchiveContents, Executables, MANIFEST_FILENAME,
 };
-use crate::attestation::Attestation;
+use crate::attestation::{Attestation, AttestedFile};
 use crate::backend::{default_backend, ServiceBackend};
 use crate::download::{fetch_to_file, DownloadSource, HttpDownloadSource};
 use crate::errors::{
@@ -72,7 +72,7 @@ use crate::errors::{
 };
 use crate::manifest::{
     bin_reference, host_arch_os, AgentIsolation, BoardId, DeclaredCapability, GcsIsolation,
-    PluginManifest, PAYLOAD_MAX_BYTES,
+    PayloadUnpack, PluginManifest, PAYLOAD_MAX_BYTES,
 };
 use crate::plugin_account::{host_accounts, Accounts};
 use crate::server::{plugin_socket_dir, plugin_socket_path};
@@ -482,11 +482,13 @@ mod compat;
 mod enable_disable;
 mod grants;
 mod install;
+mod payloads;
 mod readiness;
 mod refresh;
 mod units;
 mod voxmap;
 
+use payloads::place_payloads;
 pub use readiness::{verify_install, InstallVerifier, TAMPERED_REASON};
 use units::*;
 pub use units::{require_signed_default, semver_in_range};

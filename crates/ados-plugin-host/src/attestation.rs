@@ -6,7 +6,9 @@
 //! ```json
 //! {"signature": "<SIGNATURE entry text, or null when unsigned>",
 //!  "files": [{"path": "manifest.yaml", "sha256": "<hex>"},
-//!            {"path": "bin/tool", "sha256": "<hex>", "payload": true}]}
+//!            {"path": "bin/tool", "sha256": "<hex>", "payload": true},
+//!            {"path": "lib/rt/bin/python3", "sha256": "<hex>", "payload": true,
+//!             "unpacked_from": "lib/rt"}]}
 //! ```
 //!
 //! `files` lists every archive entry except `SIGNATURE`, path-sorted, with the
@@ -14,7 +16,10 @@
 //! is computed over, so a verifier rebuilds the signed digest from it. Payloads
 //! fetched at install follow, marked `"payload": true` and carrying the sha256
 //! the signed `manifest.yaml` pins; they are outside the signed digest and are
-//! trusted through the manifest instead.
+//! trusted through the manifest instead. An unpacked payload
+//! (`unpack: zip`) contributes every file it unpacked, each with the sha256 of
+//! its own bytes and `unpacked_from` naming the payload path whose pinned
+//! archive it came from.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +41,22 @@ pub struct AttestedFile {
     /// True for a file fetched at install from a manifest-pinned payload.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub payload: bool,
+    /// For a file unpacked from an archive payload: that payload's path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpacked_from: Option<String>,
+}
+
+impl AttestedFile {
+    /// A payload file: one fetched as is (`unpacked_from` `None`, the pinned
+    /// sha256) or one unpacked from the archive payload at `unpacked_from`.
+    pub fn payload(path: String, sha256: &str, unpacked_from: Option<String>) -> Self {
+        AttestedFile {
+            path,
+            sha256: sha256.to_ascii_lowercase(),
+            payload: true,
+            unpacked_from,
+        }
+    }
 }
 
 /// A plugin's install attestation.
@@ -48,12 +69,12 @@ pub struct Attestation {
 }
 
 impl Attestation {
-    /// Build from an archive's per-entry digests plus the payloads fetched for
-    /// it (`(path, pinned sha256)`).
+    /// Build from an archive's per-entry digests plus the payload files placed
+    /// for it ([`AttestedFile::payload`]).
     pub fn new(
         signature: Option<String>,
         archive_digests: &BTreeMap<String, String>,
-        payloads: &[(String, String)],
+        payloads: &[AttestedFile],
     ) -> Self {
         let mut files: Vec<AttestedFile> = archive_digests
             .iter()
@@ -61,13 +82,10 @@ impl Attestation {
                 path: path.clone(),
                 sha256: sha256.clone(),
                 payload: false,
+                unpacked_from: None,
             })
             .collect();
-        files.extend(payloads.iter().map(|(path, sha256)| AttestedFile {
-            path: path.clone(),
-            sha256: sha256.to_ascii_lowercase(),
-            payload: true,
-        }));
+        files.extend_from_slice(payloads);
         Attestation { signature, files }
     }
 

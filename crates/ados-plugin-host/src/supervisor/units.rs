@@ -242,46 +242,6 @@ impl PluginSupervisor {
     }
 }
 
-/// Move each fetched payload from `payload_dir` into the staged tree at its
-/// manifest path. A payload may not overwrite a file the archive ships. Its
-/// mode follows the archive members' rule ([`Executables::runs`]): `0755` when
-/// the manifest runs it or it starts with an ELF or `#!` header, else `0644`.
-pub(super) fn place_payloads(
-    manifest: &PluginManifest,
-    payload_dir: &Path,
-    staging: &Path,
-    fetched: &[(String, String)],
-) -> Result<(), LifecycleError> {
-    let executables = Executables::of(manifest);
-    for (path, _) in fetched {
-        let dest = staging.join(path);
-        if dest.exists() {
-            return Err(SupervisorError(format!(
-                "plugin {}: payload {path} collides with a file in the archive",
-                manifest.id
-            ))
-            .into());
-        }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(payload_dir.join(path), &dest)?;
-        let mut head = [0u8; 4];
-        let n = {
-            use std::io::Read;
-            std::fs::File::open(&dest)?.read(&mut head)?
-        };
-        use std::os::unix::fs::PermissionsExt;
-        let mode = if executables.runs(path, &head[..n]) {
-            0o755
-        } else {
-            0o644
-        };
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode))?;
-    }
-    Ok(())
-}
-
 /// The default signature-enforcement policy for [`PluginSupervisor::production`]:
 /// ON unless `ADOS_PLUGIN_REQUIRE_SIGNED` is explicitly one of the falsey tokens
 /// (`0` / `false` / `no` / `off`, case-insensitive). An absent or unrecognized

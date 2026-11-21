@@ -97,6 +97,7 @@ const PAYLOAD: &[&str] = &[
     "size_bytes",
     "profiles",
     "arch_os",
+    "unpack",
 ];
 const DECLARED_CAPABILITY: &[&str] = &["id", "risk", "description"];
 const SHARED_TOPIC: &[&str] = &["topic", "subscribe_capability"];

@@ -302,7 +302,7 @@ impl PluginSupervisor {
         )
         .map_err(LifecycleError::from)
         .and_then(|()| place_payloads(manifest, payload_dir, &staging, fetched))
-        .and_then(|()| {
+        .and_then(|placed| {
             // A manifest that declares a GCS half (or a rust agent binary)
             // must actually ship the file it points at. Fail here rather
             // than letting a missing bundle surface later as an empty
@@ -313,13 +313,11 @@ impl PluginSupervisor {
                 &crate::archive::unpacked_paths(&staging),
                 &host_arch_os(),
             )
-            .map_err(LifecycleError::from)
-        })
-        .and_then(|()| {
+            .map_err(LifecycleError::from)?;
             Attestation::new(
                 contents.signature_text.clone(),
                 &contents.file_digests,
-                fetched,
+                &placed,
             )
             .write_to(&staging)
             .map_err(LifecycleError::from)

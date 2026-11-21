@@ -182,6 +182,19 @@ impl PluginManifest {
                     payload.path
                 )));
             }
+            // An unpacked payload lands as a directory, so it cannot stand
+            // where `binaries` names a file the host runs.
+            if payload.unpack.is_some()
+                && agent
+                    .binaries
+                    .values()
+                    .any(|by_arch| by_arch.values().any(|p| *p == payload.path))
+            {
+                return Err(ManifestError(format!(
+                    "agent.payloads path {:?} unpacks a directory onto an agent.binaries path",
+                    payload.path
+                )));
+            }
         }
         let leaf = self.leaf();
         let mut declared: BTreeSet<&str> = BTreeSet::new();

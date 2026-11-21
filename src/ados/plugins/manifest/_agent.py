@@ -300,6 +300,19 @@ class AgentBlock(_StrictModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_unpacked_payloads(self) -> AgentBlock:
+        """An unpacked payload lands as a directory, so it cannot stand
+        where ``binaries`` names a file the host runs."""
+        run = {path for by_arch in self.binaries.values() for path in by_arch.values()}
+        for p in self.payloads:
+            if p.unpack is not None and p.path in run:
+                raise ManifestError(
+                    f"agent.payloads path {p.path!r} unpacks a directory onto an "
+                    "agent.binaries path"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _validate_listener_capabilities(self) -> AgentBlock:
         """A service that binds a port needs ``network.listen``, and also
         ``network.outbound``: only that grant opens the inet socket
