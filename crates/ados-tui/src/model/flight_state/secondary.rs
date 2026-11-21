@@ -1,7 +1,7 @@
 //! The chip's secondary line, in the spec's order, as `flight-state.ts`
 //! builds it: FC failsafe, the obstacle clearance, a late stick input, the
 //! position's uncertainty, the pilot's speed cap, the limit that cut the
-//! commanded speed, a mission the
+//! commanded speed, a detour or routed return, a mission the
 //! pilot holds paused, hold reason, avoidance state, control mode, then the
 //! horizontal and vertical speed while the sticks fly.
 
@@ -75,6 +75,14 @@ pub(super) struct KeyedPart {
     color: String,
 }
 
+/// The detour or routed return part: one spec string for each.
+#[derive(Debug, Deserialize)]
+pub(super) struct RouteRound {
+    detour_key: String,
+    return_key: String,
+    color: String,
+}
+
 /// A speed part, shown only while `owner` flies.
 #[derive(Debug, Deserialize)]
 pub(super) struct SpeedPart {
@@ -126,6 +134,26 @@ pub fn chip_secondary(f: &ChipFacts) -> Vec<ChipLine> {
                     out.push(ChipLine {
                         text: spec_text(&u.text_key, &[("m", &format!("{m:.1}"))]),
                         color: u.color.clone(),
+                    });
+                }
+            }
+            "route_round" => {
+                let r = &sec.route_round;
+                let text = match (f.detour_seq, f.return_route) {
+                    (Some(seq), _) => Some(spec_text(&r.detour_key, &[("wp", &seq.to_string())])),
+                    (None, Some((remaining, straight))) => Some(spec_text(
+                        &r.return_key,
+                        &[
+                            ("remaining_m", &(js_round(remaining) as i64).to_string()),
+                            ("straight_m", &(js_round(straight) as i64).to_string()),
+                        ],
+                    )),
+                    (None, None) => None,
+                };
+                if let Some(text) = text {
+                    out.push(ChipLine {
+                        text,
+                        color: r.color.clone(),
                     });
                 }
             }

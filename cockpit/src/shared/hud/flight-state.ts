@@ -40,6 +40,7 @@ const CHIP_SECONDARY = flightStateJson.secondary as {
   fc_failsafe: { text: string; color: string };
   speed_cap: { text: string; color: string };
   pose_uncertainty: ChipTextPart;
+  route_round: { detour_key: string; return_key: string; color: string };
   mission_paused_line: { match: Record<string, string | number | boolean>; text: string; color: string };
   avoid_state: Record<string, { text: string; color: string } | null>;
   hold_reason: { text: string; color: string };
@@ -108,6 +109,12 @@ export interface ChipFacts {
   /** The position's one-sigma uncertainty (m) while the pilot flies on it
    *  slowed (`pose_uncertainty_m`), or null. */
   poseUncertaintyM: number | null;
+  /** The mission item a detour round a blocked leg resumes at
+   *  (`mission_detour.seq`), or null with none. */
+  detourSeq: number | null;
+  /** A return the pilot routes round a blocked one: the way left and the
+   *  straight line home, metres (`return_route`), or null with none. */
+  returnRoute: { remainingM: number; straightM: number } | null;
   /** Why the cap (`gnss-denied`, `confined-near`, `position-uncertain`), or
    *  null with none. */
   speedCapReason: string | null;
@@ -274,10 +281,10 @@ function holdReasonLabel(reason: string): string {
 }
 
 /** The secondary line, in the spec's order: FC failsafe, the obstacle
- *  clearance, a late stick input, the pilot's speed cap, the limit that cut
- *  the commanded speed, a mission the pilot holds paused, hold reason,
- *  avoidance state, control mode, then the
- *  horizontal and vertical speed while the sticks fly. */
+ *  clearance, a late stick input, the position's uncertainty, the pilot's
+ *  speed cap, the limit that cut the commanded speed, a detour or routed
+ *  return, a mission the pilot holds paused, hold reason, avoidance state,
+ *  control mode, then the horizontal and vertical speed while the sticks fly. */
 export function chipSecondary(f: ChipFacts): ChipLine[] {
   const out: ChipLine[] = [];
   for (const part of CHIP_SECONDARY.order) {
@@ -301,6 +308,13 @@ export function chipSecondary(f: ChipFacts): ChipLine[] {
     } else if (part === "pose_uncertainty" && f.poseUncertaintyM !== null) {
       const u = CHIP_SECONDARY.pose_uncertainty;
       out.push({ id: part, text: specText(u.text_key, { m: f.poseUncertaintyM.toFixed(1) }), color: colorOf(u.color) });
+    } else if (part === "route_round" && (f.detourSeq !== null || f.returnRoute !== null)) {
+      const r = CHIP_SECONDARY.route_round;
+      const text =
+        f.detourSeq !== null
+          ? specText(r.detour_key, { wp: f.detourSeq })
+          : specText(r.return_key, { remaining_m: Math.round(f.returnRoute!.remainingM), straight_m: Math.round(f.returnRoute!.straightM) });
+      out.push({ id: part, text, color: colorOf(r.color) });
     } else if (part === "speed_cap" && f.speedCapMps !== null) {
       // The reason's own spec line; the spec's default line for a reason it
       // does not name.
@@ -417,6 +431,8 @@ export function chipFacts(
     speedCapMps: p.speedCap?.vHMps ?? null,
     positionUnverified: positionUnverifiedKey(p.positionUnverified),
     poseUncertaintyM: p.poseUncertaintyM,
+    detourSeq: p.missionDetour?.seq ?? null,
+    returnRoute: p.returnRoute,
     speedCapReason: p.speedCap?.reason ?? null,
     profileLimitMps: p.profileLimits?.vHMps ?? null,
     hSpeedMps: extra.speed?.hMps ?? null,

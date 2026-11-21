@@ -16,7 +16,7 @@ import { ALERT_TINT_PCT } from "@/lib/flight-layout";
 import { chipLineTextColor } from "@/lib/chip-view";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import tokensJson from "@/shared/cockpit-spec/tokens.json";
-import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { specText } from "@/shared/hud/spec-text";
 import { severityTextColor } from "@/shared/hud/status-pill";
 import { INITIAL_FLIGHT_STATE, useFlightStore } from "@/stores/flight-store";
@@ -45,17 +45,17 @@ afterEach(async () => {
   useFlightStore.setState({ ...INITIAL_FLIGHT_STATE });
 });
 
-const PILOT = {
+const PILOT: PilotState = parsePilotState({
   owner: "idle",
-  controlMode: "ados",
+  control_mode: "ados",
   profile: "normal",
   avoid: "brake",
   armed: false,
   landed: true,
-  vehicleClass: "multirotor",
+  vehicle_class: "multirotor",
   readiness: [],
-  planNed: [],
-} as unknown as PilotState;
+  plan_ned: [],
+})!;
 
 function pilot(p: Partial<PilotState> = {}) {
   useNavStreamStore.setState({ pilot: { data: { ...PILOT, ...p }, at: Date.now() } });

@@ -226,6 +226,44 @@ fn the_sensing_tier_and_its_speed_limit_show_only_while_the_pilot_reports_them()
     assert!(!text.contains("Sensing:"), "{text}");
 }
 
+#[test]
+fn the_avoid_mode_explains_itself_and_a_detour_shows_while_it_flies() {
+    let mut frame: Value = serde_json::from_str(include_str!(
+        "../../../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON");
+    frame["avoid"] = json!("bypass");
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 80);
+    assert!(text.contains("Route round obstacles"), "{text}");
+    assert!(!text.contains("Routing round"), "{text}");
+
+    frame["mission_detour"] = json!({"seq": 3, "target_ned": [18.25, 0.0, -5.0], "since_ms": 1});
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 80);
+    assert!(text.contains("Routing round"), "{text}");
+
+    frame.as_object_mut().unwrap().remove("mission_detour");
+    frame["return_route"] = json!({"remaining_m": 37.6, "straight_m": 24.2, "since_ms": 1});
+    let text = draw(&mut app_with_frame(1, frame), 160, 80);
+    assert!(text.contains("Routing home"), "{text}");
+}
+
+#[test]
+fn a_skipped_waypoint_shows_why() {
+    let mut frame: Value = serde_json::from_str(include_str!(
+        "../../../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON");
+    frame["mission"] = json!({
+        "state": "active", "seq": 5, "total": 6,
+        "gaps": [{"seq": 4, "reason": "unreachable_inside_obstacle", "at_ms": 1}]
+    });
+    let text = draw(&mut app_with_frame(1, frame), 160, 80);
+    assert!(
+        text.contains("WP 4 · Skipped · Inside an obstacle"),
+        "{text}"
+    );
+}
+
 // --- the mission stall, from the golden stall frame -------------------------
 
 /// The golden stall frame, its banner slot moved to the far future so it

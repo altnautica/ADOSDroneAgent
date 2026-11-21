@@ -1,6 +1,7 @@
 // One setup step, drawn generically from the step schema: title, body (spec
 // text keys with the step's args filled in), the pose/motor-order picture, a
-// progress ring, the outputs step's yes/no question, operator inputs, the live
+// progress ring, the outputs step's yes/no question, operator inputs, the
+// parameters it will write, the live
 // values, blockers, the result, and the action buttons with their confirm
 // style. The closing `ados_intro` step is the same data in the "Meet ADOS
 // Pilot" layout.
@@ -11,8 +12,8 @@ import { AlertTriangle, Gamepad2, Navigation, ShieldCheck } from "lucide-react";
 
 import { FOCUS_RING, HoldButton, ProgressRing, StatePill, WizardButton } from "./controls";
 import { inputArgs, liveRows, outputQuestion } from "./parse";
-import { formatValue, optionText, setupImageUrl, setupLabel, setupText } from "./strings";
-import type { InputOption, SetupAction, SetupStep, SetupValue, StepInput } from "./types";
+import { formatValue, optionText, paramNote, setupImageUrl, setupLabel, setupText } from "./strings";
+import type { InputOption, ParamRow, SetupAction, SetupStep, SetupValue, StepInput } from "./types";
 
 /** The step id whose actions render as the "Meet ADOS Pilot" screen. */
 export const ADOS_INTRO_STEP = "ados_intro";
@@ -84,6 +85,8 @@ export function StepCard({ step, busy, error, onAction }: StepCardProps) {
           ))}
         </div>
       ) : null}
+
+      {step.params.length ? <ParamTable step={step.step} rows={step.params} /> : null}
 
       {live.length ? <ValueTable title="setupWizard.live" group="live" rows={live} args={step.args} /> : null}
 
@@ -157,6 +160,32 @@ function ActionControl({
         />
       );
   }
+}
+
+/** The parameters a step will write, each with what it is for when the spec
+ *  says (the obstacle backstop rows of the ADOS safety profile). */
+function ParamTable({ step, rows }: { step: string; rows: ParamRow[] }) {
+  return (
+    <div className="rounded-lg border border-border bg-muted/20 px-[0.9em] py-[0.6em]" data-testid="setup-params">
+      <h3 className="mb-[0.3em] text-[0.75em] font-semibold uppercase tracking-wide text-muted-foreground">
+        {setupText(`setup.${step}.params`)}
+      </h3>
+      <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-[1.2em] gap-y-[0.25em] text-[1em]">
+        {rows.map((r) => {
+          const note = paramNote(step, r.name);
+          return (
+            <div key={r.name} className="contents">
+              <dt className="min-w-0 text-muted-foreground">
+                <span className="font-mono text-foreground">{r.name}</span>
+                {note ? <span className="block text-[0.85em]">{note}</span> : null}
+              </dt>
+              <dd className="text-right font-mono tabular-nums text-foreground">{formatValue(r.value)}</dd>
+            </div>
+          );
+        })}
+      </dl>
+    </div>
+  );
 }
 
 function ValueTable({

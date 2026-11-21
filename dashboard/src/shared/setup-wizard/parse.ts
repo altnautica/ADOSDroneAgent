@@ -11,6 +11,7 @@ import {
   WIZARD_STATES,
   type ActionStyle,
   type ConfirmKind,
+  type ParamRow,
   type InputOption,
   type OutputQuestion,
   type SetupAction,
@@ -54,6 +55,16 @@ function scalarMap(v: unknown, skip: (key: string) => boolean = () => false): Re
   if (!isObj(v)) return out;
   for (const [k, val] of Object.entries(v)) {
     if (!skip(k) && isScalar(val)) out[k] = val;
+  }
+  return out;
+}
+
+function parseParams(raw: unknown): ParamRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ParamRow[] = [];
+  for (const r of raw) {
+    const name = isObj(r) ? str(r.name) : null;
+    if (name && isObj(r) && isScalar(r.value)) out.push({ name, value: r.value });
   }
   return out;
 }
@@ -129,6 +140,7 @@ export function parseStep(raw: unknown): SetupStep | null {
     body_key: str(raw.body_key) ?? "",
     args: scalarMap(raw.args, (k) => k === "inputs"),
     inputs: isObj(raw.args) ? parseInputs(raw.args.inputs) : [],
+    params: isObj(raw.args) ? parseParams(raw.args.params) : [],
     image: str(raw.image),
     state,
     progress: progress === null ? null : Math.min(1, Math.max(0, progress)),

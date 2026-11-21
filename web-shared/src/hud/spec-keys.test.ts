@@ -44,6 +44,16 @@ describe("command limits", () => {
   });
 });
 
+describe("avoid modes", () => {
+  it("explains every mode the same in both files", () => {
+    const a = flightState.mode_sheet.avoidance;
+    for (const v of a.values) {
+      expect(S[`pilot.avoid.explain.${v}`], `setup-strings.json pilot.avoid.explain.${v}`).toBe(a.explain[v as keyof typeof a.explain]);
+    }
+    expect(a.explain.bypass).toBe("Route round obstacles");
+  });
+});
+
 describe("tips", () => {
   it("has a text for every tip and for the shared buttons", () => {
     for (const t of tips.tips) expect(S[`tips.${t.id}`], `tips.${t.id}`).toBeTruthy();

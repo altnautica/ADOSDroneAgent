@@ -1,9 +1,9 @@
 //! The Pilot block from the `pilot` nav kind: the flight-state chip and its
 //! secondary line (the cockpit spec's `flight-state.json`, the speed cap by
 //! its reason), the place class (Open, or Confined with the key that switches
-//! it while disarmed) and the route check of a confined mission with its
-//! tightest point, the control mode and profile, who holds the sticks, the
-//! gimbal, obstacle avoidance, the mission progress, the link-loss action or
+//! it while disarmed) and the route check of the mission with its tightest
+//! point, the control mode and profile, who holds the sticks, the gimbal,
+//! obstacle avoidance (`route`), the mission progress, the link-loss action or
 //! countdown, the height above ground with its source, and the status pill's
 //! alerts (the airframe balance alert with its "I rebalanced it" key while it
 //! answers). A steady take-off shows its status line and detail under the launch.
@@ -33,6 +33,7 @@ use crate::ui::widgets::{kv, kv_text};
 use super::autonomy::{mark_stale, LABEL};
 
 mod fit;
+mod route;
 mod sensing;
 pub use fit::{min_rows, render};
 
@@ -444,6 +445,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         avoid.push(Span::styled(format!(" {m:.1} m"), t.bright()));
     }
     out.push((stale(Line::from(avoid)), false));
+    out.extend(route::avoid_rows(t, p, p_stale));
 
     let mission = match &p.mission {
         None => "–".to_string(),
@@ -456,6 +458,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         Some(m) => format!("WP {}/{}", whole(m.seq), whole(m.total)),
     };
     out.push((stale(kv_text(t, "Mission", LABEL, mission)), false));
+    out.extend(route::gap_rows(t, p, p_stale));
 
     let link = match link_loss_line(p) {
         Some(countdown) => Span::styled(countdown, Style::default().fg(t.warning())),

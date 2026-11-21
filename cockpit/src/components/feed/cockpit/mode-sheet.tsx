@@ -211,6 +211,16 @@ export function ModeSheet() {
               hold={MODE_SHEET.avoidance.confirm_off.ms}
               onPick={(v) => pilotAction(specText("flow.mode.section.avoidance"), "avoid", v, `avoid:${v}`)}
             />
+            {last.vehicleClass !== "fixedwing" ? (
+              <ul className="flex flex-col gap-[0.2rem] text-[0.78rem] text-muted-foreground" data-testid="avoid-explain">
+                {MODE_SHEET.avoidance.values.map((v, i) => (
+                  <li key={v} className={cn(pilot?.avoid === v && "text-surface-foreground")}>
+                    <span className="font-semibold">{MODE_SHEET.avoidance.labels[i]}:</span>{" "}
+                    {MODE_SHEET.avoidance.explain[v as keyof typeof MODE_SHEET.avoidance.explain]}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             {avoidWarning ? (
               <p role="alert" className="text-[0.75rem] font-semibold text-warn" data-testid="avoid-off-warning">
                 {avoidWarning}

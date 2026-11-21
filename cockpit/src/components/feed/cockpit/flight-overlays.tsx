@@ -5,9 +5,10 @@
 // countdown, the cancellable low-battery RTH countdown, and the persistent
 // mission stall (Skip waypoint, Return, Land here; Land here only for a
 // blocked return) with the stall's own banners hidden behind it, and the
-// route-check report while the confined route is too tight. Voice prompts
-// speak handovers, RTH, low battery, a stall,
-// a skipped waypoint and mission-state changes. They stack in
+// route-check report while the mission route is too tight. Voice prompts
+// speak handovers, RTH, low battery, a stall, a detour round a blocked leg,
+// a routed return, a skipped or unreachable waypoint and mission-state
+// changes. They stack in
 // the Feed's alert column, under the alert cards and above the layer chips,
 // so none covers another. Everything here reads a fresh pilot frame only: a
 // stalled pilot clears them all (the chip turns LINK instead). Sizes are CSS

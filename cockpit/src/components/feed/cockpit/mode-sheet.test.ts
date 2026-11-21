@@ -126,4 +126,12 @@ describe("the Mode sheet's control mode row on a drone", () => {
   it("does not offer ELRS on a drone otherwise", () => {
     expect(render("ados")).not.toContain(elrsExplain);
   });
+
+  it("explains what each avoidance mode does, Bypass routing round", () => {
+    serverPilot({ data: parsePilotState({ ...demoPilotData(0), avoid: "bypass" })!, at: Date.now() });
+    const html = renderToStaticMarkup(createElement(ModeSheet));
+    expect(html).toContain('data-testid="avoid-explain"');
+    for (const v of MODE_SHEET.avoidance.values) expect(html).toContain(MODE_SHEET.avoidance.explain[v as keyof typeof MODE_SHEET.avoidance.explain]);
+    expect(html).toContain("Route round obstacles");
+  });
 });

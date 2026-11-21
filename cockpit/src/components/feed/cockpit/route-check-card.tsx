@@ -1,4 +1,4 @@
-// The route-check report of the confined-place profile: the state line
+// The pilot's route-check report of the loaded mission: the state line
 // (clear, not seen yet, too tight at a leg) and where the tightest checked
 // point is. On the Launch sheet while the pilot reports a check, and over the
 // video while the route is too tight.

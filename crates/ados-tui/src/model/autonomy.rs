@@ -181,6 +181,8 @@ pub struct PilotMission {
     pub total: Option<f64>,
     /// The mission is on its landing sequence.
     pub landing_seq: bool,
+    /// The items skipped this mission (coverage gaps), with why.
+    pub gaps: Vec<ados_protocol::pilot::MissionGap>,
 }
 
 /// The pilot's banner: a spec text key and its args (values as text), shown
@@ -249,6 +251,10 @@ pub struct Pilot {
     pub rth_countdown_s: Option<f64>,
     /// A mission or return stalled for the operator, while it lasts.
     pub mission_stall: Option<MissionStall>,
+    /// A detour round a blocked mission leg, while one flies.
+    pub mission_detour: Option<ados_protocol::pilot::MissionDetour>,
+    /// A return home the pilot routes round a blocked one, while it flies.
+    pub return_route: Option<ados_protocol::pilot::ReturnRoute>,
     /// Height above ground: a fresh downward rangefinder, else the EKF
     /// height above home (`agl_source`).
     pub agl_m: Option<f64>,
@@ -307,7 +313,7 @@ pub struct Pilot {
     /// The drone is declared to fly with no RC transmitter
     /// (`rc_receiver: absent`; omitted or `present` reads false).
     pub rc_absent: bool,
-    /// The route check of the loaded mission, while confined.
+    /// The route check of the loaded mission (any place class).
     pub route_check: Option<RouteCheck>,
     /// The pilot operations a surface may offer now (`goto`, ...).
     pub surface_ops: Vec<String>,

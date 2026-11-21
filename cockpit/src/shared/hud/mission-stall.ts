@@ -70,23 +70,45 @@ export function missionStallOverlay(stall: MissionStall | null | undefined): Mis
   };
 }
 
-type VoiceFields = Pick<PilotState, "missionStall" | "banner">;
+type VoiceFields = Pick<PilotState, "missionStall" | "banner"> & Partial<Pick<PilotState, "missionDetour" | "returnRoute">>;
+
+/** The skip banners and the voice line each speaks once it newly arrives. */
+const SKIP_VOICE: Readonly<Record<string, string>> = {
+  "pilot.banner.mission_wp_skipped": "voice.waypoint_skipped",
+  "pilot.banner.mission_wp_inside_obstacle": "voice.waypoint_unreachable",
+  "pilot.banner.mission_wp_no_path": "voice.waypoint_unreachable",
+};
 
 /** The voice key for a change between two pilot states, or null: a stall
  *  that appeared (or changed kind) speaks `voice.mission_stalled` or
- *  `voice.return_blocked`; a newly arrived waypoint-skipped banner speaks
- *  `voice.waypoint_skipped`. */
+ *  `voice.return_blocked`; a detour round a blocked leg that began (or moved
+ *  to another item) `voice.mission_detour`; a routed return that began
+ *  `voice.return_routed`; a newly arrived skip banner
+ *  `voice.waypoint_skipped`, or `voice.waypoint_unreachable` for a waypoint
+ *  proven unreachable. */
 export function missionStallVoiceKey(prev: VoiceFields | null, next: VoiceFields): string | null {
   const stall = next.missionStall;
   if (stall && stall.kind !== prev?.missionStall?.kind) {
     return stall.kind === "mission" ? "voice.mission_stalled" : "voice.return_blocked";
   }
-  const skipped = "pilot.banner.mission_wp_skipped";
-  if (next.banner?.textKey === skipped) {
+  if (next.missionDetour && next.missionDetour.seq !== prev?.missionDetour?.seq) return "voice.mission_detour";
+  if (next.returnRoute && !prev?.returnRoute) return "voice.return_routed";
+  const key = next.banner?.textKey;
+  const voice = key ? SKIP_VOICE[key] : undefined;
+  if (voice) {
     const was = prev?.banner;
-    if (was?.textKey !== skipped || JSON.stringify(was.args) !== JSON.stringify(next.banner.args)) return "voice.waypoint_skipped";
+    if (was?.textKey !== key || JSON.stringify(was?.args) !== JSON.stringify(next.banner!.args)) return voice;
   }
   return null;
+}
+
+/** A coverage gap's reason as words (`pilot.gap.reason.<reason>`); the bare
+ *  code for a reason the spec does not word, null without one. */
+export function gapReasonText(reason: string | null): string | null {
+  if (!reason) return null;
+  const key = `pilot.gap.reason.${reason}`;
+  const text = specText(key);
+  return text === key ? reason.replace(/_/g, " ") : text;
 }
 
 /** The mission items skipped this mission (coverage gaps), ascending and

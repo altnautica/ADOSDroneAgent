@@ -116,6 +116,7 @@ fn the_pilot_kind_reads_the_golden_frame() {
             seq: Some(0.0),
             total: Some(0.0),
             landing_seq: false,
+            gaps: vec![],
         })
     );
     assert_eq!(p.age_ms, Some(100));

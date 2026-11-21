@@ -55,6 +55,13 @@ export function setupLabel(group: "live" | "result", key: string, args: Record<s
   return setupText(named in STRINGS ? named : key, args);
 }
 
+/** What a parameter a step writes is for (`setup.<step>.param.<NAME>`, e.g.
+ *  the flight controller's obstacle backstop rows), or null when the spec
+ *  says nothing about it. */
+export function paramNote(step: string, name: string): string | null {
+  return STRINGS[`setup.${step}.param.${name}`] ?? null;
+}
+
 /** The bundled URL of `setup-images/<key>.svg`, or null when the spec has none. */
 export function setupImageUrl(key: string | null): string | null {
   if (!key) return null;
@@ -62,7 +69,8 @@ export function setupImageUrl(key: string | null): string | null {
 }
 
 /** A value as the wizard shows it: numbers to at most three decimals,
- *  booleans as ✓/✗, nested objects flattened to `k v` pairs. */
+ *  booleans as ✓/✗, a parameter row (`{name, value}`) as `NAME = value`,
+ *  other nested objects flattened to `k v` pairs. */
 export function formatValue(v: unknown): string {
   if (v === null || v === undefined) return "—";
   if (typeof v === "number") return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(3)));
@@ -70,7 +78,10 @@ export function formatValue(v: unknown): string {
   if (typeof v === "string") return v;
   if (Array.isArray(v)) return v.map(formatValue).join(", ");
   if (typeof v === "object") {
-    return Object.entries(v)
+    const o = v as Record<string, unknown>;
+    const keys = Object.keys(o);
+    if (keys.length === 2 && typeof o.name === "string" && "value" in o) return `${o.name} = ${formatValue(o.value)}`;
+    return Object.entries(o)
       .map(([k, val]) => `${k} ${formatValue(val)}`)
       .join(" · ");
   }

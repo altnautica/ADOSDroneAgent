@@ -12594,5 +12594,111 @@
         "ADOS Pilot"
       ]
     }
+  },
+  {
+    "name": "goto_mission_detour",
+    "input": {
+      "pilot": {
+        "owner": "goto",
+        "vehicle_class": "multirotor",
+        "control_mode": "ados",
+        "profile": "normal",
+        "avoid": "bypass",
+        "fc_mode": 4,
+        "fc_mode_name": "GUIDED",
+        "armed": true,
+        "landed": false,
+        "avoid_state": "detour",
+        "goal_ned": [
+          18.25,
+          0.0,
+          -5.0
+        ],
+        "readiness": [],
+        "mission": {
+          "state": "paused",
+          "seq": 3,
+          "total": 6
+        },
+        "mission_detour": {
+          "seq": 3,
+          "target_ned": [
+            18.25,
+            0.0,
+            -5.0
+          ],
+          "since_ms": 1793960000000
+        }
+      },
+      "pilot_age_ms": 100,
+      "home_dist_m": null,
+      "local_pos": {
+        "x": 11.25,
+        "y": 0.0
+      },
+      "ar_eta_s": null,
+      "mode_detail": null,
+      "complete_age_ms": null
+    },
+    "expected": {
+      "rule": "goto",
+      "text": "Goto · 7 m",
+      "color": "goto",
+      "dim": false,
+      "button": null,
+      "secondary": [
+        "Routing round · WP 3",
+        "Avoiding",
+        "ADOS Pilot"
+      ]
+    }
+  },
+  {
+    "name": "goto_routed_return",
+    "input": {
+      "pilot": {
+        "owner": "goto",
+        "vehicle_class": "multirotor",
+        "control_mode": "ados",
+        "profile": "normal",
+        "avoid": "bypass",
+        "fc_mode": 4,
+        "fc_mode_name": "GUIDED",
+        "armed": true,
+        "landed": false,
+        "avoid_state": "clear",
+        "goal_ned": [
+          0.0,
+          0.0,
+          -5.0
+        ],
+        "readiness": [],
+        "return_route": {
+          "remaining_m": 37.6,
+          "straight_m": 24.2,
+          "since_ms": 1793960000000
+        }
+      },
+      "pilot_age_ms": 100,
+      "home_dist_m": 24.2,
+      "local_pos": {
+        "x": 24.0,
+        "y": 0.0
+      },
+      "ar_eta_s": null,
+      "mode_detail": null,
+      "complete_age_ms": null
+    },
+    "expected": {
+      "rule": "goto",
+      "text": "Goto · 24 m",
+      "color": "goto",
+      "dim": false,
+      "button": null,
+      "secondary": [
+        "Routing home · 38 m (straight 24 m)",
+        "ADOS Pilot"
+      ]
+    }
   }
 ]

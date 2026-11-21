@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import layout from "../cockpit-spec/layout.json";
 import { parsePilotState, type MissionStall, type PilotState } from "./cockpit-frames";
-import { gapSeqs, missionStallActions, missionStallOverlay, missionStallVoiceKey, stallShadowsBanner } from "./mission-stall";
+import { gapReasonText, gapSeqs, missionStallActions, missionStallOverlay, missionStallVoiceKey, stallShadowsBanner } from "./mission-stall";
+import { routeRoundPreview } from "./cockpit-mission";
 import { specText } from "./spec-text";
 import { pillAlerts } from "./status-pill";
 
@@ -151,6 +152,54 @@ describe("skipped waypoints", () => {
   it("sorts and dedupes, and reads none without a mission", () => {
     expect(gapSeqs({ gaps: [{ seq: 5, reason: null, atMs: null }, { seq: 2, reason: null, atMs: null }, { seq: 5, reason: null, atMs: null }] })).toEqual([2, 5]);
     expect(gapSeqs(null)).toEqual([]);
+  });
+
+  it("words every gap reason the pilot sends", () => {
+    expect(gapReasonText("unreachable_inside_obstacle")).toBe("Inside an obstacle");
+    expect(gapReasonText("unreachable_no_path")).toBe("No way there within 200 m");
+    expect(gapReasonText("stall_timeout")).toBe("No progress before the countdown");
+    expect(gapReasonText("stall_operator")).toBe("Skipped by the operator");
+    expect(gapReasonText("something_new")).toBe("something new");
+    expect(gapReasonText(null)).toBeNull();
+  });
+});
+
+describe("routing round", () => {
+  const detour = { seq: 3, targetNed: [18.25, 0, -5] as [number, number, number], sinceMs: 1 };
+  const routed = { remainingM: 38, straightM: 24, sinceMs: 1 };
+  const none = { missionStall: null, banner: null, missionDetour: null, returnRoute: null };
+
+  it("parses the detour and the routed return", () => {
+    const p = parsePilotState({ ...raw, mission_detour: { seq: 3, target_ned: [18.25, 0, -5], since_ms: 1 }, return_route: { remaining_m: 38, straight_m: 24, since_ms: 1 } })!;
+    expect(p.missionDetour).toEqual(detour);
+    expect(p.returnRoute).toEqual(routed);
+    expect(golden.missionDetour).toBeNull();
+    expect(golden.returnRoute).toBeNull();
+  });
+
+  it("speaks a detour as it begins or moves on, and a routed return once", () => {
+    expect(missionStallVoiceKey(none, { ...none, missionDetour: detour })).toBe("voice.mission_detour");
+    expect(missionStallVoiceKey({ ...none, missionDetour: detour }, { ...none, missionDetour: detour })).toBeNull();
+    expect(missionStallVoiceKey({ ...none, missionDetour: detour }, { ...none, missionDetour: { ...detour, seq: 4 } })).toBe("voice.mission_detour");
+    expect(missionStallVoiceKey(none, { ...none, returnRoute: routed })).toBe("voice.return_routed");
+    expect(missionStallVoiceKey({ ...none, returnRoute: routed }, { ...none, returnRoute: routed })).toBeNull();
+  });
+
+  it("speaks an unreachable waypoint on its banner", () => {
+    for (const textKey of ["pilot.banner.mission_wp_inside_obstacle", "pilot.banner.mission_wp_no_path"]) {
+      const b = { ...none, banner: { textKey, args: { wp: "4" }, untilMs: null } };
+      expect(missionStallVoiceKey(none, b)).toBe("voice.waypoint_unreachable");
+      expect(missionStallVoiceKey(b, b)).toBeNull();
+    }
+  });
+
+  it("previews the planned way round, or the detour's free point alone", () => {
+    const plan: [number, number][] = [[0, 0], [4, 3], [18.25, 0]];
+    expect(routeRoundPreview({ missionDetour: detour, returnRoute: null, planNed: plan })).toEqual({ kind: "detour", pathNe: plan, targetNe: [18.25, 0] });
+    expect(routeRoundPreview({ missionDetour: detour, returnRoute: null, planNed: [] })).toEqual({ kind: "detour", pathNe: [], targetNe: [18.25, 0] });
+    expect(routeRoundPreview({ missionDetour: null, returnRoute: routed, planNed: plan })).toEqual({ kind: "return", pathNe: plan, targetNe: null });
+    expect(routeRoundPreview({ missionDetour: null, returnRoute: routed, planNed: [] })).toBeNull();
+    expect(routeRoundPreview({ missionDetour: null, returnRoute: null, planNed: plan })).toBeNull();
   });
 });
 

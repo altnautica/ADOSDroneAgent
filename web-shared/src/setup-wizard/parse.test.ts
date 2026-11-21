@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { fcSetupUrls } from "./client";
 import { parseAction, parseFrame, parseStep, setupNeeded } from "./parse";
+import { formatValue, paramNote } from "./strings";
 
 const accel = {
   wizard: "ground",
@@ -56,6 +57,17 @@ describe("setup step parser ", () => {
 
   it("reports setup needed only with a status in hand", () => {
     expect(setupNeeded(null)).toBe(false);
+  });
+
+  it("lifts the profile's parameter rows out of args and words the backstop rows", () => {
+    const params = [{ name: "AVOID_ENABLE", value: 2 }, { name: "AVOID_MARGIN", value: 1.3 }, { name: "bad" }, { value: 1 }];
+    const s = parseStep({ ...accel, step: "ados_profile", args: { params } })!;
+    expect(s.params).toEqual([{ name: "AVOID_ENABLE", value: 2 }, { name: "AVOID_MARGIN", value: 1.3 }]);
+    expect(s.args.params).toBeUndefined();
+    expect(parseStep(accel)!.params).toEqual([]);
+    for (const name of ["AVOID_ENABLE", "AVOID_MARGIN", "AVOID_BEHAVE", "PRX1_TYPE", "OA_TYPE"]) expect(paramNote("ados_profile", name)).toBeTruthy();
+    expect(paramNote("ados_profile", "GUID_TIMEOUT")).toBeNull();
+    expect(formatValue([{ name: "AVOID_ENABLE", value: 2 }, { name: "AVOID_MARGIN", value: 1.3 }])).toBe("AVOID_ENABLE = 2, AVOID_MARGIN = 1.3");
   });
 });
 

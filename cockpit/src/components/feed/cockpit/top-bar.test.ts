@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { TopBar } from "@/components/feed/cockpit/top-bar";
 import { linkCell, TOP_BAR_LINK } from "@/lib/flight-layout";
-import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { parsePilotState } from "@/shared/hud/cockpit-frames";
 import { INITIAL_FLIGHT_STATE, useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -39,8 +39,8 @@ afterEach(async () => {
 describe("the top bar's link cell", () => {
   it("a ground station with fresh pilot frames and no heartbeat age reads a live link", async () => {
     // A ground station's status carries no heartbeat age; none is set here.
-    const data = { owner: "idle", controlMode: "ados", profile: "normal", avoid: "brake", armed: false, landed: true, vehicleClass: "multirotor", readiness: [], planNed: [] };
-    useNavStreamStore.setState({ pilot: { data: data as unknown as PilotState, at: Date.now() - 300 } });
+    const data = parsePilotState({ owner: "idle", control_mode: "ados", profile: "normal", avoid: "brake", armed: false, landed: true, vehicle_class: "multirotor", readiness: [], plan_ned: [] })!;
+    useNavStreamStore.setState({ pilot: { data, at: Date.now() - 300 } });
     const link = await render();
     expect(link.dataset.severity).toBe("ok");
     expect(link.textContent).not.toContain(linkCell(null).text);

@@ -105,10 +105,25 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                 seq: f(m, "seq").or_else(|| f(m, "current_seq")),
                 total: f(m, "total"),
                 landing_seq: m.get("landing_seq").and_then(Value::as_bool) == Some(true),
+                gaps: m
+                    .get("gaps")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|g| serde_json::from_value(g.clone()).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }),
         banner: d.get("banner").and_then(banner),
         rth_countdown_s: f(d, "rth_countdown_s"),
         mission_stall: d.get("mission_stall").and_then(mission_stall),
+        mission_detour: d
+            .get("mission_detour")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        return_route: d
+            .get("return_route")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         agl_m: f(d, "agl_m"),
         agl_source: one_of(d, "agl_source", &["rangefinder", "home"]),
         sensors: d.get("sensors").and_then(SensorHealth::from_value),

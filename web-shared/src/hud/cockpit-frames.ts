@@ -38,16 +38,8 @@ import {
   type SpeedCap,
   type StickCommand,
 } from "./pilot-fields";
-import {
-  PLACE_CLASSES,
-  parseMission,
-  parseMissionStall,
-  parseRouteCheck,
-  type MissionStall,
-  type MissionState,
-  type PlaceClass,
-  type RouteCheck,
-} from "./cockpit-mission";
+import { PLACE_CLASSES, parseMission, parseMissionDetour, parseMissionStall, parseReturnRoute, parseRouteCheck } from "./cockpit-mission";
+import type { MissionDetour, MissionStall, MissionState, PlaceClass, ReturnRoute, RouteCheck } from "./cockpit-mission";
 import { parseSimClock, type SimClock } from "./sim-clock";
 
 export type { BatteryReserve, FcStatusText, OverheadAhead, PositionUnverified, ProfileLimits, Sensing, SpeedCap, StickCommand } from "./pilot-fields";
@@ -61,20 +53,19 @@ export {
   type DepthFrame,
   type ObstaclesFrame,
 } from "./cockpit-grids";
-export {
-  MISSION_STATES,
-  PLACE_CLASSES,
-  parseMission,
-  parseMissionStall,
-  parseRouteCheck,
-  type MissionGap,
-  type MissionStall,
-  type MissionState,
-  type MissionStateName,
-  type MissionTarget,
-  type PlaceClass,
-  type RouteCheck,
-  type RoutePinch,
+export { MISSION_STATES, PLACE_CLASSES, parseMission, parseMissionDetour, parseMissionStall, parseReturnRoute, parseRouteCheck, routeRoundPreview } from "./cockpit-mission";
+export type {
+  MissionDetour,
+  MissionGap,
+  MissionStall,
+  MissionState,
+  MissionStateName,
+  MissionTarget,
+  PlaceClass,
+  ReturnRoute,
+  RouteCheck,
+  RoutePinch,
+  RouteRoundPreview,
 } from "./cockpit-mission";
 export { parseSurfacesFrame, type SurfaceZone, type SurfacesFrame } from "./cockpit-surfaces";
 
@@ -212,6 +203,10 @@ export interface PilotState {
   rthCountdownS: number | null;
   /** A mission or return that stopped making progress; null while none. */
   missionStall: MissionStall | null;
+  /** A detour round a blocked mission leg in flight; null while none. */
+  missionDetour: MissionDetour | null;
+  /** A return home the pilot routes round a blocked one; null while none. */
+  returnRoute: ReturnRoute | null;
   /** Pilot actions this agent accepts from a surface (e.g. `goto`). */
   surfaceOps: string[];
   /** Height above ground, from a fresh downward rangefinder or the EKF
@@ -248,7 +243,7 @@ export interface PilotState {
   /** `absent` while the drone is declared to fly with no RC transmitter;
    *  `present` from an agent that omits it. */
   rcReceiver: "absent" | "present";
-  /** The route check, while confined with a mission loaded; else null. */
+  /** The FC mission's route check (any place class); else null. */
   routeCheck: RouteCheck | null;
   /** The raw `sensors` block (parse with sensor-health); null when absent. */
   sensors: unknown;
@@ -345,6 +340,8 @@ export function parsePilotState(raw: unknown): PilotState | null {
         : null,
     rthCountdownS: num(p.rth_countdown_s),
     missionStall: parseMissionStall(p.mission_stall),
+    missionDetour: parseMissionDetour(p.mission_detour),
+    returnRoute: parseReturnRoute(p.return_route),
     surfaceOps: Array.isArray(p.surface_ops) ? p.surface_ops.filter((o): o is string => typeof o === "string") : [],
     aglM: num(p.agl_m),
     aglSource: oneOf(p.agl_source, ["rangefinder", "home"] as const),

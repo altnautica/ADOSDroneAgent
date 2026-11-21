@@ -28,7 +28,7 @@
     "land": { "copter": [9], "plane": [20] }
   },
   "secondary": {
-    "order": ["fc_failsafe", "clearance", "input_age", "pose_uncertainty", "speed_cap", "command_limit", "mission_paused_line", "hold_reason", "avoid_state", "control_mode", "h_speed", "v_speed"],
+    "order": ["fc_failsafe", "clearance", "input_age", "pose_uncertainty", "speed_cap", "command_limit", "route_round", "mission_paused_line", "hold_reason", "avoid_state", "control_mode", "h_speed", "v_speed"],
     "profile_limit": { "text_key": "chip.stick.limit", "note": "{profile_limit} of a rule: the horizontal limit the sticks fly at (profile_limits.v_h_mps, one decimal at most); empty while the agent sends no limits." },
     "clearance": { "text_key": "chip.stick.clearance", "near_factor": 2.0, "near_color": "avoiding", "inside_margin_color": "blocked", "note": "Any owner: min_clearance_m (one decimal) while under near_factor × the margin (profile_limits.margin_m, else route_check.margin_m); inside the margin in the second colour. Hidden with no margin known." },
     "input_age": { "text_key": "chip.stick.input_age", "over_ms": 100, "color": "avoiding", "note": "stick.input_age_ms, while the sticks fly and it is over over_ms." },
@@ -37,6 +37,7 @@
     "fc_failsafe": { "text": "Failsafe", "color": "blocked" },
     "speed_cap": { "text": "GNSS-denied: {v} m/s max", "color": "avoiding", "text_key": "pilot.speed_cap.gnss_denied" },
     "pose_uncertainty": { "text_key": "chip.pose_uncertainty", "color": "avoiding", "note": "Any owner: pose_uncertainty_m (one decimal) while the pilot publishes it: the position is uncertain but within the pilot's max_pose_sigma_m, so it flies on slowed (speed_cap position-uncertain says how slow)." },
+    "route_round": { "detour_key": "chip.route_round.detour", "return_key": "chip.route_round.return", "color": "avoiding", "note": "Any owner: while mission_detour is set, the detour line with wp = its seq; else while return_route is set, the return line with remaining_m and straight_m rounded to whole metres." },
     "command_limit": {
       "owners": ["skill", "goto", "pilot"],
       "skip": ["speed", "nav_cap", "shaper", "hold", "position_uncertain"],

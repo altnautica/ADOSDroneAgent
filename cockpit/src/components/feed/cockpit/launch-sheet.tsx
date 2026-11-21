@@ -9,8 +9,8 @@
 // strip, with a supervised lift-off's own line (what it does on the ground,
 // or why it stopped there), and Abort brakes to a hold (or disarms while
 // still on the ground).
-// In the confined class the pilot's route check of the loaded mission shows
-// below the place. Ranges, defaults and texts come from the spec.
+// The pilot's route check of the loaded mission shows below the place, in
+// either class. Ranges, defaults and texts come from the spec.
 
 import { useEffect, useMemo, useState } from "react";
 
@@ -242,7 +242,7 @@ export function LaunchSheet() {
           <p className="text-[0.78rem] text-muted-foreground" data-testid="launch-place-explain">
             {placeExplainLine(place, pilot, margins)}
           </p>
-          {place === "confined" ? <RouteCheckCard check={pilot?.routeCheck ?? null} className="rounded-lg border border-border" /> : null}
+          <RouteCheckCard check={pilot?.routeCheck ?? null} className="rounded-lg border border-border" />
         </div>
         {plane ? (
           <p className="text-[0.82rem] text-muted-foreground">{specText("flow.launch.plane_alt")}</p>

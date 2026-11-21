@@ -59,8 +59,15 @@ export interface StepInput {
   label_key: string;
 }
 
+/** A flight-controller parameter a step will write (`step.args.params`, the
+ *  ADOS safety profile's rows), with the value it writes. */
+export interface ParamRow {
+  name: string;
+  value: SetupValue;
+}
+
 /** One wizard step. `args` holds interpolation values for the text keys;
- *  `inputs` is lifted out of `args.inputs`. */
+ *  `inputs` and `params` are lifted out of `args.inputs` and `args.params`. */
 export interface SetupStep {
   wizard: string;
   step: string;
@@ -68,6 +75,7 @@ export interface SetupStep {
   body_key: string;
   args: Record<string, SetupValue>;
   inputs: StepInput[];
+  params: ParamRow[];
   image: string | null;
   state: StepState;
   progress: number | null;

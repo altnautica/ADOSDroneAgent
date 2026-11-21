@@ -22,7 +22,7 @@ mod secondary;
 mod words;
 
 pub use secondary::chip_secondary;
-use secondary::{Clearance, CommandLimit, InputAge, Keyed, KeyedPart, SpeedPart};
+use secondary::{Clearance, CommandLimit, InputAge, Keyed, KeyedPart, RouteRound, SpeedPart};
 use words::{fill, word_label};
 
 /// The spec file, byte for byte.
@@ -86,6 +86,7 @@ struct Secondary {
     fc_failsafe: Styled,
     speed_cap: Styled,
     pose_uncertainty: KeyedPart,
+    route_round: RouteRound,
     mission_paused_line: Conditional,
     avoid_state: BTreeMap<String, Option<Styled>>,
     hold_reason: Styled,
@@ -191,6 +192,10 @@ pub struct ChipFacts {
     /// The position's one-sigma uncertainty (m) while the pilot flies on it
     /// slowed (`pose_uncertainty_m`).
     pub pose_uncertainty_m: Option<f64>,
+    /// The mission item a detour round a blocked leg resumes at.
+    pub detour_seq: Option<u32>,
+    /// A routed return: the way left and the straight line home, metres.
+    pub return_route: Option<(f64, f64)>,
     /// The horizontal limit the sticks fly at (m/s), from `profile_limits`.
     pub profile_limit_mps: Option<f64>,
     /// The vehicle's horizontal and vertical (+ up) speed (m/s), when the
@@ -420,6 +425,11 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         speed_cap_reason: p.speed_cap_reason.clone(),
         avoid_state: p.avoid_state.clone(),
         pose_uncertainty_m: p.pose_uncertainty_m,
+        detour_seq: p.mission_detour.as_ref().map(|d| d.seq),
+        return_route: p
+            .return_route
+            .as_ref()
+            .map(|r| (f64::from(r.remaining_m), f64::from(r.straight_m))),
         launch_step: p.launch_step.clone(),
         fc_failsafe: p.fc_failsafe,
         position_unverified: p.position_unverified.as_ref().map(|u| match &u.detail {

@@ -2,8 +2,9 @@
  * @module hud/cockpit-mission
  * @description The mission parts of the cockpit v2 `pilot` kind, parsed apart
  * from `cockpit-frames.ts`: the agent-computed mission state with its target
- * and coverage gaps, the mission stall, and the confined-place profile's place
- * class and route check. `cockpit-frames.ts` re-exports everything here.
+ * and coverage gaps, the mission stall, the mission detour and routed return
+ * with the way round a map previews, and the place class and route check.
+ * `cockpit-frames.ts` re-exports everything here.
  *
  * Dependency-free on purpose: Mission Control copies this file byte for byte.
  *
@@ -52,7 +53,9 @@ export interface MissionTarget {
 /** One skipped mission item (`mission.gaps[]`): a coverage gap to re-fly. */
 export interface MissionGap {
   seq: number;
-  /** `stall_timeout` (skipped after the countdown) or `stall_operator`. */
+  /** `stall_timeout` (skipped after the countdown), `stall_operator`, or
+   *  proven unreachable at once: `unreachable_inside_obstacle`,
+   *  `unreachable_no_path` (`gapReasonText` words each). */
   reason: string | null;
   atMs: number | null;
 }
@@ -148,10 +151,73 @@ export function parseMissionStall(raw: unknown): MissionStall | null {
   };
 }
 
-// ── place class and route check (the confined-place profile) ───────────────────
+// ── routing round (avoid mode bypass) ───────────────────────────────────────
 
-/** The operator's place class: `confined` flies tighter to walls, slower
- *  near the limit, and checks the mission route before and during flight. */
+/** A detour round a blocked mission leg (`mission_detour`): the FC is in
+ *  GUIDED while the pilot flies its planner to the leg's next free point,
+ *  then it resumes AUTO at mission item `seq`. */
+export interface MissionDetour {
+  seq: number;
+  /** The leg's next free point, local NED metres. */
+  targetNed: [number, number, number];
+  /** Wall-clock epoch ms the detour began. */
+  sinceMs: number | null;
+}
+
+export function parseMissionDetour(raw: unknown): MissionDetour | null {
+  const d = obj(raw);
+  const seq = d ? num(d.seq) : null;
+  const targetNed = d ? pt3(d.target_ned) : null;
+  if (!d || seq === null || !targetNed) return null;
+  return { seq, targetNed, sinceMs: num(d.since_ms) };
+}
+
+/** A return home the pilot flies itself round what blocked the FC's own
+ *  (`return_route`); the low-battery reserve counts `remainingM`. */
+export interface ReturnRoute {
+  /** The planned way still to fly home, horizontal metres. */
+  remainingM: number;
+  /** The straight line home, horizontal metres. */
+  straightM: number;
+  sinceMs: number | null;
+}
+
+export function parseReturnRoute(raw: unknown): ReturnRoute | null {
+  const r = obj(raw);
+  const remainingM = r ? num(r.remaining_m) : null;
+  const straightM = r ? num(r.straight_m) : null;
+  if (!r || remainingM === null || straightM === null) return null;
+  return { remainingM, straightM, sinceMs: num(r.since_ms) };
+}
+
+/** The way round a surface previews on its map while the pilot routes round
+ *  (a mission detour or a routed return): the pilot's planned path
+ *  (`plan_ned`, north/east metres), and the detour's free point it resumes
+ *  the mission at. Null while the pilot routes round nothing or plans no
+ *  path and names no point. */
+export interface RouteRoundPreview {
+  kind: "detour" | "return";
+  pathNe: [number, number][];
+  targetNe: [number, number] | null;
+}
+
+export function routeRoundPreview(p: {
+  missionDetour: MissionDetour | null;
+  returnRoute: ReturnRoute | null;
+  planNed: [number, number][];
+}): RouteRoundPreview | null {
+  const kind = p.missionDetour ? "detour" : p.returnRoute ? "return" : null;
+  if (!kind) return null;
+  const t = p.missionDetour?.targetNed ?? null;
+  const targetNe: [number, number] | null = t ? [t[0], t[1]] : null;
+  if (p.planNed.length < 2 && !targetNe) return null;
+  return { kind, pathNe: p.planNed.length >= 2 ? p.planNed : [], targetNe };
+}
+
+// ── place class and route check ─────────────────────────────────────────────
+
+/** The operator's place class: `confined` flies tighter to walls and slower
+ *  near the limit. */
 export const PLACE_CLASSES = ["open", "confined"] as const;
 export type PlaceClass = (typeof PLACE_CLASSES)[number];
 
@@ -166,8 +232,8 @@ export interface RoutePinch {
   requiredM: number;
 }
 
-/** The pilot's check of the loaded mission against its occupancy grid,
- *  present only in the confined class with a mission loaded. */
+/** The pilot's check of the loaded mission against its occupancy grid, in
+ *  every place class while the FC holds a mission with at least one leg. */
 export interface RouteCheck {
   state: "feasible" | "unverified" | "infeasible";
   /** Clearance the route must keep: the margin plus the pose uncertainty. */
