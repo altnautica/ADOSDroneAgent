@@ -108,6 +108,8 @@ impl Pilot {
                         self.fc
                             .pos_reset
                             .cue(crate::fc::pos_reset::ResetCause::SourceSet, now_ms);
+                        // It may name a step already seen.
+                        self.check_pos_reset(now_ms);
                     }
                     self.nav_set = set;
                 }

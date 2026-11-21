@@ -131,11 +131,11 @@ pub struct Fc {
     pub ap_guided: bool,
     /// The estimate's steps from [`Fc::ekf_reset`]: the copter truly is at
     /// `pos − frame_shift` ([`Fc::truth`]).
-    pub frame_shift: [f32; 2],
+    pub frame_shift: [f32; 3],
     /// ArduPilot's position-controller offset after a reset in a position
     /// submode (`EKFResetMethod::MoveVehicle`), slewed out at the position
-    /// controller's speed.
-    offset: [f32; 2],
+    /// controller's speeds.
+    offset: [f32; 3],
     /// The velocity submode's integrated position target.
     vel_target: Option<[f32; 2]>,
     hold: [f32; 3],
@@ -175,8 +175,8 @@ impl Fc {
             gust_mps: rng.range(0.05, 0.25),
             sp: None,
             ap_guided: false,
-            frame_shift: [0.0; 2],
-            offset: [0.0; 2],
+            frame_shift: [0.0; 3],
+            offset: [0.0; 3],
             vel_target: None,
             hold: [0.0; 3],
             takeoff_alt: None,
@@ -244,7 +244,7 @@ impl Fc {
             self.mode = mode;
             self.hold = self.stop_point();
             self.sp = None;
-            self.offset = [0.0; 2];
+            self.offset = [0.0; 3];
             self.vel_target = None;
             if mode == copter::AUTO && self.seq == 0 && !self.mission.is_empty() {
                 self.seq = 1;
@@ -254,31 +254,28 @@ impl Fc {
 
     /// Where the copter truly is ([`Fc::frame_shift`]).
     pub fn truth(&self) -> [f32; 3] {
-        [
-            self.pos[0] - self.frame_shift[0],
-            self.pos[1] - self.frame_shift[1],
-            self.pos[2],
-        ]
+        std::array::from_fn(|i| self.pos[i] - self.frame_shift[i])
     }
 
-    /// The EKF's horizontal estimate steps by `d` while the copter stays
-    /// where it is (a source-set change, the origin set in flight, a GPS
-    /// glitch). In GUIDED's position submodes ArduPilot keeps the absolute
-    /// target and flies the copter to it, the step slewed in through the
-    /// offset (`ModeGuided::move_vehicle_on_ekf_reset`); the velocity
-    /// submode, the take-off and the other modes move their targets with the
-    /// estimate (`AC_PosControl::NE_handle_ekf_reset`). Needs
+    /// The EKF's estimate steps by `d` (north, east, down) while the copter
+    /// stays where it is (a source-set change, the origin set in flight, a
+    /// GPS glitch, a height source changed). In GUIDED's position submodes
+    /// ArduPilot keeps the absolute target and flies the copter to it, the
+    /// step slewed in through the offset on each axis
+    /// (`ModeGuided::move_vehicle_on_ekf_reset`); the velocity submode, the
+    /// take-off and the other modes move their targets with the estimate
+    /// (`AC_PosControl::NE_handle_ekf_reset`, `D_handle_ekf_reset`). Needs
     /// [`Fc::ap_guided`].
-    pub fn ekf_reset(&mut self, d: [f32; 2]) {
+    pub fn ekf_reset(&mut self, d: [f32; 3]) {
         assert!(self.ap_guided, "a reset is modelled on ArduPilot's GUIDED");
-        self.pos = [self.pos[0] + d[0], self.pos[1] + d[1], self.pos[2]];
-        self.frame_shift = [self.frame_shift[0] + d[0], self.frame_shift[1] + d[1]];
+        self.pos = std::array::from_fn(|i| self.pos[i] + d[i]);
+        self.frame_shift = std::array::from_fn(|i| self.frame_shift[i] + d[i]);
         let pos_submode =
             self.mode == copter::GUIDED && self.takeoff_alt.is_none() && self.vel_target.is_none();
         if pos_submode {
-            self.offset = [self.offset[0] + d[0], self.offset[1] + d[1]];
+            self.offset = std::array::from_fn(|i| self.offset[i] + d[i]);
         } else {
-            self.hold = [self.hold[0] + d[0], self.hold[1] + d[1], self.hold[2]];
+            self.hold = std::array::from_fn(|i| self.hold[i] + d[i]);
             if let Some(t) = self.vel_target.as_mut() {
                 *t = [t[0] + d[0], t[1] + d[1]];
             }
@@ -292,7 +289,7 @@ impl Fc {
         let pos_sp = s.type_mask.bits() & 0b111 == 0;
         let was_pos = self.vel_target.is_none();
         if pos_sp != was_pos {
-            self.offset = [0.0; 2];
+            self.offset = [0.0; 3];
         }
         self.vel_target = match (pos_sp, self.vel_target) {
             (true, _) => None,
@@ -301,15 +298,17 @@ impl Fc {
         };
     }
 
-    /// One tick of [`Fc::ap_guided`]'s GUIDED: the offset slews out, and the
-    /// velocity target's position moves on its velocity (none past the
-    /// timeout).
+    /// One tick of [`Fc::ap_guided`]'s GUIDED: the offset slews out at the
+    /// position controller's speeds, and the velocity target's position
+    /// moves on its velocity (none past the timeout).
     fn ap_guided_step(&mut self, now: u64, dt: f32) {
         let n = self.offset[0].hypot(self.offset[1]);
         if n > 0.0 {
             let k = (n - MAX_H_MPS * dt).max(0.0) / n;
-            self.offset = [self.offset[0] * k, self.offset[1] * k];
+            self.offset = [self.offset[0] * k, self.offset[1] * k, self.offset[2]];
         }
+        let z = self.offset[2];
+        self.offset[2] = z - z.clamp(-MAX_DOWN_MPS * dt, MAX_DOWN_MPS * dt);
         if let (Some(t), Some((at, s))) = (self.vel_target.as_mut(), &self.sp) {
             if now.saturating_sub(*at) <= SETPOINT_TIMEOUT_MS {
                 *t = [t[0] + s.vx * dt, t[1] + s.vy * dt];
@@ -465,7 +464,7 @@ impl Fc {
                         if mask & 0b111 == 0 {
                             v[0] += (s.x + self.offset[0] - self.pos[0]) * POS_GAIN;
                             v[1] += (s.y + self.offset[1] - self.pos[1]) * POS_GAIN;
-                            v[2] += (s.z - self.pos[2]) * POS_GAIN;
+                            v[2] += (s.z + self.offset[2] - self.pos[2]) * POS_GAIN;
                         } else if let Some(t) = self.vel_target {
                             v[0] += (t[0] - self.pos[0]) * POS_GAIN;
                             v[1] += (t[1] - self.pos[1]) * POS_GAIN;
@@ -476,7 +475,7 @@ impl Fc {
                         let to = [
                             self.hold[0] + self.offset[0],
                             self.hold[1] + self.offset[1],
-                            self.hold[2],
+                            self.hold[2] + self.offset[2],
                         ];
                         toward(self.pos, to, MAX_H_MPS)
                     }

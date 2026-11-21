@@ -39,6 +39,14 @@ impl Trail {
         self.ret.clear();
     }
 
+    /// The FC's estimate stepped by `d` (an EKF position reset) while the
+    /// vehicle stayed put: the flown path moves with it.
+    pub fn shift(&mut self, d: V2) {
+        for p in self.pts.iter_mut().chain(self.ret.iter_mut()) {
+            *p = geo::add(*p, d);
+        }
+    }
+
     /// Keep `pos` once it is [`TRAIL_STEP_M`] from the last point kept; the
     /// return path keeps it [`RET_STEP_M`] on, cut back to an older point
     /// within `accuracy_m` (a loop SmartRTL would not fly back round).

@@ -15,10 +15,11 @@
 //! pause, resume and stalled-waypoint skip; and follow flights through
 //! trunks ([`forest`]): a corridor between trunk rows, a gap too narrow to
 //! enter, a held detour round a trunk and a seeded random stand; and FC
-//! position resets ([`pos_reset`]): a 21 m EKF step under the pilot's hold
-//! and under a GUIDED target nobody streams, a GPS glitch's smaller step,
-//! and fast flight and a stepped clock that are none. Latency, stick feel
-//! and throughput stay with the real-time World Engine benches.
+//! position resets ([`pos_reset`]): a 21 m EKF step (with a height step)
+//! under the pilot's hold and under a GUIDED target nobody streams, a GPS
+//! glitch's smaller step, and fast flight, climbs and a stepped clock that
+//! are none. Latency, stick feel and throughput stay with the real-time
+//! World Engine benches.
 //! The shaper pins ([`shaper_pins`]) hold the trajectories of goals, holds
 //! and landings to their recordings.
 //!

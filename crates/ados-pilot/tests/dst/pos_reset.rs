@@ -30,14 +30,14 @@ const BANNER: &str = "pilot.banner.position_reset";
 /// How far the copter may wander, and its targets lie, around the reset.
 const LEASH_M: f32 = 1.0;
 
-/// A seeded step of `len` m in any direction.
-fn step_of(rng: &mut Rng, len: f32) -> [f32; 2] {
+/// A seeded horizontal step of `len` m in any direction, and `down` m.
+fn step_of(rng: &mut Rng, len: f32, down: f32) -> [f32; 3] {
     let a = rng.range(0.0, std::f32::consts::TAU);
-    [len * a.cos(), len * a.sin()]
+    [len * a.cos(), len * a.sin(), down]
 }
 
 /// Where the dash goes: back along the step from where the copter is.
-fn trunk_on_the_dash(at: [f32; 3], d: [f32; 2]) -> [f32; 2] {
+fn trunk_on_the_dash(at: [f32; 3], d: [f32; 3]) -> [f32; 2] {
     let k = TRUNK_ALONG_M / JUMP_M;
     [at[0] - d[0] * k, at[1] - d[1] * k]
 }
@@ -61,11 +61,11 @@ fn text(t: &str) -> MavMessage {
 }
 
 /// Fly `ms` after a reset of `d` taken now, tick by tick: the copter stays
-/// within [`LEASH_M`] of where it truly was, every position target the
-/// pilot sends lies within it of the copter's estimate, and no setpoint asks
-/// for more than `v_max`. Whether the pilot named the reset in its banner,
-/// with that cause.
-fn ride_out(s: &mut Sim, d: [f32; 2], ms: u64, v_max: f32) -> Option<String> {
+/// within [`LEASH_M`] of where it truly was (height too), every position
+/// target the pilot sends lies within it of the copter's estimate, and no
+/// setpoint asks for more than `v_max`. Whether the pilot named the reset in
+/// its banner, with that cause.
+fn ride_out(s: &mut Sim, d: [f32; 3], ms: u64, v_max: f32) -> Option<String> {
     let t0 = s.fc.truth();
     s.fc.ekf_reset(d);
     let mut cause = None;
@@ -75,9 +75,10 @@ fn ride_out(s: &mut Sim, d: [f32; 2], ms: u64, v_max: f32) -> Option<String> {
         s.step();
         let t = s.fc.truth();
         let wander = (t[0] - t0[0]).hypot(t[1] - t0[1]);
+        let climb = (t[2] - t0[2]).abs();
         assert!(
-            wander <= LEASH_M,
-            "{}: flew {wander} m at {}",
+            wander <= LEASH_M && climb <= LEASH_M,
+            "{}: flew {wander} m, {climb} m up or down at {}",
             s.name,
             s.now
         );
@@ -87,7 +88,12 @@ fn ride_out(s: &mut Sim, d: [f32; 2], ms: u64, v_max: f32) -> Option<String> {
             };
             if sp.type_mask.bits() & 0b111 == 0 {
                 let off = (sp.x - s.fc.pos[0]).hypot(sp.y - s.fc.pos[1]);
-                assert!(off <= LEASH_M, "{}: target {off} m off at {at}", s.name);
+                let off_d = (sp.z - s.fc.pos[2]).abs();
+                assert!(
+                    off <= LEASH_M && off_d <= LEASH_M,
+                    "{}: target {off} m, {off_d} m off at {at}",
+                    s.name
+                );
             }
             let v = sp.vx.hypot(sp.vy);
             assert!(
@@ -129,11 +135,13 @@ fn hover(name: &'static str, seed: u64, settings: impl FnOnce(&mut Settings)) ->
     s
 }
 
-/// A 21 m reset in the pilot's own hold: the copter holds where it is, the
-/// hold given again at the copter, `hold_reason` `position-reset`.
+/// A 21 m reset, with up to 1.5 m of height, in the pilot's own hold: the
+/// copter holds where it is, the hold given again at the copter,
+/// `hold_reason` `position-reset`.
 pub fn reset_hold(seed: u64) -> Sim {
     let mut s = hover("reset_hold", seed, |_| {});
-    let d = step_of(&mut s.rng, JUMP_M);
+    let down = s.rng.range(-1.5, 1.5);
+    let d = step_of(&mut s.rng, JUMP_M, down);
     s.stand = vec![(trunk_on_the_dash(s.fc.truth(), d), TRUNK_R_M)];
     s.run(4_000);
     let v_pre = pre_speed(&s, 2_000);
@@ -155,7 +163,8 @@ pub fn reset_idle(seed: u64) -> Sim {
     });
     s.fc_frame(ack_reposition());
     assert_eq!(s.p.owner(), Owner::FcMode);
-    let d = step_of(&mut s.rng, JUMP_M);
+    let down = s.rng.range(-1.5, 1.5);
+    let d = step_of(&mut s.rng, JUMP_M, down);
     s.stand = vec![(trunk_on_the_dash(s.fc.truth(), d), TRUNK_R_M)];
     s.run(5_000);
     let from = s.sent.len();
@@ -187,7 +196,7 @@ pub fn reset_glitch(seed: u64) -> Sim {
     let mut s = hover("reset_glitch", seed, |_| {});
     s.run(2_000);
     let len = s.rng.range(1.0, 1.8);
-    let d = step_of(&mut s.rng, len);
+    let d = step_of(&mut s.rng, len, 0.0);
     s.fc_frame(text("GPS Glitch or Compass error"));
     let wait = s.rng.range(200.0, 3_000.0) as u64;
     s.run(wait);
@@ -216,8 +225,8 @@ fn saw_reset(s: &mut Sim, ms: u64) -> bool {
     seen
 }
 
-/// Full sticks out, a hard reversal, a turn across, then a bench clock
-/// stepped 30 s on with the copter 200 m on: no reset.
+/// Full sticks out, a hard reversal, a turn across, a climb and a descent,
+/// then a bench clock stepped 30 s on with the copter 200 m on: no reset.
 pub fn no_false_reset(seed: u64) -> Sim {
     let mut s = Sim::new("no_false_reset", seed, |st| {
         st.pilot.avoid = ados_protocol::pilot::AvoidMode::Off;
@@ -226,6 +235,17 @@ pub fn no_false_reset(seed: u64) -> Sim {
     launch_to_hold(&mut s, 5.0);
     let ms = s.rng.range(5_000.0, 8_000.0) as u64;
     let mut seen = false;
+    for axes in [
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0, 1.0, 0.0],
+    ] {
+        s.sticks = Some([0.0; 4]);
+        seen |= saw_reset(&mut s, 800);
+        s.sticks = Some(axes);
+        seen |= saw_reset(&mut s, 2_500);
+        assert!(s.fc.vel[2].abs() > 0.5, "climbing: {:?}", s.fc.vel);
+    }
     for axes in [
         [0.0, 1.0, 0.0, 0.0],
         [0.0, -1.0, 0.0, 0.0],
@@ -271,7 +291,7 @@ pub fn fc_flies_the_reset_alone(seed: u64) {
         fc.step(now, 0.02, &mut rng, false);
     }
     let t0 = fc.truth();
-    let d = step_of(&mut rng, JUMP_M);
+    let d = step_of(&mut rng, JUMP_M, 0.0);
     let trunk = trunk_on_the_dash(t0, d);
     fc.ekf_reset(d);
     let (mut peak, mut nearest) = (0.0f32, f32::INFINITY);

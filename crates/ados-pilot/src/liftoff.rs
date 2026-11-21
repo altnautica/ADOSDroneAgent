@@ -614,6 +614,21 @@ impl Liftoff {
         matches!(self.phase, Phase::Hold { .. })
     }
 
+    /// The FC's estimate stepped by `d` (north, east, down; an EKF position
+    /// reset) while the airframe stayed put: the take-off point and the
+    /// position target move with it.
+    pub fn rebase(&mut self, d: [f32; 3]) {
+        if let Some(s) = self.start.as_mut() {
+            s.n += d[0];
+            s.e += d[1];
+            s.d += d[2];
+        }
+        if let Phase::Hold { ne, zt, .. } = &mut self.phase {
+            *ne = [ne[0] + d[0], ne[1] + d[1]];
+            *zt += d[2];
+        }
+    }
+
     /// What it found at lift-off or at a saturation stop, once.
     pub fn take_outcome(&mut self) -> Option<LiftoffOutcome> {
         self.outcome.take()

@@ -22,6 +22,7 @@
 //! (or the pilot its lift-off), neither of which a reset moves: only the
 //! pilot's frame moves, and a goto waiting after the take-off holds instead.
 
+use ados_protocol::mavlink::ardupilotmega::MavCmd;
 use ados_protocol::pilot::{Owner, VehicleClass};
 use serde_json::json;
 
@@ -30,6 +31,9 @@ use crate::fc::pos_reset::PosReset;
 use crate::fc::MASK_VELOCITY;
 use crate::flows::{banner, LaunchStep};
 use crate::geo;
+
+/// HOME_POSITION's message id, asked for again after a reset.
+const MSG_HOME_POSITION: f32 = 242.0;
 
 /// `hold_reason` while the pilot holds after an FC position reset.
 pub const HOLD_POSITION_RESET: &str = "position-reset";
@@ -44,7 +48,7 @@ impl Pilot {
 
     fn on_pos_reset(&mut self, r: PosReset, now_ms: u64) {
         let d = r.shift;
-        let shift_m = geo::norm(d);
+        let shift_m = d.iter().map(|v| v * v).sum::<f32>().sqrt();
         self.rebase(d, now_ms);
         let owner = self.owner();
         let airborne = self.fc.armed && !self.fc.landed();
@@ -60,6 +64,7 @@ impl Pilot {
             cause = r.cause.code(),
             shift_n = d[0],
             shift_e = d[1],
+            shift_d = d[2],
             shift_m,
             owner = ?owner,
             acts,
@@ -68,17 +73,25 @@ impl Pilot {
         if !acts {
             return;
         }
-        let taking_off = self.launch.as_mut().is_some_and(|l| {
+        // The FC's own take-off (GUIDED's take-off submode) and the
+        // supervised lift-off's attitude targets fly no position target a
+        // reset moves; the lift-off's climb after its hand-over does.
+        let fc_takes_off = self.launch.as_mut().is_some_and(|l| {
             if l.after == "goto" {
                 l.after = "hold".into();
                 l.goto = None;
             }
+            let positioned = l
+                .supervised
+                .as_ref()
+                .and_then(|s| s.liftoff.as_ref())
+                .is_some_and(|lo| lo.handed_over());
             matches!(
                 l.step,
                 LaunchStep::Checks | LaunchStep::Arm | LaunchStep::Takeoff
-            )
+            ) && !positioned
         });
-        if !taking_off {
+        if !fc_takes_off {
             let m = self
                 .tx()
                 .setpoint(MASK_VELOCITY, [0.0; 3], [0.0; 3], 0.0, 0.0);
@@ -105,34 +118,60 @@ impl Pilot {
         ));
     }
 
-    /// Move what the pilot keeps in the FC's local frame by `d`, the step
-    /// of the estimate. The planner plans again from the moved frame at once.
-    fn rebase(&mut self, d: geo::V2, now_ms: u64) {
+    /// Move what the pilot keeps in the FC's local frame by `d` (north,
+    /// east, down), the step of the estimate, and ask the FC for its home
+    /// again. The planner plans again from the moved frame at once.
+    fn rebase(&mut self, d: [f32; 3], now_ms: u64) {
+        let ne = [d[0], d[1]];
         let add3 = |p: &mut [f32; 3]| {
-            p[0] += d[0];
-            p[1] += d[1];
+            for (v, s) in p.iter_mut().zip(d) {
+                *v += s;
+            }
         };
         if let Some(r) = self.motion_ref.as_mut() {
-            r.p = geo::add(r.p, d);
+            r.p = geo::add(r.p, ne);
+            r.d += d[2];
         }
         if let Some(h) = self.mr.hold_ne.as_mut() {
-            *h = geo::add(*h, d);
+            *h = geo::add(*h, ne);
+        }
+        if let Some(h) = self.mr.hold_d.as_mut() {
+            *h += d[2];
         }
         for p in [
             self.plan_hold.as_mut(),
             self.stale_hold.as_mut(),
             self.setpoint.as_mut(),
+            // Home keeps its place against the vehicle (the height above
+            // it too) until the FC answers with its own.
+            self.fc.home_local.as_mut(),
         ]
         .into_iter()
         .flatten()
         {
             add3(p);
         }
+        if let Some(lo) = self
+            .launch
+            .as_mut()
+            .and_then(|l| l.supervised.as_mut())
+            .and_then(|s| s.liftoff.as_mut())
+        {
+            lo.rebase(d);
+        }
+        self.sup.trail.shift(ne);
+        if self.fc.home_local.is_some() {
+            let m = self.tx().command(
+                MavCmd::MAV_CMD_REQUEST_MESSAGE,
+                [MSG_HOME_POSITION, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            );
+            self.mav(m);
+        }
         // The FC no longer holds the target given outside `ados`: give it
         // again.
         self.fc_hold = None;
         self.held_route.clear();
-        self.obstacles.shift(d);
+        self.obstacles.shift(ne);
         if let Some(p) = self.pos_ne(now_ms) {
             self.obstacles.rebuild(p, now_ms);
         }
