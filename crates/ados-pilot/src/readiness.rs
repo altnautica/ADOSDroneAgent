@@ -3,7 +3,9 @@
 use ados_protocol::pilot::{ControlMode, PlaceClass, RcReceiver, Readiness, Severity};
 
 use crate::fc::FcState;
-use crate::fc_profile::{check_row, Firmware, RowCheck};
+use crate::fc_profile::{
+    avoid_conflict, check_row, Firmware, ProfileParam, RowCheck, AVOID_ENABLE, AVOID_MARGIN,
+};
 
 fn item(id: &str, ok: bool, severity: Severity, msg: impl Into<String>) -> Readiness {
     Readiness {
@@ -111,6 +113,7 @@ pub fn items(
     }
     if let Some(fw) = fc.firmware {
         out.push(profile_item(fc, fw, mode, place, rc, margin_m));
+        out.extend(backstop_item(fc, fw, place, rc, margin_m));
         if fw == Firmware::Ardupilot {
             out.push(crate::batt_failsafe::item_for(fc, mode, place));
             let p = |n: &str| fc.params.get(n).copied();
@@ -149,20 +152,15 @@ fn profile_item(
     // value depends on the GNSS sources and the place class. The RC
     // failsafe and the fence follow the RC declaration. The rows the pilot
     // sets itself before the flight that needs them are not checked.
-    let rows = crate::no_rc::profile(fw, class, rc, margin_m)
-        .filter(|r| !r.pilot_sets && !crate::batt_failsafe::ACTIONS.contains(&r.name));
-    for row in rows {
-        match check_row(&row, place, |n| fc.params.get(n).copied()) {
+    let rows: Vec<ProfileParam> = crate::no_rc::profile(fw, class, rc, margin_m)
+        .filter(|r| !r.pilot_sets && !crate::batt_failsafe::ACTIONS.contains(&r.name))
+        .collect();
+    for row in rows.iter().filter(|r| !r.backstop) {
+        match check_row(row, place, |n| fc.params.get(n).copied()) {
             RowCheck::Ok => {}
             // Absent only once every name of the row was asked for without
             // an answer: a missing row is otherwise still being read.
-            RowCheck::Absent
-                if !std::iter::once(row.name)
-                    .chain(row.alt_names.iter().copied())
-                    .all(|n| fc.param_absent(n)) =>
-            {
-                unread = true
-            }
+            RowCheck::Absent if being_read(fc, row) => unread = true,
             RowCheck::Absent => {
                 if let Some(why) = row.absent_blocks {
                     missing.push(format!("{} absent ({why})", row.name))
@@ -172,6 +170,16 @@ fn profile_item(
                 missing.push(format!("{name} {have} (want {want})"))
             }
         }
+    }
+    // The proximity backstop rows are `fc_backstop`'s and never block by
+    // themselves: an FC without them flies on the pilot's brake alone. An
+    // FC avoider that would act before that brake does block.
+    if rows.iter().any(|r| r.backstop) {
+        let lookup = |n: &str| fc.params.get(n).copied();
+        unread |= [AVOID_ENABLE, AVOID_MARGIN]
+            .into_iter()
+            .any(|n| lookup(n).is_none() && !fc.param_absent(n));
+        missing.extend(avoid_conflict(margin_m, lookup));
     }
     let severity = if mode == ControlMode::Ados {
         Severity::Block
@@ -202,6 +210,78 @@ fn profile_item(
     }
 }
 
+/// A row no name of which has been taken as absent yet: still being read.
+fn being_read(fc: &FcState, row: &ProfileParam) -> bool {
+    !std::iter::once(row.name)
+        .chain(row.alt_names.iter().copied())
+        .all(|n| fc.param_absent(n))
+}
+
+/// `fc_backstop`: the FC's proximity stop under the pilot's brake (the
+/// profile's backstop rows). A warning in every control mode, never a
+/// block: the backstop is a fallback, and an FC set up before it joined the
+/// profile flies on the pilot's brake alone until the setup wizard's ADOS
+/// profile step writes it. A row the FC reads at boot only (`PRX1_TYPE`)
+/// says so. `None` for a profile without backstop rows.
+fn backstop_item(
+    fc: &FcState,
+    fw: Firmware,
+    place: PlaceClass,
+    rc: RcReceiver,
+    margin_m: f32,
+) -> Option<Readiness> {
+    let rows: Vec<ProfileParam> = crate::no_rc::profile(fw, fc.vehicle_class(), rc, margin_m)
+        .filter(|r| r.backstop)
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let (mut missing, mut absent, mut unread) = (Vec::new(), Vec::new(), false);
+    for row in &rows {
+        match check_row(row, place, |n| fc.params.get(n).copied()) {
+            RowCheck::Ok => {}
+            RowCheck::Absent if being_read(fc, row) => unread = true,
+            RowCheck::Absent => absent.push(row.name),
+            RowCheck::Mismatch { name, have, want } if row.reboot => missing.push(format!(
+                "{name} {have} (want {want}, used after an FC reboot)"
+            )),
+            RowCheck::Mismatch { name, have, want } => {
+                missing.push(format!("{name} {have} (want {want})"))
+            }
+        }
+    }
+    let (ok, msg) = if !missing.is_empty() {
+        (
+            false,
+            format!(
+                "FC proximity backstop not set: {}. The pilot's brake flies alone until the ADOS profile is applied in setup",
+                missing.join(", ")
+            ),
+        )
+    } else if unread {
+        (
+            false,
+            "Reading the FC proximity backstop parameters".to_owned(),
+        )
+    } else if !absent.is_empty() {
+        (
+            false,
+            format!(
+                "FC proximity backstop not in this firmware: {} absent",
+                absent.join(", ")
+            ),
+        )
+    } else if crate::fc_profile::fc_avoid_margin_m(margin_m).is_none() {
+        (
+            true,
+            "FC proximity backstop off: its stop does not fit inside the pilot's margin".to_owned(),
+        )
+    } else {
+        (true, "FC proximity backstop set".to_owned())
+    };
+    Some(item("fc_backstop", ok, Severity::Warn, msg))
+}
+
 /// The first blocking item that is not ok.
 pub fn first_block(items: &[Readiness]) -> Option<&Readiness> {
     items
@@ -209,5 +289,7 @@ pub fn first_block(items: &[Readiness]) -> Option<&Readiness> {
         .find(|r| !r.ok && r.severity == Severity::Block)
 }
 
+#[cfg(test)]
+mod backstop_tests;
 #[cfg(test)]
 mod tests;

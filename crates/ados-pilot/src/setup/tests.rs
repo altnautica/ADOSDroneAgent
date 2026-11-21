@@ -590,6 +590,31 @@ fn ados_profile_skips_the_reboot_for_runtime_rows() {
     assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(false));
 }
 
+/// The proximity backstop over ArduCopter's defaults (a fresh FC) and over
+/// the profile before the backstop (avoidance off): every row written, and
+/// one reboot for `PRX1_TYPE`, which the FC reads at boot only.
+#[test]
+fn ados_profile_writes_the_backstop_on_a_fresh_and_an_upgraded_fc() {
+    for avoid_enable in [3.0, 0.0] {
+        let s = apply_profile_differing(&[
+            ("AVOID_ENABLE", avoid_enable),
+            ("AVOID_MARGIN", 2.0),
+            ("AVOID_BEHAVE", 0.0),
+            ("PRX1_TYPE", 0.0),
+        ]);
+        for (n, v) in [
+            ("AVOID_ENABLE", 2.0),
+            ("AVOID_MARGIN", 1.0),
+            ("AVOID_BEHAVE", 1.0),
+            ("PRX1_TYPE", 2.0),
+        ] {
+            assert_eq!(s.param(n), v, "{n} over AVOID_ENABLE {avoid_enable}");
+        }
+        assert_eq!(s.fc.reboots, 1, "PRX1_TYPE takes effect after a reboot");
+        assert_eq!(s.result(G, "ados_profile")["rebooted"], json!(true));
+    }
+}
+
 /// Runs `ados_profile` in a confined place on a copter matching the profile
 /// but for `SRTL_ACCURACY` `have`; returns the `SRTL_ACCURACY` it leaves.
 fn confined_srtl_accuracy_after_apply(have: f32) -> f32 {

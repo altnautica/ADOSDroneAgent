@@ -6,6 +6,14 @@
 //! versions differ in which of these exist. A row with an `absent_blocks`
 //! reason is the exception: its absence means a feature the pilot relies on is
 //! compiled out of the firmware, so readiness fails on it.
+//!
+//! The FC's proximity backstop rows (`backstop`) are a fallback under the
+//! pilot's own brake: the wizard writes them, the `fc_backstop` readiness
+//! item reports them as a warning, and they never block a flight by
+//! themselves. An FC that has not had them written yet (one set up before
+//! they joined the profile) flies as before, with the pilot's brake alone.
+//! What still blocks is an FC avoider that would act before the pilot's
+//! brake ([`avoid_conflict`]).
 
 use std::fmt;
 
@@ -45,6 +53,9 @@ pub struct ProfileParam {
     /// supervised lift-off): the wizard writes it, readiness does not check
     /// it.
     pub pilot_sets: bool,
+    /// The FC's proximity backstop: the wizard writes it, readiness warns
+    /// when it differs (`fc_backstop`) and never blocks on it.
+    pub backstop: bool,
 }
 
 /// `ATC_INPUT_TC` for camera flight in an open place, seconds: 0.15-0.2.
@@ -114,6 +125,34 @@ pub fn fc_avoid_margin_m(pilot_margin_m: f32) -> Option<f32> {
     (pilot_margin_m - m >= FC_AVOID_GAP_MIN_M - 1e-4).then_some(m)
 }
 
+/// The FC's own avoidance against the pilot's flight, from its parameters
+/// (`lookup`) and the pilot's margin: `Some(why)` when it would act before
+/// the pilot's brake: fence or beacon avoidance (an `AVOID_ENABLE` bit other
+/// than proximity), proximity avoidance where its stop cannot fit inside the
+/// pilot's margin ([`fc_avoid_margin_m`] `None`), or a proximity stop
+/// (`AVOID_MARGIN`) less than [`FC_AVOID_GAP_MIN_M`] inside the margin.
+/// `AVOID_ENABLE` 0 never conflicts, whatever the other backstop rows hold:
+/// the vehicle flies with the pilot's brake alone, as it did before the
+/// backstop. `None` while a row it needs is unread or absent.
+pub fn avoid_conflict(pilot_margin_m: f32, lookup: impl Fn(&str) -> Option<f32>) -> Option<String> {
+    let enable = lookup(AVOID_ENABLE)?;
+    let bits = enable.max(0.0) as u32;
+    let proximity = AVOID_PROXIMITY as u32;
+    let fits = fc_avoid_margin_m(pilot_margin_m).is_some();
+    if bits & !proximity != 0 || (bits & proximity != 0 && !fits) {
+        let want = if fits { "0 or 2" } else { "0" };
+        return Some(format!("{AVOID_ENABLE} {enable} (want {want})"));
+    }
+    if bits & proximity == 0 {
+        return None;
+    }
+    let have = lookup(AVOID_MARGIN)?;
+    // Centimetres, as the FC stores it.
+    let most = ((pilot_margin_m - FC_AVOID_GAP_MIN_M) * 100.0 + 1e-3).floor() / 100.0;
+    (have > most + 1e-4)
+        .then(|| format!("{AVOID_MARGIN} {have} (want ≤ {most} with {AVOID_ENABLE} 2)"))
+}
+
 /// `row` as the pilot flying with margin `pilot_margin_m` wants it:
 /// `AVOID_ENABLE` proximity only and [`AVOID_MARGIN`] at
 /// [`fc_avoid_margin_m`] while the FC's stop fits inside the pilot's
@@ -156,6 +195,7 @@ pub(crate) const fn p(
         open_band: None,
         bits: false,
         pilot_sets: false,
+        backstop: false,
     }
 }
 
@@ -198,6 +238,14 @@ impl ProfileParam {
             ..self
         }
     }
+
+    const fn backstop(self) -> Self {
+        ProfileParam {
+            backstop: true,
+            ..self
+        }
+    }
+
     /// What the row wants in `place`.
     pub fn want(&self, place: PlaceClass) -> Want {
         match (place, self.confined_max, self.open_band) {
@@ -287,13 +335,14 @@ const COPTER: &[ProfileParam] = &[
     p("OA_TYPE", &[], 0.0).reboots(),
     // 2: proximity only; 1: stop, never slide. The values here are the
     // default margin's; the profile takes the flown one (for_margin), and
-    // a margin too small for the FC's stop inside it turns it off.
-    p(AVOID_ENABLE, &[], AVOID_PROXIMITY),
-    p(AVOID_MARGIN, &[], 1.0),
-    p("AVOID_BEHAVE", &[], 1.0),
+    // a margin too small for the FC's stop inside it turns it off. The
+    // backstop never blocks a flight by itself (see the module note).
+    p(AVOID_ENABLE, &[], AVOID_PROXIMITY).backstop(),
+    p(AVOID_MARGIN, &[], 1.0).backstop(),
+    p("AVOID_BEHAVE", &[], 1.0).backstop(),
     // 2: MAVLink: the proximity library reads Navigation's
     // OBSTACLE_DISTANCE (PRX_TYPE before ArduPilot 4.3).
-    p("PRX1_TYPE", &["PRX_TYPE"], 2.0).reboots(),
+    p("PRX1_TYPE", &["PRX_TYPE"], 2.0).reboots().backstop(),
     p("SRTL_POINTS", &[], 500.0)
         .reboots()
         .absent_blocks("SmartRTL not in this firmware: no return along the flown path"),

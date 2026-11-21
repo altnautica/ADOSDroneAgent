@@ -327,7 +327,7 @@ fn any_source_set_without_gnss_decides() {
 }
 
 /// An ArduCopter whose parameters match the whole profile.
-fn copter() -> FcState {
+pub(super) fn copter() -> FcState {
     let mut fc = FcState {
         firmware: Some(Firmware::Ardupilot),
         ..FcState::default()
@@ -346,7 +346,7 @@ fn profile(fc: &FcState) -> Readiness {
     profile_in(fc, PlaceClass::Open)
 }
 
-fn profile_in(fc: &FcState, place: PlaceClass) -> Readiness {
+pub(super) fn profile_in(fc: &FcState, place: PlaceClass) -> Readiness {
     super::profile_item(
         fc,
         Firmware::Ardupilot,
@@ -390,15 +390,13 @@ fn a_confined_place_accepts_a_tight_smartrtl_accuracy_an_open_one_does_not() {
     );
 }
 
+/// The proximity backstop rows are `fc_backstop`'s and never block by
+/// themselves (`backstop_tests`).
 #[test]
 fn each_avoidance_and_return_row_blocks_when_it_differs() {
     assert!(profile(&copter()).ok);
     for (name, want, wrong) in [
         ("OA_TYPE", 0.0, 1.0),
-        ("AVOID_ENABLE", 2.0, 7.0),
-        ("AVOID_MARGIN", 1.0, 2.0),
-        ("AVOID_BEHAVE", 1.0, 0.0),
-        ("PRX1_TYPE", 2.0, 5.0),
         ("FS_GCS_ENABLE", 4.0, 1.0),
         ("FS_THR_ENABLE", 5.0, 1.0),
         ("SRTL_POINTS", 500.0, 300.0),
