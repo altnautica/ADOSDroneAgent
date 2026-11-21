@@ -1,7 +1,7 @@
 //! Real-model smoke test for the ONNX depth path. `#[ignore]` by default: it
 //! needs the Depth Anything V2 Small ONNX
 //! (`depth_anything_v2_small_252x196.onnx`, built by
-//! `scripts/depth/export_depth_anything.py`) and the `onnx` cargo feature.
+//! `scripts/models/export_depth_anything_v2.py`) and the `onnx` cargo feature.
 //! Run it once the model is on disk:
 //!
 //!   ADOS_TEST_DEPTH_ONNX=/path/depth_anything_v2_small_252x196.onnx \
