@@ -58,6 +58,8 @@ fn person(b: BoundingBox, confidence: f32) -> Detection {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     }
 }
 

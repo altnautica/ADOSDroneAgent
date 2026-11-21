@@ -338,6 +338,8 @@ async fn main() -> Result<()> {
                     keypoints: None,
                     depth: None,
                     world_pos: None,
+                    track_state: None,
+                    appearance_id: None,
                 };
                 designated = engine.designate(CAMERA, &target).await;
             }

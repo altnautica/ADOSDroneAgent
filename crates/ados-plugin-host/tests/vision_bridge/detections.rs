@@ -34,6 +34,8 @@ fn sample_batch(frame_id: u64) -> DetectionBatch {
             keypoints: None,
             depth: None,
             world_pos: None,
+            track_state: None,
+            appearance_id: None,
         }],
     }
 }

@@ -93,6 +93,8 @@ fn detection_batch_round_trips() {
             keypoints: None,
             depth: None,
             world_pos: None,
+            track_state: None,
+            appearance_id: None,
         }],
     };
     let bytes = b.to_msgpack().unwrap();
@@ -230,6 +232,8 @@ fn detection_lock_fields_round_trip_present() {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     };
     let bytes = rmp_serde::to_vec_named(&d).unwrap();
     let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
@@ -267,6 +271,8 @@ fn detection_attributes_round_trip() {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     };
     let bytes = rmp_serde::to_vec_named(&d).unwrap();
     let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
@@ -365,6 +371,8 @@ fn detection_new_fields_skipped_for_old_readers() {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     };
     let bytes = rmp_serde::to_vec_named(&d).unwrap();
     let back: OldReader = rmp_serde::from_slice(&bytes).unwrap();
@@ -424,6 +432,8 @@ fn percept_typed_fields_round_trip() {
         ]),
         depth: Some(4.5),
         world_pos: Some([12.5, -3.0, 1.2]),
+        track_state: None,
+        appearance_id: None,
     };
     let bytes = rmp_serde::to_vec_named(&d).unwrap();
     let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
@@ -450,6 +460,8 @@ fn boxless_percept_round_trips() {
         keypoints: None,
         depth: Some(2.0),
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     };
     let bytes = rmp_serde::to_vec_named(&d).unwrap();
     let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
@@ -499,4 +511,48 @@ fn detection_predating_percept_fields_defaults_none() {
     assert_eq!(back.keypoints, None);
     assert_eq!(back.depth, None);
     assert_eq!(back.world_pos, None);
+    assert_eq!(back.track_state, None);
+    assert_eq!(back.appearance_id, None);
+}
+
+#[test]
+fn multi_object_track_fields_round_trip_and_are_omitted_when_absent() {
+    let mut d = Detection {
+        bbox: Some(BoundingBox {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        }),
+        class_label: "person".into(),
+        confidence: 0.8,
+        track_id: None,
+        assoc_confidence: None,
+        lock_state: None,
+        attributes: None,
+        mask: None,
+        keypoints: None,
+        depth: None,
+        world_pos: None,
+        track_state: None,
+        appearance_id: None,
+    };
+    let keys = msgpack_keys(&rmp_serde::to_vec_named(&d).unwrap());
+    for absent in ["track_state", "appearance_id"] {
+        assert!(!keys.iter().any(|k| k == absent), "{absent} on the wire");
+    }
+    for state in [
+        TrackState::Tentative,
+        TrackState::Confirmed,
+        TrackState::Lost,
+    ] {
+        d.track_id = Some(12);
+        d.track_state = Some(state);
+        d.appearance_id = Some(3);
+        let bytes = rmp_serde::to_vec_named(&d).unwrap();
+        assert_eq!(rmp_serde::from_slice::<Detection>(&bytes).unwrap(), d);
+    }
+    let json = serde_json::to_value(&d).unwrap();
+    assert_eq!(json["track_state"], "lost");
+    assert_eq!(json["appearance_id"], 3);
 }

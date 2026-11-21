@@ -61,6 +61,8 @@ fn batch_json(v: u16) -> Vec<u8> {
             keypoints: None,
             depth: None,
             world_pos: None,
+            track_state: None,
+            appearance_id: None,
         }],
     };
     serde_json::to_vec(&batch).unwrap()

@@ -294,6 +294,29 @@ def test_detection_batch_camera_geometry_and_sensor_time_both_ways():
     assert DetectionBatch.from_msgpack(batch.to_msgpack()) == batch
 
 
+def test_detection_multi_object_track_fields_both_ways():
+    # The engine's multi-object tracker stamps a track state on every tracked
+    # detection and the designated subject's appearance id; both are omitted
+    # when absent, so an older producer's detection reads back unchanged.
+    plain = Detection(bbox=None, class_label="person", confidence=0.8)
+    raw = plain.to_dict()
+    assert "track_state" not in raw and "appearance_id" not in raw
+    assert Detection.from_dict(raw) == plain
+
+    tracked = Detection(
+        bbox=BoundingBox(x=1.0, y=2.0, width=3.0, height=4.0),
+        class_label="person",
+        confidence=0.8,
+        track_id=12,
+        track_state="lost",
+        appearance_id=3,
+    )
+    raw = tracked.to_dict()
+    assert raw["track_state"] == "lost"
+    assert raw["appearance_id"] == 3
+    assert Detection.from_dict(raw) == tracked
+
+
 def test_frame_descriptor_camera_geometry_round_trips_and_is_omitted_when_absent():
     d = FrameDescriptor(
         camera_id="front",

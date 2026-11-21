@@ -286,6 +286,8 @@ pub(super) fn reported(track: &Track, bbox: BoundingBox, lock: LockState, assoc:
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     }
 }
 

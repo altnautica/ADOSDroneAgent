@@ -1544,6 +1544,8 @@ fn a_published_batch_is_bound_to_its_plugin() {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     };
     let batch = DetectionBatch {
         v: ados_protocol::framebus::VISION_DETECTION_VERSION,

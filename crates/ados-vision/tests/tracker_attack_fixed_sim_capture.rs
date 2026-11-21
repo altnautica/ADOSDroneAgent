@@ -29,6 +29,8 @@ fn det(x: f32, y: f32, w: f32, h: f32, conf: f32, label: &str) -> Detection {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     }
 }
 

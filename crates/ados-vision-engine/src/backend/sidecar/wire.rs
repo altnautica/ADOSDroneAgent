@@ -256,6 +256,8 @@ pub(super) fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
             keypoints: None,
             depth: None,
             world_pos: None,
+            track_state: None,
+            appearance_id: None,
         });
     }
     Ok(out)

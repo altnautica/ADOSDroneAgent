@@ -26,6 +26,8 @@ fn person(x: f32) -> Detection {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     }
 }
 
@@ -59,7 +61,7 @@ assert_ne!(coast.detection.and_then(|d| d.lock_state), Some(LockState::Locked));
 
 ## How it works
 
-The crate has four modules.
+The crate has five modules.
 
 ### [`tracker`](https://docs.rs/ados-vision/latest/ados_vision/tracker/index.html)
 
@@ -72,6 +74,12 @@ Geometry alone cannot separate two overlapping boxes: a distractor riding the pr
 Association is appearance-first. Among candidates that clear the absolute appearance gate, the one that looks most like the template wins; motion fit and detector confidence only break ties within an ambiguity margin of the best. When two admissible candidates fall inside that margin, the tracker holds on the prediction, reports `Uncertain`, lowers its confidence and sets [`needs_redesignation`](https://docs.rs/ados-vision/latest/ados_vision/tracker/struct.SingleObjectTracker.html#method.needs_redesignation). The one case vision cannot solve, a lone appearance-identical impostor while the true target is out of frame, is left to that operator backstop rather than a guess.
 
 All thresholds live in [`TrackerConfig`](https://docs.rs/ados-vision/latest/ados_vision/tracker/struct.TrackerConfig.html).
+
+### [`mot`](https://docs.rs/ados-vision/latest/ados_vision/mot/index.html)
+
+[`MultiObjectTracker`](https://docs.rs/ados-vision/latest/ados_vision/mot/struct.MultiObjectTracker.html) keeps a stable `track_id` on every detected object, not only a locked one. Each track has a constant-velocity Kalman filter over centre, aspect ratio and height (and over the world position when detections carry one). Association runs in passes solved as minimum-cost assignments, in the manner of ByteTrack and OC-SORT: high-score detections by IoU plus a motion-direction term, then low-score detections for tracks left over (a partly hidden person scores low but is still there, and its cut-short box does not shrink the track), then a re-find by the last observed box, and a track re-found after a gap is replayed along a straight path from its last observation. Tracks are `Tentative` until seen on three frames, `Confirmed`, then `Lost` while unseen and removed after 1.5 s. [`warp`](https://docs.rs/ados-vision/latest/ados_vision/mot/struct.MultiObjectTracker.html#method.warp) moves every track by the camera's own motion between frames (a point map or a [`Homography`](https://docs.rs/ados-vision/latest/ados_vision/mot/struct.Homography.html)).
+
+A designated subject ([`designate`](https://docs.rs/ados-vision/latest/ados_vision/mot/struct.MultiObjectTracker.html#method.designate)) gets an online appearance model with no learned weights: the colour histogram of [`histogram`](https://docs.rs/ados-vision/latest/ados_vision/histogram/index.html) beside an oriented-gradient histogram, and a logistic classifier trained on clean views of the subject against the other people in view. When the subject's track is gone, a newly appeared track takes the subject's id back only when it scores high and clearly above every other visible person; two people the model cannot tell apart are never re-locked.
 
 ### [`yolo`](https://docs.rs/ados-vision/latest/ados_vision/yolo/index.html)
 

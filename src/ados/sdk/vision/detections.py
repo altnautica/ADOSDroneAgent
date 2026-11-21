@@ -220,6 +220,14 @@ class Detection:
     """The detection's position in a world frame, as a bare 3-list so the frame
     convention can evolve: local ENU metres ``[x, y, z]`` or geographic
     ``[lat, lon, alt]``. ``None`` when the source reports no world position."""
+    track_state: str | None = None
+    """Lifecycle state of the detection's track from the multi-object tracker:
+    ``"tentative"`` | ``"confirmed"`` | ``"lost"`` (lowercase, matching the wire
+    enum). ``None`` when the source runs no multi-object tracker."""
+    appearance_id: int | None = None
+    """Identity of the appearance model the tracker attributed this detection to
+    (the designated subject's); it survives a change of ``track_id``. ``None``
+    when no appearance model holds the detection's track."""
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -248,6 +256,10 @@ class Detection:
             out["depth"] = float(self.depth)
         if self.world_pos is not None:
             out["world_pos"] = [float(v) for v in self.world_pos]
+        if self.track_state is not None:
+            out["track_state"] = self.track_state
+        if self.appearance_id is not None:
+            out["appearance_id"] = int(self.appearance_id)
         return out
 
     @classmethod
@@ -296,6 +308,16 @@ class Detection:
             world_pos=(
                 [float(v) for v in world_pos]
                 if isinstance(world_pos, list)
+                else None
+            ),
+            track_state=(
+                str(raw["track_state"])
+                if raw.get("track_state") is not None
+                else None
+            ),
+            appearance_id=(
+                int(raw["appearance_id"])
+                if raw.get("appearance_id") is not None
                 else None
             ),
         )

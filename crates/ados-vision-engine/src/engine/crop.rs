@@ -171,8 +171,9 @@ impl VisionEngine {
             .await
             .get(&desc.camera_id)
             .and_then(|t| {
-                t.designated_prediction_at(frame_ts)
-                    .map(|(b, c)| (b, c.to_string(), t.coast_steps()))
+                t.sot
+                    .designated_prediction_at(frame_ts)
+                    .map(|(b, c)| (b, c.to_string(), t.sot.coast_steps()))
             })
         else {
             return whole_only;

@@ -252,6 +252,8 @@ pub fn decode_designate_track(args: &Value) -> Result<DesignateTrack, VisionArgs
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     };
     Ok(DesignateTrack { camera_id, target })
 }
@@ -567,6 +569,8 @@ mod tests {
             keypoints: None,
             depth: None,
             world_pos: None,
+            track_state: None,
+            appearance_id: None,
         };
         assert!(matches!(
             designate_track_args("cam-0", &boxless),

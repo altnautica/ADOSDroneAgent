@@ -31,6 +31,7 @@ use crate::depth::geometry::CameraMount;
 use crate::ring::{FrameTiming, RingWriter};
 mod batch_times;
 mod camera_motion;
+mod camera_tracks;
 mod crop;
 mod demand;
 mod depth;
@@ -49,7 +50,7 @@ pub use embeddings::{
     strip_embeddings, EmbeddingInterest, EMBEDDING_ATTR, EMBEDDING_MODEL_ATTR, HISTOGRAM_EMBEDDING,
 };
 
-use ados_vision::tracker::{Appearance, Candidate, SingleObjectTracker, TrackerConfig};
+use ados_vision::tracker::{Appearance, Candidate, TrackerConfig};
 
 /// Broadcast depth for frame descriptors and detections. Slow subscribers lag
 /// and skip rather than back up the publisher (latest-wins, like the rings).
@@ -147,13 +148,14 @@ pub struct VisionEngine {
     /// How camera rings are sized: the requested depth and the hard ceiling on
     /// one ring's shared-memory footprint.
     sizing: RingSizing,
-    /// Per-camera single-object tracker. Built lazily on the first detection or
-    /// an operator designation for a camera. Only consulted when
-    /// `tracker_enabled`.
-    trackers: Mutex<HashMap<String, SingleObjectTracker>>,
-    /// When true, `infer_and_publish` runs the per-camera tracker between
+    /// Per-camera trackers (the single-object lock and the multi-object
+    /// tracker). Built lazily on the first detection or an operator
+    /// designation for a camera. Only consulted when `tracker_enabled`.
+    trackers: Mutex<HashMap<String, camera_tracks::CameraTracks>>,
+    /// When true, `infer_and_publish` runs the per-camera trackers between
     /// inference and publish so the published batch carries a stable `track_id`
-    /// + `lock_state` on the locked object. Default false ⇒ raw detections.
+    /// and `track_state` on every tracked detection and the `lock_state` on the
+    /// locked object. Default false ⇒ raw detections.
     tracker_enabled: bool,
     /// Tuning the per-camera trackers are built with.
     tracker_cfg: TrackerConfig,
@@ -497,6 +499,8 @@ impl VisionEngine {
 
 #[cfg(test)]
 mod camera_motion_tests;
+#[cfg(test)]
+mod camera_tracks_tests;
 #[cfg(test)]
 mod crop_tests;
 #[cfg(test)]

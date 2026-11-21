@@ -731,6 +731,8 @@ mod tests {
                 keypoints: None,
                 depth: None,
                 world_pos: None,
+                track_state: None,
+                appearance_id: None,
             }],
         };
         let frame = deliver_detection(&batch).unwrap();
@@ -863,6 +865,8 @@ mod tests {
                 keypoints: None,
                 depth: None,
                 world_pos: None,
+                track_state: None,
+                appearance_id: None,
             },
         )
         .unwrap();

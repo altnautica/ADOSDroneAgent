@@ -127,6 +127,8 @@ fn the_box(x: f32, y: f32, width: f32, height: f32) -> Detection {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     }
 }
 

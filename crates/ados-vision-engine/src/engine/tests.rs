@@ -388,6 +388,8 @@ async fn publish_detection_reaches_subscribers() {
             keypoints: None,
             depth: None,
             world_pos: None,
+            track_state: None,
+            appearance_id: None,
         }],
     };
     let reached = e.publish_detection(batch.clone());
@@ -512,6 +514,8 @@ fn det(x: f32, y: f32, conf: f32, label: &str) -> Detection {
         keypoints: None,
         depth: None,
         world_pos: None,
+        track_state: None,
+        appearance_id: None,
     }
 }
 

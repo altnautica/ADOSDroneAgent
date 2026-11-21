@@ -146,6 +146,21 @@ pub enum LockState {
     Lost,
 }
 
+/// Lifecycle state of the track a detection belongs to, from a multi-object
+/// tracker that tracks every object in the frame (not only a locked one).
+/// `Tentative` = a new track not yet seen on enough frames to be trusted, so it
+/// carries no `track_id` yet; `Confirmed` = a trusted track measured on this
+/// frame; `Lost` = a confirmed track with no measurement on this frame, its box
+/// is the tracker's prediction. A removed track is simply absent. Independent
+/// of [`LockState`], which scores only the operator-designated subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackState {
+    Tentative,
+    Confirmed,
+    Lost,
+}
+
 /// One percept from a model: the self-describing per-frame unit a consumer
 /// reads. It began as a 2D box and grows by ADDING typed optional fields (each
 /// serde-default + skipped when absent), so a producer emits only what it
@@ -204,6 +219,17 @@ pub struct Detection {
     /// `None` when the source reports no world position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world_pos: Option<[f64; 3]>,
+    /// Lifecycle state of the detection's track (v4). `None` when the source
+    /// runs no multi-object tracker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_state: Option<TrackState>,
+    /// Identity of the appearance model this detection was attributed to (v4):
+    /// set while the tracker holds an online appearance model for the
+    /// detection's track (the designated subject). It survives a change of
+    /// `track_id`, so a consumer can tell that a re-identified or re-designated
+    /// track is the same person. `None` when no appearance model holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance_id: Option<u32>,
 }
 
 /// The current wire version of a [`DetectionBatch`] on the `vision.detection`

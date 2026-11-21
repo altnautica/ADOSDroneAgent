@@ -62,7 +62,7 @@ pub fn histogram_descriptor(
 }
 
 /// Accumulate one pixel into a half's eight bins.
-fn add_pixel(bins: &mut [f32], r: u8, g: u8, b: u8) {
+pub(crate) fn add_pixel(bins: &mut [f32], r: u8, g: u8, b: u8) {
     let (r, g, b) = (r as f32, g as f32, b as f32);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);

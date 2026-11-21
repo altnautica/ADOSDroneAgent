@@ -333,6 +333,8 @@ mod tests {
                 keypoints: None,
                 depth: None,
                 world_pos: None,
+                track_state: None,
+                appearance_id: None,
             }],
         };
         engine.capture(batch.clone());
