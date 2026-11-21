@@ -6,7 +6,7 @@
 
 use ados_protocol::pilot::{Goal, GoalKind, Request};
 
-use super::harness::{wall, World};
+use super::harness::World;
 use super::pins::Pin;
 use super::shaping::flying;
 use crate::modes::copter;
@@ -91,8 +91,10 @@ fn pin_a_goto_and_its_arrival_hold() {
 }
 
 /// A goto north in open space; 3 s in, a wall shows up 12 m north of the
-/// start: the plan is blocked, the goal's reference slows to a stop on the
-/// goal limits and holds where it ends.
+/// start, across the way and meeting a ring 11 m round the vehicle: a
+/// closed room, no route out (a wall alone no longer holds a goto, which
+/// routes round its end): the plan is blocked, the goal's reference slows to
+/// a stop on the goal limits and holds where it ends.
 #[test]
 fn pin_a_goto_braked_to_a_blocked_hold() {
     let mut w = World::new();
@@ -107,10 +109,25 @@ fn pin_a_goto_braked_to_a_blocked_hold() {
     let mut pin = Pin::new("core-blocked", COLS);
     drive(&mut w, &mut pin, 12_000, |w, t| {
         if t >= 3_000 {
-            w.scan_ranges = wall(0, 12.0 - w.pos[0]);
+            w.scan_ranges = closed_room(12.0 - w.pos[0], 11.0);
         }
     });
     check(&pin);
+}
+
+/// A body-frame scan of a straight wall `front_m` ahead, meeting a ring
+/// `ring_m` round the vehicle on either side: a room with no way out.
+fn closed_room(front_m: f32, ring_m: f32) -> Vec<f32> {
+    (0..360)
+        .map(|i| {
+            let c = (i as f32).to_radians().cos();
+            if c > 0.0 && front_m / c < ring_m {
+                front_m / c
+            } else {
+                ring_m
+            }
+        })
+        .collect()
 }
 
 /// A skill goal cruising north; the operator holds the roll stick over for

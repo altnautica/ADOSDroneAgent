@@ -7,7 +7,7 @@ use ados_protocol::pilot::{AvoidMode, Goal, GoalKind, Request};
 use serde_json::{json, Value};
 
 use super::harness::World;
-use super::safety::{wall_scan, G};
+use super::safety::{ring_scan, wall_scan, G};
 use crate::core::control::brake_limit;
 use crate::core::{limit, ShadowCmd, SHADOW_MAX_AGE_MS};
 use crate::fc::{MASK_POS_VEL_ACC_YAW, MASK_POS_VEL_YAW};
@@ -155,9 +155,9 @@ fn a_braked_goal_names_the_limit_that_cut_it() {
     assert!(geo::norm(flown) <= geo::norm(fc_ask(&w, [0.0, 0.0])) + 1e-3);
 }
 
-/// A wall across a goto holds the vehicle: the command is a hold that keeps
-/// the target and what the goto asked, so asked against commanded shows the
-/// freeze, and `hold_reason` says why.
+/// A closed room round a goto holds the vehicle: the command is a hold that
+/// keeps the target and what the goto asked, so asked against commanded
+/// shows the freeze, and `hold_reason` says why.
 #[test]
 fn a_blocked_goto_publishes_a_hold() {
     let mut w = World::new();
@@ -170,7 +170,7 @@ fn a_blocked_goto_publishes_a_hold() {
     });
     let end = w.now + 1500;
     while w.now < end {
-        w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(4.0), w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &ring_scan(4.0), w.now);
         w.run(20);
     }
     let v = frame(&w);
@@ -476,7 +476,12 @@ fn a_shadow_command_is_published_and_never_flown() {
         sp.vy.abs() < 1e-3,
         "the shadow's velocity was flown: {sp:?}"
     );
-    // Stale: dropped.
+    // Stale: dropped. The pilot's own trajectory planner, run beside the
+    // grid planner, publishes in its place, made within the age limit.
     w.run(SHADOW_MAX_AGE_MS + 100);
-    assert!(frame(&w).get("shadow").is_none());
+    if let Some(s) = frame(&w).get("shadow") {
+        assert_ne!(s["reason"], "exploratory", "{s}");
+        let t = s["t_ms"].as_u64().unwrap() - 1_700_000_000_000;
+        assert!(w.now - t <= SHADOW_MAX_AGE_MS, "{s}");
+    }
 }

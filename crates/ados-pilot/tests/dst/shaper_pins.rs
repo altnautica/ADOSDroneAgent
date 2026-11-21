@@ -10,6 +10,12 @@ use crate::pins::Pin;
 use crate::scenarios::{fly_sticks, launch_to_hold};
 use crate::sim::Sim;
 
+/// The pins record the grid planner's shaped flight: they fly it whatever
+/// `DST_PLANNER` says.
+fn reactive(s: &mut ados_pilot::config::Settings) {
+    s.pilot.planner = ados_pilot::config::PlannerMode::Reactive;
+}
+
 /// The pins are recorded to six decimals and the simulation replays a seed
 /// bit for bit on every machine (the pilot's inverse trigonometry is the
 /// pure-Rust `libm`, `ados_pilot::geo::atan2`). 1e-5 is the six-decimal
@@ -68,7 +74,7 @@ fn goto(n: f32, e: f32, d: f32) -> Request {
 #[test]
 fn dst_pin_goto_and_arrival_hold() {
     for seed in SEEDS {
-        let mut s = Sim::new("pin_goto", seed, |_| {});
+        let mut s = Sim::new("pin_goto", seed, reactive);
         s.boot();
         launch_to_hold(&mut s, 5.0);
         s.request(goto(12.0, -8.0, -7.0));
@@ -87,7 +93,7 @@ fn dst_pin_goto_and_arrival_hold() {
 #[test]
 fn dst_pin_sticks_take_over_a_goto() {
     for seed in SEEDS {
-        let mut s = Sim::new("pin_takeover", seed, |_| {});
+        let mut s = Sim::new("pin_takeover", seed, reactive);
         s.boot();
         launch_to_hold(&mut s, 5.0);
         s.sticks = Some([0.0; 4]);
@@ -120,7 +126,7 @@ fn dst_pin_sticks_take_over_a_goto() {
 #[test]
 fn dst_pin_stick_release_hold() {
     for seed in SEEDS {
-        let mut s = Sim::new("pin_hold", seed, |_| {});
+        let mut s = Sim::new("pin_hold", seed, reactive);
         s.boot();
         launch_to_hold(&mut s, 5.0);
         s.sticks = Some([0.0; 4]);
@@ -152,7 +158,7 @@ fn dst_pin_stick_release_hold() {
 fn landing(session: bool) {
     let tag = if session { "sticks" } else { "hold" };
     for seed in SEEDS {
-        let mut s = Sim::new("pin_landing", seed, |_| {});
+        let mut s = Sim::new("pin_landing", seed, reactive);
         s.boot();
         launch_to_hold(&mut s, 5.0);
         if session {

@@ -575,6 +575,7 @@ version = "0.124.19"
 dependencies = [
  "ados-config",
  "ados-pilot",
+ "ados-planning",
  "ados-protocol",
  "ados-time",
  "base64 0.23.1",

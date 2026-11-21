@@ -32,7 +32,10 @@ pub struct RunMetrics {
 /// Folds a run's ticks into [`RunMetrics`].
 pub struct Meter {
     pub m: RunMetrics,
-    inside: bool,
+    /// Inside the margin last tick; `None` before the first tick (a run
+    /// that starts inside the margin, a trunk the stand's 1 m keep-out
+    /// leaves within it, has not crossed into it).
+    inside: Option<bool>,
     last: [f32; 2],
     path_m: f32,
     straight_m: f32,
@@ -46,7 +49,7 @@ impl Meter {
                 min_clearance_m: f32::INFINITY,
                 ..RunMetrics::default()
             },
-            inside: false,
+            inside: None,
             last: start,
             path_m: 0.0,
             straight_m,
@@ -62,10 +65,10 @@ impl Meter {
             self.m.collision = true;
         }
         let inside = clearance_m < MARGIN_M;
-        if inside && !self.inside {
+        if inside && self.inside == Some(false) {
             self.m.margin_entries += 1;
         }
-        self.inside = inside;
+        self.inside = Some(inside);
     }
 
     pub fn reached(&mut self, t_s: f32) {

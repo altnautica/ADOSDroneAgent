@@ -11,7 +11,8 @@
 //!
 //! `cargo test -p ados-pilot --test dst -- --ignored bench_matrix` flies
 //! the whole matrix (`DST_BENCH_SEEDS`, default 10; `DST_BENCH_THREADS`,
-//! default 4) and writes `target/dst-bench/<scenario>.json` and a table.
+//! default 4; `DST_PLANNER=trajectory` flies the trajectory planner) and
+//! writes `target/dst-bench/<scenario>.json` and a table.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -154,12 +155,67 @@ fn fly(s: &mut Sim, alt_m: f32, speed: f32, crossing: Option<usize>) -> RunMetri
             );
         }
         let t = s.fc.truth();
+        let every = if trace_fine() { 100 } else { 1000 };
+        if trace_on() && (s.now - t0).is_multiple_of(every) {
+            trace_line(s, t0, subject);
+        }
         if (t[0] - end[0]).hypot(t[1] - end[1]) <= REACH_M {
             meter.reached((s.now - t0) as f32 / 1000.0);
             break;
         }
     }
     meter.finish()
+}
+
+/// `DST_BENCH_TRACE=1`: a line a second per run (debugging a cell);
+/// `DST_BENCH_TRACE=2`: a line every 100 ms with the command flown.
+pub fn trace_on() -> bool {
+    std::env::var("DST_BENCH_TRACE").is_ok_and(|v| v == "1" || v == "2")
+}
+
+fn trace_fine() -> bool {
+    std::env::var("DST_BENCH_TRACE").is_ok_and(|v| v == "2")
+}
+
+pub fn trace_line(s: &Sim, t0: u64, subject: [f32; 2]) {
+    let t = s.fc.truth();
+    let st = s.p.state(s.now);
+    let frame = serde_json::to_value(&st).unwrap_or_default();
+    let end = st
+        .plan_ned
+        .last()
+        .map_or(0.0, |e| (e[0] as f32 - t[0]).hypot(e[1] as f32 - t[1]));
+    eprintln!(
+        "{} s{} t={:5.1} pos=({:5.1},{:5.1}) v={:4.2} subj={:5.1} clr={:4.2} avoid={:?} hold={:?} sense={:?} traj={:?} end={:4.1} limits={}",
+        s.name,
+        s.seed,
+        (s.now - t0) as f32 / 1000.0,
+        t[0],
+        t[1],
+        s.fc.vel[0].hypot(s.fc.vel[1]),
+        subject[0],
+        s.stand_clearance_m().min(s.walker_clearance_m()),
+        st.avoid_state,
+        st.hold_reason,
+        s.p.sensing().map(|x| x.speed_limit_mps),
+        s.p.trajectory_outcome(),
+        end,
+        frame["command"]["limits"],
+    );
+    if trace_fine() {
+        let c = &frame["command"];
+        let plan: Vec<_> = st.plan_ned.iter().take(4).collect();
+        eprintln!(
+            "    vel=({:5.2},{:5.2}) yaw={:6.1} ask={} sp_vel={} target={} plan={:?}",
+            s.fc.vel[0],
+            s.fc.vel[1],
+            s.fc.att[2].to_degrees(),
+            c["ask_vel_ne"],
+            c["sp_vel_ned"],
+            c["target_ne"],
+            plan,
+        );
+    }
 }
 
 /// One forest run.
@@ -217,6 +273,14 @@ fn bench_matrix() {
             cells.push((3, tier, v));
         }
     }
+    // `DST_BENCH_TIERS=mid360,planar` and `DST_BENCH_SPEEDS=3,5` fly a
+    // part of the matrix.
+    let listed = |key: &str, v: &str| {
+        std::env::var(key).map_or(true, |l| l.split(',').any(|x| x.trim() == v))
+    };
+    cells.retain(|&(_, tier, v)| {
+        listed("DST_BENCH_TIERS", tier.name()) && listed("DST_BENCH_SPEEDS", &format!("{v:.0}"))
+    });
     let jobs: Vec<(usize, u64)> = (0..cells.len())
         .flat_map(|c| (1..=seeds).map(move |s| (c, s)))
         .collect();

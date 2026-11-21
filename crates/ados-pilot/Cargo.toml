@@ -24,6 +24,7 @@ dst = []
 
 [dependencies]
 ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
+ados-planning = { path = "../ados-planning" }
 ados-config = { path = "../ados-config" }
 ados-time = { path = "../ados-time" }
 base64 = { workspace = true }

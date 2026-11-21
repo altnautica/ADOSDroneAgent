@@ -720,6 +720,13 @@ pub(super) fn wall_scan(d: f32) -> Value {
            "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
 }
 
+/// A planar scan of a closed room: a wall `d` away on every bearing. No
+/// route leaves it, so a goal outside is blocked.
+pub(super) fn ring_scan(d: f32) -> Value {
+    json!({"frame": "body_frd", "angle_start_rad": 0.0,
+           "angle_increment_rad": TAU / 360.0, "ranges_m": vec![d; 360]})
+}
+
 /// A planar scan of a trunk about 0.5 m wide `d` ahead (vehicle yaw 0).
 pub(super) fn trunk_scan(d: f32) -> Value {
     let half = (0.25 / d).atan();
@@ -865,8 +872,9 @@ fn sides_scan(d: f32) -> Value {
            "angle_increment_rad": TAU / 360.0, "ranges_m": ranges})
 }
 
-/// A goto at 1 m/s is blocked by a wall: its shaped stop's hold point is
-/// the reference, which runs ahead of a vehicle that lags its setpoint.
+/// A goto at 1 m/s is blocked by a closed room's walls: its shaped stop's
+/// hold point is the reference, which runs ahead of a vehicle that lags its
+/// setpoint.
 /// Walls then come inside the hard-stop distance on both sides, their
 /// pushes cancelling: the hard stop holds where the vehicle is. Before, it
 /// held at the shaped stop's reference, ahead of the vehicle, and the FC's
@@ -882,7 +890,7 @@ fn a_hard_stop_after_a_shaped_stop_holds_at_the_vehicle() {
         d: -5.0,
         yaw: None,
     });
-    scan_for(&mut w, &wall_scan(4.0), 600);
+    scan_for(&mut w, &ring_scan(4.0), 600);
     assert_eq!(w.p.state(w.now).hold_reason.as_deref(), Some("blocked"));
     let lead = w.last_setpoint().unwrap().x - w.pos[0];
     assert!(
@@ -942,9 +950,9 @@ fn stick_brake_reports_avoid_state_and_hard_stop() {
     );
 }
 
-/// A wall across a goto holds the vehicle, and the frame still carries the
-/// commanded goal and the straight way to it, so every surface draws them in
-/// the blocked colour instead of dropping them.
+/// A closed room round a goto (no route out) holds the vehicle, and the
+/// frame still carries the commanded goal and the straight way to it, so
+/// every surface draws them in the blocked colour instead of dropping them.
 #[test]
 fn a_blocked_goto_keeps_its_goal_and_way_on_the_frame() {
     let mut w = World::new();
@@ -957,7 +965,7 @@ fn a_blocked_goto_keeps_its_goal_and_way_on_the_frame() {
     });
     let end = w.now + 1500;
     while w.now < end {
-        w.p.on_feed(crate::events::TOPIC_SCAN, &wall_scan(4.0), w.now);
+        w.p.on_feed(crate::events::TOPIC_SCAN, &ring_scan(4.0), w.now);
         w.run(20);
     }
     let s = w.p.state(w.now);

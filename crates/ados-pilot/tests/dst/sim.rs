@@ -134,6 +134,10 @@ impl Sim {
         let mut rng = Rng::new(seed);
         let fc = Fc::new(&mut rng);
         let mut s = Settings::default();
+        // `DST_PLANNER=trajectory`: every run flies the trajectory planner.
+        if std::env::var("DST_PLANNER").is_ok_and(|v| v == "trajectory") {
+            s.pilot.planner = ados_pilot::config::PlannerMode::Trajectory;
+        }
         settings(&mut s);
         let p = Pilot::new(s);
         let now = 1_000;

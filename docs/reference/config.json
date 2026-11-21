@@ -2234,6 +2234,19 @@
       "type": "string"
     },
     {
+      "default": "reactive",
+      "description": "Planner",
+      "enum": [
+        "reactive",
+        "trajectory"
+      ],
+      "key": "pilot.planner",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": "normal",
       "description": "Profile",
       "enum": [

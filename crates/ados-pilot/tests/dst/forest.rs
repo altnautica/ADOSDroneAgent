@@ -154,6 +154,27 @@ fn walk(s: &mut Sim, trail: &[[f32; 2]], pace: f32, max_mps: f32, tail_ms: u64) 
         }
         w.track.push(p);
         w.to_goal_m.push((g[0] - p[0]).hypot(g[1] - p[1]));
+        if std::env::var("DST_BENCH_TRACE").is_ok_and(|v| v == "1")
+            && w.track.len().is_multiple_of(10)
+        {
+            let st = s.p.state(s.now);
+            eprintln!(
+                "{} s{} pos=({:5.1},{:5.1}) goal=({:5.1},{:5.1}) v={:4.2} yaw={:6.1} avoid={:?} hold={:?} traj={:?} plan_end={:?} limits={}",
+                s.name,
+                s.seed,
+                p[0],
+                p[1],
+                g[0],
+                g[1],
+                s.fc.vel[0].hypot(s.fc.vel[1]),
+                s.fc.att[2].to_degrees(),
+                st.avoid_state,
+                st.hold_reason,
+                s.p.trajectory_outcome(),
+                st.plan_ned.last(),
+                serde_json::to_value(&st).unwrap_or_default()["command"]["limits"],
+            );
+        }
         if walking {
             w.speeds.push(s.fc.vel[0].hypot(s.fc.vel[1]));
         } else {

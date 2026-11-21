@@ -2469,6 +2469,15 @@
           "title": "Place Class",
           "type": "string"
         },
+        "planner": {
+          "default": "reactive",
+          "enum": [
+            "reactive",
+            "trajectory"
+          ],
+          "title": "Planner",
+          "type": "string"
+        },
         "profile": {
           "default": "normal",
           "enum": [

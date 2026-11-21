@@ -30,6 +30,7 @@
 mod bench;
 mod fc;
 mod forest;
+mod goto_wall;
 mod metrics;
 #[path = "../pins/mod.rs"]
 mod pins;

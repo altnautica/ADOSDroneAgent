@@ -6,6 +6,7 @@ use ados_protocol::pilot::{AvoidMode, AvoidState, GoalKind, Owner};
 
 mod ask;
 mod bounds;
+mod traj;
 
 use super::motion_ref::{leash_within, MotionRef, ASK_SMOOTH_S, REF_LEASH_M, SHAPER_REPORT_MPS};
 use super::subject_guard::Subject;
@@ -18,6 +19,7 @@ use crate::core::{limit, Pilot};
 use crate::fc::{MASK_POS_VEL_ACC_YAW, MASK_POS_VEL_YAW};
 use crate::geo::{self, V2};
 use crate::model::{limits, GoalLimits, HOLD_CAPTURE_MPS};
+use crate::planner::TrajRef;
 use bounds::{clamp_d, inside_fence, live_goal};
 
 /// Least speed a commanded-velocity goal flies its detour at, m/s: its
@@ -36,6 +38,9 @@ struct Shape {
     max_dist: f32,
     /// The subject a skill's goal names, for the subject brake.
     subject: Option<Subject>,
+    /// The committed trajectory's reference this tick, while the
+    /// trajectory planner flies the goal.
+    traj: Option<TrajRef>,
 }
 
 impl Pilot {
@@ -141,6 +146,7 @@ impl Pilot {
             home,
             max_dist,
             subject: guard.map(|g| g.0),
+            traj: None,
         };
         let target = if close { None } else { self.plan.target };
         let Some(target) = target else {
@@ -171,7 +177,11 @@ impl Pilot {
             let mut r = self.goal_ref(pos, yaw, now_ms);
             let mut limits = 0;
             let v = self.fly_shaped(&mut r, [0.0, 0.0], &shape, &mut limits, now_ms);
-            let yaw_cmd = r.slew_yaw(None, &shape.gl, dt);
+            // With a forward view only and no subject to face, the hold
+            // looks along the way the trajectory planner found outside that
+            // view, so its next plan is seen.
+            let look = subject.is_none().then(|| self.traj.look()).flatten();
+            let yaw_cmd = r.slew_yaw(look, &shape.gl, dt);
             r.at_ms = now_ms;
             self.motion_ref = Some(r);
             let hold = [r.p[0], r.p[1], hold_d];
@@ -200,11 +210,15 @@ impl Pilot {
         self.hold_reason = None;
         self.plan_hold = None;
         let detour = self.plan.state == AvoidState::Detour;
+        // The trajectory planner flies: its reference, the carrot ahead on
+        // it as the target ([`traj`]).
+        let traj = self.traj_ref(now_ms);
         // A straight plan to a skill's goal: fly the goal as it is now, not
         // as it was at the last replan. Replanned every PLAN_PERIOD_MS, a
         // moving goal would step every 200 ms. A vantage goal's target is
         // the vantage point the planner chose, not the goal's own point.
         let target = match (&goal, self.plan.goal) {
+            _ if traj.is_some() => traj.map_or(target, |t| t.carrot),
             (Some(g), Some(planned))
                 if !detour && target == planned && g.kind != GoalKind::Vantage =>
             {
@@ -223,7 +237,10 @@ impl Pilot {
             // past the cap.
             r.p = pos_ne;
         }
-        let asked = self.goal_ask(goal.as_ref(), geo::sub(target, r.p), &shape.gl, dt);
+        let asked = match &traj {
+            Some(t) => t.v,
+            None => self.goal_ask(goal.as_ref(), geo::sub(target, r.p), &shape.gl, dt),
+        };
         // Every limit that changes what was asked, for the published command:
         // the speed limit that binds when the ask is over it, and the goal's
         // own limit when its own velocity is.
@@ -237,13 +254,18 @@ impl Pilot {
             limits |= limit::SPEED;
         }
         let want = geo::clamp_len(asked, v_cap);
+        let shape = Shape { traj, ..shape };
         let v = self.fly_shaped(&mut r, want, &shape, &mut limits, now_ms);
         let want_yaw = goal_yaw.or_else(|| match subject {
             Some(s) => Some(geo::bearing_of(geo::sub(s, pos_ne))),
             None if geo::dist(target, pos_ne) > 1.0 => {
                 Some(geo::bearing_of(geo::sub(target, pos_ne)))
             }
-            None => None,
+            // At the target with a forward view only: look along the way
+            // the trajectory planner found outside that view (a goto
+            // following a route that has come to rest), so its next plan
+            // is seen.
+            None => self.traj.look(),
         });
         let yaw_cmd = r.slew_yaw(want_yaw, &shape.gl, dt);
         r.at_ms = now_ms;
@@ -296,7 +318,10 @@ impl Pilot {
     /// brake on the same acceleration ([`Pilot::goal_brake`]), last so a
     /// back-away from the subject never flies into an obstacle, and the
     /// geofence. Moves the reference point on the velocity flown and returns
-    /// that velocity.
+    /// that velocity. A trajectory the planner flies ([`Shape::traj`]) is
+    /// the shaped motion itself: while no cap or soft brake has changed its
+    /// velocity, the reference takes its state as it is (no smoothing, no
+    /// shaper); once one has, the shaper flies on from the reference.
     fn fly_shaped(
         &mut self,
         r: &mut MotionRef,
@@ -307,10 +332,13 @@ impl Pilot {
     ) -> V2 {
         // Smoothed first, so a goal reversing at its update rate does not
         // make the shaper wander; the brake then cuts the smoothed ask.
-        r.ask = geo::add(
-            r.ask,
-            geo::scale(geo::sub(want, r.ask), (s.dt / ASK_SMOOTH_S).min(1.0)),
-        );
+        r.ask = match s.traj {
+            Some(_) => want,
+            None => geo::add(
+                r.ask,
+                geo::scale(geo::sub(want, r.ask), (s.dt / ASK_SMOOTH_S).min(1.0)),
+            ),
+        };
         let mut want = r.ask;
         if let Some(subject) = &s.subject {
             if let Some(held) = self.subject_soft(subject, s.pos, want, s.gl.a_h, s.v_cap, now_ms) {
@@ -320,7 +348,15 @@ impl Pilot {
         }
         let (want, by) = self.soft_brake(s.pos, want, s.gl.a_h, now_ms);
         *limits |= by;
-        let mut v = r.sh.track(want, &s.gl.shape(), s.dt);
+        let on_traj = s.traj.filter(|t| geo::dist(want, t.v) < 1e-3);
+        let mut v = match on_traj {
+            Some(t) => {
+                r.sh.v = t.v;
+                r.sh.a = t.a;
+                t.v
+            }
+            None => r.sh.track(want, &s.gl.shape(), s.dt),
+        };
         if geo::dist(v, want) > SHAPER_REPORT_MPS {
             *limits |= limit::SHAPER;
         }
@@ -333,7 +369,8 @@ impl Pilot {
         let mut p = if s.capped {
             s.pos
         } else {
-            leash_within(geo::add(r.p, geo::scale(v, s.dt)), s.pos, REF_LEASH_M)
+            let next = on_traj.map_or(geo::add(r.p, geo::scale(v, s.dt)), |t| t.p);
+            leash_within(next, s.pos, REF_LEASH_M)
         };
         if let Some(subject) = &s.subject {
             let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));

@@ -1,7 +1,9 @@
 //! The skill and goto planner (C2): keep the goal when it is clear, otherwise
 //! search detour candidates on the skill's ring and route to the best
 //! reachable one with A* over the clearance grid, preferring wide gaps; a
-//! chosen detour is held from one replan to the next ([`commit`]).
+//! chosen detour is held from one replan to the next ([`commit`]). The
+//! trajectory planner ([`traj`]) flies instead under `pilot.planner =
+//! trajectory`, and runs beside this one in shadow otherwise.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -11,11 +13,18 @@ use ados_protocol::pilot::{AvoidState, Goal, GoalKind};
 use crate::geo::{self, V2};
 use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
 
+mod backup;
+mod carrot;
 mod commit;
+mod map2d;
+mod route_goal;
+mod traj;
+pub use backup::{Committed, TrajRef, CARROT_S};
 pub use commit::{
     plan_committed, Commit, Motion, Narrows, RECHOOSE_GOAL_M, RELEASE_PLANS, RELEASE_ROOM_M,
     STALL_MPS, STALL_MS, STALL_PLANS, STALL_RADIUS_M,
 };
+pub use traj::{Outcome, TrajGoal, TrajPlanner, TRAJ_PERIOD_MS, TRAJ_ROOM_M};
 
 /// Expansion budget per search.
 pub const MAX_EXPANSIONS: usize = 4000;
@@ -251,7 +260,7 @@ fn route(
                 .and_then(|f| f.exit_toward(grid, cand)),
         };
         if let Some(path) = path {
-            let wp = along(&path, LOOKAHEAD_M);
+            let wp = carrot::carrot(grid, &path, margin);
             let minc = path
                 .iter()
                 .map(|p| clearance(grid, *p))

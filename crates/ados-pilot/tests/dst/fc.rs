@@ -1,7 +1,8 @@
 //! The simulated ArduPilot copter the pilot flies: a parameter server, the
 //! commands the pilot sends (mode, arm, take-off, mission pause and current
-//! item), GUIDED setpoints flown through a first-order velocity response,
-//! AUTO waypoints, SmartRTL and LAND returns that land and disarm, a battery
+//! item), GUIDED setpoints flown through a first-order velocity response
+//! and their heading or yaw rate through ArduCopter's yaw limits, AUTO
+//! waypoints, SmartRTL and LAND returns that land and disarm, a battery
 //! that drains while armed, and the supervised lift-off flown on
 //! [`Airframe`]. Wind gusts and sensor noise come from the run's seeded
 //! [`Rng`]; nothing reads a clock or a socket.
@@ -36,6 +37,18 @@ const SETPOINT_TIMEOUT_MS: u64 = 3_000;
 const LAND_DISARM_MS: u64 = 1_000;
 /// The rangefinder sits this far above the ground on the skids, m.
 const SKID_M: f32 = 0.1;
+/// The heading, as ArduCopter's attitude controller turns it in GUIDED: a
+/// heading target is pulled at the yaw angle gain (`ATC_ANG_YAW_P` 4.5) and
+/// slewed at no more than `ATC_SLEW_YAW` (6000 cdeg/s); a yaw-rate target
+/// is flown up to this rate limit; the rate reached follows the target
+/// through the input shaping's time constant (`ATC_INPUT_TC` 0.15 s).
+const YAW_P: f32 = 4.5;
+const YAW_SLEW_DPS: f32 = 60.0;
+const YAW_RATE_MAX_DPS: f32 = 90.0;
+const YAW_TC_S: f32 = 0.15;
+/// `SET_POSITION_TARGET_LOCAL_NED` type-mask bits: ignore yaw, yaw rate.
+const MASK_YAW_IGNORE: u16 = 1024;
+const MASK_YAW_RATE_IGNORE: u16 = 2048;
 
 /// Heartbeat and SYS_STATUS period.
 pub const HEARTBEAT_MS: u64 = 500;
@@ -95,6 +108,8 @@ pub struct Fc {
     pub pos: [f32; 3],
     pub vel: [f32; 3],
     pub att: [f32; 3],
+    /// Heading rate, rad/s (body yaw rate, reported in ATTITUDE).
+    pub yaw_rate: f32,
     pub landed: bool,
     pub battery_pct: f32,
     /// Battery drain while armed, % per second.
@@ -162,6 +177,7 @@ impl Fc {
             att: [0.0; 3],
             landed: true,
             battery_pct: 95.0,
+            yaw_rate: 0.0,
             drain_pct_s: 0.05,
             current_a: None,
             srtl_share: None,
@@ -302,6 +318,34 @@ impl Fc {
             (false, Some(t)) => Some(t),
             (false, None) => Some([self.pos[0], self.pos[1]]),
         };
+    }
+
+    /// One tick of the heading. In GUIDED a setpoint's heading target
+    /// (yaw not masked) is turned to, a yaw-rate target (yaw masked, rate
+    /// not) flown, while the setpoint is fresh; a position target's heading
+    /// is held past the timeout as its position is ([`Fc::ap_guided`]).
+    /// Every other case, and every other mode, holds the heading.
+    fn yaw_step(&mut self, now: u64, dt: f32) {
+        let want = match &self.sp {
+            Some((at, s)) if self.mode == copter::GUIDED && self.takeoff_alt.is_none() => {
+                let mask = s.type_mask.bits();
+                let fresh = now.saturating_sub(*at) <= SETPOINT_TIMEOUT_MS;
+                let held = self.ap_guided && mask & 0b111 == 0;
+                if mask & MASK_YAW_IGNORE == 0 && (fresh || held) {
+                    let err = ados_pilot::geo::wrap_pi(s.yaw - self.att[2]);
+                    let slew = YAW_SLEW_DPS.to_radians();
+                    (err * YAW_P).clamp(-slew, slew)
+                } else if mask & MASK_YAW_RATE_IGNORE == 0 && fresh {
+                    let max = YAW_RATE_MAX_DPS.to_radians();
+                    s.yaw_rate.clamp(-max, max)
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        };
+        self.yaw_rate += (want - self.yaw_rate) * (dt / YAW_TC_S).min(1.0);
+        self.att[2] = ados_pilot::geo::wrap_pi(self.att[2] + self.yaw_rate * dt);
     }
 
     /// One tick of [`Fc::ap_guided`]'s GUIDED: the offset slews out at the
@@ -558,6 +602,7 @@ impl Fc {
         self.rig.af.armed = self.armed;
         if !self.armed {
             self.vel = [0.0; 3];
+            self.yaw_rate = 0.0;
             self.pos[2] = 0.0;
             self.att = [0.0, 0.0, self.att[2]];
             self.landed = true;
@@ -590,6 +635,11 @@ impl Fc {
         }
         if self.ap_guided && self.mode == copter::GUIDED {
             self.ap_guided_step(now, dt);
+        }
+        if !self.landed {
+            self.yaw_step(now, dt);
+        } else {
+            self.yaw_rate = 0.0;
         }
         let want = self.target_vel(now);
         let h = (want[0] * want[0] + want[1] * want[1]).sqrt();
@@ -719,7 +769,7 @@ impl Fc {
             yaw: self.att[2],
             rollspeed: 0.0,
             pitchspeed: 0.0,
-            yawspeed: 0.0,
+            yawspeed: self.yaw_rate,
         }));
         let agl = SKID_M - self.pos[2] + rng.noise(0.005);
         out.push(MavMessage::DISTANCE_SENSOR(DISTANCE_SENSOR_DATA {

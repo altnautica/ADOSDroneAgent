@@ -131,7 +131,13 @@ impl Pilot {
         // seen before) replan at once: a goal waits for no planning period.
         let recovered = matches!(self.plan.state, AvoidState::Stale | AvoidState::Unavailable)
             && self.obstacle_data_state(now_ms).is_none();
-        if recovered || now_ms.saturating_sub(self.plan_ms) >= PLAN_PERIOD_MS {
+        // The trajectory planner replans at its own, faster period.
+        let period = if self.traj_flies() {
+            planner::TRAJ_PERIOD_MS
+        } else {
+            PLAN_PERIOD_MS
+        };
+        if recovered || now_ms.saturating_sub(self.plan_ms) >= period {
             self.plan_ms = now_ms;
             if let Some(p) = self.pos_ne(now_ms) {
                 self.obstacles.rebuild(p, now_ms);
@@ -225,9 +231,10 @@ impl Pilot {
     }
 
     fn replan(&mut self, now_ms: u64) {
-        let Some(pos) = self.pos_ne(now_ms) else {
+        let Some(pos3) = self.pos(now_ms) else {
             return;
         };
+        let pos = [pos3[0], pos3[1]];
         let margin = self.margin();
         let goal = match self.owner() {
             Owner::Skill => self.auth.lease().and_then(|l| l.goal.clone()),
@@ -237,17 +244,17 @@ impl Pilot {
             _ => None,
         };
         let Some(goal) = goal else {
-            self.held_route.clear();
+            self.drop_routes();
             self.plan = planner::Plan::hold(AvoidState::Clear);
             return;
         };
         if goal.kind == GoalKind::Vantage {
-            self.held_route.clear();
+            self.drop_routes();
             self.replan_vantage(&goal, pos, margin, now_ms);
             return;
         }
         if self.settings.pilot.avoid == AvoidMode::Off {
-            self.held_route.clear();
+            self.drop_routes();
             let t = [goal.n, goal.e];
             self.plan = planner::Plan {
                 state: AvoidState::Off,
@@ -260,12 +267,12 @@ impl Pilot {
         }
         match self.obstacle_data_state(now_ms) {
             Some(AvoidState::Stale) => {
-                self.held_route.clear();
+                self.drop_routes();
                 self.plan = planner::Plan::hold(AvoidState::Stale);
             }
             // No obstacle sensor: the goal flies straight, reported as such.
             Some(s) => {
-                self.held_route.clear();
+                self.drop_routes();
                 let t = [goal.n, goal.e];
                 self.plan = planner::Plan {
                     state: s,
@@ -274,6 +281,10 @@ impl Pilot {
                     path: vec![pos, t],
                     min_clearance: None,
                 };
+            }
+            None if self.traj_flies() => {
+                self.held_route.clear();
+                self.replan_traj(&goal, pos3, now_ms);
             }
             None => {
                 let speed_mps = self
@@ -284,8 +295,22 @@ impl Pilot {
                 let held = &mut self.held_route;
                 self.plan =
                     planner::plan_committed(&self.obstacles, &goal, pos, margin, motion, held);
+                self.shadow_traj(&goal, pos3, now_ms);
+                // A goto has no detour spots: blocked, it follows the
+                // trajectory planner's route when there is one.
+                if self.owner() == Owner::Goto && self.plan.state == AvoidState::Blocked {
+                    if let Some(p) = self.goto_route(pos, now_ms) {
+                        self.plan = p;
+                    }
+                }
             }
         }
+    }
+
+    /// Drop the routes both planners hold (no goal they plan).
+    fn drop_routes(&mut self) {
+        self.held_route.clear();
+        self.traj.clear();
     }
 
     /// How many times the planner changed the route it flies: straight to a

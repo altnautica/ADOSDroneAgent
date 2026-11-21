@@ -58,11 +58,28 @@ impl LinkLossAction {
     }
 }
 
+/// Which planner flies skill goals and gotos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannerMode {
+    /// The grid planner: the goal while its way is clear, else a detour
+    /// spot on the skill's ring; the trajectory planner runs beside it in
+    /// shadow (published, never flown). A goto the grid planner finds
+    /// blocked follows the trajectory planner's route.
+    #[default]
+    Reactive,
+    /// The trajectory planner flies: a smooth trajectory replanned at
+    /// 10 Hz, committed only with a backup that stops in seen-free space.
+    Trajectory,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PilotSection {
     pub profile: Profile,
     pub avoid: AvoidMode,
+    /// Which planner flies skill goals and gotos ([`PlannerMode`]).
+    pub planner: PlannerMode,
     pub height_ref: HeightRef,
     pub obstacle_margin_m: f32,
     /// The kind of place flown: `open`, or `confined` (a margin from the
@@ -215,6 +232,7 @@ impl Default for PilotSection {
         Self {
             profile: Profile::Normal,
             avoid: AvoidMode::Brake,
+            planner: PlannerMode::Reactive,
             height_ref: HeightRef::Agl,
             obstacle_margin_m: 1.5,
             place_class: PlaceClass::Open,

@@ -55,6 +55,14 @@ class PilotConfig(BaseModel):
 
     profile: Literal["cine", "normal", "sport"] = "normal"
     avoid: Literal["brake", "bypass", "off"] = "brake"
+    # Which planner flies skill goals and gotos. ``reactive``: the grid
+    # planner (the goal while its way is clear, else a detour spot on the
+    # skill's ring), with the trajectory planner run beside it in shadow,
+    # published and never flown; a goto it finds blocked follows the
+    # trajectory planner's route. ``trajectory``: the trajectory planner
+    # flies, replanned at 10 Hz and committed only with a backup that stops
+    # in seen-free space.
+    planner: Literal["reactive", "trajectory"] = "reactive"
     height_ref: Literal["agl", "ekf"] = "agl"
     # The open-place obstacle margin. A confined place flies the
     # propeller-tip radius plus 0.1 m instead, whatever this says, so the

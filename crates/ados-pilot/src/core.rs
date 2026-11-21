@@ -126,6 +126,9 @@ pub struct Pilot {
     plan: Plan,
     /// The route the planner holds between replans.
     held_route: crate::planner::Commit,
+    /// The trajectory planner and the plan it committed: flown under
+    /// `pilot.planner = trajectory`, in shadow otherwise.
+    traj: crate::planner::TrajPlanner,
     plan_ms: u64,
     sessions: Sessions,
     failsafe: Failsafe,
@@ -255,6 +258,7 @@ impl Pilot {
             fw: Fixedwing::default(),
             plan: Plan::hold(ados_protocol::pilot::AvoidState::Clear),
             held_route: Default::default(),
+            traj: crate::planner::TrajPlanner::new(),
             plan_ms: 0,
             sessions: Sessions::default(),
             failsafe: Failsafe::default(),

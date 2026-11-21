@@ -43,4 +43,5 @@ mod supervisor;
 mod take;
 mod touchdown;
 mod trace;
+mod trajectory;
 mod tunnel_replay;
