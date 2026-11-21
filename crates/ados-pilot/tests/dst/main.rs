@@ -33,6 +33,7 @@ mod fc_avoid;
 mod forest;
 mod goto_wall;
 mod metrics;
+mod mine;
 mod mission_route;
 #[path = "../pins/mod.rs"]
 mod pins;

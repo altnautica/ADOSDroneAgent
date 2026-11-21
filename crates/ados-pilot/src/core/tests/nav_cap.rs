@@ -7,6 +7,12 @@ use crate::modes::copter;
 const CAP: f32 = 2.0;
 const ACCEL: f32 = 1.5;
 const TICK_S: f32 = 0.02;
+/// The pilot's FC position-loop gain, 1/s (`core::control::FC_POS_GAIN`):
+/// the FC flies the setpoint velocity plus this times the setpoint
+/// position's distance from the vehicle.
+const FC_POS_GAIN: f32 = 1.0;
+/// f32 rounding on a cap of a few m/s.
+const FLOAT_TOL: f32 = 1e-5;
 
 fn ext_nav_world() -> World {
     let mut w = World::new();
@@ -65,6 +71,16 @@ fn pos_pull(w: &World) -> f32 {
     (sp.x - w.pos[0]).hypot(sp.y - w.pos[1])
 }
 
+/// The horizontal speed the FC flies on the last setpoint: its velocity
+/// plus the position loop's pull, at most. Under a cap the reference point
+/// may lead the vehicle by the slack the cap leaves above the velocity (the
+/// harness vehicle never moves, so it leads by all of it), and this must
+/// stay within the cap.
+fn fc_speed(w: &World) -> f32 {
+    let sp = w.last_setpoint().unwrap();
+    sp.vx.hypot(sp.vy) + FC_POS_GAIN * pos_pull(w)
+}
+
 #[test]
 fn the_harness_flies_uncapped_with_its_3d_fix() {
     let mut w = World::new();
@@ -83,7 +99,11 @@ fn goal_speed_is_capped_while_the_active_source_is_external_nav() {
     for v in speeds(&w, from) {
         assert!(v <= CAP + 1e-3, "{v} m/s");
     }
-    assert!(pos_pull(&w) < 1e-3, "position pull {} m", pos_pull(&w));
+    assert!(
+        fc_speed(&w) <= CAP + FLOAT_TOL,
+        "FC flies {} m/s",
+        fc_speed(&w)
+    );
     let cap = w.p.nav_cap(w.now).unwrap();
     assert_eq!(cap.reason, "gnss-denied");
     assert_eq!(cap.v_h_mps, CAP);
@@ -207,7 +227,58 @@ fn gotos_are_capped_too() {
     for s in v {
         assert!(s <= CAP + 1e-3, "{s} m/s");
     }
-    assert!(pos_pull(&w) < 1e-3);
+    assert!(
+        fc_speed(&w) <= CAP + FLOAT_TOL,
+        "FC flies {} m/s",
+        fc_speed(&w)
+    );
+}
+
+/// A capped goto blocked by a wall holds where it stopped: the hold point
+/// stays while the vehicle slides off it on an EKF velocity that reads
+/// still, and the FC's pull back toward it keeps within the cap.
+#[test]
+fn a_capped_blocked_goto_keeps_its_hold_point() {
+    let mut w = ext_nav_world();
+    ext_nav(&mut w);
+    w.scan_ranges = super::safety::wall_scan(5.0)["ranges_m"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_f64().unwrap() as f32)
+        .collect();
+    w.action("take_control");
+    w.req(ados_protocol::pilot::Request::Goto {
+        n: 40.0,
+        e: 0.0,
+        d: w.pos[2],
+        yaw: None,
+    });
+    run_ext_nav(&mut w, 2000);
+    assert_eq!(w.p.state(w.now).hold_reason.as_deref(), Some("blocked"));
+    let sp = w.last_setpoint().unwrap();
+    let held = [sp.x, sp.y];
+    // 0.8 m east over 2 s, the EKF velocity still zero.
+    for _ in 0..4 {
+        ext_nav(&mut w);
+        for _ in 0..25 {
+            w.pos[1] += 0.008;
+            w.run(20);
+        }
+    }
+    let sp = w.last_setpoint().unwrap();
+    let moved = (sp.x - held[0]).hypot(sp.y - held[1]);
+    assert!(
+        moved < 0.05,
+        "the hold point moved {moved} m with the vehicle"
+    );
+    let pull = pos_pull(&w);
+    assert!((pull - 0.8).abs() < 0.05, "position pull {pull} m");
+    assert!(
+        fc_speed(&w) <= CAP + FLOAT_TOL,
+        "FC flies {} m/s",
+        fc_speed(&w)
+    );
 }
 
 #[test]

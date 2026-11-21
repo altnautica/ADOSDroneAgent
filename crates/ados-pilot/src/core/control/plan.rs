@@ -231,12 +231,6 @@ impl Pilot {
             _ => target,
         };
         let mut r = self.goal_ref(pos, yaw, now_ms);
-        if shape.capped {
-            // Capped, the velocity is flown from the vehicle's own position:
-            // a reference ahead of it would let the FC's position loop pull
-            // past the cap.
-            r.p = pos_ne;
-        }
         let asked = match &traj {
             Some(t) => t.v,
             None => self.goal_ask(goal.as_ref(), pos_ne, geo::sub(target, r.p), &shape.gl, dt),
@@ -366,12 +360,15 @@ impl Pilot {
             r.sh.reset(v);
             *limits |= s.speed_by;
         }
-        let mut p = if s.capped {
-            s.pos
+        // Capped, the FC's pull toward the reference adds only what the cap
+        // leaves: the reference may lead or trail the vehicle by that slack.
+        let slack = if s.capped {
+            (s.v_cap - geo::norm(v)) / FC_POS_GAIN
         } else {
-            let next = on_traj.map_or(geo::add(r.p, geo::scale(v, s.dt)), |t| t.p);
-            leash_within(next, s.pos, REF_LEASH_M)
+            REF_LEASH_M
         };
+        let next = on_traj.map_or(geo::add(r.p, geo::scale(v, s.dt)), |t| t.p);
+        let mut p = leash_within(next, s.pos, slack.clamp(0.0, REF_LEASH_M));
         if let Some(subject) = &s.subject {
             let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
             if let Some((cut, slide_capped)) =

@@ -143,6 +143,12 @@ pub struct Fc {
     gust: [f32; 2],
     /// Per-run gust strength, m/s.
     gust_mps: f32,
+    /// How far the EKF's velocity reads below the copter's true velocity,
+    /// m/s (north, east): a flow-fused estimate lagging an acceleration or
+    /// a turn. The FC flies its estimate to the target, so the copter moves
+    /// this much faster than it thinks; its position stays true (the
+    /// external position keeps it), the velocity it reports does not.
+    pub vel_bias: [f32; 2],
     /// The proximity avoidance backstop ([`crate::fc_avoid`]).
     pub prox: crate::fc_avoid::Proximity,
     sp: Option<(u64, SET_POSITION_TARGET_LOCAL_NED_DATA)>,
@@ -207,6 +213,7 @@ impl Fc {
             offset: [0.0; 3],
             vel_target: None,
             hold: [0.0; 3],
+            vel_bias: [0.0; 2],
             takeoff_alt: None,
             landed_ms: None,
             replies: Vec::new(),
@@ -699,8 +706,8 @@ impl Fc {
         self.att = [(right / G).atan(), -(fwd / G).atan(), self.att[2]];
         let flying = !self.landed || self.vel[2] < -0.05 || self.takeoff_alt.is_some();
         if flying {
-            self.pos[0] += (self.vel[0] + self.gust[0]) * dt;
-            self.pos[1] += (self.vel[1] + self.gust[1]) * dt;
+            self.pos[0] += (self.vel[0] + self.gust[0] + self.vel_bias[0]) * dt;
+            self.pos[1] += (self.vel[1] + self.gust[1] + self.vel_bias[1]) * dt;
             self.pos[2] += self.vel[2] * dt;
         }
         let v_h = self.vel[0].hypot(self.vel[1]);

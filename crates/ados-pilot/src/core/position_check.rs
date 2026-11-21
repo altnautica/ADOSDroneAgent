@@ -4,9 +4,10 @@
 //! - Navigation's `plugin.navigation.state` reports the external position degraded or lost
 //!   while the active EKF source set takes its horizontal position from it;
 //! - the FC's own optical flow (rate × range) and the EKF's velocity disagree
-//!   by more than [`TRIP_M`] over [`WINDOW_MS`]. A frozen external position
-//!   pulls the EKF velocity to rest while the aircraft flies on; the flow
-//!   still measures the ground going by, whatever its quality.
+//!   over a window by more than the flow's own noise allows
+//!   ([`flow_check`]). A frozen external position pulls the EKF velocity to
+//!   rest while the aircraft flies on; the flow still measures the ground
+//!   going by, whatever its quality.
 //!
 //! A third, graded: Navigation's pose sigma (`pose_sigma_m`). Over
 //! [`UNCERTAIN_SIGMA_M`] and up to `pilot.max_pose_sigma_m` the position is
@@ -20,7 +21,9 @@
 //! that flies on the estimate (a goto, a lease, a launch, a mission resume)
 //! starts.
 
-use std::collections::{BTreeMap, VecDeque};
+pub(super) mod flow_check;
+
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use ados_protocol::pilot::{ControlMode, PlaceClass, PositionUnverified, Readiness, Severity};
@@ -28,31 +31,12 @@ use ados_protocol::pilot::{ControlMode, PlaceClass, PositionUnverified, Readines
 use super::Pilot;
 use crate::geo::V2;
 
-/// The window the flow and the estimate are compared over.
-pub const WINDOW_MS: u64 = 3_000;
-/// The displacement gap over the window that marks the position unverified.
-pub const TRIP_M: f32 = 1.5;
-/// The gap under which a tripped check clears.
-pub const CLEAR_M: f32 = 0.75;
-/// A flow gap longer than this is not bridged (the comparison restarts).
-const MAX_STEP_MS: u64 = 200;
-/// A flow check whose last flow is older than this no longer speaks.
-const FLOW_STALE_MS: u64 = 1_000;
 /// A `plugin.navigation.state` older than this no longer speaks for Navigation.
 pub const EXTNAV_STALE_MS: u64 = 3_000;
 /// `EK3_SRCn_POSXY` value for external navigation.
 const POSXY_EXTNAV: f32 = 6.0;
 /// Horizontal stick speed while the position is unverified.
 pub const UNVERIFIED_MAX_MPS: f32 = 1.0;
-/// The flow-against-estimate gap a tripped check brakes on is averaged over
-/// this, ms: five 10 Hz flow samples smooth a dusty floor's flow, and the
-/// lag stays short of the FC's velocity response (a 1 s average let the
-/// brake overshoot into a 0.3-0.9 m/s backward slide in simulation).
-const BRAKE_WINDOW_MS: u64 = 500;
-/// The most the flow brake asks, m/s: the frozen-pose drifts it stops run
-/// to 3 m/s, and an ask held under the gap leaves the vehicle sliding at
-/// the rest.
-pub const FLOW_BRAKE_MAX_MPS: f32 = 3.0;
 /// `hold_reason` while the position is unverified.
 pub const HOLD_POSITION_UNVERIFIED: &str = "position-unverified";
 
@@ -102,108 +86,6 @@ fn degraded_reason_unverifies(reason: Option<&str>) -> bool {
     reason.is_some_and(|r| UNVERIFYING_DEGRADED_REASONS.contains(&r) || r.starts_with("imu_feed"))
 }
 
-/// The flow-against-estimate comparison.
-#[derive(Debug, Clone, Default)]
-pub struct FlowCheck {
-    /// (time, (flow − estimate) × dt, dt ms) per flow sample inside the
-    /// window.
-    steps: VecDeque<(u64, V2, u64)>,
-    last_ms: Option<u64>,
-    tripped: bool,
-    flow_mps: f32,
-    estimate_mps: f32,
-}
-
-impl FlowCheck {
-    /// Fold one flow sample in: the ground velocity it measures and the
-    /// EKF's, both north-east, m/s.
-    pub fn step(&mut self, flow_ne: V2, est_ne: V2, now_ms: u64) {
-        let dt_ms = match self.last_ms {
-            Some(t) if now_ms.saturating_sub(t) <= MAX_STEP_MS => now_ms.saturating_sub(t),
-            Some(_) => {
-                self.steps.clear();
-                0
-            }
-            None => 0,
-        };
-        self.last_ms = Some(now_ms);
-        let dt = dt_ms as f32 / 1000.0;
-        self.steps.push_back((
-            now_ms,
-            [(flow_ne[0] - est_ne[0]) * dt, (flow_ne[1] - est_ne[1]) * dt],
-            dt_ms,
-        ));
-        while self
-            .steps
-            .front()
-            .is_some_and(|(t, _, _)| now_ms.saturating_sub(*t) >= WINDOW_MS)
-        {
-            self.steps.pop_front();
-        }
-        self.flow_mps = flow_ne[0].hypot(flow_ne[1]);
-        self.estimate_mps = est_ne[0].hypot(est_ne[1]);
-        let gap = self.gap_m();
-        if gap > TRIP_M {
-            self.tripped = true;
-        } else if gap < CLEAR_M {
-            self.tripped = false;
-        }
-    }
-
-    /// A sample with no flow measurement: the comparison restarts.
-    pub fn gap(&mut self) {
-        self.last_ms = None;
-        self.steps.clear();
-    }
-
-    /// The displacement gap over the window, metres.
-    pub fn gap_m(&self) -> f32 {
-        let s = self
-            .steps
-            .iter()
-            .fold([0.0f32; 2], |a, (_, d, _)| [a[0] + d[0], a[1] + d[1]]);
-        s[0].hypot(s[1])
-    }
-
-    /// Tripped, with the speeds it last compared, while the flow is fresh.
-    fn verdict(&self, now_ms: u64) -> Option<(f32, f32)> {
-        let fresh = self
-            .last_ms
-            .is_some_and(|t| now_ms.saturating_sub(t) <= FLOW_STALE_MS);
-        (self.tripped && fresh).then_some((self.flow_mps, self.estimate_mps))
-    }
-
-    /// While tripped: the velocity, north-east m/s, to ask the flight
-    /// controller for so that the ground velocity the flow measures goes to
-    /// zero. The FC drives its EKF velocity to the ask, and the ground
-    /// velocity is the EKF's plus the gap (flow − estimate), averaged over
-    /// [`BRAKE_WINDOW_MS`]; so the ask is minus that gap, held to
-    /// [`FLOW_BRAKE_MAX_MPS`]. `None` while not tripped (or the flow is
-    /// stale) or with under 0.2 s of flow in the window: a quality-0 sample
-    /// or a missing range restarts the comparison, and the hold then asks
-    /// zero on the estimate as before.
-    fn brake_ne(&self, now_ms: u64) -> Option<V2> {
-        self.verdict(now_ms)?;
-        let (mut sum, mut span_ms) = ([0.0f32; 2], 0u64);
-        for (_, d, dt) in self
-            .steps
-            .iter()
-            .filter(|(t, _, _)| now_ms.saturating_sub(*t) < BRAKE_WINDOW_MS)
-        {
-            sum = [sum[0] + d[0], sum[1] + d[1]];
-            span_ms += dt;
-        }
-        if span_ms < 200 {
-            return None;
-        }
-        let s = span_ms as f32 / 1000.0;
-        Some(crate::geo::clamp_len(
-            [-sum[0] / s, -sum[1] / s],
-            FLOW_BRAKE_MAX_MPS,
-        ))
-    }
-}
-
 /// Navigation's last `plugin.navigation.state`, as far as the position check reads it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExtNav {
@@ -232,19 +114,6 @@ impl ExtNav {
             at_ms: now_ms,
         })
     }
-}
-
-/// The body-frame (FRD) ground velocity of a flow rate over `range_m`:
-/// forward motion reads as +y flow, rightward as −x (ArduPilot's
-/// OPTICAL_FLOW convention).
-pub fn flow_body_velocity(comp: [f32; 2], range_m: f32) -> V2 {
-    [comp[1] * range_m, -comp[0] * range_m]
-}
-
-/// Rotate a body-frame horizontal velocity by `yaw` into north-east.
-pub fn body_to_ne(v: V2, yaw: f32) -> V2 {
-    let (s, c) = yaw.sin_cos();
-    [v[0] * c - v[1] * s, v[0] * s + v[1] * c]
 }
 
 impl Pilot {

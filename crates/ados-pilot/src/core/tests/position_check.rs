@@ -61,7 +61,7 @@ fn a_hold_the_flow_says_is_moving_is_not_a_calm_hold() {
     // so the ground speed the flow measures goes to zero.
     let sp = w.last_setpoint().unwrap();
     assert_eq!(sp.type_mask.bits(), crate::fc::MASK_VELOCITY);
-    let cap = crate::core::position_check::FLOW_BRAKE_MAX_MPS;
+    let cap = crate::core::position_check::flow_check::FLOW_BRAKE_MAX_MPS;
     assert!((sp.vx + cap).abs() < 1e-3 && sp.vy.abs() < 1e-3, "{sp:?}");
 }
 
@@ -422,4 +422,114 @@ fn launch_and_arm_are_refused_while_unverified() {
     assert!(position_check_msg(&w).is_some());
     assert!(refused(&w.action("arm")).is_some());
     assert!(!w.armed);
+}
+
+/// A seeded xorshift64* with Box-Muller normals, for flow noise.
+struct Noise(u64);
+
+impl Noise {
+    fn new(seed: u64) -> Self {
+        Self(
+            seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(1)
+                .max(1),
+        )
+    }
+    /// Uniform in (0, 1].
+    fn unit(&mut self) -> f64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        ((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) + 1) as f64 / (1u64 << 53) as f64
+    }
+    fn normal(&mut self) -> f32 {
+        let (u1, u2) = (self.unit(), self.unit());
+        ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
+    }
+}
+
+/// One standard deviation of the flow rate's noise, rad/s, per axis and
+/// sample: about 1.1 m/s at 1.9 m, a dusty floor at quality 20.
+const DUSTY_SIGMA_RAD_S: f32 = 0.6;
+/// The EKF velocity's lag behind the ground velocity, s.
+const EKF_LAG_S: f32 = 0.3;
+
+/// A flight north at yaw 0, 1.9 m up, `secs` long, the FC sending
+/// OPTICAL_FLOW at 20 Hz (the agent's stream rate) with seeded white noise
+/// at [`DUSTY_SIGMA_RAD_S`]. The ground velocity is `ground(t)`; the EKF's
+/// follows it [`EKF_LAG_S`] behind, less `freeze.1` m/s from `freeze.0` s
+/// on (a frozen external position holding it back). Returns when the check
+/// first said the position was unverified, s.
+fn dusty_flight(
+    seed: u64,
+    secs: f32,
+    ground: impl Fn(f32) -> f32,
+    freeze: Option<(f32, f32)>,
+) -> Option<f32> {
+    let mut w = hovering();
+    let agl = w.agl.unwrap();
+    let t0 = w.now;
+    let mut noise = Noise::new(seed);
+    let (mut est, mut sample) = (0.0f32, None);
+    while w.now - t0 < (secs * 1000.0) as u64 {
+        let t = (w.now - t0) as f32 / 1000.0;
+        let g = ground(t);
+        est += (g - est) * 0.02 / EKF_LAG_S;
+        let held = freeze.filter(|(at, _)| t >= *at).map_or(0.0, |(_, v)| v);
+        w.vel = [est - held, 0.0, 0.0];
+        let bin = (w.now - t0) / 50;
+        if sample != Some(bin) {
+            sample = Some(bin);
+            let comp_y = g / agl + DUSTY_SIGMA_RAD_S * noise.normal();
+            let comp_x = DUSTY_SIGMA_RAD_S * noise.normal();
+            w.inbox.push(MavMessage::OPTICAL_FLOW(OPTICAL_FLOW_DATA {
+                flow_comp_m_x: comp_x,
+                flow_comp_m_y: comp_y,
+                quality: 20,
+                ground_distance: agl,
+                ..Default::default()
+            }));
+        }
+        w.run(20);
+        if w.p.position_unverified(w.now).is_some() {
+            return Some((w.now - t0) as f32 / 1000.0);
+        }
+    }
+    None
+}
+
+/// Stop, speed up at 1 m/s² to 1.6 m/s, cruise, slow down: a 7.6 s cycle.
+fn stop_and_go(t: f32) -> f32 {
+    match t % 7.6 {
+        c if c < 2.0 => 0.0,
+        c if c < 3.6 => c - 2.0,
+        c if c < 6.0 => 1.6,
+        c => 1.6 - (c - 6.0),
+    }
+}
+
+/// Noisy flow over a dusty floor, its mean on the ground velocity, against
+/// an estimate that is right but for its lag: never unverified. Each seed
+/// tripped the bare 1.5 m threshold (noise alone moves the 3 s gap by about
+/// 0.4 m per axis at 20 Hz, the lag through the speed changes by more).
+#[test]
+fn noisy_flow_around_a_correct_estimate_is_verified() {
+    for seed in 1..=3 {
+        let tripped = dusty_flight(seed, 30.0, stop_and_go, None);
+        assert_eq!(tripped, None, "seed {seed}: unverified at {tripped:?} s");
+    }
+}
+
+/// The same noisy flow at a steady 1.6 m/s, the estimate frozen 1 m/s
+/// short of it from 10 s on: the check still catches it, within 3.5 s.
+#[test]
+fn a_frozen_estimate_is_caught_through_noisy_flow() {
+    for seed in 1..=3 {
+        let tripped = dusty_flight(seed, 20.0, |_| 1.6, Some((10.0, 1.0)));
+        let at = tripped.unwrap_or_else(|| panic!("seed {seed}: never caught"));
+        eprintln!("seed {seed}: caught {:.2} s after the freeze", at - 10.0);
+        assert!((10.0..13.5).contains(&at), "seed {seed}: caught at {at} s");
+    }
 }
