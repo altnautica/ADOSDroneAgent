@@ -15,6 +15,7 @@ mod ekf;
 pub mod extnav;
 pub mod pos_reset;
 pub mod rates;
+pub mod trail;
 mod tx;
 pub use ekf::EkfPosition;
 pub use tx::{heartbeat, Tx};
@@ -132,6 +133,8 @@ pub struct FcState {
     pub rates: rates::Rates,
     /// Horizontal position resets of the FC's EKF ([`pos_reset`]).
     pub pos_reset: pos_reset::ResetWatch,
+    /// The attitude and local position of the last second ([`trail`]).
+    pub trail: trail::Trail,
 }
 
 impl FcState {
@@ -186,6 +189,7 @@ impl FcState {
                     yaw_rate: a.yawspeed,
                 };
                 self.attitude = Some(Stamped { v, at_ms: now_ms });
+                self.trail.on_attitude(now_ms, v);
             }
             MavMessage::LOCAL_POSITION_NED(p) => {
                 let v = LocalPos {
@@ -197,6 +201,7 @@ impl FcState {
                     vd: p.vz,
                 };
                 self.local = Some(Stamped { v, at_ms: now_ms });
+                self.trail.on_local(now_ms, v);
                 self.extnav.on_local(p.vx, p.vy, now_ms);
                 if self.from_fc(sysid, compid) {
                     self.pos_reset.on_local(p.time_boot_ms, &v, now_ms);

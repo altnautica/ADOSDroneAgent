@@ -7,7 +7,9 @@
 // opens the Mode sheet. A tap on a chip that fits opens the Mode sheet.
 // Beside it, a "Confined" badge while the pilot flies the confined-place
 // profile, and (outside compact bars) the sensing badge, "Sensing: 3D lidar ·
-// ≤ 4.2 m/s", while the fresh pilot frame reports its sensing tier.
+// ≤ 4.2 m/s", while the fresh pilot frame reports its sensing tier, and the
+// goal badge, "Follow intent · view 15° 8 m" or "Ring", while a skill's goal
+// flies.
 
 import { useRef, useState } from "react";
 
@@ -17,6 +19,7 @@ import { chipButton, chipFullText, chipLines, chipLineTextColor } from "@/lib/ch
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { CHIP_MAX_FRAC, HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { goalKindChipText } from "@/shared/hud/goal-kind";
 import { confinedChipText } from "@/shared/hud/route-check";
 import { sensingChipText } from "@/shared/hud/sensing";
 import { specText } from "@/shared/hud/spec-text";
@@ -29,7 +32,9 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   const chip = useFlightChip();
   const radioFallback = useNavStreamStore((s) => s.radioFallback);
   const confined = useNavStreamStore((s) => (s.pilot ? confinedChipText(s.pilot.data) : null));
-  const sensing = sensingChipText(useFreshPilot()?.sensing ?? null);
+  const fresh = useFreshPilot();
+  const sensing = sensingChipText(fresh?.sensing ?? null);
+  const goal = goalKindChipText(fresh?.goalKind ?? null, fresh?.view ?? null);
   const openSheet = useCockpitUiStore((s) => s.openSheet);
   const textRef = useRef<HTMLSpanElement>(null);
   const [fullAt, setFullAt] = useState<DOMRect | null>(null);
@@ -104,6 +109,16 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
           style={{ color: "var(--fs-text)" }}
         >
           {sensing}
+        </span>
+      ) : null}
+      {goal && !compact ? (
+        <span
+          data-testid="goal-kind-chip"
+          title={goal}
+          className="h-[var(--fs-control)] min-w-0 shrink truncate whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] px-[8px] leading-[var(--fs-control)]"
+          style={{ color: "var(--fs-text)" }}
+        >
+          {goal}
         </span>
       ) : null}
       {button ? (

@@ -38,6 +38,13 @@ pub fn guard_keep_m(m: &Mover, now_ms: u64) -> f32 {
 #[derive(Debug, Default)]
 pub(crate) struct MoverGuards(Vec<Subject>);
 
+impl MoverGuards {
+    /// The people kept clear of this tick.
+    pub(super) fn people(&self) -> &[Subject] {
+        &self.0
+    }
+}
+
 impl Pilot {
     /// Before each grid rebuild: the margin the planners keep and whether
     /// the vehicle flies over a person's head (its height above ground less

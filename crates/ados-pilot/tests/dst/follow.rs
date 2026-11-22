@@ -673,7 +673,7 @@ pub fn orbit(seed: u64) -> (Sim, Follow) {
 /// `intent`): one table row per case, goal and seed.
 pub fn table() {
     type Case = (&'static str, fn(u64, bool) -> (Sim, Follow));
-    let cases: [Case; 6] = [
+    let cases: [Case; 8] = [
         ("corner", corner),
         ("trunks", trunks),
         ("t_junction", t_junction),
@@ -683,6 +683,13 @@ pub fn table() {
         }),
         ("jog_away 3.0", |s, r| {
             walk_away(s, JOG_MPS, SensorTier::Mid360, r)
+        }),
+        // The held vehicle's goal names no subject: ring and intent fly alike.
+        ("lost_hold walk 1.4", |s, _| {
+            crate::lost_hold::walk_under(s, WALK_MPS)
+        }),
+        ("lost_hold run 3.0", |s, _| {
+            crate::lost_hold::walk_under(s, JOG_MPS)
         }),
     ];
     let only = std::env::var("DST_FOLLOW_CASE").unwrap_or_default();

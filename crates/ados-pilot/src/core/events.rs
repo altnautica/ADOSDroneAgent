@@ -10,6 +10,7 @@ use crate::events::{
     TOPIC_SCAN, TOPIC_SUBJECT,
 };
 use crate::flows::banner;
+use crate::obstacles::CameraFrom;
 
 mod params;
 
@@ -87,7 +88,33 @@ impl Pilot {
             TOPIC_LIDAR => self.lidar.on_status(payload, now_ms),
             TOPIC_MAP_STATUS => self.nav_imu.on_status(payload, now_ms),
             TOPIC_OCCUPANCY => self.obstacles.ingest_occupancy(payload),
-            TOPIC_DETECTION => self.obstacles.movers.ingest_detections(payload, now_ms),
+            TOPIC_DETECTION => {
+                // Where the camera looked from, for the tracks it places on
+                // no world position: the vehicle's pose when the frame was
+                // taken (a simulated camera stamps it in simulation time,
+                // the pilot's clock when it flies on the simulator's; a
+                // frame stamped on no clock the pilot shares is placed from
+                // the pose now) and its height over the ground.
+                let taken = payload
+                    .get("ts_sensor_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|t| *t <= now_ms && now_ms - t <= crate::fc::trail::TRAIL_MS);
+                let pose = taken.and_then(|t| {
+                    let p = self.fc.trail.local_at(t)?;
+                    Some(([p.n, p.e, p.d], self.fc.trail.attitude_at(t)?))
+                });
+                let from = pose
+                    .or_else(|| self.pos(now_ms).zip(self.fc.fresh_attitude(now_ms)))
+                    .zip(self.fc.rangefinder_agl(now_ms).or_else(|| self.agl(now_ms)))
+                    .map(|((ned, a), agl)| CameraFrom {
+                        ned,
+                        att: [a.roll, a.pitch, a.yaw],
+                        agl,
+                    });
+                self.obstacles
+                    .movers
+                    .ingest_detections(payload, from, now_ms);
+            }
             TOPIC_SUBJECT => self.follow_view.on_subject(payload, now_ms),
             TOPIC_POSE => {
                 let pos = self.pos_ne(now_ms);

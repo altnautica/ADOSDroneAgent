@@ -429,6 +429,41 @@ fn command_and_shadow_are_omitted_until_set_and_round_trip() {
 }
 
 #[test]
+fn goal_kind_and_view_are_omitted_until_set_and_round_trip() {
+    use crate::pilot::{FollowView, PilotState};
+    let mut s = PilotState::default();
+    let v = serde_json::to_value(&s).unwrap();
+    assert!(
+        v.get("goal_kind").is_none() && v.get("view").is_none(),
+        "{v}"
+    );
+    // An older pilot's frame (no fields) reads as none.
+    let back: PilotState = serde_json::from_value(v).unwrap();
+    assert_eq!((back.goal_kind, back.view), (None, None));
+    s.goal_kind = Some(GoalKind::FollowIntent);
+    s.view = Some(FollowView::new(15.0, 8.0, 4.5, 0.75));
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["goal_kind"], "follow_intent");
+    assert_eq!(
+        v["view"],
+        serde_json::json!({"bearing_deg": 15.0, "radius_m": 8.0, "height_m": 4.5, "visibility": 0.75})
+    );
+    let back: PilotState = serde_json::from_value(v).unwrap();
+    assert_eq!(back, s);
+    for (kind, wire) in [
+        (GoalKind::Follow, "follow"),
+        (GoalKind::Orbit, "orbit"),
+        (GoalKind::Position, "position"),
+        (GoalKind::Vantage, "vantage"),
+        (GoalKind::FollowIntent, "follow_intent"),
+    ] {
+        s.goal_kind = Some(kind);
+        assert_eq!(serde_json::to_value(&s).unwrap()["goal_kind"], wire);
+        assert_eq!(kind.as_str(), wire);
+    }
+}
+
+#[test]
 fn profile_limits_and_stick_are_omitted_until_set_and_round_trip() {
     use crate::pilot::{PilotCommand, PilotState, Profile, ProfileLimits, StickCommand};
     let mut s = PilotState::default();

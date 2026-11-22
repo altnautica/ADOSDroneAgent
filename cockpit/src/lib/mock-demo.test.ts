@@ -34,6 +34,8 @@ describe("demo feed", () => {
       expect(pilot!.data.movers.map((m) => m.kind)).toEqual(["person", "person", "unknown"]);
       const owner = pilot!.data.owner;
       seen.add(owner);
+      // The follow skill flies an intent on the viewpoint the pilot picked.
+      expect(pilot!.data.goalKind).toBe(owner === "skill" ? "follow_intent" : null);
       if (follow!.data.active) {
         expect(owner).toBe("skill");
         expect(pilot!.data.skill?.label).toBe("Follow me");

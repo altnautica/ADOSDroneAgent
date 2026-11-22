@@ -27,7 +27,7 @@ use serde_json::Value;
 pub use band::{band_top_m, Climb, BAND_TOP_M, OVERHEAD_MARGIN_M, WALL_MEMORY_MS};
 pub use grid::{Grid, CELL_M, GRID_N};
 pub use level::level_hit;
-pub use movers::{Mover, MoverFlight, Movers, OVER_HEAD_M, PERSON_H_M, PERSON_SEP_M};
+pub use movers::{CameraFrom, Mover, MoverFlight, Movers, OVER_HEAD_M, PERSON_H_M, PERSON_SEP_M};
 pub use probe::{Bar, LegProbe};
 pub use project::{project_camera, Attitude, Scratch};
 #[cfg(test)]

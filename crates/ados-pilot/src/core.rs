@@ -110,6 +110,11 @@ pub struct Pilot {
     /// The seen-space hold's stall: since when it has left the goal no
     /// motion while its look lasts, and the goal ([`control`]'s `sensing`).
     unseen_stall: Option<control::UnseenStall>,
+    /// The heading the nose turns to while a guard's back-away is held to
+    /// the ways a forward-looking tier looked along lately, and until when
+    /// (ms), and the headings the nose held lately ([`control`]'s `retreat`).
+    retreat_look: Option<(f32, u64)>,
+    view_log: control::ViewLog,
     /// FC attitudes by host-monotonic arrival, for levelling each scan at
     /// its capture ([`scan_attitude`]).
     att_log: scan_attitude::AttitudeLog,
@@ -264,6 +269,8 @@ impl Pilot {
             sensing: None,
             unseen_look: None,
             unseen_stall: None,
+            retreat_look: None,
+            view_log: Default::default(),
             att_log: Default::default(),
             mono_ns: || 0,
             overhead: Default::default(),

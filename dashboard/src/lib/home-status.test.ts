@@ -115,6 +115,15 @@ describe("home status card", () => {
     expect(homeStatusLines({ ...base, pilot: parsePilotState(raw), follow: null }).sensing).toBeNull();
   });
 
+  it("shows the goal a skill flies, with the pilot's viewpoint for a follow intent", () => {
+    const view = { bearing_deg: 15, radius_m: 8, height_m: 4.5, visibility: 0.9 };
+    const lines = (extra: Record<string, unknown>) =>
+      homeStatusLines({ ...base, pilot: parsePilotState({ ...raw, ...extra }), follow: null }).goal;
+    expect(lines({ goal_kind: "follow_intent", view })).toBe("Follow intent · view 15° 8 m");
+    expect(lines({ goal_kind: "follow" })).toBe("Ring");
+    expect(lines({})).toBeNull();
+  });
+
   it("hides the link-loss, AGL and sticks lines once the pilot frame is stale", () => {
     const pilot = { ...raw, link_loss_in_s: 3.4, link_loss_action: "rth", agl_m: 4.12, agl_source: "home" };
     const follow = { active: true, phase: "tracking", agl_m: 6.0, agl_source: "rng" };

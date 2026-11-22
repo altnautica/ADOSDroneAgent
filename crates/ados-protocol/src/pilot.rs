@@ -13,6 +13,7 @@
 
 mod clock;
 mod command;
+mod follow_view;
 mod movers;
 mod obstacles;
 mod rc;
@@ -26,6 +27,7 @@ mod wire;
 
 pub use clock::*;
 pub use command::*;
+pub use follow_view::*;
 pub use movers::*;
 pub use obstacles::*;
 pub use rc::*;
@@ -188,6 +190,19 @@ pub enum GoalKind {
     /// the skill's own point, flown when the pilot cannot pick one;
     /// `vn`/`ve` the subject's velocity; `subject_ne` the subject.
     FollowIntent,
+}
+
+impl GoalKind {
+    /// The wire name (`follow_intent`, `follow`, …).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Follow => "follow",
+            Self::Orbit => "orbit",
+            Self::Position => "position",
+            Self::Vantage => "vantage",
+            Self::FollowIntent => "follow_intent",
+        }
+    }
 }
 
 /// What a `follow_intent`'s preferred bearing is measured from.

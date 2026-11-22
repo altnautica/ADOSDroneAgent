@@ -182,6 +182,12 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         sensing: d
             .get("sensing")
             .and_then(|v| serde_json::from_value::<ados_protocol::pilot::Sensing>(v.clone()).ok()),
+        goal_kind: d
+            .get("goal_kind")
+            .and_then(|v| serde_json::from_value::<ados_protocol::pilot::GoalKind>(v.clone()).ok()),
+        view: d.get("view").and_then(|v| {
+            serde_json::from_value::<ados_protocol::pilot::FollowView>(v.clone()).ok()
+        }),
         movers: movers(d.get("movers")),
         speed_cap_reason: d
             .get("speed_cap")

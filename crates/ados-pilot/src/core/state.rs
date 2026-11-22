@@ -1,8 +1,8 @@
 //! The published `pilot` and `obstacles` kinds.
 
 use ados_protocol::pilot::{
-    wire, AvoidMode, AvoidState, FcStatusText, ObstaclesFrame, Owner, PilotState, Profile,
-    Sequence, SkillRef, VehicleClass,
+    wire, AvoidMode, AvoidState, FcStatusText, FollowView, GoalKind, ObstaclesFrame, Owner,
+    PilotState, Profile, Sequence, SkillRef, VehicleClass,
 };
 
 use super::Pilot;
@@ -282,6 +282,14 @@ impl Pilot {
         });
         s.command = self.command_frame();
         s.shadow = self.shadow_frame(now_ms);
+        // The kind of goal the skill sent, and the viewpoint the view
+        // planner picked when that goal is a `follow_intent`.
+        s.goal_kind = (owner == Owner::Skill)
+            .then(|| self.auth.lease()?.goal.as_ref().map(|g| g.kind))
+            .flatten();
+        if s.goal_kind == Some(GoalKind::FollowIntent) {
+            s.view = self.follow_view_wire(now_ms);
+        }
         // The limits the sticks fly at now, on a vehicle they fly as a
         // multirotor; what they flew on the latest tick while they own it.
         let hover = self.fc.vehicle_class() != ados_protocol::pilot::VehicleClass::Fixedwing
@@ -289,6 +297,23 @@ impl Pilot {
         s.profile_limits = hover.then(|| self.profile_limits_of(&self.stick_limits(now_ms)));
         s.stick = self.stick.map(|t| t.wire());
         s
+    }
+
+    /// The view planner's last pick as published: bearing from the subject
+    /// (north, clockwise), distance, height over the ground under the
+    /// vehicle (over home with no ground known) and visibility.
+    fn follow_view_wire(&self, now_ms: u64) -> Option<FollowView> {
+        let c = self.view_choice()?;
+        let ground_d = self
+            .pos(now_ms)
+            .zip(self.agl(now_ms))
+            .map(|(p, agl)| p[2] + agl);
+        Some(FollowView::new(
+            c.bearing.to_degrees().rem_euclid(360.0),
+            c.radius,
+            ground_d.unwrap_or(0.0) - c.d,
+            c.visibility,
+        ))
     }
 
     /// The `obstacles` kind: sectors always; camera grids only for cameras a

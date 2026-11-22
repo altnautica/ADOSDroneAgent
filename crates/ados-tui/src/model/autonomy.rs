@@ -306,6 +306,11 @@ pub struct Pilot {
     /// What the pilot sees obstacles with and the speed that stops inside
     /// its seen-clear range; `None` from an older agent.
     pub sensing: Option<ados_protocol::pilot::Sensing>,
+    /// The kind of goal the flying skill sent; `None` while none (or a kind
+    /// this build does not know).
+    pub goal_kind: Option<ados_protocol::pilot::GoalKind>,
+    /// The viewpoint the view planner picked for a follow intent.
+    pub view: Option<ados_protocol::pilot::FollowView>,
     /// The moving obstacles the pilot tracks; empty while none (or from an
     /// older agent).
     pub movers: Vec<ados_protocol::pilot::TrackedMover>,

@@ -1,18 +1,42 @@
-//! What the pilot senses, in the Pilot block: the sensing chip's words, what
-//! it sees obstacles with and the speed that still stops inside the range it
-//! sees clear (`Sensing: 3D lidar · ≤ 4.2 m/s`), and the moving obstacles it
-//! tracks (`Movers: 3 · nearest person 7.4 m`), the cockpit spec's text.
+//! What the pilot senses and flies, in the Pilot block: the sensing chip's
+//! words, what it sees obstacles with and the speed that still stops inside
+//! the range it sees clear (`Sensing: 3D lidar · ≤ 4.2 m/s`), the goal the
+//! flying skill sent (`Follow intent · view 15° 8 m`, `Ring`), and the
+//! moving obstacles it tracks (`Movers: 3 · nearest person 7.4 m`), the
+//! cockpit spec's text.
 
-use ados_protocol::pilot::MoverKind;
+use ados_protocol::pilot::{GoalKind, MoverKind};
 
 use crate::model::autonomy::Pilot;
 use crate::model::spec_text::spec_text;
 
-/// The sensing chip and the movers line, each while the pilot reports it.
+/// The sensing chip, the goal chip and the movers line, each while the
+/// pilot reports it.
 pub(super) fn texts(p: &Pilot, local_pos: Option<(f64, f64)>) -> impl Iterator<Item = String> {
-    [sensing_text(p), movers_text(p, local_pos)]
+    [sensing_text(p), goal_text(p), movers_text(p, local_pos)]
         .into_iter()
         .flatten()
+}
+
+/// `Follow intent · view 15° 8 m` while the pilot reports the viewpoint it
+/// picked for an intent, else the kind's label (`Ring`, `Orbit`, …); `None`
+/// while no skill goal is reported.
+fn goal_text(p: &Pilot) -> Option<String> {
+    let kind = p.goal_kind?;
+    let label = spec_text(&format!("pilot.goal_kind.{}", kind.as_str()), &[]);
+    let Some(v) = p.view.filter(|_| kind == GoalKind::FollowIntent) else {
+        return Some(label);
+    };
+    let bearing = (f64::from(v.bearing_deg).round() as i64).rem_euclid(360);
+    let r = f64::from(v.radius_m).round();
+    Some(spec_text(
+        "pilot.goal_kind.view",
+        &[
+            ("kind", &label),
+            ("bearing", &bearing.to_string()),
+            ("r", &format!("{r}")),
+        ],
+    ))
 }
 
 /// `Sensing: 3D lidar · ≤ 4.2 m/s`, or `None` while the pilot reports no

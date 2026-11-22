@@ -22,7 +22,10 @@
 
 import {
   parseBatteryReserve,
+  parseFollowView,
+  parseGoalKind,
   parseMovers,
+  parseLiftoff,
   parseOverheadAhead,
   parsePositionUnverified,
   parseProfileLimits,
@@ -32,6 +35,9 @@ import {
   parseStickCommand,
   type BatteryReserve,
   type FcStatusText,
+  type FollowView,
+  type GoalKind,
+  type LaunchLiftoff,
   type Mover,
   type OverheadAhead,
   type PositionUnverified,
@@ -44,7 +50,18 @@ import { PLACE_CLASSES, parseMission, parseMissionDetour, parseMissionStall, par
 import type { MissionDetour, MissionStall, MissionState, PlaceClass, ReturnRoute, RouteCheck } from "./cockpit-mission";
 import { parseSimClock, type SimClock } from "./sim-clock";
 
-export type { BatteryReserve, FcStatusText, OverheadAhead, PositionUnverified, ProfileLimits, Sensing, SpeedCap, StickCommand } from "./pilot-fields";
+export type {
+  BatteryReserve,
+  FcStatusText,
+  FollowView,
+  GoalKind,
+  OverheadAhead,
+  PositionUnverified,
+  ProfileLimits,
+  Sensing,
+  SpeedCap,
+  StickCommand,
+} from "./pilot-fields";
 export {
   decodeBase64Into,
   decodeGridCode,
@@ -128,21 +145,6 @@ export interface ReadinessItem {
   msg: string;
 }
 
-export const LIFTOFF_PHASES = ["spool", "level", "find", "bracket", "settle", "commit", "climb", "done", "stopped"] as const;
-export type LiftoffPhase = (typeof LIFTOFF_PHASES)[number];
-
-/** A steady take-off on an ArduPilot multirotor: its phase, its status
- *  line ("Spinning up", "Take-off stopped"), the longer line where a surface
- *  has room ("Climbing to 3 m"; null when the agent sends none), whether it
- *  loads a learned trim or probes for one, and the tilt from rest. */
-export interface LaunchLiftoff {
-  phase: LiftoffPhase;
-  text: string;
-  detail: string | null;
-  trim: "learned" | "probe" | null;
-  tiltDeg: number | null;
-}
-
 export interface LaunchSequence {
   step: "checks" | "arm" | "takeoff" | "after" | "done";
   after: string | null;
@@ -150,19 +152,6 @@ export interface LaunchSequence {
   /** Present while the take-off is a steady take-off; absent from an agent
    *  without one. */
   liftoff?: LaunchLiftoff | null;
-}
-
-function parseLiftoff(v: unknown): LaunchLiftoff | null {
-  const o = obj(v);
-  const phase = o ? oneOf(o.phase, LIFTOFF_PHASES) : null;
-  if (!o || !phase) return null;
-  return {
-    phase,
-    text: str(o.text) ?? "",
-    detail: str(o.detail) || null,
-    trim: oneOf(o.trim, ["learned", "probe"] as const),
-    tiltDeg: num(o.tilt_deg),
-  };
 }
 
 export interface PilotState {
@@ -262,6 +251,12 @@ export interface PilotState {
   /** What the pilot sees obstacles with and the speed that stops inside the
    *  range it sees clear (`sensing`), or null (an older agent). */
   sensing: Sensing | null;
+  /** The kind of goal the skill's lease sent (`goal_kind`), or null while a
+   *  skill flies none (or an older agent). */
+  goalKind: GoalKind | null;
+  /** The viewpoint the view planner picked for a `follow_intent` (`view`),
+   *  or null. */
+  view: FollowView | null;
   /** The moving obstacles the pilot tracks (`movers`); empty when none. */
   movers: Mover[];
   /** The limits the operator's sticks fly at now, or null (an older agent). */
@@ -365,6 +360,8 @@ export function parsePilotState(raw: unknown): PilotState | null {
     poseUncertaintyM: num(p.pose_uncertainty_m),
     overheadAhead: parseOverheadAhead(p.overhead_ahead),
     sensing: parseSensing(p.sensing),
+    goalKind: parseGoalKind(p.goal_kind),
+    view: parseFollowView(p.view),
     movers: parseMovers(p.movers),
     profileLimits: parseProfileLimits(p.profile_limits),
     stick: parseStickCommand(p.stick),

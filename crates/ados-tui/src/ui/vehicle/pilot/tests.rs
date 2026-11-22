@@ -227,6 +227,36 @@ fn the_sensing_tier_and_its_speed_limit_show_only_while_the_pilot_reports_them()
 }
 
 #[test]
+fn the_goal_kind_and_the_view_picked_show_while_a_skill_goal_flies() {
+    let mut frame: Value = serde_json::from_str(include_str!(
+        "../../../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON");
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 48);
+    assert!(
+        !text.contains("Follow intent") && !text.contains("Ring"),
+        "{text}"
+    );
+
+    frame["goal_kind"] = json!("follow_intent");
+    frame["view"] =
+        json!({"bearing_deg": 15.4, "radius_m": 7.6, "height_m": 4.5, "visibility": 0.9});
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 48);
+    assert!(text.contains("Follow intent · view 15° 8 m"), "{text}");
+
+    // The skill's own ring point, no view.
+    frame["goal_kind"] = json!("follow");
+    frame["view"] = Value::Null;
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 48);
+    assert!(text.contains("Ring"), "{text}");
+
+    // A kind this build does not know reads as none.
+    frame["goal_kind"] = json!("wander");
+    let text = draw(&mut app_with_frame(1, frame), 160, 48);
+    assert!(!text.contains("Ring") && !text.contains("wander"), "{text}");
+}
+
+#[test]
 fn the_movers_count_and_the_nearest_person_show_while_the_pilot_tracks_any() {
     let mut frame: Value = serde_json::from_str(include_str!(
         "../../../../../ados-control/tests/fixtures/pilot-frame.json"

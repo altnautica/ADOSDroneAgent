@@ -468,6 +468,14 @@ pub struct PilotState {
     /// is older than a second.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<ShadowCommand>,
+    /// The kind of goal the skill's lease sent, while a skill flies one;
+    /// omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_kind: Option<super::GoalKind>,
+    /// The viewpoint the view planner picked, while a `follow_intent` flies
+    /// on one; omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<super::FollowView>,
     /// The limits the operator's sticks fly at now; omitted when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_limits: Option<ProfileLimits>,

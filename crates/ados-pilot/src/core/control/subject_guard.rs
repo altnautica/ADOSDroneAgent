@@ -206,9 +206,30 @@ impl Pilot {
             return None;
         };
         let armed = now_ms >= t.named_ms + SUBJECT_ARM_MS;
+        let mut vel = t.vel;
         let body = self.settings.pilot.body_radius_m();
-        let keep = subject_keep(body, sigma);
-        let d = geo::dist([pos[0], pos[1]], ne);
+        let pos_ne = [pos[0], pos[1]];
+        let (mut ne, mut keep) = (ne, subject_keep(body, sigma));
+        // The subject's own camera track (the one the person guard leaves to
+        // this brake), at its predicted position and kept [`SUBJECT_SIGMAS`]
+        // of its own sigma further, uncapped (a box ranged from its size errs
+        // by its sigma): a `subject_ne` ranged long never lets the vehicle
+        // close on the person the camera sees. The nearer of the two is kept,
+        // with the faster approach of the track's velocity and the goals'
+        // (a prediction gone unmeasured holds its last velocity while the
+        // person turns back).
+        for m in self.obstacles.movers.subject_tracks(now_ms) {
+            let p = m.at(now_ms);
+            let k = subject_keep(body, None) + SUBJECT_SIGMAS * m.sigma_at(now_ms);
+            if geo::dist(pos_ne, p) - k < geo::dist(pos_ne, ne) - keep {
+                (ne, keep) = (p, k);
+                let u = geo::sub(pos_ne, p);
+                if geo::dot(m.vel, u) > geo::dot(vel, u) {
+                    vel = m.vel;
+                }
+            }
+        }
+        let d = geo::dist(pos_ne, ne);
         let agl = self.agl(now_ms);
         let t = &mut self.subject_track;
         if d < keep + SUBJECT_CLIMB_ZONE_M {
@@ -226,7 +247,6 @@ impl Pilot {
         // ratchet the floor up.
         if t.climbing {
             if let Some(a) = agl {
-                let pos_ne = [pos[0], pos[1]];
                 let cand = pos[2] + a;
                 match t.ground_d {
                     None => {
@@ -250,7 +270,6 @@ impl Pilot {
                 }
             }
         }
-        let vel = t.vel;
         let floor_d = t
             .ground_d
             .map(|g| g.d - (SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M));

@@ -57,6 +57,33 @@ impl DepthPacer {
     }
 }
 
+/// The detector's turn on the frame clock. On wall time a frame that comes
+/// while a batch is in flight is skipped (the camera's one inference permit),
+/// so the detector runs as often as its batches allow. On the simulator's
+/// clock in lockstep the simulator waits for each batch: no frame comes while
+/// one runs, and the detector would meet its full rate in sim time, more
+/// often than the same board manages in real time, holding the simulator for
+/// every extra batch. So a simulated frame earlier on the frame clock than
+/// the last batch's frame plus the wall time that batch ran is skipped, as it
+/// would have come while the batch ran. A frame clock that goes back (a new
+/// run) opens the turn.
+#[derive(Clone, Default)]
+struct DetectorTurn(Arc<std::sync::Mutex<Option<(u64, u64)>>>);
+
+impl DetectorTurn {
+    /// Whether a frame at `frame_ms` on the frame clock may start a batch.
+    fn open(&self, frame_ms: u64) -> bool {
+        let last = *self.0.lock().unwrap_or_else(|e| e.into_inner());
+        last.is_none_or(|(at, until)| frame_ms < at || frame_ms >= until)
+    }
+
+    /// A batch on the frame at `frame_ms` ran for `ran_ms` of wall time.
+    fn ran(&self, frame_ms: u64, ran_ms: u64) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((frame_ms, frame_ms.saturating_add(ran_ms)));
+    }
+}
+
 /// Run one camera's capture loop: open its source, pull frames (each in the
 /// source's native format), and publish each into the engine ring. A source
 /// error, a silent source or a closed stream reopens it: at once after an
@@ -97,6 +124,9 @@ pub(super) async fn run_camera(
     // On the simulator's clock: each simulated frame keeps the camera's lane
     // busy (in lockstep, the simulator waits) until its batch is out.
     let pacing = engine.sim_pacing();
+    // On the simulator's clock: a batch keeps the detector's turn for the
+    // frame-clock time it ran ([`DetectorTurn`]).
+    let turn = DetectorTurn::default();
     // The last source failure, surfaced in the status sidecar and logged at
     // warn once per distinct reason, cleared by the next delivered frame.
     let mut last_error: Option<String> = None;
@@ -177,11 +207,15 @@ pub(super) async fn run_camera(
                                     // actually run. The models are paced on the
                                     // frame clock (a simulated frame's sim time).
                                     let now_ms = mono_ns() / 1_000_000;
-                                    let frame_ms = frame_clock_ns(&desc).map_or(now_ms, |ns| ns / 1_000_000);
+                                    let sim_ms = frame_clock_ns(&desc).map(|ns| ns / 1_000_000);
+                                    let frame_ms = sim_ms.unwrap_or(now_ms);
                                     let lane = pacing.as_ref().and_then(|p| p.frame(&camera_id, &desc).map(|ns| (p.clone(), ns)));
                                     let mut spawned = false;
                                     depth.offer(&engine, &desc, now_ms);
-                                    if !paces.is_empty() && engine.detection_wanted(&camera_id, now_ms) {
+                                    if !paces.is_empty()
+                                        && sim_ms.is_none_or(|ms| turn.open(ms))
+                                        && engine.detection_wanted(&camera_id, now_ms)
+                                    {
                                         if let Ok(permit) =
                                             infer_sem.clone().try_acquire_owned()
                                         {
@@ -197,9 +231,11 @@ pub(super) async fn run_camera(
                                                 let back = recycle.clone();
                                                 let lane = lane.clone();
                                                 let cam = camera_id.clone();
+                                                let turn = sim_ms.map(|ms| (turn.clone(), ms));
                                                 spawned = true;
                                                 tokio::spawn(async move {
                                                     let _permit = permit;
+                                                    let started = std::time::Instant::now();
                                                     for det in due {
                                                         if let Err(e) = eng
                                                             .infer_and_publish(&det, &desc, &data)
@@ -207,6 +243,10 @@ pub(super) async fn run_camera(
                                                         {
                                                             tracing::warn!(model = %det, error = %e, "detector_infer_failed");
                                                         }
+                                                    }
+                                                    if let Some((t, ms)) = turn {
+                                                        let ran = started.elapsed().as_millis();
+                                                        t.ran(ms, u64::try_from(ran).unwrap_or(u64::MAX));
                                                     }
                                                     back.give(data);
                                                     if let Some((p, ns)) = lane {
@@ -249,5 +289,24 @@ pub(super) async fn run_camera(
         if backoff(&cancel, reopen_pause(opened.elapsed())).await {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DetectorTurn;
+
+    #[test]
+    fn a_batch_keeps_the_turn_for_its_run_time_on_the_frame_clock() {
+        let turn = DetectorTurn::default();
+        assert!(turn.open(1_000));
+        // A 128 ms batch on the frame at 1000 ms: the 30 fps frames that
+        // would have come while it ran are skipped, the fourth one runs.
+        turn.ran(1_000, 128);
+        assert!(!turn.open(1_033));
+        assert!(!turn.open(1_100));
+        assert!(turn.open(1_133));
+        // A frame clock that went back is a new run.
+        assert!(turn.open(400));
     }
 }

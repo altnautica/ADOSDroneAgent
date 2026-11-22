@@ -53,7 +53,7 @@ fn a_camera_track_is_a_mover_of_its_class_predicted_on_its_velocity() {
         ]})
     };
     for k in 0..=10u64 {
-        m.ingest_detections(&batch(0.14 * k as f32), 1000 + 100 * k);
+        m.ingest_detections(&batch(0.14 * k as f32), None, 1000 + 100 * k);
     }
     let l = list(&m, 2000);
     assert_eq!(l.len(), 1, "{l:?}");
@@ -180,7 +180,7 @@ fn the_subject_is_never_guarded() {
         ]})
     };
     for k in 0..=5u64 {
-        m.ingest_detections(&batch(0.14 * k as f32), 1000 + 100 * k);
+        m.ingest_detections(&batch(0.14 * k as f32), None, 1000 + 100 * k);
     }
     let ids = |m: &Movers| {
         let mut v: Vec<_> = m.guarded(1500).map(|x| x.ne[0]).collect();
@@ -238,6 +238,7 @@ fn the_sweep_marks_the_grid_and_leaves_the_vehicle_its_margin() {
         first: [6.0, -4.0],
         born_ms: 1000,
         moving: true,
+        subject: false,
     });
     let mut g = Grid::default();
     g.reset([0.0, 0.0]);
@@ -252,4 +253,99 @@ fn the_sweep_marks_the_grid_and_leaves_the_vehicle_its_margin() {
     // Over their heads, nothing is guarded or marked.
     m.flight.over_head = true;
     assert_eq!(m.guarded(1000).count(), 0);
+}
+
+/// The pixel a point `rel` (NED from the camera) falls on, for a level
+/// vehicle facing north and a 1280 x 720 camera of 87° pitched 15° down.
+fn pixel(rel: [f32; 3]) -> [f32; 2] {
+    let f = 640.0 / (87.0f32.to_radians() / 2.0).tan();
+    let (sp, cp) = (-15.0f32).to_radians().sin_cos();
+    let c = [cp * rel[0] - sp * rel[2], rel[1], sp * rel[0] + cp * rel[2]];
+    [640.0 + f * c[1] / c[0], 360.0 + f * c[2] / c[0]]
+}
+
+/// A batch from that camera of one track `label` boxed from `head` to
+/// `feet` (NED from the camera), its bottom cut at the frame.
+fn box_batch(label: &str, head: [f32; 3], feet: [f32; 3]) -> serde_json::Value {
+    let (h, f) = (pixel(head), pixel(feet));
+    let bottom = f[1].min(720.0);
+    json!({"v": 4, "camera_id": "main", "hfov_deg": 87.0, "mount_pitch_deg": -15.0,
+        "frame_width": 1280, "frame_height": 720, "detections": [
+        {"class_label": label, "confidence": 0.8, "track_id": 3, "track_state": "confirmed",
+         "bbox": {"x": h[0] - 20.0, "y": h[1], "width": 40.0, "height": bottom - h[1]}}]})
+}
+
+#[test]
+fn a_person_box_without_a_world_position_is_placed_from_the_camera() {
+    let from = Some(CameraFrom {
+        ned: [0.0, 0.0, -4.0],
+        att: [0.0, 0.0, 0.0],
+        agl: 4.0,
+    });
+    let at = |label: &str, head: [f32; 3], feet: [f32; 3]| {
+        let mut m = Movers::default();
+        m.ingest_detections(&box_batch(label, head, feet), from, 1000);
+        list(&m, 1000).first().map(|p| (p.ne, p.sigma_m))
+    };
+    // A person 8 m ahead, 3 m right: both edges in the frame.
+    let (ne, sigma) = at("person", [8.0, 3.0, 2.25], [8.0, 3.0, 4.0]).expect("placed");
+    assert!(geo::dist(ne, [8.0, 3.0]) < 0.05, "{ne:?}");
+    assert!(sigma > 1.0, "{sigma}");
+    // Close below, feet under the frame: the head edge alone places them.
+    let (ne, _) = at("person", [2.5, 0.0, 2.25], [2.5, 0.0, 4.0]).expect("placed");
+    assert!(geo::dist(ne, [2.5, 0.0]) < 0.05, "{ne:?}");
+    // A trunk read as a person (its top 4 m up) places nothing, nor does a
+    // car's box, nor a batch from no known pose.
+    assert!(at("person", [6.0, 0.0, 0.0], [6.0, 0.0, 4.0]).is_none());
+    assert!(at("car", [8.0, 3.0, 2.25], [8.0, 3.0, 4.0]).is_none());
+    let mut m = Movers::default();
+    m.ingest_detections(
+        &box_batch("person", [8.0, 3.0, 2.25], [8.0, 3.0, 4.0]),
+        None,
+        1000,
+    );
+    assert!(list(&m, 1000).is_empty());
+}
+
+#[test]
+fn a_camera_lower_than_a_head_places_a_box_on_its_foot_edge() {
+    let from = Some(CameraFrom {
+        ned: [0.0, 0.0, -1.5],
+        att: [0.0, 0.0, 0.0],
+        agl: 1.5,
+    });
+    let mut m = Movers::default();
+    m.ingest_detections(
+        &box_batch("person", [6.0, 0.0, -0.25], [6.0, 0.0, 1.5]),
+        from,
+        1000,
+    );
+    let p = list(&m, 1000)[0];
+    assert!(geo::dist(p.ne, [6.0, 0.0]) < 0.05, "{:?}", p.ne);
+    assert!(p.sigma_m > 1.5, "{}", p.sigma_m);
+}
+
+#[test]
+fn a_ranged_box_near_the_subject_within_its_error_is_the_subject() {
+    let from = Some(CameraFrom {
+        ned: [0.0, 0.0, -4.0],
+        att: [0.0, 0.0, 0.0],
+        agl: 4.0,
+    });
+    // The skill's subject 1.8 m beyond the person the pilot boxed at 8 m
+    // (its own range read long): further than SUBJECT_SAME_M, within twice
+    // the box's error.
+    let guarded = |world: bool| {
+        let mut m = Movers::default();
+        let mut b = box_batch("person", [8.0, 3.0, 2.25], [8.0, 3.0, 4.0]);
+        if world {
+            b["detections"][0]["world_pos"] = json!([3.0, 8.0, 0.0]);
+        }
+        m.ingest_detections(&b, from, 1000);
+        m.flight.subject = Some([9.8, 3.0]);
+        m.guarded(1000).count()
+    };
+    assert_eq!(guarded(false), 0);
+    // A track placed to 0.3 m is another person that far off.
+    assert_eq!(guarded(true), 1);
 }

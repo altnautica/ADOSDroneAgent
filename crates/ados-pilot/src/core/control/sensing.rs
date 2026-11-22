@@ -187,7 +187,7 @@ impl Pilot {
 
     /// The rule on a range `seen` along the motion on `tier`: the range
     /// trusted and the speed that stops inside it.
-    fn seen_rule(&self, tier: SensingTier, seen: f32) -> (f32, f32) {
+    pub(super) fn seen_rule(&self, tier: SensingTier, seen: f32) -> (f32, f32) {
         let clear = match tier {
             SensingTier::Camera => seen * CAMERA_RANGE_SHARE,
             _ => seen,
@@ -319,7 +319,7 @@ impl Pilot {
     /// narrow obstacle's shadow between sparser rays would read as seen),
     /// from the body's edge (the vehicle's own voxels are where it is, seen
     /// or not); the shortest.
-    fn world_clear_m(&self, pos: [f32; 3], dir: V2) -> f32 {
+    pub(super) fn world_clear_m(&self, pos: [f32; 3], dir: V2) -> f32 {
         let body = self.settings.pilot.body_radius_m();
         let side = [-dir[1], dir[0]];
         let len = WORLD_SCAN_MAX_M - body;

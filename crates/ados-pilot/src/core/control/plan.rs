@@ -182,8 +182,8 @@ impl Pilot {
             // A forward view only: the hold looks along the way the trajectory
             // planner found outside it (glancing from a subject), to see it.
             let face = subject.map(|s| geo::bearing_of(geo::sub(s, pos_ne)));
-            let look = self.traj_look(face, now_ms);
-            let yaw_cmd = r.slew_yaw(look, &shape.gl, dt);
+            let look = self.retreat_look(now_ms).or(self.traj_look(face, now_ms));
+            let yaw_cmd = r.slew_yaw(look, &self.look_limits(&shape.gl, now_ms), dt);
             r.at_ms = now_ms;
             self.motion_ref = Some(r);
             let hold = [r.p[0], r.p[1], hold_d];
@@ -248,11 +248,11 @@ impl Pilot {
         let want = geo::clamp_len(asked, v_cap);
         let shape = Shape { traj, ..shape };
         let v = self.fly_shaped(&mut r, want, &shape, &mut limits, now_ms);
-        // Forward-only: face a guarded person, else glance along held or unseen planned motion.
+        // Forward-only: see a held back-away's way, else face a guarded person, else glance.
         let face = subject.map(|s| geo::bearing_of(geo::sub(s, pos_ne)));
         let traj_look = face.and(self.traj_look(face, now_ms));
         let unseen = self.unseen_look(face, now_ms).or(traj_look);
-        let look = self.mover_look(pos_ne, now_ms).or(unseen);
+        let look = self.guard_look(pos_ne, now_ms).or(unseen);
         let want_yaw = (look.or(goal_yaw)).or_else(|| match subject {
             Some(s) => Some(geo::bearing_of(geo::sub(s, pos_ne))),
             None if geo::dist(target, pos_ne) > 1.0 => {
@@ -262,7 +262,7 @@ impl Pilot {
             // trajectory planner found outside it (a goto's route at rest).
             None => self.traj.look(now_ms),
         });
-        let yaw_cmd = r.slew_yaw(want_yaw, &shape.gl, dt);
+        let yaw_cmd = r.slew_yaw(want_yaw, &self.look_limits(&shape.gl, now_ms), dt);
         r.at_ms = now_ms;
         self.motion_ref = Some(r);
         // Climbing clear of the subject: the setpoint is raised to the climb
@@ -304,23 +304,19 @@ impl Pilot {
         self.mav(m);
     }
 
-    /// One shaped tick toward `want`: the brakes' caps at the goal
-    /// acceleration slow it first (the subject brake's
-    /// [`Pilot::subject_soft`], then the obstacle brake's [`Pilot::soft_brake`]),
-    /// the shaper holds its acceleration and jerk, then the safety limits
-    /// cut what it flies at once: the speed cap, the subject brake on the
-    /// profile's stick acceleration ([`Pilot::subject_cut`]), the person
-    /// guard's ([`Pilot::movers_cut`]), the obstacle brake on the same
-    /// acceleration ([`Pilot::goal_brake`]), so a back-away from the subject
-    /// or a person never flies into an obstacle, the seen-space hold on a
-    /// forward camera's map ([`Pilot::unseen_hold`]), so a back-away into
-    /// unseen space is held too (stopping by a person beats backing blind
-    /// into a trunk), and the geofence. Moves the reference point on the
-    /// velocity flown and returns that velocity. A trajectory the planner
-    /// flies ([`Shape::traj`]) is the shaped motion itself: while no cap or
-    /// soft brake has changed its velocity, the reference takes its state as
-    /// it is (no smoothing, no shaper); once one has, the shaper flies on
-    /// from the reference.
+    /// One shaped tick toward `want`: the brakes' soft caps slow it first
+    /// ([`Pilot::subject_soft`], [`Pilot::soft_brake`]), the shaper holds its
+    /// acceleration and jerk, then the safety limits cut what it flies at
+    /// once: the speed cap, the subject brake and the person guard on the
+    /// stick acceleration ([`Pilot::subject_cut`], [`Pilot::movers_cut`]),
+    /// their back-away held to a forward camera's view ([`Pilot::retreat_view`]),
+    /// the obstacle brake ([`Pilot::goal_brake`]) so no back-away flies into an
+    /// obstacle, the seen-space hold ([`Pilot::unseen_hold`]) and the geofence.
+    /// Moves the reference point on the velocity flown and returns it. A
+    /// trajectory the planner flies ([`Shape::traj`]) is the shaped motion
+    /// itself: while no cap or soft brake has changed its velocity, the
+    /// reference takes its state as it is (no smoothing, no shaper); once one
+    /// has, the shaper flies on from the reference.
     fn fly_shaped(
         &mut self,
         r: &mut MotionRef,
@@ -400,6 +396,11 @@ impl Pilot {
             *limits |= limit::PERSON | if slide_capped { s.speed_by } else { 0 };
             v = cut;
             p = s.pos;
+            r.cut(p, v);
+        }
+        if let Some(seen) = self.retreat_view(v, s.subject.as_ref(), *limits, s.v_cap, now_ms) {
+            *limits |= limit::SENSING;
+            (v, p) = (seen, s.pos);
             r.cut(p, v);
         }
         let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));

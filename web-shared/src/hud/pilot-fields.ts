@@ -2,8 +2,9 @@
  * @module hud/pilot-fields
  * @description Smaller parts of the `pilot` kind, parsed apart from
  * `cockpit-frames.ts`: the horizontal speed cap (`speed_cap`, and its value
- * as the flight-state chip prints it), the FC's STATUSTEXT lines, and the
- * stick limits and stick command (`profile_limits`, `stick`).
+ * as the flight-state chip prints it), the FC's STATUSTEXT lines, the stick
+ * limits and stick command (`profile_limits`, `stick`), the steady take-off
+ * (`sequence.liftoff`) and the skill's goal (`goal_kind`, `view`).
  *
  * Dependency-free on purpose: Mission Control copies this file byte for byte.
  *
@@ -20,6 +21,39 @@ function num(v: unknown): number | null {
 }
 function str(v: unknown): string | null {
   return typeof v === "string" ? v : null;
+}
+function oneOf<T extends string>(v: unknown, values: readonly T[]): T | null {
+  return values.find((x) => x === v) ?? null;
+}
+
+export const LIFTOFF_PHASES = ["spool", "level", "find", "bracket", "settle", "commit", "climb", "done", "stopped"] as const;
+export type LiftoffPhase = (typeof LIFTOFF_PHASES)[number];
+
+/** A steady take-off on an ArduPilot multirotor: its phase, its status
+ *  line ("Spinning up", "Take-off stopped"), the longer line where a surface
+ *  has room ("Climbing to 3 m"; null when the agent sends none), whether it
+ *  loads a learned trim or probes for one, and the tilt from rest. */
+export interface LaunchLiftoff {
+  phase: LiftoffPhase;
+  text: string;
+  detail: string | null;
+  trim: "learned" | "probe" | null;
+  tiltDeg: number | null;
+}
+
+/** `sequence.liftoff`, or null when absent or of a phase this surface does
+ *  not know. */
+export function parseLiftoff(v: unknown): LaunchLiftoff | null {
+  const o = obj(v);
+  const phase = o ? oneOf(o.phase, LIFTOFF_PHASES) : null;
+  if (!o || !phase) return null;
+  return {
+    phase,
+    text: str(o.text) ?? "",
+    detail: str(o.detail) || null,
+    trim: oneOf(o.trim, ["learned", "probe"] as const),
+    tiltDeg: num(o.tilt_deg),
+  };
 }
 
 /** The pilot's horizontal speed cap: why, and the limit in m/s. */
@@ -98,6 +132,42 @@ export function parseSensing(raw: unknown): Sensing | null {
   const clearRangeM = num(o.clear_range_m);
   const speedLimitMps = num(o.speed_limit_mps);
   return tier !== null && clearRangeM !== null && speedLimitMps !== null ? { tier, clearRangeM, speedLimitMps } : null;
+}
+
+/** The kind of goal a skill's lease sent the pilot (`goal_kind`): a
+ *  `follow_intent` (the pilot picks the viewpoint), the skill's own ring
+ *  point (`follow`), an orbit, a hold (`position`) or a search (`vantage`). */
+export const GOAL_KINDS = ["follow_intent", "follow", "orbit", "position", "vantage"] as const;
+export type GoalKind = (typeof GOAL_KINDS)[number];
+
+/** `goal_kind` from the pilot frame, or null when absent (no skill goal, an
+ *  older agent) or of a kind this surface does not know. */
+export function parseGoalKind(raw: unknown): GoalKind | null {
+  return GOAL_KINDS.find((k) => k === raw) ?? null;
+}
+
+/** The viewpoint the pilot's view planner picked for a `follow_intent`
+ *  (`view`): bearing from the subject (degrees, north clockwise), distance
+ *  (m), height (m) and the share of the subject's predicted positions it
+ *  sees (0-1). */
+export interface FollowView {
+  bearingDeg: number;
+  radiusM: number;
+  heightM: number;
+  visibility: number;
+}
+
+/** `view` from the pilot frame, or null when absent or malformed. */
+export function parseFollowView(raw: unknown): FollowView | null {
+  const o = obj(raw);
+  if (!o) return null;
+  const bearingDeg = num(o.bearing_deg);
+  const radiusM = num(o.radius_m);
+  const heightM = num(o.height_m);
+  const visibility = num(o.visibility);
+  return bearingDeg !== null && radiusM !== null && heightM !== null && visibility !== null
+    ? { bearingDeg, radiusM, heightM, visibility }
+    : null;
 }
 
 /** What a tracked mover is: a person, a road vehicle, or something the

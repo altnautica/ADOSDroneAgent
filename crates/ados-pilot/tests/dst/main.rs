@@ -33,6 +33,7 @@ mod fc_avoid;
 mod follow;
 mod forest;
 mod goto_wall;
+mod lost_hold;
 mod metrics;
 mod mine;
 mod mission_route;
@@ -251,6 +252,46 @@ fn dst_follow_intent_keeps_its_separation_from_a_subject_lost_walking_toward_it(
     for seed in FOLLOW_SEEDS {
         let (_, f) = follow::toward_at_loss(seed, false);
         follow_safe("toward_at_loss", seed, &f);
+    }
+}
+
+/// A skill that lost its subject holds, naming none, while the subject
+/// walks (and runs) back under the vehicle, boxed by the camera with no
+/// world position, late and with frames lost, and never returned by the
+/// level planar lidar: the vehicle keeps the subject's separation.
+#[test]
+fn dst_a_held_vehicle_keeps_clear_of_a_person_walking_back_under_it() {
+    for seed in FOLLOW_SEEDS {
+        for pace in [follow::WALK_MPS, follow::JOG_MPS] {
+            let (_, f) = lost_hold::walk_under(seed, pace);
+            follow_safe("lost_hold", seed, &f);
+        }
+    }
+}
+
+/// A ring goal names its subject by place alone, read from the subject's
+/// own box a quarter long, while the pilot places the same box as a person
+/// track: the person keep never binds on the vehicle's own subject, and the
+/// subject brake keeps the real subject (its camera track, nearer than the
+/// long `subject_ne`) at least its kept distance off.
+#[test]
+fn dst_a_ring_goal_never_keeps_the_person_distance_from_its_own_subject() {
+    for seed in FOLLOW_SEEDS {
+        for pace in [follow::WALK_MPS, follow::JOG_MPS] {
+            let (_, f, bound) = lost_hold::ring_own_box(seed, pace);
+            assert!(f.seen > 0, "ring_own_box s{seed}: the camera boxed nothing");
+            assert_eq!(
+                bound, 0,
+                "ring_own_box s{seed} pace {pace}: person keep bound"
+            );
+            // The subject brake's kept distance for the goal's 0.5 m sigma:
+            // body 0.4 + vehicle 0.4 + margin 0.5 + two sigma.
+            assert!(
+                f.min_separation_m >= 2.3,
+                "ring_own_box s{seed} pace {pace}: closed to {:.2} m of the subject",
+                f.min_separation_m
+            );
+        }
     }
 }
 

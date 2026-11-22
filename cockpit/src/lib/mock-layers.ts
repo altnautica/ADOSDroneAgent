@@ -79,6 +79,9 @@ export function demoPilotData(nowMs: number): Record<string, unknown> {
     mission: follow ? null : MISSION,
     // Leaves ahead of the follow skill's way, under which it lowers its height.
     overhead_ahead: follow ? { lease_id: 1, fly_under_agl_m: 3.9, ahead_m: 6 } : null,
+    // The follow skill's intent and the viewpoint the pilot picked for it.
+    goal_kind: follow ? "follow_intent" : null,
+    view: follow ? { bearing_deg: 15, radius_m: 8, height_m: 4.5, visibility: 0.92 } : null,
     // The 3D lidar's voxel map and the speed that stops inside its seen-clear range.
     sensing: { tier: "lidar3d", clear_range_m: 11.6, speed_limit_mps: 4.2 },
     movers: demoMovers(nowMs),

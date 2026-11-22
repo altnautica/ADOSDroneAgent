@@ -28,6 +28,7 @@ import { followHeightLine, overheadAheadLine, type FollowHeightLine } from "@/sh
 import { parseFollowState, parseNavState, type FollowPhase, type FollowState, type NavState } from "@/shared/hud/nav-types";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
+import { goalKindChipText } from "@/shared/hud/goal-kind";
 import { sensingChipText } from "@/shared/hud/sensing";
 import { moversLine } from "@/shared/hud/movers";
 import { specText } from "@/shared/hud/spec-text";
@@ -235,6 +236,9 @@ export interface HomeStatusLines {
   timeToReserve: string | null;
   /** `Sensing: 3D lidar · ≤ 4.2 m/s`, or null while the pilot reports none. */
   sensing: string | null;
+  /** `Follow intent · view 15° 8 m`, `Ring`, …: the goal a skill flies, or
+   *  null while none. */
+  goal: string | null;
   /** `Movers: 3 · nearest person 7.4 m`, or null while the pilot tracks none. */
   movers: string | null;
 }
@@ -268,6 +272,7 @@ export function homeStatusLines(
     timeToReserve:
       reading?.timeToReserveS != null ? specText("cockpit.battery.time_left", { time: fmtClock(reading.timeToReserveS) }) : null,
     sensing: sensingChipText(i.pilot?.sensing ?? null),
+    goal: goalKindChipText(i.pilot?.goalKind ?? null, i.pilot?.view ?? null),
     movers: moversLine(i.pilot?.movers ?? [], drone),
   };
 }

@@ -59,8 +59,11 @@ const VEL_SMOOTH_S: f32 = 0.5;
 /// Fastest mover speed believed, m/s (a running person, a car in a street).
 const MAX_MPS: f32 = 15.0;
 /// Without the subject's track id, a mover within this of the skill's
-/// subject (`subject_ne`) is that subject, m.
+/// subject (`subject_ne`) is that subject, m, or within
+/// [`SUBJECT_SAME_SIGMAS`] of its own measurement's error when that is
+/// wider (a camera box ranged by the pilot, whose range errs by metres).
 const SUBJECT_SAME_M: f32 = 1.0;
+const SUBJECT_SAME_SIGMAS: f32 = 3.0;
 /// A cluster mover within this of a camera track is that track, m.
 const SAME_M: f32 = 1.0;
 /// A new cluster this near a mover that lost its cluster is that mover
@@ -164,6 +167,18 @@ struct Track {
     born_ms: u64,
     /// A cluster track seen moving (a camera track always counts).
     moving: bool,
+    /// A camera track whose last measurement lay at the skill's subject by
+    /// place ([`at_subject`]): the subject until it is measured again,
+    /// wherever its prediction drifts meanwhile (a subject turning unseen).
+    subject: bool,
+}
+
+/// Whether a mover at `at`, measured to `sigma`, is the subject of the
+/// goal flown (`f`) by place: within [`SUBJECT_SAME_M`] of it, or
+/// [`SUBJECT_SAME_SIGMAS`] of its own error when that is wider.
+fn at_subject(f: &MoverFlight, at: V2, sigma: f32) -> bool {
+    let same = SUBJECT_SAME_M.max(SUBJECT_SAME_SIGMAS * sigma);
+    f.subject.is_some_and(|s| geo::dist(at, s) <= same)
 }
 
 /// The tracked movers.
@@ -237,6 +252,7 @@ impl Movers {
             first: ne,
             born_ms: now_ms,
             moving: ext.is_some(),
+            subject: false,
         });
     }
 
@@ -317,21 +333,37 @@ impl Movers {
     /// flies over their heads ([`MoverFlight::over_head`]), and never the
     /// skill's own subject: its camera track when the goal names it
     /// ([`MoverFlight::subject_track`]), else (no track id, or a scan
-    /// cluster, which no camera names) whatever lies within
-    /// [`SUBJECT_SAME_M`] of the goal's subject.
+    /// cluster, which no camera names) a camera track once measured at the
+    /// goal's subject, or whatever lies at it now ([`at_subject`]).
     pub fn guarded(&self, now_ms: u64) -> impl Iterator<Item = &Mover> {
         let f = self.flight;
-        let near_subject = move |t: &Track| {
-            f.subject
-                .is_some_and(|s| geo::dist(t.m.at(now_ms), s) <= SUBJECT_SAME_M)
+        let is_subject = move |t: &Track| {
+            (t.subject && f.subject.is_some()) || at_subject(&f, t.m.at(now_ms), t.m.sigma_m)
         };
         self.live(now_ms)
             .filter(move |t| {
                 !f.over_head
                     && match (f.subject_track, t.ext) {
                         (Some(id), Some(e)) => e.1 != u64::from(id),
-                        _ => !near_subject(t),
+                        _ => !is_subject(t),
                     }
+            })
+            .map(|t| &t.m)
+    }
+
+    /// The camera tracks [`Movers::guarded`] leaves out as the skill's own
+    /// subject (whatever the flight over their heads): the subject brake
+    /// keeps clear of them as well as of the goal's `subject_ne`.
+    pub fn subject_tracks(&self, now_ms: u64) -> impl Iterator<Item = &Mover> {
+        let f = self.flight;
+        self.live(now_ms)
+            .filter(move |t| match (f.subject_track, t.ext) {
+                (Some(id), Some(e)) => e.1 == u64::from(id),
+                (_, Some(_)) => {
+                    (t.subject && f.subject.is_some())
+                        || at_subject(&f, t.m.at(now_ms), t.m.sigma_m)
+                }
+                _ => false,
             })
             .map(|t| &t.m)
     }
@@ -385,6 +417,8 @@ fn mark_disk(grid: &mut Grid, c: V2, r: f32) {
 
 mod scan;
 mod vision;
+
+pub use vision::CameraFrom;
 
 #[cfg(test)]
 mod tests;

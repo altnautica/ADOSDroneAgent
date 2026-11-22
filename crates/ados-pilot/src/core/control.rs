@@ -21,6 +21,7 @@ mod motion_ref;
 mod mover_guard;
 mod obstacle_data;
 mod plan;
+mod retreat;
 mod route;
 mod route_home;
 mod sensing;
@@ -34,6 +35,7 @@ pub use brake::*;
 pub(super) use motion_ref::MotionRef;
 pub(super) use mover_guard::MoverGuards;
 pub(super) use plan::FollowView;
+pub(super) use retreat::ViewLog;
 #[cfg(test)]
 pub use route::{check_legs, legs_of, Origin};
 pub use route::{route_of, Route, RouteItem, CONFINED_CAP_MPS};
