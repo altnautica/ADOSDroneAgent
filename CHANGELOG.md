@@ -6,6 +6,21 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.22] - 2026-11-22
+
+### Added
+- Pilot: follow intents (`pilot.v1` 6). A skill may send a `follow_intent` goal instead of a point: a standoff band, the bearing it prefers (from the subject's heading, or from north with `bearing_frame: world`, or none for the best view), a height band (never under 3.4 m), the subject's id on `vision.subject.v1` and whether the line of sight matters. Every 100 ms the pilot's view planner samples viewpoints in the bands every 15° and 0.5 m, scores each on how much of the subject's predicted positions it sees past what the obstacle map holds (the 2D grid, or the live voxel map on a 3D tier), the standoff, the bearing, the height, the distance to fly and the clearance, and flies the best through either planner as a follow goal with the subject's velocity fed forward. The subject's heading turns at most 30°/s, round the vehicle's side when it turns back; with no fix for 0.5 s it plans to see where the subject most probably is. While an intent with a band flies, routes and the subject brake keep the subject at least the band's near edge less 1.5 m away. The pilot now reads `vision.subject.v1` from the event export. In `ados-protocol`: `GoalKind::FollowIntent`, `BearingFrame`, `Goal::{standoff_band_m, bearing_pref_deg, bearing_frame, height_band_m, subject_ref, require_los}`, `FOLLOW_HEIGHT_FLOOR_M`.
+- Pilot: an orbit is a bearing preference on the same view planner: its phase goes as a bearing over the ground (`bearing_frame: world`) and the viewpoint slots turn with it; with no bearing preference (auto angle) the view planner takes the bearing that sees the subject best.
+- Pilot: moving obstacles. The pilot tracks people, vehicles and anything else its sensors see move as movers with a position, velocity and uncertainty, predicted on constant velocity over 3 s: from the camera's multi-object tracker (`vision.detection` v4 tracks with a world position) and from the obstacle returns themselves (a small cluster low enough to stand on the ground that walks off the place it was first seen at becomes a mover of unknown kind, kept clear as a person). The planners' grid gets each mover's sweep over 2 s and the trajectory planner checks its plans against each mover where it is predicted at the plan's own time. A separation guard keeps every person, and every unknown mover, at least 2.5 m off horizontally (plus its uncertainty and 0.3 m) unless the vehicle flies 3.4 m over their head, cutting whatever the goal or the plan asks; a skill's own subject stays with the subject brake. The state frame carries `movers` (`ados_protocol::pilot::TrackedMover {id, kind, source, ne, vel_ne, sigma_m, age_ms}`).
+- Movers on every surface: the cockpit's local map draws each tracked mover (its one-sigma ring and an arrow to where it will be in 2 s, coloured by kind), and the cockpit, the dashboard's status tiles and the terminal's pilot view read "Movers: {n} · nearest person {d} m" (spec keys `pilot.movers.*`).
+
+### Changed
+- Pilot: the obstacle brake caps toward the edge of the seen space only where a stop path comes within that point's keep-out, while the seen space closes round the vehicle from an all-round sensor. The shadow of a trunk beside the way no longer slows a jog past trunks 2-3 m off its line (it held such a jog to about 1 m/s); a forward camera's map, seen space ending inside the keep-out beside the vehicle, and a horizon point nearer than the keep-out still cap every way.
+
+### Fixed
+- Pilot: a goal on a forward-looking sensing tier (`depth`, `camera`) no longer creeps into space the camera never saw. The seen-clear speed rule is read along the goal's own velocity at any speed, and while it holds the motion back the nose turns along the way the goal would fly (and keeps looking for 1.5 s) so the camera sees it before the vehicle moves on.
+- The plugin host builds on macOS again: the payload unpacker's free-space check widens the platform's `statvfs` block counts to 64 bits.
+
 ## [0.124.21] - 2026-11-22
 
 ### Added
