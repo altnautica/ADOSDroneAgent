@@ -205,9 +205,9 @@ pub(super) async fn build_host(
     //     that starts after the host or restarts under it heals by itself;
     //     while it is down the request methods answer a transient error.
     host = host.with_vision(Arc::new(VisionClient::spawn(run_dir.join("vision.sock"))));
-    // The engine's metric depth frames and designated-subject state,
-    // republished as host-only `vision.` topics for plugins granted their read
-    // capability.
+    // The engine's metric depth frames, designated-subject state and tracker
+    // batches, republished as host-only `vision.` topics for plugins granted
+    // their read capability and for the pilot over the event export.
     for stream in crate::vision_topics::STREAMS {
         crate::vision_topics::spawn(Arc::clone(bus), &run_dir, stream);
     }

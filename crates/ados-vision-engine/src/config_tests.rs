@@ -225,6 +225,16 @@ fn confidence_thresholds_ship_their_defaults_parse_and_clamp() {
 }
 
 #[test]
+fn a_detector_model_id_never_reads_as_a_plugins() {
+    let (_d, p) =
+        write_tmp("vision:\n  detector:\n    model_id: coco/yolov8n\n    model_path: /m.onnx\n");
+    let c = VisionConfig::load_from(&p);
+    let det = c.detector.as_ref().unwrap();
+    assert_eq!(det.model_id, "coco_yolov8n");
+    assert!(!ados_protocol::vision_rpc::is_owned_model_id(&det.model_id));
+}
+
+#[test]
 fn an_absent_detector_rate_is_ten_hz_and_an_explicit_zero_is_unpaced() {
     let (_d, p) = write_tmp("vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n");
     let c = VisionConfig::load_from(&p);

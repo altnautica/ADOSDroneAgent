@@ -11,13 +11,13 @@ use ados_protocol::pilot::VehicleClass;
 
 use crate::fc_profile::Firmware;
 
-mod ekf;
+pub mod ekf;
 pub mod extnav;
 pub mod pos_reset;
 pub mod rates;
 pub mod trail;
 mod tx;
-pub use ekf::EkfPosition;
+pub use ekf::{EkfPosition, EkfSettle};
 pub use tx::{heartbeat, Tx};
 
 /// Velocity plus yaw rate (C2 "moving").
@@ -121,6 +121,8 @@ pub struct FcState {
     pub range_track: crate::sensor_health::RangeTrack,
     /// The FC's own EKF_STATUS_REPORT, `None` until one arrives.
     pub ekf: Option<Stamped<EkfPosition>>,
+    /// How long the EKF's horizontal position has held good ([`EkfSettle`]).
+    pub ekf_settle: EkfSettle,
     /// The FC's OPTICAL_FLOW.
     pub flow: Option<Stamped<Flow>>,
     /// The EKF's start on external navigation and the stillness since.
@@ -244,17 +246,20 @@ impl FcState {
                 }
             }
             MavMessage::EKF_STATUS_REPORT(e) if self.from_fc(sysid, compid) => {
-                self.ekf = Some(Stamped {
-                    v: EkfPosition {
-                        horiz_abs: e.flags.contains(EkfStatusFlags::EKF_POS_HORIZ_ABS),
-                        pred_horiz_abs: e.flags.contains(EkfStatusFlags::EKF_PRED_POS_HORIZ_ABS),
-                        horiz_rel: e.flags.contains(EkfStatusFlags::EKF_POS_HORIZ_REL),
-                        pred_horiz_rel: e.flags.contains(EkfStatusFlags::EKF_PRED_POS_HORIZ_REL),
-                        const_pos_mode: e.flags.contains(EkfStatusFlags::EKF_CONST_POS_MODE),
-                        horiz_variance: e.pos_horiz_variance,
-                    },
-                    at_ms: now_ms,
-                });
+                let v = EkfPosition {
+                    horiz_abs: e.flags.contains(EkfStatusFlags::EKF_POS_HORIZ_ABS),
+                    pred_horiz_abs: e.flags.contains(EkfStatusFlags::EKF_PRED_POS_HORIZ_ABS),
+                    horiz_rel: e.flags.contains(EkfStatusFlags::EKF_POS_HORIZ_REL),
+                    pred_horiz_rel: e.flags.contains(EkfStatusFlags::EKF_PRED_POS_HORIZ_REL),
+                    const_pos_mode: e.flags.contains(EkfStatusFlags::EKF_CONST_POS_MODE),
+                    horiz_variance: e.pos_horiz_variance,
+                };
+                let gap = self
+                    .ekf
+                    .is_none_or(|p| now_ms.saturating_sub(p.at_ms) >= ekf::EKF_STATUS_STALE_MS);
+                let relative = ekf::relative_enabled(&self.params);
+                self.ekf_settle.step(&v, self.armed, relative, gap, now_ms);
+                self.ekf = Some(Stamped { v, at_ms: now_ms });
             }
             MavMessage::EXTENDED_SYS_STATE(x) => {
                 self.landed_state = Some(x.landed_state);

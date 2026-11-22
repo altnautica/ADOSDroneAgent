@@ -26,6 +26,10 @@ pub struct SensorCtx<'a> {
     pub avoid_on: bool,
     pub mounts: &'a FcSensors,
     pub nav_imu: &'a crate::nav_imu::NavImuTrack,
+    /// The FC's active EKF source set (1-3) as Navigation reported it, whose
+    /// `EK3_SRCn_POSXY` the `position` item reads; `None` while no report
+    /// has named one.
+    pub nav_set: Option<u8>,
 }
 
 fn item(id: &str, ok: bool, severity: Severity, msg: impl Into<String>) -> Readiness {

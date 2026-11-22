@@ -44,7 +44,7 @@ fn scan(pos: V2, disks: &[(V2, f32)]) -> (Vec<Hit>, Vec<V2>) {
 fn a_camera_track_is_a_mover_of_its_class_predicted_on_its_velocity() {
     let mut m = Movers::default();
     let batch = |e: f32| {
-        json!({"v": 4, "camera_id": "front", "detections": [
+        json!({"v": 4, "model_id": "person", "camera_id": "front", "detections": [
             {"class_label": "person", "confidence": 0.9, "track_id": 7,
              "track_state": "confirmed", "world_pos": [e, 10.0, 0.0]},
             {"class_label": "car", "confidence": 0.9, "track_id": 8,
@@ -172,7 +172,7 @@ fn a_cluster_higher_than_anyone_walking_is_no_mover() {
 fn the_subject_is_never_guarded() {
     let mut m = Movers::default();
     let batch = |e: f32| {
-        json!({"v": 4, "camera_id": "front", "detections": [
+        json!({"v": 4, "model_id": "person", "camera_id": "front", "detections": [
             {"class_label": "person", "track_id": 7, "track_state": "confirmed",
              "world_pos": [e, 10.0, 0.0]},
             {"class_label": "person", "track_id": 8, "track_state": "confirmed",
@@ -269,7 +269,8 @@ fn pixel(rel: [f32; 3]) -> [f32; 2] {
 fn box_batch(label: &str, head: [f32; 3], feet: [f32; 3]) -> serde_json::Value {
     let (h, f) = (pixel(head), pixel(feet));
     let bottom = f[1].min(720.0);
-    json!({"v": 4, "camera_id": "main", "hfov_deg": 87.0, "mount_pitch_deg": -15.0,
+    json!({"v": 4, "model_id": "person", "camera_id": "main", "hfov_deg": 87.0,
+        "mount_pitch_deg": -15.0,
         "frame_width": 1280, "frame_height": 720, "detections": [
         {"class_label": label, "confidence": 0.8, "track_id": 3, "track_state": "confirmed",
          "bbox": {"x": h[0] - 20.0, "y": h[1], "width": 40.0, "height": bottom - h[1]}}]})

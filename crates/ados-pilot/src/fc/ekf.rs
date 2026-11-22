@@ -1,5 +1,47 @@
 //! The FC's EKF_STATUS_REPORT as the `position` readiness item reads it.
 
+use std::collections::HashMap;
+
+/// An EKF_STATUS_REPORT older than this no longer vouches for the estimate.
+pub const EKF_STATUS_STALE_MS: u64 = 3000;
+/// Horizontal position test ratio that blocks: ArduPilot's default EKF
+/// failsafe threshold (`FS_EKF_THRESH` 0.8).
+pub const EKF_POS_VARIANCE_BLOCK: f32 = 0.8;
+
+/// A relative position source is enabled: ArduPilot's `optflow.enabled() ||
+/// visual_odom.enabled()` (`FLOW_TYPE` or `VISO_TYPE` non-zero).
+pub fn relative_enabled(params: &HashMap<String, f32>) -> bool {
+    let on = |n: &str| params.get(n).is_some_and(|p| *p != 0.0);
+    on("FLOW_TYPE") || on("VISO_TYPE")
+}
+
+/// Since when the EKF's horizontal position has held good without a break,
+/// per kind. A report that loses it, or a gap of [`EKF_STATUS_STALE_MS`]
+/// between reports, restarts the clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EkfSettle {
+    /// An absolute horizontal position (what a GPS source set needs).
+    pub abs_since_ms: Option<u64>,
+    /// Any position ArduPilot's own check accepts: absolute, or relative
+    /// with a relative source enabled.
+    pub any_since_ms: Option<u64>,
+}
+
+impl EkfSettle {
+    /// Fold one report in; `gap` is true when the previous report was
+    /// missing or stale.
+    pub fn step(&mut self, v: &EkfPosition, armed: bool, relative: bool, gap: bool, now_ms: u64) {
+        let usable = v.horiz_variance < EKF_POS_VARIANCE_BLOCK;
+        let keep = |since: Option<u64>, good: bool| match (good, since) {
+            (false, _) => None,
+            (true, Some(s)) if !gap => Some(s),
+            (true, _) => Some(now_ms),
+        };
+        self.abs_since_ms = keep(self.abs_since_ms, usable && v.has_position(armed, false));
+        self.any_since_ms = keep(self.any_since_ms, usable && v.has_position(armed, relative));
+    }
+}
+
 /// The FC's EKF_STATUS_REPORT, as far as the position item reads it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EkfPosition {

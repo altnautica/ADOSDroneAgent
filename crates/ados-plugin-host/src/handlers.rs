@@ -223,6 +223,11 @@ pub const HOST_PLUGIN_TOPICS: &[(&str, &str)] = &[(
 /// `vision.subject.v1`.
 pub const VISION_SUBJECT_READ_CAP: &str = "vision.subject.read";
 
+/// The capability a plugin needs (beside `event.subscribe`) to read the
+/// `vision.detection` batches the host forwards: the one
+/// `vision.subscribe_detections` takes.
+pub const VISION_DETECTION_READ_CAP: &str = "vision.detection.subscribe";
+
 /// Host-published `vision.` topics, each with the capability a plugin needs
 /// beside `event.subscribe` to read it. The host forwards them from the vision
 /// engine (`crate::vision_topics`); no plugin may publish under `vision.`.
@@ -234,6 +239,10 @@ pub const HOST_VISION_TOPICS: &[(&str, &str)] = &[
     (
         ados_protocol::vision_subject::VISION_SUBJECT_TOPIC,
         VISION_SUBJECT_READ_CAP,
+    ),
+    (
+        ados_protocol::framebus::VISION_DETECTION_TOPIC,
+        VISION_DETECTION_READ_CAP,
     ),
 ];
 

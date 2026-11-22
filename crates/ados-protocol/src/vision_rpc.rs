@@ -91,6 +91,12 @@ pub fn owned_model_id(owner: &str, id: &str) -> String {
     }
 }
 
+/// Whether a model id is a plugin's ([`owned_model_id`]; the engine's own
+/// never hold a `/`): its batches are the plugin's claims, not the tracker's.
+pub fn is_owned_model_id(id: &str) -> bool {
+    id.contains('/')
+}
+
 /// A vision request or reply that does not have its method's shape.
 #[derive(Debug, Error)]
 pub enum VisionArgsError {

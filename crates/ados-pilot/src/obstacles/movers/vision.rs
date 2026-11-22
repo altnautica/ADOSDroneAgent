@@ -14,6 +14,7 @@
 use serde_json::Value;
 
 use ados_protocol::pilot::MoverKind;
+use ados_protocol::vision_rpc::is_owned_model_id;
 
 use super::{at_subject, Movers};
 use crate::geo::V2;
@@ -198,8 +199,15 @@ impl Movers {
     /// position (local ENU, the FC's local origin) is a mover of its class,
     /// and a confirmed person track without one is placed from its box
     /// ([`Lens::place`]). A lost or tentative track measures nothing; a
-    /// track already held coasts on its prediction.
+    /// track already held coasts on its prediction. Only the engine's own
+    /// models place anything: a batch naming no model, or a plugin's model
+    /// ([`is_owned_model_id`]: every batch a plugin publishes), is the
+    /// plugin's claim and measures nothing.
     pub fn ingest_detections(&mut self, payload: &Value, from: Option<CameraFrom>, now_ms: u64) {
+        let model = payload.get("model_id").and_then(Value::as_str);
+        if model.is_none_or(is_owned_model_id) {
+            return;
+        }
         let cam = camera_key(
             payload
                 .get("camera_id")

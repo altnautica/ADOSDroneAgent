@@ -16,19 +16,55 @@ fn item(id: &str, ok: bool, severity: Severity, msg: impl Into<String>) -> Readi
     }
 }
 
-/// An EKF_STATUS_REPORT older than this no longer vouches for the estimate.
-const EKF_STATUS_STALE_MS: u64 = 3000;
 /// Horizontal position test ratio that warns: half-way to rejection.
 const EKF_POS_VARIANCE_WARN: f32 = 0.5;
-/// Horizontal position test ratio that blocks: ArduPilot's default EKF
-/// failsafe threshold (`FS_EKF_THRESH` 0.8).
-const EKF_POS_VARIANCE_BLOCK: f32 = 0.8;
+/// How long, disarmed, the EKF's horizontal position must have held good
+/// without a break before launch. ArduPilot's EKF3 can report a usable
+/// position and lose all aiding within a second (on the bench: GPS origin
+/// set, then every aiding source dropped 0.8 s later, and the launch armed in
+/// between went to an EKF failsafe Land). Three seconds spans that transient
+/// with margin, takes several consecutive reports at the FC's 2-5 Hz
+/// EKF_STATUS_REPORT rate, and equals the staleness window, so one report
+/// alone never clears the gate.
+pub const POSITION_SETTLE_MS: u64 = 3000;
+/// `EK3_SRCn_POSXY` value for GPS.
+const POSXY_GPS: f32 = 3.0;
+const POSXY: [&str; 3] = ["EK3_SRC1_POSXY", "EK3_SRC2_POSXY", "EK3_SRC3_POSXY"];
+const VELXY: [&str; 3] = ["EK3_SRC1_VELXY", "EK3_SRC2_VELXY", "EK3_SRC3_VELXY"];
+
+/// Whether the active EKF source set takes its horizontal position from GPS
+/// (`EK3_SRCn_POSXY` 3). `nav_set` is the set Navigation reported; with
+/// none reported the FC's set is unknown (an RC switch may have chosen any),
+/// so set 1 is assumed only while no other set names a non-GPS source. An
+/// unread `EK3_SRC1_POSXY` reads as ArduPilot's default, GPS; an unread
+/// set 2 or 3 as its default, unused.
+fn gps_source(fc: &FcState, nav_set: Option<u8>) -> bool {
+    let p = |names: &[&str; 3], i: usize| fc.params.get(names[i]).copied();
+    let is_gps = |v: f32| (v - POSXY_GPS).abs() < 0.5;
+    let set_gps = |i: usize| p(&POSXY, i).map_or(i == 0, is_gps);
+    let other_source = |i: usize| {
+        [p(&POSXY, i), p(&VELXY, i)]
+            .into_iter()
+            .flatten()
+            .any(|v| v != 0.0 && !is_gps(v))
+    };
+    match nav_set {
+        Some(n @ 1..=3) => set_gps(usize::from(n) - 1),
+        Some(_) => false,
+        None => set_gps(0) && !(1..3).any(other_source),
+    }
+}
 
 /// `position`: a fresh local position, and while the FC reports its EKF
-/// status, an absolute horizontal position the EKF trusts. A local position
-/// keeps streaming after the EKF has lost its absolute fix, so it alone
-/// cannot say the estimate is good.
-fn position_item(fc: &FcState, now_ms: u64) -> Readiness {
+/// status, a horizontal position the EKF trusts. A local position keeps
+/// streaming after the EKF has lost its absolute fix, so it alone cannot say
+/// the estimate is good. Disarmed (the launch gate), a GPS source set needs
+/// an absolute position (a relative one from flow is only a prediction from
+/// the start point), the position must have held good for
+/// [`POSITION_SETTLE_MS`], and a status gone quiet blocks; armed,
+/// ArduPilot's own test applies and a quiet status only warns.
+fn position_item(fc: &FcState, nav_set: Option<u8>, now_ms: u64) -> Readiness {
+    use crate::fc::ekf::{relative_enabled, EKF_POS_VARIANCE_BLOCK, EKF_STATUS_STALE_MS};
     let block = |msg| item("position", false, Severity::Block, msg);
     let warn = |msg| item("position", false, Severity::Warn, msg);
     if fc.fresh_local(now_ms).is_none() {
@@ -43,15 +79,30 @@ fn position_item(fc: &FcState, now_ms: u64) -> Readiness {
         );
     };
     if now_ms.saturating_sub(ekf.at_ms) >= EKF_STATUS_STALE_MS {
-        return warn("Position degraded (EKF): status not reporting");
+        let msg = "Position degraded (EKF): status not reporting";
+        return if fc.armed { warn(msg) } else { block(msg) };
     }
     let v = ekf.v;
-    let enabled = |n: &str| fc.params.get(n).is_some_and(|p| *p != 0.0);
-    let relative_enabled = enabled("FLOW_TYPE") || enabled("VISO_TYPE");
-    if !v.has_position(fc.armed, relative_enabled) {
+    let relative = relative_enabled(&fc.params);
+    let gps = !fc.armed && gps_source(fc, nav_set);
+    let settled =
+        |since: Option<u64>| since.is_some_and(|s| now_ms.saturating_sub(s) >= POSITION_SETTLE_MS);
+    if gps && !v.has_position(false, false) {
+        block("Position degraded (EKF): no absolute horizontal position on the GPS source")
+    } else if !v.has_position(fc.armed, relative) {
         block("Position degraded (EKF): no absolute or relative horizontal position")
+    } else if !v.horiz_variance.is_finite() {
+        block("Position degraded (EKF): position variance not reported")
     } else if v.horiz_variance >= EKF_POS_VARIANCE_BLOCK {
         block("Position degraded (EKF): position variance too high")
+    } else if !fc.armed
+        && !settled(if gps {
+            fc.ekf_settle.abs_since_ms
+        } else {
+            fc.ekf_settle.any_since_ms
+        })
+    {
+        block("Position settling (EKF): waiting for a steady estimate")
     } else if v.horiz_variance >= EKF_POS_VARIANCE_WARN {
         warn("Position degraded (EKF): position variance high")
     } else {
@@ -120,7 +171,7 @@ pub fn items(
             out.extend(crate::height_source::item(fc.vehicle_class(), place, p));
         }
     }
-    out.push(position_item(fc, now_ms));
+    out.push(position_item(fc, sensors.nav_set, now_ms));
     out.extend(crate::sensor_readiness::items(fc, mode, sensors, now_ms));
     if mode == ControlMode::Ados {
         out.push(if controller_live {
@@ -291,5 +342,7 @@ pub fn first_block(items: &[Readiness]) -> Option<&Readiness> {
 
 #[cfg(test)]
 mod backstop_tests;
+#[cfg(test)]
+mod position_tests;
 #[cfg(test)]
 mod tests;

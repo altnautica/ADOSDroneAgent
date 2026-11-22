@@ -46,6 +46,7 @@ fn all(fc: &FcState, mode: ControlMode) -> Vec<Readiness> {
         avoid_on: false,
         mounts: &mounts,
         nav_imu: &nav_imu,
+        nav_set: None,
     };
     items(
         fc,

@@ -40,6 +40,9 @@ pub struct NavImuTrack {
     /// Whether Navigation's last `plugin.navigation.state` named [`EXTERNAL_NAV`]; false
     /// before any (nothing fuses the lidar pose without Navigation).
     external_nav: bool,
+    /// Whether any Navigation report has named the FC's active EKF source
+    /// set (`active_set`); until one does, the pilot's set is only assumed.
+    set_reported: bool,
 }
 
 impl NavImuTrack {
@@ -59,6 +62,18 @@ impl NavImuTrack {
         if let Some(mode) = payload.get("mode").and_then(serde_json::Value::as_str) {
             self.external_nav = mode == EXTERNAL_NAV;
         }
+        if payload
+            .get("active_set")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        {
+            self.set_reported = true;
+        }
+    }
+
+    /// Whether Navigation has named the FC's active EKF source set.
+    pub fn set_reported(&self) -> bool {
+        self.set_reported
     }
 
     /// The `nav_imu` and `nav_heading` items: neither while the pose does not
@@ -303,5 +318,18 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn the_source_set_counts_as_reported_once_a_report_names_it() {
+        let mut t = NavImuTrack::default();
+        assert!(!t.set_reported());
+        t.on_nav_state(&json!({"mode": "gps"}));
+        assert!(!t.set_reported());
+        t.on_nav_state(&json!({"active_set": 2}));
+        assert!(t.set_reported());
+        // A later report naming none keeps the last set, as the pilot does.
+        t.on_nav_state(&json!({"mode": "gps"}));
+        assert!(t.set_reported());
     }
 }

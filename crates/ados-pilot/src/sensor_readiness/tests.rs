@@ -56,6 +56,7 @@ fn run(
         avoid_on,
         mounts: &mounts,
         nav_imu: &crate::nav_imu::NavImuTrack::default(),
+        nav_set: None,
     };
     items(fc, mode, &ctx, now)
 }

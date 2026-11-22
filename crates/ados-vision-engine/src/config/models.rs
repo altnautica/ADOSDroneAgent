@@ -4,7 +4,22 @@
 use ados_protocol::framebus::{
     DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
 };
-use serde::Deserialize;
+use ados_protocol::vision_rpc::is_owned_model_id;
+use serde::{Deserialize, Deserializer};
+
+/// The detector's model id as configured, with every `/` turned to `_`: a
+/// `/` marks a plugin's model ([`is_owned_model_id`]), whose batches the
+/// host's detection topic and the pilot never take, so a configured id
+/// holding one would silently place no person or vehicle at all.
+fn engine_model_id<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let id = String::deserialize(d)?;
+    if !is_owned_model_id(&id) {
+        return Ok(id);
+    }
+    let used = id.replace('/', "_");
+    tracing::warn!(model_id = %id, used = %used, "vision_detector_model_id_normalised");
+    Ok(used)
+}
 
 fn default_detector_dim() -> u32 {
     640
@@ -52,7 +67,9 @@ fn default_detector_threads() -> u32 {
 /// plugin must drive inference through the `vision.sock` register/infer RPCs).
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetectorConfig {
-    /// Model id stamped on every published `DetectionBatch`.
+    /// Model id stamped on every published `DetectionBatch`, never holding a
+    /// `/` (`engine_model_id`).
+    #[serde(deserialize_with = "engine_model_id")]
     pub model_id: String,
     /// Resolved path to the model file (`.rknn` on an NPU board, `.onnx` on a
     /// CPU build). Provisioning resolves a registry id to this path; a sideload

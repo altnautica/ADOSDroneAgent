@@ -1,5 +1,7 @@
 //! The plugin event export client: Navigation's scan, live occupancy and
-//! pose topics feed the obstacle model; its lidar status feeds sensor health.
+//! pose topics feed the obstacle model; its lidar status feeds sensor health;
+//! the vision engine's tracker batches and subject state, which the plugin
+//! host forwards onto the bus, feed the movers and the follow view.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,9 +23,10 @@ pub const TOPIC_POSE: &str = "plugin.navigation.pose";
 /// Navigation's active EKF source set: the GNSS-denied speed cap.
 pub const TOPIC_NAV_STATE: &str = "plugin.navigation.state";
 /// A camera's multi-object tracker batch (`vision.detection` v4, its JSON
-/// form): tracks with a world position become movers
-/// ([`crate::obstacles::Movers`]). Fed by a `feed` relay; the plugin
-/// event bus does not carry it.
+/// form, each detection without its appearance embeddings): tracks with a
+/// world position, and person tracks the camera's geometry ranges, become
+/// movers ([`crate::obstacles::Movers`]). The plugin host forwards the
+/// engine's batches onto the bus.
 pub const TOPIC_DETECTION: &str = "vision.detection";
 /// The designated subject's world state (`vision.subject.v1`): the
 /// predictions a follow intent's view is planned over.
@@ -37,6 +40,7 @@ pub const TOPICS: &[&str] = &[
     TOPIC_OCCUPANCY,
     TOPIC_POSE,
     TOPIC_NAV_STATE,
+    TOPIC_DETECTION,
     TOPIC_SUBJECT,
 ];
 

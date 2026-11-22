@@ -288,6 +288,9 @@ fn ekf(flags: EkfStatusFlags, pos_horiz_variance: f32) -> MavMessage {
     })
 }
 
+/// Long enough for a good EKF position to pass the launch settle time.
+const SETTLED: u64 = crate::readiness::POSITION_SETTLE_MS + 400;
+
 /// Run `ms` with one EKF_STATUS_REPORT every 200 ms from the FC.
 fn run_with_ekf(w: &mut World, msg: &MavMessage, ms: u64) {
     let end = w.now + ms;
@@ -319,7 +322,7 @@ fn an_ekf_without_absolute_horizontal_position_blocks_the_position_item() {
         | EkfStatusFlags::EKF_VELOCITY_HORIZ
         | EkfStatusFlags::EKF_POS_HORIZ_REL
         | EkfStatusFlags::EKF_POS_HORIZ_ABS;
-    run_with_ekf(&mut w, &ekf(good, 0.1), 600);
+    run_with_ekf(&mut w, &ekf(good, 0.1), SETTLED);
     assert!(position_item(&w).0, "{:?}", position_item(&w));
     // The lidar pose stops: local position still streams, the EKF has lost
     // its absolute horizontal position.
@@ -342,7 +345,7 @@ fn a_high_ekf_position_variance_degrades_then_blocks_the_position_item() {
     let good = EkfStatusFlags::EKF_ATTITUDE
         | EkfStatusFlags::EKF_POS_HORIZ_REL
         | EkfStatusFlags::EKF_POS_HORIZ_ABS;
-    run_with_ekf(&mut w, &ekf(good, 0.6), 600);
+    run_with_ekf(&mut w, &ekf(good, 0.6), SETTLED);
     let (ok, sev, msg) = position_item(&w);
     assert!(!ok, "{msg}");
     assert_eq!(sev, Severity::Warn);
@@ -356,7 +359,8 @@ fn a_high_ekf_position_variance_degrades_then_blocks_the_position_item() {
     w.run(4000);
     let (ok, sev, msg) = position_item(&w);
     assert!(!ok, "{msg}");
-    assert_eq!(sev, Severity::Warn);
+    // On the ground a quiet status blocks the launch.
+    assert_eq!(sev, Severity::Block);
     // The navigator's own position check says "Position unverified"; the
     // EKF item never borrows that wording.
     assert!(msg.starts_with(EKF_PREFIX), "{msg}");
@@ -383,7 +387,7 @@ fn a_flow_only_ekf_with_a_relative_position_passes_on_the_ground_and_in_the_air(
         | EkfStatusFlags::EKF_VELOCITY_HORIZ
         | EkfStatusFlags::EKF_POS_HORIZ_REL
         | EkfStatusFlags::EKF_PRED_POS_HORIZ_REL;
-    run_with_ekf(&mut w, &ekf(rel, 0.1), 600);
+    run_with_ekf(&mut w, &ekf(rel, 0.1), SETTLED);
     assert!(position_item(&w).0, "{:?}", position_item(&w));
     w.airborne(crate::modes::copter::LOITER);
     run_with_ekf(&mut w, &ekf(rel, 0.1), 600);
@@ -446,7 +450,7 @@ fn a_visual_odometry_only_ekf_is_asked_for_and_passes() {
         | EkfStatusFlags::EKF_VELOCITY_HORIZ
         | EkfStatusFlags::EKF_POS_HORIZ_REL
         | EkfStatusFlags::EKF_PRED_POS_HORIZ_REL;
-    run_with_ekf(&mut w, &ekf(rel, 0.1), 600);
+    run_with_ekf(&mut w, &ekf(rel, 0.1), SETTLED);
     assert!(position_item(&w).0, "{:?}", position_item(&w));
 }
 

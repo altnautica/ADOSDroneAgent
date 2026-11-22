@@ -11,6 +11,7 @@ mod command_goal;
 mod confined;
 mod confined_flight;
 mod confined_route;
+mod detection_feed;
 mod extnav_settle;
 mod fc_backstop;
 mod fc_failsafe;

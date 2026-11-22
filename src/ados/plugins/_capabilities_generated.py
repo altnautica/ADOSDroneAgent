@@ -438,10 +438,10 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
     },
     "vision.detection.publish": {
         "label": "Publish detections to the vision engine",
-        "description": "Lets the plugin publish detection results (bounding boxes, class labels, confidence, track ids) that other plugins, overlays, and mission logic can consume. Detections are derived data; they do not command the vehicle.",
+        "description": "Lets the plugin publish detection results (bounding boxes, class labels, confidence, track ids) that other plugins, overlays, and mission logic can consume. Every batch is published under the plugin's own model id. Detections are derived data; they do not command the vehicle, and the pilot never places an obstacle or a person from a plugin's batch.",
         "category": "data_network",
         "risk": "low",
-        "risk_reason": "Detections are derived data on a sandboxed topic and do not affect flight.",
+        "risk_reason": "Detections are derived data on a sandboxed topic and do not affect flight: the pilot and the host's detection topic take only the vision engine's own models.",
     },
     "vision.offload.advertise": {
         "label": "Advertise a perception offload link",
@@ -452,10 +452,10 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
     },
     "vision.detection.subscribe": {
         "label": "Subscribe to detections from the vision engine",
-        "description": "Lets the plugin receive the detection batches the vision engine publishes (bounding boxes, class labels, confidence, and the tracker's stable track id and lock state on the locked object). Detections are derived data; subscribing does not command the vehicle or open the camera.",
+        "description": "Lets the plugin receive the detection batches the vision engine publishes (bounding boxes, class labels, confidence, and the tracker's stable track id and lock state), on the vision.subscribe_detections stream and on the host's vision.detection event topic. A batch can carry where the tracker places each person and vehicle it sees, so the plugin learns the positions of bystanders near the aircraft. Subscribing does not command the vehicle or open the camera.",
         "category": "data_network",
-        "risk": "low",
-        "risk_reason": "Detections are derived data on a sandboxed topic and do not affect flight.",
+        "risk": "medium",
+        "risk_reason": "Exposes the tracked people around the aircraft, bystanders included, with their positions.",
     },
     "vision.depth.read": {
         "label": "Read metric depth frames from the vision engine",

@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.26] - 2026-11-23
+
+### Changed
+- The `vision.detection.subscribe` capability is now medium risk: the batches it reads can carry where the tracker places each person it sees, bystanders included.
+
+### Fixed
+- Pilot: launch waits for a position the FC's EKF will keep. On a GPS source set (`EK3_SRCn_POSXY` 3) the `position` readiness item passed on a relative position predicted from optical flow, before the EKF had an absolute fix; a launch armed in that window lost all position aiding seconds later and the FC changed to Land on an EKF failsafe. On the ground the item now needs an absolute horizontal position on a GPS source set ("Position degraded (EKF): no absolute horizontal position on the GPS source"); the set is the one Navigation reports, or without Navigation set 1 (GPS by default) unless another set names a non-GPS source. On any source set the position must have held good without a break for 3 s ("Position settling (EKF): waiting for a steady estimate"), an EKF status gone quiet blocks on the ground instead of warning, and a variance that is not a number blocks ("Position degraded (EKF): position variance not reported"). Flow-only and visual-odometry source sets still launch on a relative position, and in the air the item keeps ArduPilot's own test.
+- Pilot: the people and vehicles the camera's tracker sees now reach the pilot. The pilot read tracker batches (`vision.detection`) only from a feed relay that nothing ran, and never subscribed to them on the plugin event export, so in flight it placed no person from the camera at all: a walker the tracker held centred and closing passed under a hovering vehicle with no mover and no limit. The plugin host now forwards the vision engine's batches (`vision-detections.sock`) onto the event bus as the host-only topic `vision.detection` (read by a plugin with `event.subscribe` plus `vision.detection.subscribe`), each detection without its appearance embeddings, mask, keypoints and appearance id so a crowd's batch fits one event, and the pilot subscribes to it. A batch whose frame was taken more than 2 s ago (the socket's last batch, handed to a reader that reconnects) is not forwarded. Only batches of the engine's own models travel there: a batch a plugin publishes, or one of a model a plugin registered (its model id under the plugin's namespace, holding a `/`), is never forwarded, and the pilot places nothing from one, so no plugin can make the vehicle avoid a person who is not there or move a real person's track. Detections a reconstruct offload node returns are plugin batches and no longer reach the pilot. A configured detector `model_id` holding a `/` has each `/` read as `_` (logged), so it is never taken for a plugin's.
+
 ## [0.124.25] - 2026-11-22
 
 ### Added

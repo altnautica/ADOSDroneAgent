@@ -13,6 +13,7 @@ impl Pilot {
             avoid_on: self.settings.pilot.avoid != ados_protocol::pilot::AvoidMode::Off,
             mounts: &self.settings.pilot.fc_sensors,
             nav_imu: &self.nav_imu,
+            nav_set: self.nav_imu.set_reported().then_some(self.nav_set),
         };
         let mut items = crate::readiness::items(
             &self.fc,
