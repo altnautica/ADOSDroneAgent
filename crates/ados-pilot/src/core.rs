@@ -107,6 +107,9 @@ pub struct Pilot {
     /// seen-space hold stops its motion, and until when (ms)
     /// ([`control`]'s `sensing`).
     unseen_look: Option<(f32, u64)>,
+    /// The seen-space hold's stall: since when it has left the goal no
+    /// motion while its look lasts, and the goal ([`control`]'s `sensing`).
+    unseen_stall: Option<control::UnseenStall>,
     /// FC attitudes by host-monotonic arrival, for levelling each scan at
     /// its capture ([`scan_attitude`]).
     att_log: scan_attitude::AttitudeLog,
@@ -260,6 +263,7 @@ impl Pilot {
             world: Default::default(),
             sensing: None,
             unseen_look: None,
+            unseen_stall: None,
             att_log: Default::default(),
             mono_ns: || 0,
             overhead: Default::default(),

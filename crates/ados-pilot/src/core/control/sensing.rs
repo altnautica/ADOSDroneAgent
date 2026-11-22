@@ -25,13 +25,16 @@
 //! so, the nose turns along the way the goal would fly
 //! ([`Pilot::unseen_look`]) until the camera has seen it; a goal with a
 //! subject turns only a glance's worth from it ([`LOOK_SUBJECT_DEG`]), and
-//! what lies past that stays held.
+//! what lies past that stays held, until the hold has left the goal no
+//! motion for [`STALL_LOOK_MS`]: then the nose turns fully along the way.
 
-use ados_protocol::pilot::{AvoidMode, Sensing, SensingTier};
+use ados_protocol::pilot::{AvoidMode, GoalKind, Owner, Sensing, SensingTier};
 
+use super::mover_guard::LOOK_ZONE_M;
+use super::subject_guard::Subject;
 use super::STOPPED_MPS;
 use crate::core::world_feed::WORLD_SCAN_MAX_M;
-use crate::core::Pilot;
+use crate::core::{limit, Pilot};
 use crate::geo::{self, V2};
 use crate::obstacles::{Obstacles, SCAN_HORIZON_M};
 
@@ -63,6 +66,70 @@ const LOOK_SAME_DEG: f32 = 40.0;
 /// entered a trunk's margin about three times as often in the forest
 /// benchmark.
 const LOOK_SUBJECT_DEG: f32 = 60.0;
+/// How long the seen-space hold may leave a goal no motion before the nose
+/// turns fully along the way it holds, a subject or not, ms: a way more
+/// than a glance from the subject (round a trunk behind the vehicle, out of
+/// the margin of one beside it) is otherwise never seen and never flown.
+/// Not while the subject brake binds or the subject stands within
+/// [`LOOK_ZONE_M`] of the distance it keeps: then the guard, not the map,
+/// sets the motion, and the glance keeps the subject in an 87° camera's
+/// view (a full turn, even time-boxed, would put the subject the brake
+/// backs away from behind the vehicle for the whole box).
+const STALL_LOOK_MS: u64 = 2000;
+
+/// The goal a stall of the seen-space hold was timed on: another owner,
+/// lease, goal kind or goto target starts the clock again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::core) struct GoalKey {
+    owner: Owner,
+    lease: Option<u64>,
+    kind: Option<GoalKind>,
+    goto: Option<[f32; 3]>,
+}
+
+/// A stall of the seen-space hold ([`STALL_LOOK_MS`]): since when it has
+/// left the goal no motion, ms, and the goal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::core) struct UnseenStall {
+    since_ms: u64,
+    goal: GoalKey,
+}
+
+/// What one tick of the seen-space hold did, for the stall clock
+/// ([`stall_clock`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HoldTick {
+    /// Motion let through, or the subject near: no stall.
+    Ends,
+    /// Nothing to hold (no motion asked, avoid off, another tier): the
+    /// clock stays as it was.
+    Idle,
+    /// The hold left no motion; `looking`: the look the last cut set still
+    /// lasted.
+    Stalled { looking: bool },
+}
+
+/// The stall clock after one tick: a stall carries over while the look it
+/// set lasts, starts again once that look has expired or the goal is
+/// another, and ends with any motion let through.
+fn stall_clock(
+    prev: Option<UnseenStall>,
+    goal: GoalKey,
+    tick: HoldTick,
+    now_ms: u64,
+) -> Option<UnseenStall> {
+    let prev = prev.filter(|p| p.goal == goal);
+    let start = UnseenStall {
+        since_ms: now_ms,
+        goal,
+    };
+    match tick {
+        HoldTick::Ends => None,
+        HoldTick::Idle => prev,
+        HoldTick::Stalled { looking: true } => prev.or(Some(start)),
+        HoldTick::Stalled { looking: false } => Some(start),
+    }
+}
 
 /// The speed that stops within `room_m` braking at `a_brk` after
 /// [`SENSING_REACT_S`]: the root of `v·t + v²/(2a) = room`. 0 without room.
@@ -140,40 +207,91 @@ impl Pilot {
     /// of `v`, else along `v` itself (a brake's slide out of view would
     /// stall if the camera looked along the way the brake refused). The held
     /// velocity when it cut, else `None` (avoid off, another tier, no
-    /// motion).
-    pub(in crate::core) fn unseen_hold(&mut self, v: V2, want: V2, now_ms: u64) -> Option<V2> {
+    /// motion). Each tick also runs the stall clock ([`stall_clock`]),
+    /// stopped while the subject brake binds (`limits` carries
+    /// [`limit::SUBJECT`]) or the goal's `subject` stands near
+    /// ([`STALL_LOOK_MS`]).
+    pub(super) fn unseen_hold(
+        &mut self,
+        v: V2,
+        want: V2,
+        subject: Option<&Subject>,
+        limits: u16,
+        now_ms: u64,
+    ) -> Option<V2> {
+        let looking = self.unseen_look.is_some_and(|(_, until)| now_ms < until);
+        let (held, tick) = self.hold_cut(v, want, looking, now_ms);
+        let near = limits & limit::SUBJECT != 0
+            || subject
+                .zip(self.pos_ne(now_ms))
+                .is_some_and(|(g, p)| geo::dist(p, g.ne) < g.keep + LOOK_ZONE_M);
+        let tick = if near { HoldTick::Ends } else { tick };
+        self.unseen_stall = stall_clock(self.unseen_stall, self.goal_key(), tick, now_ms);
+        held
+    }
+
+    /// [`Pilot::unseen_hold`]'s cut and what it did, `looking` whether the
+    /// look the last cut set still lasted.
+    fn hold_cut(&mut self, v: V2, want: V2, looking: bool, now_ms: u64) -> (Option<V2>, HoldTick) {
         if self.settings.pilot.avoid == AvoidMode::Off || !self.world.live_3d(now_ms) {
-            return None;
+            return (None, HoldTick::Idle);
         }
         let tier = self.world.tier();
         if !matches!(tier, SensingTier::Depth | SensingTier::Camera) {
-            return None;
+            return (None, HoldTick::Idle);
         }
         let s = geo::norm(v);
-        if s < 1e-3 {
-            return None;
-        }
-        let pos = self.pos(now_ms)?;
+        let Some(pos) = self.pos(now_ms).filter(|_| s >= 1e-3) else {
+            return (None, HoldTick::Idle);
+        };
         let dir = geo::scale(v, 1.0 / s);
         let (_, max) = self.seen_rule(tier, self.world_clear_m(pos, dir));
         if s <= max + 1e-3 {
-            return None;
+            let tick = if s >= STOPPED_MPS {
+                HoldTick::Ends
+            } else {
+                HoldTick::Idle
+            };
+            return (None, tick);
         }
         let along_want = geo::norm(want) >= STOPPED_MPS
             && geo::dot(want, dir) >= geo::norm(want) * LOOK_SAME_DEG.to_radians().cos();
         let look = if along_want { want } else { v };
         self.unseen_look = Some((geo::bearing_of(look), now_ms + LOOK_HOLD_MS));
-        Some(geo::scale(dir, max))
+        let tick = if max < STOPPED_MPS {
+            HoldTick::Stalled { looking }
+        } else {
+            HoldTick::Ends
+        };
+        (Some(geo::scale(dir, max)), tick)
+    }
+
+    /// The goal the stall clock times ([`GoalKey`]).
+    fn goal_key(&self) -> GoalKey {
+        let lease = self.auth.lease();
+        GoalKey {
+            owner: self.owner(),
+            lease: lease.map(|l| l.id),
+            kind: lease.and_then(|l| l.goal.as_ref()).map(|g| g.kind),
+            goto: self.goto,
+        }
     }
 
     /// The heading a goal turns to while [`Pilot::unseen_hold`] holds its
     /// motion back (and [`LOOK_HOLD_MS`] after), so the camera sees the
     /// way and the hold lets the motion on; with a subject to face at
-    /// bearing `face`, no more than [`LOOK_SUBJECT_DEG`] from it.
+    /// bearing `face`, no more than [`LOOK_SUBJECT_DEG`] from it until the
+    /// hold has left the same goal no motion for [`STALL_LOOK_MS`], then
+    /// fully along it.
     pub(in crate::core) fn unseen_look(&self, face: Option<f32>, now_ms: u64) -> Option<f32> {
         let (b, _) = self.unseen_look.filter(|&(_, until)| now_ms < until)?;
-        let max = LOOK_SUBJECT_DEG.to_radians();
-        Some(face.map_or(b, |f| f + geo::wrap_pi(b - f).clamp(-max, max)))
+        let stalled = self.unseen_stall.is_some_and(|st| {
+            st.goal == self.goal_key() && now_ms.saturating_sub(st.since_ms) >= STALL_LOOK_MS
+        });
+        if stalled {
+            return Some(b);
+        }
+        Some(glance(face, b, LOOK_SUBJECT_DEG))
     }
 
     /// The unit direction the range is read along: the velocity, else the
@@ -227,6 +345,13 @@ impl Pilot {
     }
 }
 
+/// The heading that looks along bearing `b`: with a subject to face at
+/// bearing `face`, no more than `max_deg` from it.
+pub(in crate::core) fn glance(face: Option<f32>, b: f32, max_deg: f32) -> f32 {
+    let max = max_deg.to_radians();
+    face.map_or(b, |f| f + geo::wrap_pi(b - f).clamp(-max, max))
+}
+
 /// The range the planar scans of `obs` see from `pos` along the unit
 /// `dir`: the nearest horizon point beside the line, else the lidar's
 /// range.
@@ -256,5 +381,104 @@ mod tests {
         }
         assert_eq!(speed_within(0.0, 2.5), 0.0);
         assert_eq!(speed_within(-1.0, 2.5), 0.0);
+    }
+
+    #[test]
+    fn a_glance_turns_from_the_subject_no_further_than_its_limit() {
+        let deg = |d: f32| d.to_radians();
+        let near = |a: f32, b: f32| (geo::wrap_pi(a - b)).abs() < 1e-5;
+        // No subject: the bearing itself.
+        assert!(near(glance(None, deg(120.0), 30.0), deg(120.0)));
+        // Within the limit of the subject: the bearing.
+        assert!(near(glance(Some(deg(10.0)), deg(30.0), 30.0), deg(30.0)));
+        // Beyond it, either side and across ±180°: held to the limit.
+        assert!(near(glance(Some(deg(10.0)), deg(100.0), 30.0), deg(40.0)));
+        assert!(near(glance(Some(deg(10.0)), deg(-100.0), 30.0), deg(-20.0)));
+        assert!(near(
+            glance(Some(deg(170.0)), deg(-100.0), 30.0),
+            deg(200.0)
+        ));
+    }
+
+    #[test]
+    fn a_stalled_hold_looks_fully_along_the_way() {
+        let mut p = Pilot::new(crate::config::Settings::default());
+        let (face, way, t) = (0.0_f32, 130.0_f32.to_radians(), 10_000);
+        let goal = p.goal_key();
+        let since = |since_ms| Some(UnseenStall { since_ms, goal });
+        p.unseen_look = Some((way, t + LOOK_HOLD_MS));
+        // Held a moment: a glance from the subject.
+        p.unseen_stall = since(t - 100);
+        let glance = p.unseen_look(Some(face), t).unwrap();
+        assert!((glance - LOOK_SUBJECT_DEG.to_radians()).abs() < 1e-4);
+        // Held with no motion for the stall time: along the way itself.
+        p.unseen_stall = since(t - STALL_LOOK_MS);
+        let full = p.unseen_look(Some(face), t).unwrap();
+        assert!((full - way).abs() < 1e-4);
+        // A stall timed on another goal: a glance again.
+        let other = GoalKey {
+            goto: Some([1.0, 2.0, -3.0]),
+            ..goal
+        };
+        p.unseen_stall = Some(UnseenStall {
+            since_ms: t - STALL_LOOK_MS,
+            goal: other,
+        });
+        let again = p.unseen_look(Some(face), t).unwrap();
+        assert!((again - LOOK_SUBJECT_DEG.to_radians()).abs() < 1e-4);
+        // The look expired: nothing.
+        assert!(p.unseen_look(Some(face), t + LOOK_HOLD_MS).is_none());
+    }
+
+    #[test]
+    fn the_stall_clock_runs_only_while_the_hold_leaves_no_motion() {
+        let p = Pilot::new(crate::config::Settings::default());
+        let goal = p.goal_key();
+        let other = GoalKey {
+            goto: Some([5.0, 0.0, -4.0]),
+            ..goal
+        };
+        let held = |looking| HoldTick::Stalled { looking };
+        // Starts on the first held tick.
+        let st = stall_clock(None, goal, held(false), 1_000);
+        assert_eq!(st.map(|s| s.since_ms), Some(1_000));
+        // Carries over while the look it set lasts, and through idle ticks.
+        let st = stall_clock(st, goal, held(true), 1_500);
+        let st = stall_clock(st, goal, HoldTick::Idle, 1_600);
+        let st = stall_clock(st, goal, held(true), 3_000);
+        assert_eq!(st.map(|s| s.since_ms), Some(1_000));
+        // Starts again once the look has expired.
+        let st = stall_clock(st, goal, held(false), 6_000);
+        assert_eq!(st.map(|s| s.since_ms), Some(6_000));
+        // Starts again on another goal, even while the look lasts.
+        let st = stall_clock(st, other, held(true), 6_100);
+        assert_eq!(
+            st,
+            Some(UnseenStall {
+                since_ms: 6_100,
+                goal: other
+            })
+        );
+        // Ends with motion let through (or the subject near).
+        assert_eq!(stall_clock(st, other, HoldTick::Ends, 6_200), None);
+        // An idle tick on another goal drops the old one's stall.
+        assert_eq!(stall_clock(st, goal, HoldTick::Idle, 6_200), None);
+    }
+
+    #[test]
+    fn the_subject_brake_stops_the_stall_clock() {
+        let mut p = Pilot::new(crate::config::Settings::default());
+        let goal = p.goal_key();
+        p.unseen_stall = Some(UnseenStall { since_ms: 0, goal });
+        // Nothing to hold, but the subject brake binds: no full turn.
+        assert_eq!(
+            p.unseen_hold([1.0, 0.0], [1.0, 0.0], None, limit::SUBJECT, 5_000),
+            None
+        );
+        assert_eq!(p.unseen_stall, None);
+        // Without it an idle tick keeps the stall as it was.
+        p.unseen_stall = Some(UnseenStall { since_ms: 0, goal });
+        assert_eq!(p.unseen_hold([1.0, 0.0], [1.0, 0.0], None, 0, 5_000), None);
+        assert!(p.unseen_stall.is_some());
     }
 }

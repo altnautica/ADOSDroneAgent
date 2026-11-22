@@ -55,6 +55,15 @@ pub const FREE_MEMORY_MS: u64 = 5_000;
 const FREE_BINS: usize = 360;
 /// The memory's cell, m.
 const CELL_M: f32 = 0.15;
+/// How far off a stored beam's line a beam may run and still take that
+/// beam's free space up to its own return, m: further off, an obstacle
+/// short enough to pass under a beam that rose with pitch could stand
+/// between the two lines unseen by either. Within it, an obstacle
+/// narrower than the gap between the lines may still stand there unseen:
+/// this bounds that residual, it does not remove it.
+const FREE_OFFSET_M: f32 = 1.25;
+/// The lanes [`SeenFree`] keeps per bearing.
+const FREE_LANES: usize = 4;
 
 /// The climb the band rises with: per horizontal metre (the height the
 /// vehicle gains before it reaches a return that far out), up to the
@@ -147,12 +156,13 @@ impl WallMemory {
     }
 }
 
-/// Per world bearing (one-degree bins), the latest beam that stayed in the
-/// band along it: where it was cast from, where it stopped seeing (its
-/// return, or the lidar's reach), and when.
+/// Per world bearing (one-degree bins), the latest beams that stayed in the
+/// band along it, one per lane of lateral position: where each was cast
+/// from, where it stopped seeing (its return, or the lidar's reach), and
+/// when.
 #[derive(Debug)]
 pub struct SeenFree {
-    beams: Vec<Option<Seen>>,
+    beams: Vec<[Option<Seen>; FREE_LANES]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -165,7 +175,7 @@ struct Seen {
 impl Default for SeenFree {
     fn default() -> Self {
         Self {
-            beams: vec![None; FREE_BINS],
+            beams: vec![[None; FREE_LANES]; FREE_BINS],
         }
     }
 }
@@ -187,9 +197,32 @@ fn on_ray(p: V2, a: V2, b: V2) -> bool {
     geo::dist(p, geo::add(a, geo::scale(ab, t))) <= CELL_M
 }
 
+/// Distance from `p` to the line through `a` and `b`.
+fn lateral(p: V2, a: V2, b: V2) -> f32 {
+    let ab = geo::sub(b, a);
+    let n = geo::dot(ab, ab).sqrt();
+    if n < 1e-6 {
+        return geo::dist(p, a);
+    }
+    let ap = geo::sub(p, a);
+    (ap[0] * ab[1] - ap[1] * ab[0]).abs() / n
+}
+
 impl SeenFree {
+    /// Keeps `from → end` as a lane of its bearing: it replaces a lane
+    /// running within half [`FREE_OFFSET_M`] of it, else an empty or the
+    /// oldest one, so beams cast from a few lines side by side stand.
     fn saw(&mut self, dir: V2, from: V2, end: V2, now_ms: u64) {
-        self.beams[bin_of(dir)] = Some(Seen {
+        let lanes = &mut self.beams[bin_of(dir)];
+        let near = lanes
+            .iter()
+            .position(|l| l.is_some_and(|l| lateral(from, l.from, l.end) <= FREE_OFFSET_M / 2.0));
+        let i = near.unwrap_or_else(|| {
+            (0..FREE_LANES)
+                .min_by_key(|&i| lanes[i].map_or(0, |l| l.at_ms + 1))
+                .unwrap_or(0)
+        });
+        lanes[i] = Some(Seen {
             from,
             end,
             at_ms: now_ms,
@@ -198,32 +231,44 @@ impl SeenFree {
 
     /// The horizon of a beam along `dir` from `pos` that left the band at
     /// `exit` and returned at `ret_m` (horizontal m; `None` for no return):
-    /// the end a beam in the band saw along that bearing within
-    /// [`FREE_MEMORY_MS`], when it is further than `exit`. Seen from on
-    /// that beam (`pos` within [`CELL_M`] of it), its end stands. Seen
-    /// from elsewhere it ran along a parallel line, past whatever this
-    /// beam's own return met: the horizon goes no further than that return,
-    /// so a trunk lifted over the band stays the edge of the seen space.
-    /// With no return to bound it, `exit`.
+    /// the furthest a lane in the band saw along that bearing within
+    /// [`FREE_MEMORY_MS`] vouches for, when it is further than `exit`. Seen
+    /// from on a lane (`pos` within [`CELL_M`] of it), its end stands.
+    /// From a lane within [`FREE_OFFSET_M`] of `pos`, it ran along a
+    /// parallel line, past whatever this beam's own return met: the
+    /// horizon goes no further than that return, so a trunk lifted over the
+    /// band stays the edge of the seen space. A lane further off vouches
+    /// for nothing (a short obstacle under this risen beam may stand
+    /// between the lines; within the offset, one narrower than the gap
+    /// still may), nor does any lane with no return to bound it: `exit`.
     fn horizon(&self, dir: V2, pos: V2, exit: V2, ret_m: Option<f32>, now_ms: u64) -> V2 {
         let exit_m = geo::dist(exit, pos);
-        let Some(s) =
-            self.beams[bin_of(dir)].filter(|s| now_ms.saturating_sub(s.at_ms) <= FREE_MEMORY_MS)
-        else {
-            return exit;
-        };
-        let end_m = geo::dist(s.end, pos);
-        if on_ray(pos, s.from, s.end) {
-            return if end_m > exit_m { s.end } else { exit };
+        let mut best = (exit_m, exit);
+        let fresh = self.beams[bin_of(dir)]
+            .iter()
+            .flatten()
+            .filter(|s| now_ms.saturating_sub(s.at_ms) <= FREE_MEMORY_MS);
+        for s in fresh {
+            let end_m = geo::dist(s.end, pos);
+            let h = if on_ray(pos, s.from, s.end) {
+                Some((end_m, s.end))
+            } else if lateral(pos, s.from, s.end) <= FREE_OFFSET_M + 1e-3 {
+                ret_m.map(|r| {
+                    let m = r.min(end_m);
+                    (m, geo::add(pos, geo::scale(dir, m)))
+                })
+            } else {
+                None
+            };
+            if let Some(h) = h.filter(|h| h.0 > best.0) {
+                best = h;
+            }
         }
-        match ret_m.map(|r| r.min(end_m)) {
-            Some(m) if m > exit_m => geo::add(pos, geo::scale(dir, m)),
-            _ => exit,
-        }
+        best.1
     }
 
     pub fn shift(&mut self, d: V2) {
-        for s in self.beams.iter_mut().flatten() {
+        for s in self.beams.iter_mut().flatten().flatten() {
             s.from = geo::add(s.from, d);
             s.end = geo::add(s.end, d);
         }
@@ -394,5 +439,32 @@ mod tests {
         let late = FREE_MEMORY_MS + 1;
         let h = seen.horizon(north, [3.0, 0.0], [5.0, 0.0], None, late);
         assert_eq!(h, [5.0, 0.0]);
+    }
+
+    #[test]
+    fn a_remembered_beam_far_off_this_one_clears_nothing_under_a_risen_beam() {
+        // A beam north stayed in the band to 12 m from 2 m east. Now at the
+        // origin a pitch lifts this beam over the band at 2 m; it passes
+        // over a short obstacle at 4 m and returns from a trunk at 9 m. The
+        // stored line runs 2 m off: nothing says the 2-9 m stretch is clear.
+        let mut seen = SeenFree::default();
+        let north = [1.0, 0.0];
+        seen.saw(north, [0.0, 2.0], [12.0, 2.0], 0);
+        let exit = [2.0, 0.0];
+        assert_eq!(seen.horizon(north, [0.0, 0.0], exit, Some(9.0), 100), exit);
+        // Within a metre off, the stored beam vouches up to the return.
+        let h = seen.horizon(north, [0.0, 1.0], [2.0, 1.0], Some(9.0), 100);
+        assert!(geo::dist(h, [9.0, 1.0]) < 1e-5, "{h:?}");
+        // A beam cast later from the origin's line keeps its own lane: the
+        // one 2 m east still stands for a beam cast from there.
+        seen.saw(north, [0.0, 0.0], [6.0, 0.0], 200);
+        assert_eq!(
+            seen.horizon(north, [1.0, 0.0], [2.0, 0.0], None, 300),
+            [6.0, 0.0]
+        );
+        assert_eq!(
+            seen.horizon(north, [1.0, 2.0], [2.0, 2.0], None, 300),
+            [12.0, 2.0]
+        );
     }
 }

@@ -39,6 +39,7 @@ pub use route::{check_legs, legs_of, Origin};
 pub use route::{route_of, Route, RouteItem, CONFINED_CAP_MPS};
 #[cfg(test)]
 pub(super) use route_home::Routed;
+pub(super) use sensing::UnseenStall;
 pub(super) use subject_guard::SubjectTrack;
 pub use supervisor::{Resume, Supervisor};
 pub use vantage_goal::HOLD_NO_VANTAGE;

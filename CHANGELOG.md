@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.23] - 2026-11-22
+
+### Changed
+- Pilot: on a forward-looking tier (`depth`, `camera`) the trajectory planner may glance the nose up to 30° off the subject toward the way it flies, and holds a glance for 500 ms, so the camera sees more of the path while it follows; a plan on a forward tier may start up to 12.5 cm off the vehicle's position, and a depth-tier orbit flies the full circle.
+- Pilot: a skill's margin wider than the distance it keeps from the subject no longer widens that distance: the route stays the margin off the subject, never further than the skill asked.
+- Pilot: a beam the obstacle band remembers as free vouches for space only within 1.25 m of its own line sideways, so an obstacle short enough to pass under a beam that rose with pitch is no longer taken as seen-clear between two lines.
+
+### Fixed
+- Pilot: a goal held by the forward-sensor hold no longer waits for good when its way lies beyond the glance the nose may turn from the subject (round a trunk behind the vehicle, or out of the margin of one beside it at take-off). After 2 s held with no motion on the same goal the nose turns fully along the way so the camera can see it, except while the subject brake acts or the subject is within 2 m of the distance it keeps, when the nose keeps its glance so the subject stays in view; the hold still lets nothing into unseen space. On the forest benchmark's depth and camera tiers (40 seeds) reach rose from 117 to 122 of 320, with no collisions and margin entries down from 12 to 3.
+
 ## [0.124.22] - 2026-11-22
 
 ### Added

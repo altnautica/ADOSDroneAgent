@@ -66,6 +66,13 @@ fn path_len(p: &ados_planning::Plan) -> f32 {
 
 /// A plan's way is looked along this far from its start, m.
 const LOOK_M: f32 = 2.0;
+/// How long the look stays after the last plan the forward view turned
+/// down, ms: a plan committed once the camera sees its way would otherwise
+/// turn the nose straight back (to a subject it faces) and the next plan,
+/// out of view again, is refused. Half a second steadies an orbit's glance
+/// (cleared at once, its subject left the view more; held 1.5 s, the nose
+/// stayed off the subject for longer than the plans needed).
+const LOOK_HOLD_MS: u64 = 500;
 
 /// The bearing from `start` to the first turning point of `p`'s path at
 /// least [`LOOK_M`] off (its end when none is).
@@ -141,8 +148,9 @@ pub struct TrajPlanner {
     /// The goal the committed plan was made for (led by its velocity).
     aimed: Option<V2>,
     /// Where the last plan wanted to go when only the forward view turned
-    /// it down: the heading to look along, so the next plan is seen.
-    look: Option<f32>,
+    /// it down, and until when: the heading to look along, so the next plan
+    /// is seen.
+    look: Option<(f32, u64)>,
     /// The movers each replan keeps clear of (reused).
     movers: Vec<Mover>,
 }
@@ -177,11 +185,11 @@ impl TrajPlanner {
         self.look = None;
     }
 
-    /// The heading to look along while no plan is committed: set when the
-    /// last plan found keeps out of everything but lies outside the
+    /// The heading to look along at `now_ms`: set for [`LOOK_HOLD_MS`]
+    /// when a plan found keeps out of everything but lies outside the
     /// forward view ([`TrajGoal::heading`]).
-    pub fn look(&self) -> Option<f32> {
-        self.look
+    pub fn look(&self, now_ms: u64) -> Option<f32> {
+        self.look.filter(|l| now_ms < l.1).map(|l| l.0)
     }
 
     /// How far the route held to `goal` still runs from `from`, m.
@@ -294,13 +302,13 @@ impl TrajPlanner {
                                 && keeps_out(&p, &map, g.margin, None, &g.limits, 0.0)
                             {
                                 let b = look_along(&p, g.start[0]);
-                                self.look = Some(next_look(self.look, b));
+                                let held = self.look(g.now_ms);
+                                self.look = Some((next_look(held, b), g.now_ms + LOOK_HOLD_MS));
                             }
                             return Outcome::Kept(PlanError::NoBackup);
                         }
                         self.committed.commit(p);
                         self.aimed = Some(goal);
-                        self.look = None;
                         return Outcome::Committed;
                     }
                     Err(e) => last = e,
@@ -419,5 +427,17 @@ mod tests {
         // to the first and a new obstacle sent the next plan elsewhere.
         assert_eq!(next_look(Some(deg(30.0)), deg(-60.0)), deg(-60.0));
         assert_eq!(next_look(Some(deg(0.0)), deg(180.0)), deg(180.0));
+    }
+
+    #[test]
+    fn the_look_lasts_its_hold_and_clears_with_the_goal() {
+        let mut p = TrajPlanner::new();
+        assert_eq!(p.look(0), None);
+        p.look = Some((1.0, 2_000 + LOOK_HOLD_MS));
+        assert_eq!(p.look(2_000), Some(1.0));
+        assert_eq!(p.look(2_000 + LOOK_HOLD_MS - 1), Some(1.0));
+        assert_eq!(p.look(2_000 + LOOK_HOLD_MS), None);
+        p.clear();
+        assert_eq!(p.look(2_000), None);
     }
 }

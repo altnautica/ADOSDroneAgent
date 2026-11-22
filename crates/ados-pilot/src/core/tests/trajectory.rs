@@ -2,11 +2,13 @@
 //! finds blocked, in shadow beside the grid planner and flown under
 //! `pilot.planner = trajectory`.
 
-use ados_protocol::pilot::{AvoidMode, AvoidState, Request};
+use ados_protocol::pilot::{AvoidMode, AvoidState, Goal, GoalKind, Request, SensingTier};
+use ados_protocol::voxmap::{VoxSnapshot, VoxTier, VoxmapMeta, ESDF_CAP_DM, VOX_FREE};
 
 use super::harness::World;
 use super::safety::wall_scan;
 use crate::config::PlannerMode;
+use crate::geo;
 use crate::modes::copter;
 use crate::planner::{self, Outcome};
 
@@ -103,4 +105,80 @@ fn a_trajectory_goto_behind_a_wall_flies_round_it() {
     assert!(sp.vy.abs() > 0.05, "it turns off the straight way: {sp:?}");
     let frame = serde_json::to_value(w.p.state(w.now)).unwrap();
     assert!(frame.get("shadow").is_none(), "{frame}");
+}
+
+/// A depth-tier map seen free 60 × 60 m round the start (−12 m to −2 m
+/// down), published as `seq` with the body at `body` (the map's frame is
+/// the local one).
+fn free_depth_map(seq: u64, body: [f32; 3]) -> VoxSnapshot {
+    let dims = [120, 120, 20];
+    let n = dims.iter().map(|&d| usize::from(d)).product();
+    VoxSnapshot {
+        valid: true,
+        seq,
+        meta: VoxmapMeta {
+            stamp_ns: 0,
+            res_m: 0.5,
+            origin_cell: [-60, -60, -24],
+            dims,
+            map_from_body: [body[0], body[1], body[2], 1.0, 0.0, 0.0, 0.0],
+            tier: VoxTier::Depth,
+        },
+        occupancy: vec![VOX_FREE; n],
+        esdf_dm: vec![ESDF_CAP_DM; n],
+    }
+}
+
+/// The subject the goal names, off to the east-north-east and far enough
+/// that no subject brake binds.
+const SUBJECT_NE: [f32; 2] = [30.0, 82.0];
+
+/// A skill goal 20 m north naming [`SUBJECT_NE`], with its own `yaw` or
+/// none, flown by the trajectory planner on a forward-only (depth) map for
+/// `ms`.
+fn fly_past_subject(yaw: Option<f32>, ms: u64) -> World {
+    let mut w = World::new();
+    w.p.settings.pilot.planner = PlannerMode::Trajectory;
+    w.airborne(copter::GUIDED);
+    let lease_id = w.lease();
+    let end = w.now + ms;
+    let mut seq = 0;
+    while w.now < end {
+        let mut goal = Goal::new(GoalKind::Position, [20.0, 0.0, -5.0], 3.0);
+        goal.subject_ne = Some(SUBJECT_NE);
+        goal.yaw = yaw;
+        w.req(Request::Goal { lease_id, goal });
+        seq += 2;
+        w.p.on_voxmap(&mut free_depth_map(seq, w.pos), w.now);
+        w.run(100);
+    }
+    w
+}
+
+/// On a forward-only tier the trajectory planner's motion glance turns
+/// the nose from the goal's subject toward where it flies, unless the goal
+/// sets its own yaw (a search sweep's vantage goal): that yaw is kept
+/// while the trajectory flies.
+#[test]
+fn a_goal_with_its_own_yaw_gets_no_motion_glance() {
+    let deg = f32::to_radians;
+    let off = |a: f32, b: f32| geo::wrap_pi(a - b).abs();
+    let own = deg(-10.0);
+    let w = fly_past_subject(Some(own), 3000);
+    let tier = w.p.state(w.now).sensing.map(|s| s.tier);
+    assert_eq!(tier, Some(SensingTier::Depth));
+    let sp = w.last_setpoint().expect("a setpoint");
+    assert!(sp.vx.hypot(sp.vy) >= 0.5, "the trajectory flies: {sp:?}");
+    assert!(off(sp.yaw, own) < deg(2.0), "the goal's yaw: {sp:?}");
+    // The same goal without a yaw: the nose glances 30° from the subject
+    // toward the motion (north), not the goal's yaw nor the subject.
+    let w = fly_past_subject(None, 3000);
+    let sp = w.last_setpoint().expect("a setpoint");
+    assert!(sp.vx.hypot(sp.vy) >= 0.5, "the trajectory flies: {sp:?}");
+    let face = geo::bearing_of(geo::sub(SUBJECT_NE, [w.pos[0], w.pos[1]]));
+    let glance = face - deg(30.0);
+    assert!(
+        off(sp.yaw, glance) < deg(3.0),
+        "a glance from {face}: {sp:?}"
+    );
 }

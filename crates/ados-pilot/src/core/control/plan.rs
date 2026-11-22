@@ -179,10 +179,10 @@ impl Pilot {
             let mut r = self.goal_ref(pos, yaw, now_ms);
             let mut limits = 0;
             let v = self.fly_shaped(&mut r, [0.0, 0.0], &shape, &mut limits, now_ms);
-            // With a forward view only and no subject to face, the hold
-            // looks along the way the trajectory planner found outside that
-            // view, so its next plan is seen.
-            let look = subject.is_none().then(|| self.traj.look()).flatten();
+            // A forward view only: the hold looks along the way the trajectory
+            // planner found outside it (glancing from a subject), to see it.
+            let face = subject.map(|s| geo::bearing_of(geo::sub(s, pos_ne)));
+            let look = self.traj_look(face, now_ms);
             let yaw_cmd = r.slew_yaw(look, &shape.gl, dt);
             r.at_ms = now_ms;
             self.motion_ref = Some(r);
@@ -248,20 +248,19 @@ impl Pilot {
         let want = geo::clamp_len(asked, v_cap);
         let shape = Shape { traj, ..shape };
         let v = self.fly_shaped(&mut r, want, &shape, &mut limits, now_ms);
-        // A forward-only sensor faces a guarded person, else glances along held motion.
+        // Forward-only: face a guarded person, else glance along held or unseen planned motion.
         let face = subject.map(|s| geo::bearing_of(geo::sub(s, pos_ne)));
-        let unseen = self.unseen_look(face, now_ms);
+        let traj_look = face.and(self.traj_look(face, now_ms));
+        let unseen = self.unseen_look(face, now_ms).or(traj_look);
         let look = self.mover_look(pos_ne, now_ms).or(unseen);
         let want_yaw = (look.or(goal_yaw)).or_else(|| match subject {
             Some(s) => Some(geo::bearing_of(geo::sub(s, pos_ne))),
             None if geo::dist(target, pos_ne) > 1.0 => {
                 Some(geo::bearing_of(geo::sub(target, pos_ne)))
             }
-            // At the target with a forward view only: look along the way
-            // the trajectory planner found outside that view (a goto
-            // following a route that has come to rest), so its next plan
-            // is seen.
-            None => self.traj.look(),
+            // At the target with a forward view only: look along the way the
+            // trajectory planner found outside it (a goto's route at rest).
+            None => self.traj.look(now_ms),
         });
         let yaw_cmd = r.slew_yaw(want_yaw, &shape.gl, dt);
         r.at_ms = now_ms;
@@ -414,7 +413,7 @@ impl Pilot {
             p = s.pos;
             r.cut(p, v);
         }
-        if let Some(held) = self.unseen_hold(v, want, now_ms) {
+        if let Some(held) = self.unseen_hold(v, want, s.subject.as_ref(), *limits, now_ms) {
             *limits |= limit::SENSING;
             (v, p) = (held, s.pos);
             r.cut(p, v);
