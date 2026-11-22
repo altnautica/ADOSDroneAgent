@@ -476,6 +476,10 @@ jobs:
       #   - ados-pilot/tests/dst/bench.rs `shadow_cost`: times the background
       #     trajectory planner against the reactive replan on a dense stand; a
       #     release-build timing, meaningless in a debug test run.
+      #   - ados-pilot/tests/dst/main.rs `follow_table`: the follow benchmark
+      #     table (every follow case, ring against intent, four seeds) takes
+      #     minutes; it measures, it does not gate. Each follow case's bars are
+      #     asserted by its own test, which runs by default.
       #   - ados-vision/tests/tracker_adversarial.rs
       #     `sparse_two_in_three_sighting_does_not_confirm_a_lock`: the recorded
       #     robustness limit of the tracker's confirm rule (identity-safe; its
@@ -495,7 +499,7 @@ jobs:
       - name: Ignored-test count matches the reviewed inventory
         run: |
           set -uo pipefail
-          EXPECTED=8
+          EXPECTED=9
 
           # Attribute position only: a doc comment that mentions the attribute
           # is prose, not an ignored test.
