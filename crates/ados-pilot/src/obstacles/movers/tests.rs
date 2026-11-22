@@ -3,6 +3,11 @@ use serde_json::json;
 use super::*;
 use crate::obstacles::Hit;
 
+/// The movers `m` holds at `now_ms`, collected.
+fn list(m: &Movers, now_ms: u64) -> Vec<Mover> {
+    m.list(now_ms).copied().collect()
+}
+
 /// A planar scan from `pos` of upright disks (`(centre, radius)`): 360 bins
 /// of 1°, each the nearest disk within 12 m as a hit, else a horizon point
 /// at 12 m.
@@ -50,7 +55,7 @@ fn a_camera_track_is_a_mover_of_its_class_predicted_on_its_velocity() {
     for k in 0..=10u64 {
         m.ingest_detections(&batch(0.14 * k as f32), 1000 + 100 * k);
     }
-    let l = m.list(2000);
+    let l = list(&m, 2000);
     assert_eq!(l.len(), 1, "{l:?}");
     let p = l[0];
     assert_eq!(p.kind, MoverKind::Person);
@@ -67,7 +72,7 @@ fn a_camera_track_is_a_mover_of_its_class_predicted_on_its_velocity() {
     assert_eq!(p.at(2000 + 10_000), p.at(2000 + 3_000));
     assert!(p.sigma_at(3000) > p.sigma_m);
     // Unmeasured past the keep, it is gone.
-    assert!(m.list(2000 + KEEP_MS + 1).is_empty());
+    assert!(list(&m, 2000 + KEEP_MS + 1).is_empty());
 }
 
 #[test]
@@ -82,7 +87,7 @@ fn a_walker_crossing_the_scan_becomes_a_mover_and_a_passed_trunk_does_not() {
         let (hits, horizon) = scan(pos, &[([8.0, 1.2], 0.3), ([12.0, -4.0 + 1.4 * s], 0.3)]);
         m.ingest_hits(&hits, &horizon, pos, Some(1.5), t);
     }
-    let l = m.list(3900);
+    let l = list(&m, 3900);
     assert_eq!(l.len(), 1, "{l:?}");
     assert_eq!(l[0].kind, MoverKind::Unknown);
     assert!(
@@ -103,7 +108,7 @@ fn a_walker_turning_back_stays_a_mover() {
         let (hits, horizon) = scan([0.0, 0.0], &[([8.0, e - 2.0], 0.3)]);
         m.ingest_hits(&hits, &horizon, [0.0, 0.0], Some(1.5), 1000 + 100 * k);
         if k >= 15 {
-            assert_eq!(m.list(1000 + 100 * k).len(), 1, "at {s:.1} s");
+            assert_eq!(list(&m, 1000 + 100 * k).len(), 1, "at {s:.1} s");
         }
     }
 }
@@ -117,7 +122,7 @@ fn a_walker_coming_straight_at_the_sensor_becomes_a_mover() {
         let (hits, horizon) = scan([0.0, 0.0], &[([0.3, 8.0 - 1.4 * s], 0.3)]);
         m.ingest_hits(&hits, &horizon, [0.0, 0.0], Some(1.5), 1000 + 100 * k);
     }
-    let l = m.list(2900);
+    let l = list(&m, 2900);
     assert_eq!(l.len(), 1, "{l:?}");
     assert!((l[0].vel[1] + 1.4).abs() < 0.4, "{:?}", l[0].vel);
 }
@@ -139,9 +144,9 @@ fn walls_and_a_corridor_of_posts_are_no_movers() {
         let (hits, horizon) = scan(pos, &posts);
         m.ingest_hits(&hits, &horizon, pos, None, 1000 + 100 * k);
         assert!(
-            m.list(1000 + 100 * k).is_empty(),
+            list(&m, 1000 + 100 * k).is_empty(),
             "{:?}",
-            m.list(1000 + 100 * k)
+            list(&m, 1000 + 100 * k)
         );
     }
 }
@@ -160,7 +165,7 @@ fn a_cluster_higher_than_anyone_walking_is_no_mover() {
         }
         m.ingest_hits(&hits, &horizon, [0.0, 0.0], Some(4.0), 1000 + 100 * k);
     }
-    assert!(m.list(3900).is_empty(), "{:?}", m.list(3900));
+    assert!(list(&m, 3900).is_empty(), "{:?}", list(&m, 3900));
 }
 
 #[test]

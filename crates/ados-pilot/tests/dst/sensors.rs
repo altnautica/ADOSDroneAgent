@@ -197,7 +197,7 @@ fn body_to_world(v: [f32; 3], att: [f32; 3]) -> [f32; 3] {
 const MID360_RAYS: usize = 20_000;
 const MID360_RANGE_M: f32 = 40.0;
 const MID360_EL_DEG: (f32, f32) = (-7.0, 52.0);
-const DEPTH_FOV_DEG: (f32, f32) = (87.0, 58.0);
+pub const DEPTH_FOV_DEG: (f32, f32) = (87.0, 58.0);
 const DEPTH_PX: (usize, usize) = (160, 120);
 const DEPTH_RANGE_M: (f32, f32) = (0.3, 10.0);
 /// The depth camera's range noise: one standard deviation of a pixel's

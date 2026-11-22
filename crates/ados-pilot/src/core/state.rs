@@ -266,7 +266,10 @@ impl Pilot {
             None
         };
         s.sensing = self.sensing.filter(|_| fc_linked);
-        s.movers = (self.obstacles.movers.list(now_ms).iter())
+        s.movers = self
+            .obstacles
+            .movers
+            .list(now_ms)
             .map(|m| m.tracked(now_ms))
             .collect();
         s.sensors = fc_linked.then(|| {

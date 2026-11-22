@@ -26,7 +26,7 @@ use serde_json::json;
 
 use crate::forest::lease;
 use crate::scenarios::launch_to_hold;
-use crate::sensors::SensorTier;
+use crate::sensors::{SensorTier, DEPTH_FOV_DEG};
 use crate::sim::Sim;
 
 /// Follow height, m.
@@ -192,6 +192,9 @@ pub struct Follow {
     /// Goal periods while the walker walked, and those that saw it.
     pub periods: u32,
     pub seen: u32,
+    /// Of those, the periods the walker stood inside a forward camera's
+    /// view from the vehicle's heading as well (the depth camera's width).
+    pub in_view: u32,
     /// Nearest horizontal distance to the walker while not
     /// [`OVER_HEAD_M`] over its head, m.
     pub min_separation_m: f32,
@@ -211,6 +214,12 @@ pub struct Follow {
 impl Follow {
     pub fn visibility(&self) -> f32 {
         self.seen as f32 / self.periods.max(1) as f32
+    }
+
+    /// The share of walking periods the walker was in a forward camera's
+    /// view ([`Follow::in_view`]).
+    pub fn view_share(&self) -> f32 {
+        self.in_view as f32 / self.periods.max(1) as f32
     }
 
     pub fn reach_share(&self) -> f32 {
@@ -341,6 +350,10 @@ pub fn fly(s: &mut Sim, trail: &Trail, setup: &Setup) -> Follow {
         let t = s.fc.truth();
         let veh = [t[0], t[1]];
         let sees = clear_line(&s.stand, veh, truth);
+        let off_nose = ados_pilot::geo::wrap_pi(
+            ados_pilot::geo::atan2(truth[1] - veh[1], truth[0] - veh[0]) - s.fc.att[2],
+        );
+        let in_view = off_nose.abs() <= (DEPTH_FOV_DEG.0 / 2.0).to_radians();
         let blind = setup.blind_ms.is_some_and(|(a, b)| {
             let since = now.saturating_sub(trail.start_ms);
             now >= trail.start_ms && (a..b).contains(&since)
@@ -400,6 +413,7 @@ pub fn fly(s: &mut Sim, trail: &Trail, setup: &Setup) -> Follow {
         if trail.walking(now) || orbiting {
             f.periods += 1;
             f.seen += u32::from(sees);
+            f.in_view += u32::from(sees && in_view);
             f.max_dist_m = f.max_dist_m.max(dist);
             f.in_reach += u32::from(dist <= BAND_M[1] + 2.0);
         } else if now >= trail.start_ms {

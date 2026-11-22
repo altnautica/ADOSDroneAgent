@@ -309,8 +309,8 @@ impl Movers {
 
     /// Every mover held at `now_ms` (a cluster mover a camera track already
     /// holds left out).
-    pub fn list(&self, now_ms: u64) -> Vec<Mover> {
-        self.live(now_ms).map(|t| t.m).collect()
+    pub fn list(&self, now_ms: u64) -> impl Iterator<Item = &Mover> {
+        self.live(now_ms).map(|t| &t.m)
     }
 
     /// The movers the vehicle keeps clear of at `now_ms`: none while it

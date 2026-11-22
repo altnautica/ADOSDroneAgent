@@ -23,7 +23,9 @@
 //! unknown beside the vehicle moves with it, so without this a goal crept
 //! on at a quarter of a metre a second into space the camera never saw. Held
 //! so, the nose turns along the way the goal would fly
-//! ([`Pilot::unseen_look`]) until the camera has seen it.
+//! ([`Pilot::unseen_look`]) until the camera has seen it; a goal with a
+//! subject turns only a glance's worth from it ([`LOOK_SUBJECT_DEG`]), and
+//! what lies past that stays held.
 
 use ados_protocol::pilot::{AvoidMode, Sensing, SensingTier};
 
@@ -50,6 +52,17 @@ const LATERAL_M: f32 = 0.35;
 /// stopped, after the hold last cut it, ms: long enough for a turn to
 /// bring the camera round and the map to fill.
 const LOOK_HOLD_MS: u64 = 1500;
+/// The most the way a goal would fly may turn from the motion the hold
+/// cut for the nose to look along it rather than the motion, degrees.
+const LOOK_SAME_DEG: f32 = 40.0;
+/// The most the nose turns from a goal's subject to look along a motion
+/// the hold cut, degrees: a glance that brings the way into view for the
+/// [`LOOK_HOLD_MS`] it lasts. Turning fully along the motion took the
+/// subject out of an 87° camera's view for 11-16 % of an orbit; holding
+/// the nose within 30-40° of it left the way unseen, and the vehicle
+/// entered a trunk's margin about three times as often in the forest
+/// benchmark.
+const LOOK_SUBJECT_DEG: f32 = 60.0;
 
 /// The speed that stops within `room_m` braking at `a_brk` after
 /// [`SENSING_REACT_S`]: the root of `v·t + v²/(2a) = room`. 0 without room.
@@ -121,10 +134,13 @@ impl Pilot {
 
     /// A goal's velocity `v` on a forward-looking tier's live map, held to
     /// the speed the rule allows along `v` itself, at any speed: motion into
-    /// space the camera has not seen past the margin gets none. `want` is
-    /// the way the goal would fly (else `v`'s); a cut turns the nose along
-    /// it for [`LOOK_HOLD_MS`] ([`Pilot::unseen_look`]). The held velocity
-    /// when it cut, else `None` (avoid off, another tier, no motion).
+    /// space the camera has not seen past the margin gets none. A cut turns
+    /// the nose for [`LOOK_HOLD_MS`] ([`Pilot::unseen_look`]) along `want`,
+    /// the way the goal would fly, while that is within [`LOOK_SAME_DEG`]
+    /// of `v`, else along `v` itself (a brake's slide out of view would
+    /// stall if the camera looked along the way the brake refused). The held
+    /// velocity when it cut, else `None` (avoid off, another tier, no
+    /// motion).
     pub(in crate::core) fn unseen_hold(&mut self, v: V2, want: V2, now_ms: u64) -> Option<V2> {
         if self.settings.pilot.avoid == AvoidMode::Off || !self.world.live_3d(now_ms) {
             return None;
@@ -143,20 +159,21 @@ impl Pilot {
         if s <= max + 1e-3 {
             return None;
         }
-        let look = [want, v].into_iter().find(|w| geo::norm(*w) >= STOPPED_MPS);
-        if let Some(w) = look {
-            self.unseen_look = Some((geo::bearing_of(w), now_ms + LOOK_HOLD_MS));
-        }
+        let along_want = geo::norm(want) >= STOPPED_MPS
+            && geo::dot(want, dir) >= geo::norm(want) * LOOK_SAME_DEG.to_radians().cos();
+        let look = if along_want { want } else { v };
+        self.unseen_look = Some((geo::bearing_of(look), now_ms + LOOK_HOLD_MS));
         Some(geo::scale(dir, max))
     }
 
     /// The heading a goal turns to while [`Pilot::unseen_hold`] holds its
-    /// motion back (and [`LOOK_HOLD_MS`] after): along the way it would fly,
-    /// so the camera sees it and the hold lets the motion on.
-    pub(in crate::core) fn unseen_look(&self, now_ms: u64) -> Option<f32> {
-        self.unseen_look
-            .filter(|&(_, until)| now_ms < until)
-            .map(|(b, _)| b)
+    /// motion back (and [`LOOK_HOLD_MS`] after), so the camera sees the
+    /// way and the hold lets the motion on; with a subject to face at
+    /// bearing `face`, no more than [`LOOK_SUBJECT_DEG`] from it.
+    pub(in crate::core) fn unseen_look(&self, face: Option<f32>, now_ms: u64) -> Option<f32> {
+        let (b, _) = self.unseen_look.filter(|&(_, until)| now_ms < until)?;
+        let max = LOOK_SUBJECT_DEG.to_radians();
+        Some(face.map_or(b, |f| f + geo::wrap_pi(b - f).clamp(-max, max)))
     }
 
     /// The unit direction the range is read along: the velocity, else the

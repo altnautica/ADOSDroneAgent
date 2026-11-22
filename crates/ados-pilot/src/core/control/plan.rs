@@ -248,9 +248,10 @@ impl Pilot {
         let want = geo::clamp_len(asked, v_cap);
         let shape = Shape { traj, ..shape };
         let v = self.fly_shaped(&mut r, want, &shape, &mut limits, now_ms);
-        // A forward-only sensor turns to a person the guard acts on first,
-        // then along a motion the seen-space hold stops.
-        let look = self.mover_look(pos_ne, now_ms).or(self.unseen_look(now_ms));
+        // A forward-only sensor faces a guarded person, else glances along held motion.
+        let face = subject.map(|s| geo::bearing_of(geo::sub(s, pos_ne)));
+        let unseen = self.unseen_look(face, now_ms);
+        let look = self.mover_look(pos_ne, now_ms).or(unseen);
         let want_yaw = (look.or(goal_yaw)).or_else(|| match subject {
             Some(s) => Some(geo::bearing_of(geo::sub(s, pos_ne))),
             None if geo::dist(target, pos_ne) > 1.0 => {
@@ -309,14 +310,18 @@ impl Pilot {
     /// [`Pilot::subject_soft`], then the obstacle brake's [`Pilot::soft_brake`]),
     /// the shaper holds its acceleration and jerk, then the safety limits
     /// cut what it flies at once: the speed cap, the subject brake on the
-    /// profile's stick acceleration ([`Pilot::subject_cut`]), the obstacle
-    /// brake on the same acceleration ([`Pilot::goal_brake`]), last so a
-    /// back-away from the subject never flies into an obstacle, and the
-    /// geofence. Moves the reference point on the velocity flown and returns
-    /// that velocity. A trajectory the planner flies ([`Shape::traj`]) is
-    /// the shaped motion itself: while no cap or soft brake has changed its
-    /// velocity, the reference takes its state as it is (no smoothing, no
-    /// shaper); once one has, the shaper flies on from the reference.
+    /// profile's stick acceleration ([`Pilot::subject_cut`]), the person
+    /// guard's ([`Pilot::movers_cut`]), the obstacle brake on the same
+    /// acceleration ([`Pilot::goal_brake`]), so a back-away from the subject
+    /// or a person never flies into an obstacle, the seen-space hold on a
+    /// forward camera's map ([`Pilot::unseen_hold`]), so a back-away into
+    /// unseen space is held too (stopping by a person beats backing blind
+    /// into a trunk), and the geofence. Moves the reference point on the
+    /// velocity flown and returns that velocity. A trajectory the planner
+    /// flies ([`Shape::traj`]) is the shaped motion itself: while no cap or
+    /// soft brake has changed its velocity, the reference takes its state as
+    /// it is (no smoothing, no shaper); once one has, the shaper flies on
+    /// from the reference.
     fn fly_shaped(
         &mut self,
         r: &mut MotionRef,
@@ -410,11 +415,8 @@ impl Pilot {
             r.cut(p, v);
         }
         if let Some(held) = self.unseen_hold(v, want, now_ms) {
-            // Not into space a forward camera has not seen: cut at once and
-            // flown from the vehicle's position, as the obstacle brake's is.
             *limits |= limit::SENSING;
-            v = held;
-            p = s.pos;
+            (v, p) = (held, s.pos);
             r.cut(p, v);
         }
         let fenced = geofence(s.pos, s.home, s.max_dist, v);
