@@ -81,6 +81,7 @@ export function demoPilotData(nowMs: number): Record<string, unknown> {
     overhead_ahead: follow ? { lease_id: 1, fly_under_agl_m: 3.9, ahead_m: 6 } : null,
     // The 3D lidar's voxel map and the speed that stops inside its seen-clear range.
     sensing: { tier: "lidar3d", clear_range_m: 11.6, speed_limit_mps: 4.2 },
+    movers: demoMovers(nowMs),
     // The navigation sensors (`sensor-health.json`): flow, range and the lidar.
     sensors: {
       flow: { state: "ok", quality: 212, rate_hz: 20, age_ms: 40 },
@@ -89,6 +90,29 @@ export function demoPilotData(nowMs: number): Record<string, unknown> {
     },
     ...pins.pilot,
   };
+}
+
+/** The moving obstacles the demo pilot tracks at epoch ms `nowMs`, on the
+ *  demo clock: a person walking a 10 m beat north of the drone at up to
+ *  1.4 m/s, a second person drifting west of it whose track goes unmeasured
+ *  for 2 s of every 6 (drawn faded), and something the lidar sees circling
+ *  at 7 m. */
+export function demoMovers(nowMs: number): Array<Record<string, unknown>> {
+  const t = nowMs / 1000;
+  const a = 0.3 * t + 1;
+  return [
+    { id: 3, kind: "person", source: "vision", ne: [6, 5 * Math.sin(0.28 * t)], vel_ne: [0, 1.4 * Math.cos(0.28 * t)], sigma_m: 0.4, age_ms: 120 },
+    {
+      id: 5,
+      kind: "person",
+      source: "vision",
+      ne: [-5 + 2 * Math.sin(0.2 * t), -4],
+      vel_ne: [0.4 * Math.cos(0.2 * t), 0],
+      sigma_m: 0.6,
+      age_ms: t % 6 < 2 ? 1500 : 100,
+    },
+    { id: 9, kind: "unknown", source: "scan", ne: [7 * Math.cos(a), 7 * Math.sin(a)], vel_ne: [-2.1 * Math.sin(a), 2.1 * Math.cos(a)], sigma_m: 0.25, age_ms: 0 },
+  ];
 }
 
 const TICK_MS = 50;

@@ -227,6 +227,42 @@ fn the_sensing_tier_and_its_speed_limit_show_only_while_the_pilot_reports_them()
 }
 
 #[test]
+fn the_movers_count_and_the_nearest_person_show_while_the_pilot_tracks_any() {
+    let mut frame: Value = serde_json::from_str(include_str!(
+        "../../../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON");
+    let text = draw(&mut app_with_frame(1, frame.clone()), 160, 48);
+    assert!(!text.contains("Movers:"), "{text}");
+
+    frame["movers"] = json!([
+        {"id": 3, "kind": "person", "source": "vision", "ne": [6.0, 8.0], "vel_ne": [0.0, 1.4], "sigma_m": 0.3, "age_ms": 100},
+        {"id": 4, "kind": "person", "source": "vision", "ne": [-9.0, 0.0], "vel_ne": [0.0, 0.0], "sigma_m": 0.3, "age_ms": 100},
+        {"id": 7, "kind": "drone", "source": "scan", "ne": [1.0, 1.0], "vel_ne": [0.0, 0.0], "sigma_m": 0.2, "age_ms": 0}
+    ]);
+    // Without the FC's local position: the count alone (a kind this build
+    // does not know still counts, as a moving object).
+    let mut app = app_with_frame(1, frame);
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("Movers: 3"), "{text}");
+    assert!(!text.contains("nearest person"), "{text}");
+
+    land(
+        &mut app,
+        ResourceId::Telemetry,
+        json!({
+            "armed": true, "mode": "GUIDED",
+            "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 1.57},
+            "gps": {"fix_type": 3, "satellites": 14, "eph": 0.8},
+            "battery": {"voltage": 15.9, "remaining": 62},
+            "local_position": {"x": 0.0, "y": 0.0, "z": -4.0, "age_ms": 100}
+        }),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("Movers: 3 · nearest person 9.0 m"), "{text}");
+}
+
+#[test]
 fn the_avoid_mode_explains_itself_and_a_detour_shows_while_it_flies() {
     let mut frame: Value = serde_json::from_str(include_str!(
         "../../../../../ados-control/tests/fixtures/pilot-frame.json"

@@ -4,7 +4,7 @@
  * local mode and the node-detail Map tab). Pure: every coordinate here is a
  * screen pixel from `mapToScreen`; the canvas painter only strokes and fills
  * what this returns, back to front: grid, occupancy, dim, trail, scan,
- * origin, planned path and goal, target, drone.
+ * origin, planned path and goal, movers, target, drone.
  *
  * @license GPL-3.0-only
  */
@@ -20,6 +20,8 @@ import {
   type OccupancyGrid,
   type TrailPoint,
 } from "./local-frame";
+import { moverMarks, type MoverMark } from "./movers";
+import type { Mover } from "./pilot-fields";
 import type { PilotState } from "./cockpit-frames";
 import { isRecoveryPhase, type FollowState, type SearchArea } from "./nav-types";
 
@@ -120,6 +122,22 @@ export interface LocalSceneInput {
   /** The pilot's plan, or null while nothing planned flies or the pilot
    *  frame is stale. */
   plan: LocalScenePlan | null;
+  /** The moving obstacles the pilot tracks; empty while the pilot frame is
+   *  stale. */
+  movers: readonly Mover[];
+}
+
+/** A tracked mover in screen pixels: its velocity arrow's tip (null while
+ *  still) and its one-sigma ring radius. */
+export interface LocalSceneMover {
+  id: number;
+  kind: MoverMark["kind"];
+  sx: number;
+  sy: number;
+  leadX: number | null;
+  leadY: number | null;
+  ringPx: number;
+  faded: boolean;
 }
 
 export interface LocalSceneTile {
@@ -138,6 +156,7 @@ export interface LocalScene {
   scan: Array<[number, number]>;
   origin: { sx: number; sy: number };
   plan: { points: Array<[number, number]>; goal: [number, number] | null; blocked: boolean } | null;
+  movers: LocalSceneMover[];
   target: {
     sx: number;
     sy: number;
@@ -266,6 +285,21 @@ export function buildLocalScene(input: LocalSceneInput): LocalScene {
       }
     : null;
 
+  const movers: LocalSceneMover[] = moverMarks(input.movers).map((m) => {
+    const [sx, sy] = project(m.ne[0], m.ne[1]);
+    const lead = m.leadNe ? project(m.leadNe[0], m.leadNe[1]) : null;
+    return {
+      id: m.id,
+      kind: m.kind,
+      sx,
+      sy,
+      leadX: lead ? lead[0] : null,
+      leadY: lead ? lead[1] : null,
+      ringPx: m.sigmaM * view.pxPerM,
+      faded: m.faded,
+    };
+  });
+
   let drone: LocalScene["drone"] = null;
   if (input.drone) {
     const [sx, sy] = project(input.drone.north, input.drone.east);
@@ -284,6 +318,7 @@ export function buildLocalScene(input: LocalSceneInput): LocalScene {
     })),
     scan,
     origin: { sx: ox, sy: oy },
+    movers,
     target,
     plan,
     drone,

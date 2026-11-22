@@ -20,6 +20,14 @@ pub const TOPIC_OCCUPANCY: &str = "plugin.navigation.occupancy";
 pub const TOPIC_POSE: &str = "plugin.navigation.pose";
 /// Navigation's active EKF source set: the GNSS-denied speed cap.
 pub const TOPIC_NAV_STATE: &str = "plugin.navigation.state";
+/// A camera's multi-object tracker batch (`vision.detection` v4, its JSON
+/// form): tracks with a world position become movers
+/// ([`crate::obstacles::Movers`]). Fed by a `feed` relay; the plugin
+/// event bus does not carry it.
+pub const TOPIC_DETECTION: &str = "vision.detection";
+/// The designated subject's world state (`vision.subject.v1`): the
+/// predictions a follow intent's view is planned over.
+pub const TOPIC_SUBJECT: &str = ados_protocol::vision_subject::VISION_SUBJECT_TOPIC;
 
 /// Topics the pilot reads.
 pub const TOPICS: &[&str] = &[
@@ -29,6 +37,7 @@ pub const TOPICS: &[&str] = &[
     TOPIC_OCCUPANCY,
     TOPIC_POSE,
     TOPIC_NAV_STATE,
+    TOPIC_SUBJECT,
 ];
 
 /// The export socket (`ADOS_PLUGIN_HOST_DIR`-aware, like the control front).

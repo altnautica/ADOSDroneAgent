@@ -27,7 +27,18 @@ pub struct RunMetrics {
     /// Horizontal path flown over the straight distance.
     pub path_ratio: f32,
     pub min_clearance_m: f32,
+    /// Times a walker came within [`PERSON_SEP_M`] horizontally (centre to
+    /// centre) while the vehicle flew less than [`OVER_HEAD_M`] over their
+    /// head.
+    pub person_breaches: u32,
+    /// The least such horizontal separation, m.
+    pub min_person_sep_m: f32,
 }
+
+/// The separation kept from a person, and the height over their head above
+/// which it is not, m (the pilot's own rule).
+pub const PERSON_SEP_M: f32 = 2.5;
+pub const OVER_HEAD_M: f32 = 3.4;
 
 /// Folds a run's ticks into [`RunMetrics`].
 pub struct Meter {
@@ -39,6 +50,8 @@ pub struct Meter {
     last: [f32; 2],
     path_m: f32,
     straight_m: f32,
+    /// Inside a person's separation last tick.
+    near_person: bool,
 }
 
 impl Meter {
@@ -47,12 +60,14 @@ impl Meter {
             m: RunMetrics {
                 seed,
                 min_clearance_m: f32::INFINITY,
+                min_person_sep_m: f32::INFINITY,
                 ..RunMetrics::default()
             },
             inside: None,
             last: start,
             path_m: 0.0,
             straight_m,
+            near_person: false,
         }
     }
 
@@ -69,6 +84,17 @@ impl Meter {
             self.m.margin_entries += 1;
         }
         self.inside = Some(inside);
+    }
+
+    /// One tick's nearest walker: `sep_m` horizontally (infinite with the
+    /// vehicle over [`OVER_HEAD_M`] above every head or no walker).
+    pub fn person(&mut self, sep_m: f32) {
+        self.m.min_person_sep_m = self.m.min_person_sep_m.min(sep_m);
+        let near = sep_m < PERSON_SEP_M;
+        if near && !self.near_person {
+            self.m.person_breaches += 1;
+        }
+        self.near_person = near;
     }
 
     pub fn reached(&mut self, t_s: f32) {
@@ -92,6 +118,8 @@ impl RunMetrics {
             "time_to_goal_s": self.time_to_goal_s,
             "path_ratio": self.path_ratio,
             "min_clearance_m": if self.min_clearance_m.is_finite() { Some(self.min_clearance_m) } else { None },
+            "person_breaches": self.person_breaches,
+            "min_person_sep_m": if self.min_person_sep_m.is_finite() { Some(self.min_person_sep_m) } else { None },
         })
     }
 }
@@ -137,7 +165,7 @@ impl Cell {
 
     pub fn row(&self) -> String {
         format!(
-            "| {} | {} | {:.0} | {}/{} | {}/{} | {} | {} | {:.2} | {} |",
+            "| {} | {} | {:.0} | {}/{} | {}/{} | {} | {} | {} | {:.2} | {} |",
             self.scenario,
             self.tier,
             self.speed_mps,
@@ -146,6 +174,7 @@ impl Cell {
             self.runs.iter().filter(|r| r.collision).count(),
             self.runs.len(),
             self.runs.iter().map(|r| r.margin_entries).sum::<u32>(),
+            self.runs.iter().map(|r| r.person_breaches).sum::<u32>(),
             self.time_to_goal_mean()
                 .map_or("-".into(), |t| format!("{t:.1}")),
             self.runs.iter().map(|r| r.path_ratio).sum::<f32>() / self.runs.len().max(1) as f32,
@@ -156,7 +185,7 @@ impl Cell {
     }
 }
 
-pub const TABLE_HEAD: &str = "| scenario | tier | speed m/s | success | collision | margin entries | time to goal s | path ratio | min clearance m |\n|---|---|---|---|---|---|---|---|---|";
+pub const TABLE_HEAD: &str = "| scenario | tier | speed m/s | success | collision | margin entries | person breaches | time to goal s | path ratio | min clearance m |\n|---|---|---|---|---|---|---|---|---|---|";
 
 /// Where the matrix JSON goes: `target/dst-bench/` of the workspace (or
 /// `CARGO_TARGET_DIR`).

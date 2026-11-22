@@ -100,6 +100,47 @@ export function parseSensing(raw: unknown): Sensing | null {
   return tier !== null && clearRangeM !== null && speedLimitMps !== null ? { tier, clearRangeM, speedLimitMps } : null;
 }
 
+/** What a tracked mover is: a person, a road vehicle, or something the
+ *  obstacle sensors see move without a camera class (kept clear as a person). */
+export const MOVER_KINDS = ["person", "vehicle", "unknown"] as const;
+export type MoverKind = (typeof MOVER_KINDS)[number];
+
+/** One moving obstacle the pilot tracks (`movers`), in the FC's local NED
+ *  frame at the frame's time: position (m), velocity (m/s), one-sigma
+ *  uncertainty (m), where it was learnt of (`vision` or `scan`) and how long
+ *  since it was last measured (ms). */
+export interface Mover {
+  id: number;
+  kind: MoverKind;
+  source: "vision" | "scan";
+  ne: [number, number];
+  velNe: [number, number];
+  sigmaM: number;
+  ageMs: number;
+}
+
+function maybePair(v: unknown): [number, number] | null {
+  if (!Array.isArray(v) || v.length !== 2) return null;
+  const [a, b] = [num(v[0]), num(v[1])];
+  return a !== null && b !== null ? [a, b] : null;
+}
+
+/** `movers` from the pilot frame: every well-formed entry, an empty list when
+ *  absent (an older agent, or nothing tracked). An unknown kind reads `unknown`. */
+export function parseMovers(raw: unknown): Mover[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((r): Mover[] => {
+    const o = obj(r);
+    const id = o ? num(o.id) : null;
+    const ne = o ? maybePair(o.ne) : null;
+    const velNe = o ? maybePair(o.vel_ne) : null;
+    if (!o || id === null || ne === null || velNe === null) return [];
+    const kind = MOVER_KINDS.find((k) => k === o.kind) ?? "unknown";
+    const source = o.source === "vision" ? "vision" : "scan";
+    return [{ id, kind, source, ne, velNe, sigmaM: num(o.sigma_m) ?? 0, ageMs: num(o.age_ms) ?? 0 }];
+  });
+}
+
 /** The cap in m/s with at most one decimal (1.5 → "1.5", 2 → "2"), the same
  *  on every surface. */
 export function speedCapText(vHMps: number): string {

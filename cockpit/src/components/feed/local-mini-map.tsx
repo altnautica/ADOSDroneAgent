@@ -3,7 +3,9 @@
 // tiles (`/api/v1/map/live`, map_server greys recoloured in the HUD ink),
 // the SLAM trail from pose frames (dashed while degraded, broken where lost),
 // the scan in the map frame, the origin, the pilot's planned path and goal
-// (dashed, red while blocked), the follow target (with a 1 s velocity tick;
+// (dashed, red while blocked), the moving obstacles the pilot tracks (kind
+// mark, 2 s velocity arrow, sigma ring, faded when unseen), the follow target
+// (with a 1 s velocity tick;
 // dashed while it is sought, with its search ellipse, the predicted path and
 // the vantage point) and the drone from the
 // FC's LOCAL_POSITION_NED. Drag pans (the view recentres on the drone 10 s
@@ -17,6 +19,7 @@ import { Minus, Plus } from "lucide-react";
 
 import { FlyHereMarker } from "@/components/feed/fly-here";
 import { useFlyHere } from "@/hooks/use-fly-here";
+import { MoverMarks } from "@/components/feed/mover-marks";
 import { MiniMapReadoutRow } from "@/components/feed/minimap-readout";
 import { useElementSize } from "@/hooks/use-element-size";
 import { useNow } from "@/hooks/use-now";
@@ -207,6 +210,7 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
               {scene.plan.goal ? <circle cx={scene.plan.goal[0]} cy={scene.plan.goal[1]} r={5} /> : null}
             </g>
           ) : null}
+          <MoverMarks movers={scene.movers} />
           {scene.target ? (
             <g
               className={scene.target.dashed ? "text-hud-coast" : "text-hud-track"}

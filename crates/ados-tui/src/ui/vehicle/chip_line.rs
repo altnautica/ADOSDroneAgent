@@ -141,6 +141,7 @@ impl VehicleTab {
                 now_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as u64),
+                local_pos: tel.and_then(|t| t.local_pos),
             },
         )
     }

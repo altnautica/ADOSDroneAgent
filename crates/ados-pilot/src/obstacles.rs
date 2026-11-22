@@ -12,6 +12,7 @@ mod band;
 mod closing;
 mod grid;
 mod level;
+mod movers;
 mod probe;
 mod project;
 mod sight;
@@ -26,6 +27,7 @@ use serde_json::Value;
 pub use band::{band_top_m, Climb, BAND_TOP_M, OVERHEAD_MARGIN_M, WALL_MEMORY_MS};
 pub use grid::{Grid, CELL_M, GRID_N};
 pub use level::level_hit;
+pub use movers::{Mover, MoverFlight, Movers, OVER_HEAD_M, PERSON_H_M, PERSON_SEP_M};
 pub use probe::{Bar, LegProbe};
 pub use project::{project_camera, Attitude, Scratch};
 #[cfg(test)]
@@ -133,6 +135,15 @@ pub struct Obstacles {
     /// [`SCAN_HORIZON_M`] when it returns nothing. Nothing beyond is known
     /// free, so the stick brake treats these points as possible obstacles.
     horizon: Vec<V2>,
+    /// The current scan is a 3D map's whose seen space ends nearer than the
+    /// brake's keep-out on some bearing, its horizon point standing in at
+    /// the keep-out's edge ([`Obstacles::ingest_world`]): unknown space
+    /// beside the vehicle. Never for a planar scan.
+    horizon_unseen: bool,
+    /// The obstacle source is a map from a forward-looking sensor (the
+    /// depth or camera tier): its seen space beside the vehicle is what it
+    /// once saw there, not a live view ([`Obstacles::set_forward_view`]).
+    forward_view: bool,
     /// When the current scan arrived (`None`: no scan yet).
     scan_ms: Option<u64>,
     /// The current scan's capture stamp (`t_ns`), when it carried one.
@@ -173,6 +184,8 @@ pub struct Obstacles {
     sigma_rose_ms: Option<u64>,
     /// A live 3D map's occupied columns in the wall slab ([`world`]).
     world_cells: Vec<V2>,
+    /// The moving obstacles ([`movers`]); their sweeps go into the grid.
+    pub movers: Movers,
 }
 
 /// Attitude and height used to level a scan.
@@ -239,27 +252,13 @@ impl Obstacles {
         closing_max_mps: f32,
         now_ms: u64,
     ) {
-        if payload
-            .get("frame")
-            .and_then(Value::as_str)
-            .is_some_and(|f| f != "body_frd")
-        {
-            return;
-        }
-        let start = payload
-            .get("angle_start_rad")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0) as f32;
-        let Some(inc) = payload.get("angle_increment_rad").and_then(Value::as_f64) else {
-            return;
-        };
-        let Some(ranges) = payload.get("ranges_m").and_then(Value::as_array) else {
+        let Some((start, inc, ranges)) = world::scan_layout(payload) else {
             return;
         };
         let sorted = band::sort_scan(
             ranges,
             start,
-            inc as f32,
+            inc,
             level,
             pos_ne,
             self.band_climb,
@@ -270,6 +269,8 @@ impl Obstacles {
         self.hits = sorted.walls;
         self.overhead = sorted.overhead;
         self.horizon = sorted.horizon;
+        self.horizon_unseen = false;
+        self.forward_view = false;
         // The scan's own capture time: delivery jitter (two scans arriving
         // 50 ms apart though captured 100 ms apart) must not double a range
         // rate.
@@ -277,6 +278,8 @@ impl Obstacles {
         self.update_closing(level.yaw, stamp_ns, closing_max_mps, now_ms);
         self.scan_ms = Some(now_ms);
         self.scan_stamp_ns = stamp_ns;
+        self.movers
+            .ingest_hits(&self.hits, &self.horizon, pos_ne, level.agl, now_ms);
     }
 
     /// How old the current scan is, ms (`None`: no scan yet).
@@ -333,6 +336,27 @@ impl Obstacles {
             .filter(move |p| fresh && geo::dist(*p, pos) <= r)
     }
 
+    /// Whether the current (fresh) scan stands in for unknown space beside
+    /// the vehicle ([`Obstacles::horizon_unseen`]): its seen space does not
+    /// close round it.
+    pub fn unseen_beside(&self, now_ms: u64) -> bool {
+        self.horizon_unseen && self.scan_fresh(now_ms)
+    }
+
+    /// Whether the map read next ([`Obstacles::ingest_world`]) comes from a
+    /// forward-looking sensor ([`Obstacles::forward_view`]); a planar scan
+    /// clears it.
+    pub fn set_forward_view(&mut self, forward: bool) {
+        self.forward_view = forward;
+    }
+
+    /// Whether the brake may judge the horizon along its stop paths: the
+    /// seen space closes round the vehicle and comes from an all-round
+    /// sensor (a planar or 3D lidar).
+    pub fn horizon_all_round(&self, now_ms: u64) -> bool {
+        !self.forward_view && !self.unseen_beside(now_ms)
+    }
+
     /// Current (fresh) walls at flight height: the scan's returns in the
     /// swept band, and over it on a wall seen in the band lately.
     pub fn hits(&self, now_ms: u64) -> &[Hit] {
@@ -381,6 +405,8 @@ impl Obstacles {
                 self.grid.mark(p);
             }
         }
+        // `center` is the vehicle: each mover's sweep leaves it room.
+        self.movers.mark(&mut self.grid, center, now_ms);
         self.grid.transform();
     }
 
@@ -397,6 +423,7 @@ impl Obstacles {
         }
         self.walls.shift(d);
         self.seen.shift(d);
+        self.movers.shift(d);
         if let Some(o) = self.offset.as_mut() {
             *o = geo::add(*o, d);
         }

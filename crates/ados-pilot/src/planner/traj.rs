@@ -12,15 +12,16 @@
 //! blocked only when no route reaches it within
 //! [`super::route_goal::ROUTE_REACH_M`].
 
-use ados_planning::{Cell, Config, FixedHeight, Limits, PlanError, PlanarQuery, Planner, State};
+use ados_planning::{Config, FixedHeight, Limits, PlanError, Planner, State};
 use ados_protocol::pilot::AvoidState;
 
 use super::backup::{Committed, TrajRef};
-use super::map2d::{seen_ranges, PlanMap, Seen, OWN_M};
+use super::keep::{keeps_out, FORWARD_VIEW_HALF_RAD};
+use super::map2d::{seen_ranges, PlanMap, Seen};
 use super::route_goal::Router;
 use super::{decimate, Keepout, Plan};
 use crate::geo::{self, V2};
-use crate::obstacles::{Obstacles, CELL_M};
+use crate::obstacles::{Mover, Obstacles, CELL_M};
 use crate::world::VoxWorld;
 
 /// The trajectory planner's replan period while it flies (10 Hz).
@@ -142,6 +143,8 @@ pub struct TrajPlanner {
     /// Where the last plan wanted to go when only the forward view turned
     /// it down: the heading to look along, so the next plan is seen.
     look: Option<f32>,
+    /// The movers each replan keeps clear of (reused).
+    movers: Vec<Mover>,
 }
 
 fn v3(v: V2) -> [f32; 3] {
@@ -198,6 +201,8 @@ impl TrajPlanner {
         vox: Option<(&VoxWorld, f32)>,
         g: &TrajGoal,
     ) -> Outcome {
+        self.movers.clear();
+        self.movers.extend(obs.movers.guarded(g.now_ms).copied());
         let out = self.plan_once(obs, vox, g);
         if matches!(out, Outcome::Kept(_)) {
             self.committed.failed();
@@ -211,6 +216,7 @@ impl TrajPlanner {
                 seen,
                 own: own_point(g),
                 subject: g.subject,
+                movers: &self.movers,
             };
             let clear = self.committed.plan().is_none_or(|p| {
                 let t = g.now_ms.saturating_sub(p.made_ms) as f32 / 1000.0;
@@ -246,6 +252,7 @@ impl TrajPlanner {
             seen,
             own: own_point(g),
             subject: g.subject,
+            movers: &self.movers,
         };
         let world = FixedHeight::new(&map, 0.0);
         let speed = geo::norm(g.goal_vel);
@@ -394,105 +401,6 @@ fn shorter_tighter(
         }
     }
     wide
-}
-
-/// What a plan flies for sure (`exec` to its commit time, then the
-/// backup) is sampled this often, s.
-const KEEP_DT_S: f32 = 0.05;
-/// One step of the grid's clearance field (a chamfer unit), m: a sample may
-/// read this much under the start without being nearer.
-const CLEAR_STEP_M: f32 = CELL_M / 3.0 + 1e-3;
-
-/// How far off the heading the forward view lets a plan's sure part go,
-/// rad: a forward depth camera's half view (40-45°) and the 45° a grid
-/// path's first step may take; a step sideways of that, into space seen
-/// from elsewhere, brushes what the camera never saw.
-const FORWARD_VIEW_HALF_RAD: f32 = 50.0 * std::f32::consts::PI / 180.0;
-/// Within this of a plan's start a sample has not moved anywhere yet, m:
-/// the rounding allowance the map itself gives the start's own point
-/// ([`OWN_M`]). A plan from rest takes its first centimetres along its
-/// smoothest start, which may point anywhere (seen 1-2 cm at 65-77° off
-/// the way it then goes); judged by bearing, every plan from a hover was
-/// turned down. The allowance stays a fraction of a voxel: a plan whose
-/// sure part keeps inside it stops inside it, so plan after plan may step
-/// the vehicle sideways by no more than that each.
-const VIEW_SLACK_M: f32 = OWN_M;
-
-/// How far from a plan's start its samples may lie in any direction before
-/// the forward view judges them, m: the way the start's own motion carries
-/// the vehicle braking as hard as the limits let it (any acceleration
-/// undone at the jerk limit, the braking ramped in at it, then held at the
-/// acceleration limit), plus [`VIEW_SLACK_M`]. That much is no plan's
-/// choice: a hovering vehicle's drift of a few cm/s goes every way, and
-/// judging its first centimetres by bearing turns every plan down. Any more
-/// is: a plan that steers sideways leaves it, and one that brakes a
-/// sideways drift at the limits stays inside it, so no plan adds sideways
-/// speed for the next to be allowed more.
-fn carried_m(v0: f32, a0: f32, lim: &Limits) -> f32 {
-    let a = lim.a_max.max(0.1);
-    let j = lim.j_max.max(0.1);
-    let v = v0 + a0 * a0 / (2.0 * j);
-    let stop = if v <= a * a / (2.0 * j) {
-        // Stopped while the braking still ramps in.
-        2.0 / 3.0 * v * (2.0 * v / j).sqrt()
-    } else {
-        let t1 = a / j;
-        let v1 = v - a * t1 / 2.0;
-        v * t1 - j * t1 * t1 * t1 / 6.0 + v1 * v1 / (2.0 * a)
-    };
-    VIEW_SLACK_M + stop
-}
-
-/// The pilot commits only to a plan whose sure part (`exec` to the commit
-/// time, and the backup it stops on) lies in seen-free space, keeps the
-/// margin, or, from a start already inside the margin, comes no nearer
-/// than the start is (an escape, never deeper in: the planner lets a start
-/// inside the margin end a little nearer still, which replan after replan
-/// walks the vehicle onto what it is inside the margin of), and, with a
-/// forward view (`heading`), stays inside it: a camera never sees beside
-/// the vehicle, and a sideways step into space it saw from elsewhere
-/// brushes what it never saw. `from_s` into the plan is where the check
-/// starts: 0 for a new plan, now for one kept on.
-fn keeps_out(
-    plan: &ados_planning::Plan,
-    map: &PlanMap<'_>,
-    margin: f32,
-    heading: Option<f32>,
-    lim: &Limits,
-    from_s: f32,
-) -> bool {
-    let at = |p: [f32; 3]| [p[0], p[1]];
-    let (p0, v0, a0) = plan.sample(from_s, true);
-    let start = at(p0);
-    let c0 = map.clearance(start);
-    let need = if c0 >= margin {
-        margin
-    } else {
-        c0 - CLEAR_STEP_M
-    };
-    let carried = carried_m(geo::norm(at(v0)), geo::norm(at(a0)), lim);
-    let in_view = |p: V2| {
-        let rel = geo::sub(p, start);
-        heading.is_none_or(|h| {
-            geo::norm(rel) <= carried
-                || geo::wrap_pi(geo::bearing_of(rel) - h).abs() <= FORWARD_VIEW_HALF_RAD
-        })
-    };
-    let ok = |p: [f32; 3]| {
-        let p = at(p);
-        map.state(p) == Cell::Free && map.clearance(p) >= need && in_view(p)
-    };
-    let sure = |tr: &ados_planning::Trajectory, from: f32, end: f32| {
-        let n = (((end - from) / KEEP_DT_S).ceil() as usize).max(1);
-        (0..=n).all(|i| ok(tr.sample(from + (end - from) * i as f32 / n as f32).0))
-    };
-    let t_c = plan.t_commit.min(plan.exec.duration());
-    let dur = plan.backup.duration();
-    if from_s <= t_c {
-        sure(&plan.exec, from_s, t_c) && sure(&plan.backup, 0.0, dur)
-    } else {
-        sure(&plan.backup, (from_s - t_c).min(dur), dur)
-    }
 }
 
 #[cfg(test)]

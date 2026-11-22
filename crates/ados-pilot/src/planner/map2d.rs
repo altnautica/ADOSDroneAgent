@@ -15,7 +15,7 @@ use ados_planning::{Cell, PlanarQuery};
 
 use super::Keepout;
 use crate::geo::{self, V2};
-use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
+use crate::obstacles::{Grid, Mover, Obstacles, CELL_M, GRID_N};
 use crate::world::VoxWorld;
 
 /// Bearing bins of the seen ranges (2° each).
@@ -93,6 +93,9 @@ pub struct PlanMap<'a> {
     pub own: Option<V2>,
     /// The subject's disk ([`Keepout`]), occupied like an obstacle.
     pub subject: Option<Keepout>,
+    /// The movers kept clear of where they will be at a plan's own time
+    /// ([`super::keep`]); their sweeps are already in the grid.
+    pub movers: &'a [Mover],
 }
 
 impl PlanMap<'_> {
@@ -177,6 +180,7 @@ mod tests {
             seen: Seen::Ranges(&seen),
             own: None,
             subject: None,
+            movers: &[],
         };
         assert_eq!(m.state([2.0, 0.0]), Cell::Free);
         assert_eq!(m.state([5.0, 0.0]), Cell::Occupied);
@@ -198,6 +202,7 @@ mod tests {
             seen: Seen::Ranges(&seen),
             own: None,
             subject: Keepout::new([4.0, 0.0], 2.3, 0.5, [0.0, 0.0]),
+            movers: &[],
         };
         assert_eq!(m.state([4.0, 1.0]), Cell::Occupied);
         assert_eq!(m.state([4.0, 2.0]), Cell::Free);

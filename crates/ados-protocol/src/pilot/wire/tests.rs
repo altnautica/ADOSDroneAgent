@@ -75,6 +75,56 @@ fn a_commanded_velocity_goal_decodes_its_vel_mode() {
 }
 
 #[test]
+fn a_follow_intent_goal_decodes_its_bands_and_round_trips() {
+    let frame = serde_json::json!({
+        "op": "goal", "lease_id": 9,
+        "goal": {"kind": "follow_intent", "n": 1.0, "e": 2.0, "d": -5.0, "max_speed_mps": 6.0,
+                 "vn": 1.4, "ve": 0.0, "subject_ne": [7.0, 2.0],
+                 "standoff_band_m": [5.0, 8.0], "bearing_pref_deg": 180.0,
+                 "height_band_m": [4.0, 6.0], "subject_ref": 12, "require_los": true}
+    });
+    let (req, _) = json_to_request_body(&frame).unwrap();
+    let Request::Goal { goal, .. } = req else {
+        panic!("not a goal")
+    };
+    assert_eq!(goal.kind, GoalKind::FollowIntent);
+    assert_eq!(goal.standoff_band_m, Some([5.0, 8.0]));
+    assert_eq!(goal.bearing_pref_deg, Some(180.0));
+    assert_eq!(goal.bearing_frame, crate::pilot::BearingFrame::Subject);
+    assert_eq!(goal.height_band_m, Some([4.0, 6.0]));
+    assert_eq!(goal.subject_ref, Some(12));
+    assert!(goal.require_los);
+    let body = encode_op("goal", &serde_json::json!({"lease_id": 9, "goal": goal})).unwrap();
+    let Request::Goal { goal: back, .. } = decode_request(&body).unwrap() else {
+        panic!("not a goal")
+    };
+    assert_eq!(back, goal);
+    // An intent without its preferences reads them unset (auto bearing).
+    let frame = serde_json::json!({
+        "op": "goal", "lease_id": 9,
+        "goal": {"kind": "follow_intent", "n": 1.0, "e": 2.0, "d": -5.0, "max_speed_mps": 6.0}
+    });
+    let (req, _) = json_to_request_body(&frame).unwrap();
+    let Request::Goal { goal, .. } = req else {
+        panic!("not a goal")
+    };
+    assert_eq!(goal.bearing_pref_deg, None);
+    assert_eq!(goal.standoff_band_m, None);
+    assert!(!goal.require_los);
+    // An orbit's bearing is over the ground.
+    let frame = serde_json::json!({
+        "op": "goal", "lease_id": 9,
+        "goal": {"kind": "follow_intent", "n": 1.0, "e": 2.0, "d": -5.0, "max_speed_mps": 6.0,
+                 "bearing_pref_deg": 45.0, "bearing_frame": "world"}
+    });
+    let (req, _) = json_to_request_body(&frame).unwrap();
+    let Request::Goal { goal, .. } = req else {
+        panic!("not a goal")
+    };
+    assert_eq!(goal.bearing_frame, crate::pilot::BearingFrame::World);
+}
+
+#[test]
 fn unknown_and_setup_ops_pass_through() {
     let body = encode_op("setup.start", &serde_json::json!({"wizard": "ground"})).unwrap();
     match decode_request(&body).unwrap() {
@@ -247,14 +297,15 @@ fn wire_floats_are_short_decimals() {
 }
 
 #[test]
-fn the_registry_version_records_the_nullable_fc_state_the_vel_mode_and_the_subject_sigma() {
+fn the_registry_version_records_the_nullable_fc_state_the_vel_mode_the_subject_sigma_and_intents() {
     // `state.armed`, `state.landed` (v2), `state.fc_mode` and
     // `state.fc_mode_name` (v3) are null while the FC link is down: changes
     // of the state message's shape, so the contract version moved with them
     // and the registry describes them. v4: a goal's velocity may be the
     // whole commanded velocity (`goal.vel_mode`). v5: a goal's subject
-    // carries its error (`goal.subject_sigma_m`).
-    assert_eq!(crate::pilot::PILOT_V1_VERSION, 5);
+    // carries its error (`goal.subject_sigma_m`). v6: the `follow_intent`
+    // goal kind.
+    assert_eq!(crate::pilot::PILOT_V1_VERSION, 6);
     let meta = crate::contracts::CONTRACTS
         .iter()
         .find(|c| c.id == "pilot.v1")
@@ -264,6 +315,12 @@ fn the_registry_version_records_the_nullable_fc_state_the_vel_mode_and_the_subje
         "fc_mode and fc_mode_name are null",
         "goal.vel_mode",
         "goal.subject_sigma_m",
+        "follow_intent",
+        "standoff_band_m",
+        "bearing_pref_deg",
+        "height_band_m",
+        "subject_ref",
+        "require_los",
     ] {
         assert!(meta.description.contains(text), "{}", meta.description);
     }

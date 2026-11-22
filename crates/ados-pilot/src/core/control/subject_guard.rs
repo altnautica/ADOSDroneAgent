@@ -256,7 +256,7 @@ impl Pilot {
             .map(|g| g.d - (SUBJECT_BODY_HEIGHT_M + body + SUBJECT_CLEAR_M));
         let subject = Subject {
             ne,
-            keep,
+            keep: keep.max(self.intent_keep_m()),
             vel,
             armed,
         };

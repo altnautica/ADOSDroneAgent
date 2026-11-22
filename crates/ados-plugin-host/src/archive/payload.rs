@@ -268,7 +268,9 @@ pub(crate) fn directory_headers<R: Read + Seek>(
 pub(crate) fn check_room(dir: &Path, bytes: u64, rel: &str) -> Result<(), ArchiveError> {
     let st = nix::sys::statvfs::statvfs(dir)
         .map_err(|e| ArchiveError(format!("payload {rel}: cannot read free space: {e}")))?;
-    let free = st.blocks_available().saturating_mul(st.fragment_size());
+    // The statvfs field widths differ by platform (u32 block counts on macOS).
+    #[allow(clippy::useless_conversion)]
+    let free = u64::from(st.blocks_available()).saturating_mul(u64::from(st.fragment_size()));
     if bytes > free {
         return Err(ArchiveError(format!(
             "payload {rel} declares {bytes} bytes; {free} are free"

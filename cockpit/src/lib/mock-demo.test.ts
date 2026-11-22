@@ -31,6 +31,7 @@ describe("demo feed", () => {
       expect(pilot).not.toBeNull();
       expect(follow).not.toBeNull();
       expect(pilot!.data.sensing).toEqual({ tier: "lidar3d", clearRangeM: 11.6, speedLimitMps: 4.2 });
+      expect(pilot!.data.movers.map((m) => m.kind)).toEqual(["person", "person", "unknown"]);
       const owner = pilot!.data.owner;
       seen.add(owner);
       if (follow!.data.active) {

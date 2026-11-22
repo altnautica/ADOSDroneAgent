@@ -29,6 +29,7 @@ import { parseFollowState, parseNavState, type FollowPhase, type FollowState, ty
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
 import { sensingChipText } from "@/shared/hud/sensing";
+import { moversLine } from "@/shared/hud/movers";
 import { specText } from "@/shared/hud/spec-text";
 import { storagePct, type StorageStatusFull } from "@/shared/hud/storage";
 import { baseAlerts, controllerLost, pillAlerts, pillSummary, pilotFailsafe, type PillSummary } from "@/shared/hud/status-pill";
@@ -234,7 +235,12 @@ export interface HomeStatusLines {
   timeToReserve: string | null;
   /** `Sensing: 3D lidar · ≤ 4.2 m/s`, or null while the pilot reports none. */
   sensing: string | null;
+  /** `Movers: 3 · nearest person 7.4 m`, or null while the pilot tracks none. */
+  movers: string | null;
 }
+
+/** The FC's local position is drawn from this young (the cockpit's rule). */
+const LOCAL_POSITION_FRESH_MS = 2000;
 
 /** `m:ss`, or `h:mm:ss` past an hour (the cockpit's clock format). */
 export function fmtClock(seconds: number): string {
@@ -253,6 +259,8 @@ export function homeStatusLines(
   // never reaches the line.
   const label = i.pilot?.inputSession?.label ?? null;
   const reading = batteryReading(i.battery, i.telemetry);
+  const lp = i.live ? i.telemetry?.local_position : null;
+  const drone = lp && (lp.age_ms ?? Infinity) <= LOCAL_POSITION_FRESH_MS ? { north: lp.x, east: lp.y } : null;
   return {
     linkLoss: i.pilot ? linkLossLine(i.pilot) : null,
     agl: agl.m === null ? null : { text: `${agl.m.toFixed(1)} m`, mark: aglMarkText(agl.mark) },
@@ -260,5 +268,6 @@ export function homeStatusLines(
     timeToReserve:
       reading?.timeToReserveS != null ? specText("cockpit.battery.time_left", { time: fmtClock(reading.timeToReserveS) }) : null,
     sensing: sensingChipText(i.pilot?.sensing ?? null),
+    movers: moversLine(i.pilot?.movers ?? [], drone),
   };
 }

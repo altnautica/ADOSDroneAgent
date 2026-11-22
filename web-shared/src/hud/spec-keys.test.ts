@@ -30,7 +30,7 @@ describe("command limits", () => {
   it("words every labelled command.limits code the same in both files", () => {
     const labels: Record<string, string> = flightState.command_limit_labels;
     expect(Object.keys(labels).sort()).toEqual(
-      ["clearance", "geofence", "hard_stop", "obstacle", "obstacle_closing", "push", "seen_space", "sensing", "subject"],
+      ["clearance", "geofence", "hard_stop", "obstacle", "obstacle_closing", "person", "push", "seen_space", "sensing", "subject"],
     );
     for (const [code, text] of Object.entries(labels)) {
       expect(S[`pilot.command_limit.${code}`], `setup-strings.json pilot.command_limit.${code}`).toBe(text);

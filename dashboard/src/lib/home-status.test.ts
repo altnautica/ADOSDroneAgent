@@ -93,6 +93,20 @@ describe("home status card", () => {
     expect(lines.timeToReserve).toBe("10:10 left");
   });
 
+  it("counts the pilot's movers and the nearest person from the FC's fresh local position", () => {
+    const movers = [
+      { id: 3, kind: "person", source: "vision", ne: [6, 8], vel_ne: [0, 1.4], sigma_m: 0.3, age_ms: 0 },
+      { id: 7, kind: "unknown", source: "scan", ne: [1, 1], vel_ne: [0, 0], sigma_m: 0.2, age_ms: 0 },
+    ];
+    const pilot = parsePilotState({ ...raw, movers });
+    const at = (local_position: { x: number; y: number; age_ms: number } | null) =>
+      homeStatusLines({ ...base, pilot, telemetry: { ...groundTel, local_position }, follow: null }).movers;
+    expect(at({ x: 0, y: 0, age_ms: 100 })).toBe("Movers: 2 · nearest person 10.0 m");
+    expect(at({ x: 0, y: 0, age_ms: 5000 })).toBe("Movers: 2");
+    expect(at(null)).toBe("Movers: 2");
+    expect(homeStatusLines({ ...base, follow: null }).movers).toBeNull();
+  });
+
   it("shows the sensing tier and its speed limit only while the pilot reports one", () => {
     const sensing = { tier: "lidar3d", clear_range_m: 11.6, speed_limit_mps: 4.2 };
     expect(homeStatusLines({ ...base, pilot: parsePilotState({ ...raw, sensing }), follow: null }).sensing).toBe(

@@ -6,6 +6,7 @@
 //! fly on it unchanged, and the planar scans are left out. A stale map (or
 //! a planar-tier one) leaves the planar scans in charge again.
 
+use ados_protocol::pilot::SensingTier;
 use ados_protocol::voxmap::VoxSnapshot;
 
 use super::Pilot;
@@ -74,6 +75,8 @@ impl Pilot {
         }
         let min_seen_m = super::control::keep_out_m(self.margin()) + CELL_M;
         let closing_max = self.scan_closing_max(now_ms);
+        let forward = matches!(self.world.tier(), SensingTier::Depth | SensingTier::Camera);
+        self.obstacles.set_forward_view(forward);
         self.obstacles.ingest_world(
             &bins,
             cells,
@@ -81,6 +84,7 @@ impl Pilot {
             yaw,
             min_seen_m,
             closing_max,
+            self.agl(now_ms).map(|a| a - WALL_DOWN_M),
             now_ms,
         );
         // The leaves over the way, as a planar scan's overhead returns are.

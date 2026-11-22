@@ -29,6 +29,7 @@ pub mod limit {
     pub const GEOFENCE: u16 = 1 << 11;
     pub const HOLD: u16 = 1 << 12;
     pub const POSITION_UNCERTAIN: u16 = 1 << 13;
+    pub const PERSON: u16 = 1 << 14;
 }
 
 /// A shadow command older than this is no longer published.
@@ -182,11 +183,7 @@ impl Pilot {
 
     /// The skill's own goal (or the goto target), before any detour.
     pub(super) fn commanded_goal(&self) -> Option<[f32; 3]> {
-        self.auth
-            .lease()
-            .and_then(|l| l.goal.as_ref())
-            .map(|g| [g.n, g.e, g.d])
-            .or(self.goto)
+        self.skill_goal().map(|g| [g.n, g.e, g.d]).or(self.goto)
     }
 
     /// Fold this tick's limits and hold reason into the latch, at the end of

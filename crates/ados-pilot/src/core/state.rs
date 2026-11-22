@@ -266,6 +266,9 @@ impl Pilot {
             None
         };
         s.sensing = self.sensing.filter(|_| fc_linked);
+        s.movers = (self.obstacles.movers.list(now_ms).iter())
+            .map(|m| m.tracked(now_ms))
+            .collect();
         s.sensors = fc_linked.then(|| {
             crate::sensor_health::snapshot(
                 &self.fc.flow_track,

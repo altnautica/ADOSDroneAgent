@@ -141,6 +141,14 @@ describe("localSceneInput", () => {
     expect(localSceneInput({ ...base, pilot: { data, at: 7_000 } }).plan).toBeNull();
     expect(localSceneInput(base).plan).toBeNull();
   });
+  it("passes the pilot's movers only while its frame is fresh", () => {
+    const data = parsePilotState({
+      owner: "goto",
+      movers: [{ id: 3, kind: "person", source: "vision", ne: [5, 1], vel_ne: [0, 1.4], sigma_m: 0.3, age_ms: 0 }],
+    })!;
+    expect(localSceneInput({ ...base, pilot: { data, at: 9_000 } }).movers.map((m) => m.id)).toEqual([3]);
+    expect(localSceneInput({ ...base, pilot: { data, at: 7_000 } }).movers).toEqual([]);
+  });
 });
 
 describe("panBy", () => {

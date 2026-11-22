@@ -109,13 +109,21 @@ fn sector_of(dir: V2) -> usize {
 /// outside the margin when the path ends on it; one the path passes keeping
 /// the margin but not the creep slack beyond it slows it in proportion to
 /// how much of that slack it keeps, to half its speed at the margin's edge
-/// ([`Sweep::cap`]). Every point of the scan's horizon (where each beam
-/// stops seeing: the floor a pitched beam meets, or the lidar's range) caps
-/// the velocity component toward it ([`stop_cap`]),
-/// per 5° bearing sector the most restrictive, what lies beyond it being
-/// unknown in any direction: the vehicle never goes faster than it can stop
-/// within the space it has seen free. Inside the margin of anything, every
-/// point near the vehicle caps that way. The result is the velocity nearest
+/// ([`Sweep::cap`]). The scan's horizon (where each beam stops seeing: the
+/// floor a pitched beam meets, the lidar's range, or a 3D map's seen space
+/// ending in a trunk's shadow) is unknown beyond: a horizon point whose
+/// keep-out disk a stop path enters caps the velocity component toward it
+/// ([`stop_cap`]), per 5° bearing sector the most restrictive, so the
+/// vehicle never goes faster than it can stop within the space it has seen
+/// free; one every path passes outside its keep-out caps nothing, so the
+/// shadow of a trunk beside the way does not slow it (a cap toward every
+/// horizon point held a jog past trunks 2-3 m off its way to about 1 m/s).
+/// While the seen space does not close round the vehicle (it ends inside
+/// the keep-out beside it, as a forward camera's map does), or comes from a
+/// forward-looking sensor's map, every horizon
+/// point caps that way, and so does one nearer than the keep-out; inside
+/// the margin of anything, every point near the vehicle does. The result is
+/// the velocity nearest
 /// to `v` that meets every cap ([`nearest_within`]), so a cap adds no
 /// sideways motion of its own (a path cap keeps the direction; a radial cap
 /// slides along the obstacle). The answer's own stop path is drawn and
@@ -163,7 +171,16 @@ pub fn brake_limit(
     let stop_at = HARD_STOP_FRAC * margin;
     let keep_out = keep_out_m(margin);
     // Every point within reach: (relative position, distance, unit direction
-    // toward it, distance to its near face, obstacle or horizon).
+    // toward it, distance to its near face, obstacle or horizon, a horizon
+    // point that caps only when a stop path comes within its keep-out). The
+    // horizon is judged that way only while the seen space closes round the
+    // vehicle from an all-round sensor ([`Obstacles::horizon_all_round`]):
+    // where it ends inside the keep-out (a forward camera's map beside the
+    // vehicle) the vehicle is inside the margin of the unknown, and a
+    // forward sensor's map beside it is memory, so every horizon point caps;
+    // so does one nearer than the keep-out (a pitched beam meeting the floor
+    // close by).
+    let gate = obs.horizon_all_round(now_ms);
     let points = || {
         let obstacles = obs.points_near(pos, reach, now_ms).map(|p| (p, true));
         let horizon = obs.horizon_near(pos, reach, now_ms).map(|p| (p, false));
@@ -176,7 +193,8 @@ pub fn brake_limit(
             let dir = geo::scale(rel, 1.0 / r);
             // Distance to the cell's near face (conservative for a scan point).
             let d = (r - crate::obstacles::CELL_M / 2.0).max(0.0);
-            Some((rel, r, dir, d, obstacle))
+            let gated = gate && !obstacle && r >= keep_out;
+            Some((rel, r, dir, d, obstacle, gated))
         })
     };
     // Closing speed along a direction: the EKF's, or the scans' own range
@@ -199,7 +217,7 @@ pub fn brake_limit(
     let mut away = [0.0, 0.0];
     let mut close = false;
     let mut r_min = f32::INFINITY;
-    for (_, r, dir, d, obstacle) in points() {
+    for (_, r, dir, d, obstacle, _) in points() {
         if !obstacle {
             continue;
         }
@@ -251,8 +269,8 @@ pub fn brake_limit(
     // between them over its lag on the setpoints it has queued, answers to
     // the same ask: at most the ask held to its own path's cap. A point
     // inside the bend, near enough for the turn to reach before it can
-    // stop, caps the velocity toward it radially too, closing at up to what
-    // those setpoints fly toward it.
+    // stop, caps the velocity toward it radially too, an obstacle closing at
+    // up to what those setpoints fly toward it.
     let bend = Bend::of(vel, v);
     let queued = if asked_path {
         let (e, _) = sweep.paths[0];
@@ -273,13 +291,15 @@ pub fn brake_limit(
         tags = [0u16; BRAKE_CAPS];
         let along: [(f32, bool); SWEEP_PATHS] =
             std::array::from_fn(|k| closing_along(sweep.paths[k].0));
-        for (rel, r, dir, d, obstacle) in points() {
-            // The seen space's edge caps radially, as it always has: what
-            // lies beyond it is unknown in every direction.
-            let in_bend = obstacle && r < bend_reach && bend.is_some_and(|b| b.holds(rel));
-            if every || !obstacle || in_bend {
+        for (rel, r, dir, d, obstacle, gated) in points() {
+            let in_bend = r < bend_reach && bend.is_some_and(|b| b.holds(rel));
+            // A horizon point caps once a stop path comes within its
+            // keep-out ([`Sweep::cap`] is `Some`), whatever its speed.
+            let met = || (0..sweep.n).any(|k| sweep.cap(k, rel, 0.0).is_some());
+            let radial = in_bend || (!obstacle && (!gated || met()));
+            if every || radial {
                 let (mut closing, by_scan) = closing_along(dir);
-                if in_bend {
+                if obstacle && in_bend {
                     closing = closing.max(geo::dot(queued, dir));
                 }
                 let cap = stop_cap(d, closing, a_h, margin);
@@ -311,14 +331,20 @@ pub fn brake_limit(
             break;
         }
         // The answer's own stop path: solved again while the answer breaks
-        // that path's cap.
+        // that path's cap, or the cap toward a horizon point it comes
+        // within the keep-out of.
         let k = sweep.n - 1;
         let (e, _) = sweep.paths[k];
         let closing = closing_along(e).0;
-        let breaks = points().filter(|p| p.4).any(|(rel, ..)| {
-            sweep
-                .cap(k, rel, closing)
-                .is_some_and(|cap| geo::dot(e, out) > cap + 1e-3)
+        let breaks = points().any(|(rel, _, dir, d, obstacle, gated)| {
+            let Some(cap) = sweep.cap(k, rel, closing) else {
+                return false;
+            };
+            if obstacle {
+                return geo::dot(e, out) > cap + 1e-3;
+            }
+            let radial = stop_cap(d, closing_along(dir).0, a_h, margin);
+            gated && geo::dot(dir, out) > radial + 1e-3
         });
         if !breaks {
             break;

@@ -7,6 +7,8 @@ use ados_protocol::pilot::{AvoidMode, AvoidState, GoalKind, Owner};
 mod ask;
 mod bounds;
 mod traj;
+mod view;
+pub(in crate::core) use view::FollowView;
 
 use super::motion_ref::{leash_within, MotionRef, ASK_SMOOTH_S, REF_LEASH_M, SHAPER_REPORT_MPS};
 use super::subject_guard::Subject;
@@ -55,7 +57,7 @@ impl Pilot {
     ) {
         let pos_ne = [pos[0], pos[1]];
         let (goal, max_speed, goal_d, goal_yaw, subject) = match self.owner() {
-            Owner::Skill => match self.auth.lease().and_then(|l| l.goal.clone()) {
+            Owner::Skill => match self.skill_goal() {
                 // A vantage goal faces the predicted subject unless it sets a yaw.
                 Some(g) => {
                     let subject = g
@@ -222,11 +224,7 @@ impl Pilot {
             (Some(g), Some(planned))
                 if !detour && target == planned && g.kind != GoalKind::Vantage =>
             {
-                let since_ms = self
-                    .auth
-                    .lease()
-                    .map_or(0, |l| now_ms.saturating_sub(l.last_goal_ms));
-                live_goal(g, since_ms)
+                live_goal(g, self.skill_goal_age_ms(now_ms))
             }
             _ => target,
         };
@@ -250,7 +248,10 @@ impl Pilot {
         let want = geo::clamp_len(asked, v_cap);
         let shape = Shape { traj, ..shape };
         let v = self.fly_shaped(&mut r, want, &shape, &mut limits, now_ms);
-        let want_yaw = goal_yaw.or_else(|| match subject {
+        // A forward-only sensor turns to a person the guard acts on first,
+        // then along a motion the seen-space hold stops.
+        let look = self.mover_look(pos_ne, now_ms).or(self.unseen_look(now_ms));
+        let want_yaw = (look.or(goal_yaw)).or_else(|| match subject {
             Some(s) => Some(geo::bearing_of(geo::sub(s, pos_ne))),
             None if geo::dist(target, pos_ne) > 1.0 => {
                 Some(geo::bearing_of(geo::sub(target, pos_ne)))
@@ -340,6 +341,11 @@ impl Pilot {
                 want = held;
             }
         }
+        self.mover_guards(now_ms);
+        if let Some(held) = self.movers_soft(s.pos, want, s.gl.a_h, s.v_cap, now_ms) {
+            *limits |= limit::PERSON;
+            want = held;
+        }
         let (want, by) = self.soft_brake(s.pos, want, s.gl.a_h, now_ms);
         *limits |= by;
         let on_traj = s.traj.filter(|t| geo::dist(want, t.v) < 1e-3);
@@ -386,6 +392,13 @@ impl Pilot {
             }
         }
         let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
+        if let Some((cut, slide_capped)) = self.movers_cut(s.pos, fc_ask, v, s.v_cap, now_ms) {
+            *limits |= limit::PERSON | if slide_capped { s.speed_by } else { 0 };
+            v = cut;
+            p = s.pos;
+            r.cut(p, v);
+        }
+        let fc_ask = geo::add(v, geo::scale(geo::sub(p, s.pos), FC_POS_GAIN));
         if let Some((braked, by)) = self.goal_brake(s.pos, fc_ask, s.v_cap, s.speed_by, now_ms) {
             // At the vehicle's own position the FC's position loop adds
             // nothing: it flies the braked velocity, cut at once, but
@@ -393,6 +406,14 @@ impl Pilot {
             // goal's acceleration.
             *limits |= by;
             v = self.brake_slew(braked, s.gl.a_h, s.dt, now_ms);
+            p = s.pos;
+            r.cut(p, v);
+        }
+        if let Some(held) = self.unseen_hold(v, want, now_ms) {
+            // Not into space a forward camera has not seen: cut at once and
+            // flown from the vehicle's position, as the obstacle brake's is.
+            *limits |= limit::SENSING;
+            v = held;
             p = s.pos;
             r.cut(p, v);
         }

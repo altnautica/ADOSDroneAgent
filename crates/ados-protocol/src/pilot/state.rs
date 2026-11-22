@@ -279,28 +279,6 @@ pub struct FcStatusText {
     pub age_ms: u64,
 }
 
-/// A horizontal speed cap the pilot enforces on every setpoint it flies.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct SpeedCap {
-    /// Why: `gnss-denied` while the EKF's horizontal position does not come
-    /// from GNSS; `confined-near` in a confined place while an obstacle is
-    /// near the clearance limit or the leg flown is unseen; `position-uncertain`
-    /// while `pose_uncertainty_m`'s cap is the slowest.
-    pub reason: String,
-    /// The horizontal speed limit in m/s.
-    pub v_h_mps: f32,
-}
-
-impl SpeedCap {
-    pub fn new(reason: impl Into<String>, v_h_mps: f32) -> Self {
-        Self {
-            reason: reason.into(),
-            v_h_mps,
-        }
-    }
-}
-
 /// The pilot does not trust the EKF's horizontal position: the Navigation
 /// external position is degraded or lost, or the flight controller's optical
 /// flow says the vehicle moves when the estimate says otherwise. While set,
@@ -462,11 +440,15 @@ pub struct PilotState {
     pub setup_abort: Option<String>,
     /// The horizontal speed cap in force, omitted while there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed_cap: Option<SpeedCap>,
+    pub speed_cap: Option<super::SpeedCap>,
     /// The sensing tier, the seen-clear range along the vehicle's motion and
     /// the speed limit it allows; omitted while no obstacle sensor is seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensing: Option<super::Sensing>,
+    /// The moving obstacles the pilot tracks now (people, vehicles, things
+    /// seen moving), each predicted to the state's time; omitted while none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub movers: Vec<super::TrackedMover>,
     /// Flow, downward range and lidar health; `None` (JSON `null`) while the
     /// FC link is down.
     #[serde(default)]

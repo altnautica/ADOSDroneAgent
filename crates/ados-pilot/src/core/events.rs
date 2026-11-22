@@ -6,7 +6,8 @@ use serde_json::json;
 
 use super::Pilot;
 use crate::events::{
-    TOPIC_LIDAR, TOPIC_MAP_STATUS, TOPIC_NAV_STATE, TOPIC_OCCUPANCY, TOPIC_POSE, TOPIC_SCAN,
+    TOPIC_DETECTION, TOPIC_LIDAR, TOPIC_MAP_STATUS, TOPIC_NAV_STATE, TOPIC_OCCUPANCY, TOPIC_POSE,
+    TOPIC_SCAN, TOPIC_SUBJECT,
 };
 use crate::flows::banner;
 
@@ -48,8 +49,14 @@ impl Pilot {
                 let returns = crate::obstacles::scan_returns(payload);
                 self.lidar.on_scan(returns, now_ms);
                 // A live 3D map is the obstacle source; its slab holds what
-                // this scan saw ([`super::world_feed`]).
+                // this scan saw ([`super::world_feed`]), but not a person
+                // walking through it: the movers take this scan's returns.
                 if self.world.live_3d(now_ms) {
+                    if let Some(ned) = self.pos(now_ms) {
+                        let level = self.scan_level(payload, now_ms);
+                        self.obstacles
+                            .ingest_mover_scan(payload, level, [ned[0], ned[1]], now_ms);
+                    }
                     return;
                 }
                 self.obstacles.clear_world();
@@ -80,6 +87,8 @@ impl Pilot {
             TOPIC_LIDAR => self.lidar.on_status(payload, now_ms),
             TOPIC_MAP_STATUS => self.nav_imu.on_status(payload, now_ms),
             TOPIC_OCCUPANCY => self.obstacles.ingest_occupancy(payload),
+            TOPIC_DETECTION => self.obstacles.movers.ingest_detections(payload, now_ms),
+            TOPIC_SUBJECT => self.follow_view.on_subject(payload, now_ms),
             TOPIC_POSE => {
                 let pos = self.pos_ne(now_ms);
                 self.obstacles.ingest_pose(payload, pos, now_ms);

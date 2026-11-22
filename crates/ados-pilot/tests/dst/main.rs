@@ -30,6 +30,7 @@
 mod bench;
 mod fc;
 mod fc_avoid;
+mod follow;
 mod forest;
 mod goto_wall;
 mod metrics;
@@ -44,6 +45,7 @@ mod scenarios;
 mod sensors;
 mod shaper_pins;
 mod sim;
+mod unseen;
 mod voxmap;
 
 use std::time::Instant;
@@ -171,6 +173,129 @@ fn dst_without_the_pilot_the_fc_flies_the_reset() {
 #[test]
 fn dst_forest_stand_chooses_again_where_it_crawls() {
     forest::forest_stand(14);
+}
+
+/// Seeds every follow-intent case flies.
+const FOLLOW_SEEDS: std::ops::RangeInclusive<u64> = 1..=4;
+
+/// The least share of a walk the vehicle sees the subject through
+/// occluding trunks and round a corner.
+const FOLLOW_VISIBILITY: f32 = 0.85;
+
+/// Every follow run: out of the trunks' margin, and the subject's
+/// separation kept (3 m unless 3.4 m over its head).
+fn follow_safe(name: &str, seed: u64, f: &follow::Follow) {
+    assert!(
+        f.min_clearance_m >= 1.5,
+        "{name} s{seed}: {:.2} m from a trunk",
+        f.min_clearance_m
+    );
+    assert!(
+        f.min_separation_m >= follow::SEPARATION_M,
+        "{name} s{seed}: {:.2} m from the subject",
+        f.min_separation_m
+    );
+}
+
+/// One occluder case on every seed, flown with intents and with today's
+/// ring goal: with intents the vehicle sees the subject at least
+/// [`FOLLOW_VISIBILITY`] of every walk, and more of them all than the ring
+/// goal does.
+fn follow_occluded(name: &str, case: fn(u64, bool) -> (sim::Sim, follow::Follow)) {
+    let (mut ring, mut intent) = (0.0, 0.0);
+    for seed in FOLLOW_SEEDS {
+        let (_, r) = case(seed, true);
+        let (_, f) = case(seed, false);
+        eprintln!(
+            "{name} s{seed}: visibility ring {:.2}, intent {:.2}",
+            r.visibility(),
+            f.visibility()
+        );
+        follow_safe(name, seed, &f);
+        assert!(
+            f.visibility() >= FOLLOW_VISIBILITY,
+            "{name} s{seed}: saw the subject {:.2} of the walk",
+            f.visibility()
+        );
+        ring += r.visibility();
+        intent += f.visibility();
+    }
+    assert!(
+        intent > ring,
+        "{name}: intents saw {intent:.2}, the ring {ring:.2}"
+    );
+}
+
+/// Trunks on the walker's way pass between it and a vehicle behind.
+#[test]
+fn dst_follow_intent_keeps_the_subject_in_sight_past_trunks() {
+    follow_occluded("trunks", follow::trunks);
+}
+
+/// A walker turning round the end of a wall beside its way.
+#[test]
+fn dst_follow_intent_keeps_the_subject_in_sight_round_a_wall_corner() {
+    follow_occluded("corner", follow::corner);
+}
+
+/// A walker turning out of a corridor at a T.
+#[test]
+fn dst_follow_intent_keeps_the_subject_in_sight_round_a_t_junction() {
+    follow_occluded("t_junction", follow::t_junction);
+}
+
+/// The camera loses a walker just after it turned back toward the
+/// vehicle: the separation holds while it walks on unseen.
+#[test]
+fn dst_follow_intent_keeps_its_separation_from_a_subject_lost_walking_toward_it() {
+    for seed in FOLLOW_SEEDS {
+        let (_, f) = follow::toward_at_loss(seed, false);
+        follow_safe("toward_at_loss", seed, &f);
+    }
+}
+
+/// A walker straight away through a stand: the vehicle keeps within the
+/// band's far edge plus 2 m for 0.8 of the walk. The jog is measured by
+/// [`dst_follow_table`].
+#[test]
+fn dst_follow_intent_keeps_up_with_a_subject_walking_away() {
+    for seed in FOLLOW_SEEDS {
+        let (_, f) = follow::walk_away(seed, follow::WALK_MPS, sensors::SensorTier::Planar, false);
+        follow_safe("walk_away", seed, &f);
+        assert!(
+            f.reach_share() >= 0.8,
+            "walk_away s{seed}: within reach {:.2} of the walk, {:.1} m at most",
+            f.reach_share(),
+            f.max_dist_m
+        );
+    }
+}
+
+/// An orbit intent (its bearing the orbit's phase over the ground) round
+/// a standing subject among trunks: the vehicle goes all the way round
+/// within 1.5 times the orbit's own 36 s, keeping its separation and the
+/// trunks' margin.
+#[test]
+fn dst_follow_intent_orbits_a_standing_subject_all_the_way_round() {
+    for seed in FOLLOW_SEEDS {
+        let (_, f) = follow::orbit(seed);
+        follow_safe("orbit", seed, &f);
+        let full = f
+            .orbit_full_ms
+            .unwrap_or_else(|| panic!("orbit s{seed}: went {:.0}° round", f.orbit_deg));
+        assert!(
+            full <= 54_000,
+            "orbit s{seed}: all the way round at {full} ms"
+        );
+    }
+}
+
+/// Every follow case with the ring goal and with intents, both on seeds
+/// 1-4, as a table: visibility, separation, clearance, within-band share.
+#[test]
+#[ignore = "the follow table: minutes; run with --ignored --nocapture follow_table"]
+fn dst_follow_table() {
+    follow::table();
 }
 
 /// One seed replays byte for byte: every frame the pilot sent, every frame

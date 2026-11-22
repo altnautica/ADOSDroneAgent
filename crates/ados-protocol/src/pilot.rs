@@ -13,6 +13,7 @@
 
 mod clock;
 mod command;
+mod movers;
 mod obstacles;
 mod rc;
 mod reserve;
@@ -25,6 +26,7 @@ mod wire;
 
 pub use clock::*;
 pub use command::*;
+pub use movers::*;
 pub use obstacles::*;
 pub use rc::*;
 pub use reserve::*;
@@ -105,7 +107,39 @@ pub struct Goal {
     /// the height.
     #[serde(default)]
     pub vantage: Option<VantageSpec>,
+    /// For a `follow_intent` goal: the horizontal distance band to the
+    /// subject the pilot picks its viewpoint in, `[min, max]` metres.
+    #[serde(default)]
+    pub standoff_band_m: Option<[f32; 2]>,
+    /// For a `follow_intent` goal: the preferred bearing of the viewpoint
+    /// from the subject, degrees, in [`Goal::bearing_frame`]: from the
+    /// subject's heading (180 behind, 90 on its right, 0 leading) or from
+    /// north; `None` lets the pilot pick the bearing that sees the subject
+    /// best.
+    #[serde(default)]
+    pub bearing_pref_deg: Option<f32>,
+    /// For a `follow_intent` goal: what `bearing_pref_deg` is measured
+    /// from. Absent reads [`BearingFrame::Subject`].
+    #[serde(default)]
+    pub bearing_frame: BearingFrame,
+    /// For a `follow_intent` goal: the height band above the ground,
+    /// `[min, max]` metres; the pilot never picks a height under
+    /// [`FOLLOW_HEIGHT_FLOOR_M`].
+    #[serde(default)]
+    pub height_band_m: Option<[f32; 2]>,
+    /// For a `follow_intent` goal: the subject's id on `vision.subject.v1`,
+    /// whose predicted positions the pilot plans the view over.
+    #[serde(default)]
+    pub subject_ref: Option<u32>,
+    /// For a `follow_intent` goal: weigh the line of sight to the subject
+    /// above the bearing and standoff preferences.
+    #[serde(default)]
+    pub require_los: bool,
 }
+
+/// The lowest height above the ground a `follow_intent` viewpoint is
+/// picked at, metres.
+pub const FOLLOW_HEIGHT_FLOOR_M: f32 = 3.4;
 
 impl Goal {
     /// A goal toward `[n, e, d]` at up to `max_speed_mps`, with no
@@ -129,6 +163,12 @@ impl Goal {
             candidates: None,
             margin_m: None,
             vantage: None,
+            standoff_band_m: None,
+            bearing_pref_deg: None,
+            bearing_frame: BearingFrame::Subject,
+            height_band_m: None,
+            subject_ref: None,
+            require_los: false,
         }
     }
 }
@@ -142,6 +182,24 @@ pub enum GoalKind {
     Position,
     /// Fly to a point that sees the lost subject's predicted area.
     Vantage,
+    /// Keep the subject in view: the pilot picks the viewpoint inside the
+    /// standoff and height bands, at the bearing preferred, that sees the
+    /// subject's predicted positions best, and flies it. `n`/`e`/`d` are
+    /// the skill's own point, flown when the pilot cannot pick one;
+    /// `vn`/`ve` the subject's velocity; `subject_ne` the subject.
+    FollowIntent,
+}
+
+/// What a `follow_intent`'s preferred bearing is measured from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BearingFrame {
+    /// The subject's heading (its way of travel).
+    #[default]
+    Subject,
+    /// North, clockwise: a bearing over the ground (an orbit's phase).
+    World,
 }
 
 /// What a goal's horizontal velocity means. Either way the pilot shapes the

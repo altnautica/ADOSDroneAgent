@@ -57,6 +57,7 @@ describe("local scene", () => {
       target: { north: 2, east: 1, velNorth: 1, velEast: 0, dashed: true },
       drone: { north: 0, east: 0, yawDeg: 45 },
       plan: null,
+      movers: [],
     });
     expect(scene.drone).toEqual({ sx: 50, sy: 40, yawDeg: 45 });
     expect(scene.target).toEqual({
@@ -87,6 +88,7 @@ describe("local scene", () => {
       target: null,
       drone: { north: 0, east: 0, yawDeg: 0 },
       plan: { points: [[0, 0], [5, 0]], goal: [5, 0], blocked: false },
+      movers: [],
     });
     expect(s.plan?.points).toHaveLength(2);
     expect(s.plan?.goal).toEqual(s.plan?.points[1]);
@@ -106,8 +108,32 @@ describe("local scene", () => {
       target: null,
       drone: null,
       plan: { points: [], goal: [0, 3], blocked: true },
+      movers: [],
     });
     expect(s.plan).toEqual({ points: [], goal: [130, 100], blocked: true });
+  });
+
+  it("projects each mover with a 2 s velocity arrow, its sigma ring, and fades a stale one", () => {
+    const s = buildLocalScene({
+      width: 200,
+      height: 200,
+      view: { centreX: 0, centreY: 0, pxPerM: 10, cx: 100, cy: 100 },
+      occupancy: EMPTY_OCCUPANCY,
+      occupancyStale: false,
+      trail: [],
+      scanPoints: null,
+      target: null,
+      drone: null,
+      plan: null,
+      movers: [
+        { id: 3, kind: "person", source: "vision", ne: [5, 0], velNe: [0, 1.5], sigmaM: 0.4, ageMs: 100 },
+        { id: 7, kind: "unknown", source: "scan", ne: [0, -2], velNe: [0, 0], sigmaM: 0.2, ageMs: 1500 },
+      ],
+    });
+    expect(s.movers).toEqual([
+      { id: 3, kind: "person", sx: 100, sy: 50, leadX: 130, leadY: 50, ringPx: 4, faded: false },
+      { id: 7, kind: "unknown", sx: 80, sy: 100, leadX: null, leadY: null, ringPx: 2, faded: true },
+    ]);
   });
 
   it("reads the plan from a pilot frame", () => {
@@ -143,6 +169,7 @@ describe("local scene", () => {
       target,
       drone: null,
       plan: null,
+      movers: [],
     });
     // A north-pointing major axis turns the x radius up the screen.
     expect(s.target?.searchArea).toEqual({ sx: 60, sy: 20, rxPx: 30, ryPx: 10, rotationRad: -Math.PI / 2 });

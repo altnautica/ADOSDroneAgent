@@ -22,6 +22,7 @@
 
 import {
   parseBatteryReserve,
+  parseMovers,
   parseOverheadAhead,
   parsePositionUnverified,
   parseProfileLimits,
@@ -31,6 +32,7 @@ import {
   parseStickCommand,
   type BatteryReserve,
   type FcStatusText,
+  type Mover,
   type OverheadAhead,
   type PositionUnverified,
   type ProfileLimits,
@@ -260,6 +262,8 @@ export interface PilotState {
   /** What the pilot sees obstacles with and the speed that stops inside the
    *  range it sees clear (`sensing`), or null (an older agent). */
   sensing: Sensing | null;
+  /** The moving obstacles the pilot tracks (`movers`); empty when none. */
+  movers: Mover[];
   /** The limits the operator's sticks fly at now, or null (an older agent). */
   profileLimits: ProfileLimits | null;
   /** The operator's sticks on the latest stick tick, while they own the
@@ -361,6 +365,7 @@ export function parsePilotState(raw: unknown): PilotState | null {
     poseUncertaintyM: num(p.pose_uncertainty_m),
     overheadAhead: parseOverheadAhead(p.overhead_ahead),
     sensing: parseSensing(p.sensing),
+    movers: parseMovers(p.movers),
     profileLimits: parseProfileLimits(p.profile_limits),
     stick: parseStickCommand(p.stick),
     simClock: parseSimClock(p.clock),

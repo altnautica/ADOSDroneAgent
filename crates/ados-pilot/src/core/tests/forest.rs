@@ -1,6 +1,7 @@
-//! Flying through trunks: the obstacle brake judges each trunk along the
-//! motion (a trunk beside a clear corridor caps nothing, one on the way
-//! still stops the vehicle outside the margin), and the planner holds the
+//! Flying through trunks: the obstacle brake judges each trunk, and the
+//! edge of the space seen free, along the motion (a trunk or its shadow
+//! beside a clear corridor caps nothing, one on the way still stops the
+//! vehicle outside the margin), and the planner holds the
 //! route it chose instead of flipping between the straight way and a
 //! detour from one replan to the next.
 
@@ -8,9 +9,11 @@ use ados_protocol::pilot::{AvoidState, Candidates, Goal, GoalKind};
 
 use super::safety::G;
 use crate::core::control::{brake_limit, keep_out_m, BRAKE_LAG_S, CREEP_SLACK_M};
+use crate::core::limit;
 use crate::geo::{self, V2};
-use crate::obstacles::Obstacles;
+use crate::obstacles::{Obstacles, CELL_M};
 use crate::planner::{self, plan_committed, Commit, Motion};
+use crate::world::ScanBin;
 
 const A_H: f32 = 3.0;
 const MARGIN: f32 = 1.5;
@@ -90,6 +93,58 @@ fn a_trunk_straight_ahead_still_stops_the_vehicle_outside_the_margin() {
     let o = stand(&trunks);
     let b = brake_limit(&o, [0.0, 0.0], [3.0, 0.0], [3.0, 0.0], A_H, G, 0);
     assert!(b.v[0] < 1e-3, "still asks {:?}", b.v);
+}
+
+/// No obstacle, the map's seen space reaching `seen_m(bearing°)` from the
+/// origin, north up, read as the pilot reads it: seen space ending inside
+/// the keep-out stands in at its edge plus a cell.
+fn seen_space(seen_m: impl Fn(i32) -> f32) -> Obstacles {
+    let mut o = stand(&[]);
+    let bins: Vec<ScanBin> = (0..360)
+        .map(|i| ScanBin {
+            hit_m: None,
+            seen_m: seen_m(i),
+            overhead: None,
+        })
+        .collect();
+    let min_seen_m = keep_out_m(MARGIN) + CELL_M;
+    o.ingest_world(&bins, Vec::new(), [0.0, 0.0], 0.0, min_seen_m, 3.0, None, 0);
+    o
+}
+
+#[test]
+fn a_trunks_shadow_beside_the_way_leaves_the_speed_alone() {
+    // Seen space ends 2.5 m off 55-65° to the right (a trunk's shadow in
+    // the map), 20 m everywhere else. Flying north at 3 m/s, the stop path
+    // passes every point of that edge outside the keep-out, so nothing
+    // caps: a cap toward each edge point held the jog past such trunks to
+    // about 1 m/s.
+    let o = seen_space(|b| if (55..=65).contains(&b) { 2.5 } else { 20.0 });
+    let b = brake_limit(&o, [0.0, 0.0], [3.0, 0.0], [3.0, 0.0], A_H, G, 0);
+    assert!(!b.cut, "cut to {:?} ({:#x})", b.v, b.by);
+    // Asked into the shadow, the same edge stops the vehicle short of it.
+    let to = geo::scale(geo::bearing_unit(60f32.to_radians()), 3.0);
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], to, A_H, G, 0);
+    assert!(b.cut && b.by & limit::SEEN_SPACE != 0, "{b:?}");
+    let s = geo::norm(b.v);
+    assert!(
+        stop_m(s, s) <= 2.5 - keep_out_m(MARGIN) + 0.05,
+        "{s:.2} m/s"
+    );
+    // Seen space ending 4 m straight ahead still caps the way, keeping
+    // its direction: the stop ends outside the edge's margin.
+    let o = seen_space(|b| if !(6..=354).contains(&b) { 4.0 } else { 20.0 });
+    let b = brake_limit(&o, [0.0, 0.0], [0.0, 0.0], [3.0, 0.0], A_H, G, 0);
+    assert!(b.cut && b.by & limit::SEEN_SPACE != 0, "{b:?}");
+    assert!(b.v[1].abs() < 1e-3, "sideways motion added: {:?}", b.v);
+    let room = 4.0 - MARGIN - CREEP_SLACK_M;
+    assert!(stop_m(b.v[0], b.v[0]) <= room + 0.05, "{:?}", b.v);
+    // Unknown 1 m off to the right (a forward camera never saw beside the
+    // vehicle): the seen space no longer closes round it, so every horizon
+    // point caps the velocity toward it, the straight way included.
+    let o = seen_space(|b| if (55..=65).contains(&b) { 1.0 } else { 20.0 });
+    let b = brake_limit(&o, [0.0, 0.0], [3.0, 0.0], [3.0, 0.0], A_H, G, 0);
+    assert!(b.cut && b.by & limit::SEEN_SPACE != 0, "{b:?}");
 }
 
 #[test]

@@ -82,11 +82,14 @@ pub struct PilotCommand {
 /// margin), `subject` (the distance kept from the subject a skill's goal
 /// names, `subject_ne`: the speed toward it that still stops outside that
 /// distance, or the push back out of it), `geofence`, `hold` (no motion
-/// toward the goal: `hold_reason` says why) and `position_uncertain` (the
+/// toward the goal: `hold_reason` says why), `position_uncertain` (the
 /// speed cap of a position whose uncertainty is wide but within the
-/// pilot's limit, [`super::PilotState::pose_uncertainty_m`]; listed last
-/// because each code's bit is its index, applied with the speed limits).
-pub const COMMAND_LIMITS: [&str; 14] = [
+/// pilot's limit, [`super::PilotState::pose_uncertainty_m`], applied with
+/// the speed limits) and `person` (the separation kept from every person
+/// or other mover the pilot tracks, [`super::PilotState::movers`]: the
+/// speed toward one that still stops outside it, or the push back out of
+/// it); each code's bit is its index.
+pub const COMMAND_LIMITS: [&str; 15] = [
     "speed",
     "nav_cap",
     "sensing",
@@ -101,6 +104,7 @@ pub const COMMAND_LIMITS: [&str; 14] = [
     "geofence",
     "hold",
     "position_uncertain",
+    "person",
 ];
 
 /// The latest command of a planner the pilot runs beside the one that flies

@@ -76,6 +76,8 @@ pub struct PilotInputs<'a> {
     pub airframe_key: bool,
     /// Wall-clock now (epoch ms), for the banner's end time.
     pub now_ms: u64,
+    /// The FC's fresh local position (north, east), for the nearest person.
+    pub local_pos: Option<(f64, f64)>,
 }
 
 /// The pilot's countdowns and banner, critical first: the mission stall
@@ -364,7 +366,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         let label = spec_text("cockpit.row.limits", &[]);
         out.extend(phrase_rows(t, &label, &text, t.bright(), p_stale));
     }
-    if let Some(text) = sensing::sensing_text(p) {
+    for text in sensing::texts(p, i.local_pos) {
         out.push((stale(kv_text(t, "", LABEL, text)), false));
     }
     if let Some(s) = &p.stick {

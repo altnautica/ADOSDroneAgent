@@ -27,6 +27,11 @@ const TRUNK_TOP_M: f32 = 30.0;
 /// A walker's radius and height, m.
 pub const WALKER_R_M: f32 = 0.3;
 pub const WALKER_H_M: f32 = 1.8;
+/// The simulated camera tracker's reach, m, its latency, ms, and its world
+/// position noise per axis, one sigma, m.
+pub const TRACKER_RANGE_M: f32 = 25.0;
+pub const TRACKER_LAG_MS: u64 = 150;
+pub const TRACKER_NOISE_M: f32 = 0.15;
 
 /// Which obstacle sensor a run flies with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,9 +190,11 @@ fn body_to_world(v: [f32; 3], att: [f32; 3]) -> [f32; 3] {
     [x2 * cy - y1 * sy, x2 * sy + y1 * cy, z2]
 }
 
-/// The rays one 0.1 s Mid-360 frame casts (20 k a frame on the sensor,
-/// down-sampled for speed).
-const MID360_RAYS: usize = 4_000;
+/// The rays one 0.1 s Mid-360 frame casts: the sensor's 20 k. The voxel
+/// map's seen space at flight height grows with them (a fifth of them saw
+/// about 7 m ahead, holding every goal under 2.6 m/s), so they are not
+/// thinned.
+const MID360_RAYS: usize = 20_000;
 const MID360_RANGE_M: f32 = 40.0;
 const MID360_EL_DEG: (f32, f32) = (-7.0, 52.0);
 const DEPTH_FOV_DEG: (f32, f32) = (87.0, 58.0);
@@ -245,6 +252,71 @@ impl Sim {
                 (c[0] - t[0]).hypot(c[1] - t[1]) - WALKER_R_M
             })
             .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The horizontal centre distance to the nearest walker while the
+    /// vehicle flies less than [`crate::metrics::OVER_HEAD_M`] over their
+    /// heads, m (infinite otherwise or with no walkers).
+    pub fn walker_sep_m(&self) -> f32 {
+        let t = self.fc.truth();
+        if -t[2] - WALKER_H_M >= crate::metrics::OVER_HEAD_M {
+            return f32::INFINITY;
+        }
+        self.walkers
+            .iter()
+            .map(|w| {
+                let c = w.at(self.now);
+                (c[0] - t[0]).hypot(c[1] - t[1])
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// A forward camera's multi-object tracker batch now (`vision.detection`
+    /// v4 JSON): every walker inside the depth camera's horizontal view and
+    /// [`TRACKER_RANGE_M`] of the vehicle, as a confirmed `person` track
+    /// (its index the track id) with a world position (local ENU) where it
+    /// was [`TRACKER_LAG_MS`] ago, [`TRACKER_NOISE_M`] of noise on each axis.
+    /// Occlusion is not modelled.
+    pub fn tracker_batch(&self) -> Value {
+        let t = self.fc.truth();
+        let yaw = self.fc.att[2];
+        let half = (DEPTH_FOV_DEG.0 / 2.0).to_radians();
+        let frame = self.now / 100;
+        let back = self.now.saturating_sub(TRACKER_LAG_MS);
+        let dets: Vec<Value> = self
+            .walkers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| {
+                let c = w.at(back);
+                let rel = [c[0] - t[0], c[1] - t[1]];
+                let d = rel[0].hypot(rel[1]);
+                let off = (ados_pilot::geo::atan2(rel[1], rel[0]) - yaw + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                if d > TRACKER_RANGE_M || off.abs() > half {
+                    return None;
+                }
+                let k = (self.seed << 40) ^ (frame << 8) ^ i as u64;
+                let n = c[0] + TRACKER_NOISE_M * hash_normal(k);
+                let e = c[1] + TRACKER_NOISE_M * hash_normal(k ^ 0x5555);
+                Some(json!({
+                    "class_label": "person",
+                    "confidence": 0.9,
+                    "track_id": i + 1,
+                    "track_state": "confirmed",
+                    "world_pos": [e, n, 0.0],
+                }))
+            })
+            .collect();
+        json!({
+            "v": 4,
+            "model_id": "dst-tracker",
+            "camera_id": "front",
+            "frame_id": frame,
+            "ts_ms": back,
+            "detections": dets,
+        })
     }
 
     /// The rays one frame of the 3D tier `tier` casts now from the vehicle,
@@ -339,32 +411,91 @@ impl Sim {
     /// The scan Navigation's flattening of the 3D tier `tier` would give the
     /// pilot: its rays to 360 body FRD bins (see the module doc).
     pub fn flat_scan(&self, tier: SensorTier) -> Value {
-        let mut hits: Vec<Vec<f32>> = vec![Vec::new(); 360];
-        self.tier_rays(tier, 1, |ray| {
-            // The ground band is cut, as the pilot cuts it at the downward
-            // rangefinder's height.
-            let Some((r, false)) = ray.ret else {
-                return;
-            };
-            // `body` is FRD: up is −z.
-            let b = ray.body;
-            let (x, y) = (b[0] * r, b[1] * r);
-            if -b[2] * r > BAND_TOP_M {
-                return;
+        let mut bins = FlatBins::default();
+        self.tier_rays(tier, 1, |ray| bins.add(&ray));
+        bins.scan(tier)
+    }
+
+    /// One frame of the 3D tier into the run's voxel map (rays with no
+    /// return clear out to the sensor's range), published to the pilot as
+    /// the seam M map, the body at its true pose. A 3D lidar's frame also
+    /// goes out flattened, as Navigation publishes its scan beside the map.
+    pub fn feed_voxmap(&mut self) {
+        let t = self.fc.truth();
+        let tier = self.tier;
+        let mut map = self
+            .vox
+            .take()
+            .unwrap_or_else(|| DstVoxmap::new(vox_tier(tier), t));
+        map.recentre(t);
+        let mut rays = Vec::new();
+        let mut flat = (tier == SensorTier::Mid360).then(FlatBins::default);
+        self.tier_rays(tier, VOXMAP_DEPTH_STRIDE, |ray| {
+            if let Some(f) = flat.as_mut() {
+                f.add(&ray);
             }
-            let h = x.hypot(y);
-            if h <= 0.05 {
-                return;
-            }
-            let az = ados_pilot::geo::atan2(y, x).rem_euclid(std::f32::consts::TAU);
-            hits[(az.to_degrees() as usize).min(359)].push(h);
+            let (r, hit) = ray.ret.map_or((ray.max_m, false), |(r, _)| (r, true));
+            let w = ray.world;
+            rays.push(([t[0] + w[0] * r, t[1] + w[1] * r, t[2] - w[2] * r], hit));
         });
+        map.insert(t, &rays);
+        let mut snap = std::mem::take(&mut self.vox_buf);
+        map.publish(self.now, body_pose(t, self.fc.att), &mut snap);
+        self.p.on_voxmap(&mut snap, self.now);
+        self.vox_buf = snap;
+        self.vox = Some(map);
+        if let Some(f) = flat {
+            let now = self.now;
+            self.p
+                .on_feed(ados_pilot::events::TOPIC_SCAN, &f.scan(tier), now);
+        }
+    }
+}
+
+/// A 3D tier's returns flattened to 360 body FRD bins of horizontal range.
+struct FlatBins {
+    hits: Vec<Vec<f32>>,
+}
+
+impl Default for FlatBins {
+    fn default() -> Self {
+        Self {
+            hits: vec![Vec::new(); 360],
+        }
+    }
+}
+
+impl FlatBins {
+    fn add(&mut self, ray: &Ray) {
+        // The ground band is cut, as the pilot cuts it at the downward
+        // rangefinder's height.
+        let Some((r, false)) = ray.ret else {
+            return;
+        };
+        // `body` is FRD: up is −z.
+        let b = ray.body;
+        let (x, y) = (b[0] * r, b[1] * r);
+        if -b[2] * r > BAND_TOP_M {
+            return;
+        }
+        let h = x.hypot(y);
+        if h <= 0.05 {
+            return;
+        }
+        let az = ados_pilot::geo::atan2(y, x).rem_euclid(std::f32::consts::TAU);
+        self.hits[(az.to_degrees() as usize).min(359)].push(h);
+    }
+
+    /// The scan: each bin's nearest return for a lidar, a low quantile for
+    /// a camera's noisier depth; 0 for a bin with none.
+    fn scan(mut self, tier: SensorTier) -> Value {
         let quantile = if tier == SensorTier::Mid360 {
             0.0
         } else {
             CAMERA_BIN_QUANTILE
         };
-        let bins: Vec<f32> = hits
+        let bins: Vec<f32> = self
+            .hits
             .iter_mut()
             .map(|h| {
                 if h.is_empty() {
@@ -376,31 +507,6 @@ impl Sim {
             .collect();
         json!({"frame": "body_frd", "angle_start_rad": 0.0,
             "angle_increment_rad": std::f32::consts::TAU / 360.0, "ranges_m": bins})
-    }
-
-    /// One frame of the 3D tier into the run's voxel map (rays with no
-    /// return clear out to the sensor's range), published to the pilot as
-    /// the seam M map, the body at its true pose.
-    pub fn feed_voxmap(&mut self) {
-        let t = self.fc.truth();
-        let tier = self.tier;
-        let mut map = self
-            .vox
-            .take()
-            .unwrap_or_else(|| DstVoxmap::new(vox_tier(tier), t));
-        map.recentre(t);
-        let mut rays = Vec::new();
-        self.tier_rays(tier, VOXMAP_DEPTH_STRIDE, |ray| {
-            let (r, hit) = ray.ret.map_or((ray.max_m, false), |(r, _)| (r, true));
-            let w = ray.world;
-            rays.push(([t[0] + w[0] * r, t[1] + w[1] * r, t[2] - w[2] * r], hit));
-        });
-        map.insert(t, &rays);
-        let mut snap = std::mem::take(&mut self.vox_buf);
-        map.publish(self.now, body_pose(t, self.fc.att), &mut snap);
-        self.p.on_voxmap(&mut snap, self.now);
-        self.vox_buf = snap;
-        self.vox = Some(map);
     }
 }
 

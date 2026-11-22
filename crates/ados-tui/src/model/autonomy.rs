@@ -306,6 +306,9 @@ pub struct Pilot {
     /// What the pilot sees obstacles with and the speed that stops inside
     /// its seen-clear range; `None` from an older agent.
     pub sensing: Option<ados_protocol::pilot::Sensing>,
+    /// The moving obstacles the pilot tracks; empty while none (or from an
+    /// older agent).
+    pub movers: Vec<ados_protocol::pilot::TrackedMover>,
     /// Why the cap (`gnss-denied`, `confined-near`), while one applies.
     pub speed_cap_reason: Option<String>,
     /// The operator's place class, `open` or `confined` (absent reads open).

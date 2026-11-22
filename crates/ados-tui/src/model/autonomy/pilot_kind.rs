@@ -182,6 +182,7 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
         sensing: d
             .get("sensing")
             .and_then(|v| serde_json::from_value::<ados_protocol::pilot::Sensing>(v.clone()).ok()),
+        movers: movers(d.get("movers")),
         speed_cap_reason: d
             .get("speed_cap")
             .filter(|c| c.get("v_h_mps").and_then(Value::as_f64).is_some())
@@ -280,6 +281,31 @@ fn mission_stall(v: &Value) -> Option<MissionStall> {
         return_in_s: f(v, "return_in_s"),
         window_s: f(v, "window_s"),
     })
+}
+
+/// Every well-formed `movers` entry; a kind this build does not know reads
+/// as `unknown` and a source as `scan`, as the web surfaces read them.
+fn movers(v: Option<&Value>) -> Vec<ados_protocol::pilot::TrackedMover> {
+    v.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let mut m = m.clone();
+            let o = m.as_object_mut()?;
+            if !matches!(
+                o.get("kind").and_then(Value::as_str),
+                Some("person" | "vehicle")
+            ) {
+                o.insert("kind".into(), "unknown".into());
+            }
+            if o.get("source").and_then(Value::as_str) != Some("vision") {
+                o.insert("source".into(), "scan".into());
+            }
+            o.entry("sigma_m").or_insert(0.0.into());
+            o.entry("age_ms").or_insert(0.into());
+            serde_json::from_value(m).ok()
+        })
+        .collect()
 }
 
 /// The pilot frame's `clock` as the "SIM ×N" badge (as the web surfaces

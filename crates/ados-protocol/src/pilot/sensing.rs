@@ -53,3 +53,25 @@ impl Sensing {
         }
     }
 }
+
+/// A horizontal speed cap the pilot enforces on every setpoint it flies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SpeedCap {
+    /// Why: `gnss-denied` while the EKF's horizontal position does not come
+    /// from GNSS; `confined-near` in a confined place while an obstacle is
+    /// near the clearance limit or the leg flown is unseen; `position-uncertain`
+    /// while `pose_uncertainty_m`'s cap is the slowest.
+    pub reason: String,
+    /// The horizontal speed limit in m/s.
+    pub v_h_mps: f32,
+}
+
+impl SpeedCap {
+    pub fn new(reason: impl Into<String>, v_h_mps: f32) -> Self {
+        Self {
+            reason: reason.into(),
+            v_h_mps,
+        }
+    }
+}

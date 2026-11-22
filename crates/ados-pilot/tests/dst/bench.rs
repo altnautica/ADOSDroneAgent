@@ -153,6 +153,11 @@ fn fly(
         let moving = subject[0] < GOAL_M + BEHIND_M;
         let g = goal(subject, if moving { speed } else { 0.0 }, alt_m, speed);
         s.request(Request::Goal { lease_id, goal: g });
+        if !s.walkers.is_empty() && tracker_on() {
+            let batch = s.tracker_batch();
+            let now = s.now;
+            s.p.on_feed("vision.detection", &batch, now);
+        }
         for _ in 0..GOAL_MS / ados_pilot::core::TICK_MS {
             let at = std::time::Instant::now();
             s.step();
@@ -164,6 +169,7 @@ fn fly(
                 [t[0], t[1]],
                 s.stand_clearance_m().min(s.walker_clearance_m()),
             );
+            meter.person(s.walker_sep_m());
         }
         let t = s.fc.truth();
         let every = if trace_fine() { 100 } else { 1000 };
@@ -188,6 +194,34 @@ fn trace_fine() -> bool {
     std::env::var("DST_BENCH_TRACE").is_ok_and(|v| v == "2")
 }
 
+/// The walkers reach the pilot through a forward camera's tracker
+/// ([`Sim::tracker_batch`]) as well as its obstacle sensor;
+/// `DST_BENCH_TRACKER=0` flies on the obstacle sensor alone.
+fn tracker_on() -> bool {
+    std::env::var("DST_BENCH_TRACKER").map_or(true, |v| v != "0")
+}
+
+/// The pilot's current obstacle returns more than 0.5 m off every walker's
+/// surface and every trunk's: returns of nothing that is there now.
+fn ghost_hits(s: &Sim) -> usize {
+    let near = |p: [f32; 2]| {
+        let walkers = s
+            .walkers
+            .iter()
+            .map(|w| (w.at(s.now), crate::sensors::WALKER_R_M));
+        s.stand
+            .iter()
+            .copied()
+            .chain(walkers)
+            .any(|(c, r)| (p[0] - c[0]).hypot(p[1] - c[1]) - r < 0.5)
+    };
+    s.p.obstacles
+        .hits(s.now)
+        .iter()
+        .filter(|h| !near(h.ne))
+        .count()
+}
+
 pub fn trace_line(s: &Sim, t0: u64, subject: [f32; 2]) {
     let t = s.fc.truth();
     let st = s.p.state(s.now);
@@ -197,7 +231,7 @@ pub fn trace_line(s: &Sim, t0: u64, subject: [f32; 2]) {
         .last()
         .map_or(0.0, |e| (e[0] as f32 - t[0]).hypot(e[1] as f32 - t[1]));
     eprintln!(
-        "{} s{} t={:5.1} pos=({:5.1},{:5.1}) v={:4.2} subj={:5.1} clr={:4.2} avoid={:?} hold={:?} sense={:?} traj={:?} end={:4.1} limits={}",
+        "{} s{} t={:5.1} pos=({:5.1},{:5.1}) v={:4.2} subj={:5.1} clr={:4.2} sep={:4.2} movers={} ghosts={} avoid={:?} hold={:?} sense={:?} traj={:?} end={:4.1} limits={}",
         s.name,
         s.seed,
         (s.now - t0) as f32 / 1000.0,
@@ -206,6 +240,9 @@ pub fn trace_line(s: &Sim, t0: u64, subject: [f32; 2]) {
         s.fc.vel[0].hypot(s.fc.vel[1]),
         subject[0],
         s.stand_clearance_m().min(s.walker_clearance_m()),
+        s.walker_sep_m(),
+        st.movers.len(),
+        ghost_hits(s),
         st.avoid_state,
         st.hold_reason,
         s.p.sensing().map(|x| x.speed_limit_mps),
@@ -343,11 +380,20 @@ fn bench_matrix() {
     let listed = |key: &str, v: &str| {
         std::env::var(key).map_or(true, |l| l.split(',').any(|x| x.trim() == v))
     };
-    cells.retain(|&(_, tier, v)| {
-        listed("DST_BENCH_TIERS", tier.name()) && listed("DST_BENCH_SPEEDS", &format!("{v:.0}"))
+    // `DST_BENCH_SCENARIOS=bench_crossing` flies one family.
+    cells.retain(|&(i, tier, v)| {
+        let name = LAMBDAS.get(i).map_or("bench_crossing", |l| l.0);
+        listed("DST_BENCH_TIERS", tier.name())
+            && listed("DST_BENCH_SPEEDS", &format!("{v:.0}"))
+            && listed("DST_BENCH_SCENARIOS", name)
     });
+    // `DST_BENCH_SEED=3` flies that seed alone (tracing one run).
+    let only = std::env::var("DST_BENCH_SEED")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
     let jobs: Vec<(usize, u64)> = (0..cells.len())
         .flat_map(|c| (1..=seeds).map(move |s| (c, s)))
+        .filter(|&(_, s)| only.is_none_or(|o| o == s))
         .collect();
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Vec<RunMetrics>>> = Mutex::new(vec![Vec::new(); cells.len()]);
@@ -440,4 +486,6 @@ fn dst_bench_runs_score() {
     assert!(m.min_clearance_m.is_finite() && m.path_ratio > 0.5, "{m:?}");
     let m = bench_crossing(SensorTier::Planar, 3.0, 1);
     assert!(m.path_ratio > 0.5, "{m:?}");
+    // The walkers are tracked and kept their separation from.
+    assert!(!m.collision && m.person_breaches == 0, "{m:?}");
 }

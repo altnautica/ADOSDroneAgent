@@ -16,10 +16,12 @@ use crate::obstacles::{Grid, Obstacles, CELL_M, GRID_N};
 mod backup;
 mod carrot;
 mod commit;
+mod keep;
 mod keepout;
 mod map2d;
 mod route_goal;
 mod traj;
+mod view;
 pub use backup::{Committed, TrajRef, CARROT_S};
 pub(crate) use carrot::decimate;
 pub use carrot::{along, carrot};
@@ -31,6 +33,9 @@ use keepout::Bars;
 pub use keepout::Keepout;
 pub use route_goal::{Router, ROUTE_REACH_M};
 pub use traj::{Outcome, TrajGoal, TrajPlanner, TRAJ_PERIOD_MS, TRAJ_ROOM_M};
+pub use view::{
+    sees_subject, Prediction, Sight, SubjectView, ViewAsk, ViewChoice, ViewPlanner, VIEW_PERIOD_MS,
+};
 
 /// Expansion budget per search.
 pub const MAX_EXPANSIONS: usize = 4000;

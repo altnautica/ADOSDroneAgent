@@ -18,6 +18,7 @@ mod failsafes;
 mod goal_brake;
 mod hold_flight;
 mod motion_ref;
+mod mover_guard;
 mod obstacle_data;
 mod plan;
 mod route;
@@ -31,6 +32,8 @@ mod trail;
 mod vantage_goal;
 pub use brake::*;
 pub(super) use motion_ref::MotionRef;
+pub(super) use mover_guard::MoverGuards;
+pub(super) use plan::FollowView;
 #[cfg(test)]
 pub use route::{check_legs, legs_of, Origin};
 pub use route::{route_of, Route, RouteItem, CONFINED_CAP_MPS};
@@ -140,9 +143,12 @@ impl Pilot {
         } else {
             PLAN_PERIOD_MS
         };
+        // A follow intent's viewpoint, at its own period.
+        self.view_tick(now_ms);
         if recovered || now_ms.saturating_sub(self.plan_ms) >= period {
             self.plan_ms = now_ms;
             if let Some(p) = self.pos_ne(now_ms) {
+                self.mover_flight(now_ms);
                 self.obstacles.rebuild(p, now_ms);
             }
             self.replan(now_ms);
@@ -241,7 +247,7 @@ impl Pilot {
         let pos = [pos3[0], pos3[1]];
         let margin = self.margin();
         let goal = match self.owner() {
-            Owner::Skill => self.auth.lease().and_then(|l| l.goal.clone()),
+            Owner::Skill => self.skill_goal().cloned(),
             Owner::Goto => self.goto.map(|g| {
                 ados_protocol::pilot::Goal::new(GoalKind::Position, g, self.limits_now(now_ms).v_h)
             }),

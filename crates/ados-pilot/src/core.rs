@@ -15,6 +15,7 @@ mod position_check;
 mod requests;
 mod scan_attitude;
 mod state;
+mod subject_feed;
 mod take;
 mod touchdown;
 mod trace;
@@ -102,6 +103,10 @@ pub struct Pilot {
     /// This tick's sensing tier, seen-clear range and speed limit
     /// ([`control`]'s `sensing`); `None` without an obstacle sensor.
     sensing: Option<ados_protocol::pilot::Sensing>,
+    /// The heading a forward-looking tier's goal turns to while the
+    /// seen-space hold stops its motion, and until when (ms)
+    /// ([`control`]'s `sensing`).
+    unseen_look: Option<(f32, u64)>,
     /// FC attitudes by host-monotonic arrival, for levelling each scan at
     /// its capture ([`scan_attitude`]).
     att_log: scan_attitude::AttitudeLog,
@@ -202,6 +207,12 @@ pub struct Pilot {
     /// The subject the skill's goals name, for the subject brake
     /// ([`control::SubjectTrack`]).
     subject_track: control::SubjectTrack,
+    /// The people the separation guard keeps clear of this tick
+    /// ([`control::MoverGuards`]).
+    mover_guards: control::MoverGuards,
+    /// A follow intent's view planner and the goal flown for it
+    /// ([`control::FollowView`]).
+    follow_view: control::FollowView,
     /// The pilot's one shaped reference, as the latest tick that flew it
     /// left it: the sticks or a hold flown as their owner, a skill goal or a
     /// goto ([`control::MotionRef`]).
@@ -248,6 +259,7 @@ impl Pilot {
             obstacles: Obstacles::new(),
             world: Default::default(),
             sensing: None,
+            unseen_look: None,
             att_log: Default::default(),
             mono_ns: || 0,
             overhead: Default::default(),
@@ -301,6 +313,8 @@ impl Pilot {
             shadow: None,
             plan_hold: None,
             subject_track: control::SubjectTrack::default(),
+            mover_guards: Default::default(),
+            follow_view: Default::default(),
             motion_ref: None,
             stale_hold: None,
             nav_set: nav_cap::BOOT_SOURCE_SET,

@@ -2,7 +2,8 @@
 // choice (AUTO switches to local after 2 s below a 3D fix or when the active
 // EKF horizontal source carries no GNSS; a LOCAL / MAP pin wins), the drone
 // from the FC's LOCAL_POSITION_NED (the SLAM pose when the FC has none), the
-// follow target, the pilot's planned path and goal, the scan in the map frame,
+// follow target, the pilot's planned path and goal and the moving obstacles
+// it tracks, the scan in the map frame,
 // and whether the occupancy layer is stale. Every source is age-gated so a
 // dead link never draws a live marker.
 
@@ -107,11 +108,13 @@ export interface LocalSceneSources {
   occupancy: OccupancyGrid;
   occupancyAt: number | null;
   trail: readonly TrailPoint[];
-  /** The newest pilot frame and its receive time; its plan shows while fresh. */
+  /** The newest pilot frame and its receive time; its plan and movers show
+   *  while fresh. */
   pilot: { data: PilotState; at: number } | null;
 }
 
 export function localSceneInput(src: LocalSceneSources): LocalSceneInput {
+  const pilot = src.pilot && pilotFresh(src.pilot.at, src.now) ? src.pilot.data : null;
   const centre = viewCentre(src.pan, src.drone, src.now);
   const view: LocalView = {
     centreX: centre.north,
@@ -134,7 +137,8 @@ export function localSceneInput(src: LocalSceneSources): LocalSceneInput {
     scanPoints,
     target: src.target,
     drone: src.drone,
-    plan: src.pilot && pilotFresh(src.pilot.at, src.now) ? localPlan(src.pilot.data) : null,
+    plan: localPlan(pilot),
+    movers: pilot?.movers ?? [],
   };
 }
 

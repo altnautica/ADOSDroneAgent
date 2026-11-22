@@ -115,6 +115,15 @@ impl Pilot {
         if let Some(b) = braked {
             limits |= b.by;
         }
+        // People the pilot tracks are kept their separation from the sticks
+        // too, with avoidance on: the hard tier on the stick acceleration.
+        if brake {
+            self.mover_guards(now_ms);
+            if let Some((cut, _)) = self.movers_cut(pos_ne, v, v, lim.v_h, now_ms) {
+                limits |= limit::PERSON;
+                v = cut;
+            }
+        }
         // The speed the sticks may fly now: the seen-space brake holds them
         // below the profile when the space the lidar has seen free is short.
         let v_cap = braked

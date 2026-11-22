@@ -15,13 +15,23 @@
 //! nothing over or under its band). A goal flies under it while avoidance
 //! is on (`command.limits` code `sensing` when it binds), and the state
 //! publishes it as `sensing`.
+//!
+//! A forward-looking tier (`depth`, `camera`) also holds what a goal flies
+//! to the same rule read along that velocity itself, at any speed
+//! ([`Pilot::unseen_hold`]): the speed cap above is floored for a hover and
+//! read along the way to the target there, and the brake's stand-in for the
+//! unknown beside the vehicle moves with it, so without this a goal crept
+//! on at a quarter of a metre a second into space the camera never saw. Held
+//! so, the nose turns along the way the goal would fly
+//! ([`Pilot::unseen_look`]) until the camera has seen it.
 
 use ados_protocol::pilot::{AvoidMode, Sensing, SensingTier};
 
+use super::STOPPED_MPS;
 use crate::core::world_feed::WORLD_SCAN_MAX_M;
 use crate::core::Pilot;
 use crate::geo::{self, V2};
-use crate::obstacles::SCAN_HORIZON_M;
+use crate::obstacles::{Obstacles, SCAN_HORIZON_M};
 
 /// The reaction time the speed rule plans for, s.
 pub const SENSING_REACT_S: f32 = 0.3;
@@ -36,6 +46,10 @@ const MAX_RAY_GAPS: f32 = 16.0;
 /// A planar horizon point this near the line of motion ends its seen
 /// range, m (as a scan hit ends [`crate::obstacles::Obstacles::ray_distance`]).
 const LATERAL_M: f32 = 0.35;
+/// How long the nose keeps looking along a motion the seen-space hold
+/// stopped, after the hold last cut it, ms: long enough for a turn to
+/// bring the camera round and the map to fill.
+const LOOK_HOLD_MS: u64 = 1500;
 
 /// The speed that stops within `room_m` braking at `a_brk` after
 /// [`SENSING_REACT_S`]: the root of `v·t + v²/(2a) = room`. 0 without room.
@@ -87,6 +101,13 @@ impl Pilot {
         } else {
             0.0
         };
+        let (clear, v) = self.seen_rule(tier, seen);
+        Some(Sensing::new(tier, clear, v))
+    }
+
+    /// The rule on a range `seen` along the motion on `tier`: the range
+    /// trusted and the speed that stops inside it.
+    fn seen_rule(&self, tier: SensingTier, seen: f32) -> (f32, f32) {
         let clear = match tier {
             SensingTier::Camera => seen * CAMERA_RANGE_SHARE,
             _ => seen,
@@ -95,7 +116,47 @@ impl Pilot {
         if tier == SensingTier::Planar {
             v = v.min(PLANAR_MAX_MPS);
         }
-        Some(Sensing::new(tier, clear, v))
+        (clear, v)
+    }
+
+    /// A goal's velocity `v` on a forward-looking tier's live map, held to
+    /// the speed the rule allows along `v` itself, at any speed: motion into
+    /// space the camera has not seen past the margin gets none. `want` is
+    /// the way the goal would fly (else `v`'s); a cut turns the nose along
+    /// it for [`LOOK_HOLD_MS`] ([`Pilot::unseen_look`]). The held velocity
+    /// when it cut, else `None` (avoid off, another tier, no motion).
+    pub(in crate::core) fn unseen_hold(&mut self, v: V2, want: V2, now_ms: u64) -> Option<V2> {
+        if self.settings.pilot.avoid == AvoidMode::Off || !self.world.live_3d(now_ms) {
+            return None;
+        }
+        let tier = self.world.tier();
+        if !matches!(tier, SensingTier::Depth | SensingTier::Camera) {
+            return None;
+        }
+        let s = geo::norm(v);
+        if s < 1e-3 {
+            return None;
+        }
+        let pos = self.pos(now_ms)?;
+        let dir = geo::scale(v, 1.0 / s);
+        let (_, max) = self.seen_rule(tier, self.world_clear_m(pos, dir));
+        if s <= max + 1e-3 {
+            return None;
+        }
+        let look = [want, v].into_iter().find(|w| geo::norm(*w) >= STOPPED_MPS);
+        if let Some(w) = look {
+            self.unseen_look = Some((geo::bearing_of(w), now_ms + LOOK_HOLD_MS));
+        }
+        Some(geo::scale(dir, max))
+    }
+
+    /// The heading a goal turns to while [`Pilot::unseen_hold`] holds its
+    /// motion back (and [`LOOK_HOLD_MS`] after): along the way it would fly,
+    /// so the camera sees it and the hold lets the motion on.
+    pub(in crate::core) fn unseen_look(&self, now_ms: u64) -> Option<f32> {
+        self.unseen_look
+            .filter(|&(_, until)| now_ms < until)
+            .map(|(b, _)| b)
     }
 
     /// The unit direction the range is read along: the velocity, else the
@@ -143,18 +204,23 @@ impl Pilot {
             .fold(f32::INFINITY, f32::min)
     }
 
-    /// The range the planar scans see along `dir`: the nearest horizon
-    /// point beside the line, else the lidar's range.
+    /// The range the planar scans see along `dir`: [`planar_seen_m`].
     fn planar_clear_m(&self, pos: V2, dir: V2, now_ms: u64) -> f32 {
-        self.obstacles
-            .horizon_near(pos, SCAN_HORIZON_M + 1.0, now_ms)
-            .filter_map(|p| {
-                let rel = geo::sub(p, pos);
-                let t = geo::dot(rel, dir);
-                (t > 0.0 && (rel[0] * dir[1] - rel[1] * dir[0]).abs() < LATERAL_M).then_some(t)
-            })
-            .fold(SCAN_HORIZON_M, f32::min)
+        planar_seen_m(&self.obstacles, pos, dir, now_ms)
     }
+}
+
+/// The range the planar scans of `obs` see from `pos` along the unit
+/// `dir`: the nearest horizon point beside the line, else the lidar's
+/// range.
+pub(in crate::core) fn planar_seen_m(obs: &Obstacles, pos: V2, dir: V2, now_ms: u64) -> f32 {
+    obs.horizon_near(pos, SCAN_HORIZON_M + 1.0, now_ms)
+        .filter_map(|p| {
+            let rel = geo::sub(p, pos);
+            let t = geo::dot(rel, dir);
+            (t > 0.0 && (rel[0] * dir[1] - rel[1] * dir[0]).abs() < LATERAL_M).then_some(t)
+        })
+        .fold(SCAN_HORIZON_M, f32::min)
 }
 
 #[cfg(test)]
