@@ -6,7 +6,6 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.124.24] - 2026-11-22
 ## [0.124.25] - 2026-11-22
 
 ### Added
@@ -17,6 +16,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Pilot: the subject brake keeps clear of the nearer of the skill's subject position and the camera track of that subject (at its predicted position, kept its own error further off), taking the faster approach of the two, so a subject position ranged long never lets the vehicle close on the person the camera sees; a camera track last measured at the subject counts as the subject until it is measured again.
 - Vision engine: on the simulator's clock in lockstep the person detector skips a frame that would have arrived while the previous batch ran, so a simulated run detects at the rate the board manages in real time instead of the detector's full rate.
 
+### Fixed
 - Pilot: on a forward-looking tier (`depth`, `camera`) a back-away from the subject or a person while a skill or follow goal flies no longer runs blind. The way back was seen on the way in, so the seen-space hold let the guard back the vehicle down it at up to 1 m/s with the motion 160° off the nose, into walkers who had crossed into it since. A back-away along a way the camera has not looked along in the last second now leaves it at no more than 0.3 m/s; the rest is flown along the way looked along that keeps everyone near clearest over the next 2 s (their own motion counted), never toward anyone near and within the seen-clear range there, and the nose turns at the profile's yaw rate to the clearest way so the back-away can follow it. This applies to goal back-aways only; the person guard in stick flight is unchanged. The trade-off: on a forward camera the nose turns toward the way the vehicle backs, off the subject, for as long as it backs away. On the crossing benchmark (depth and camera tiers, 3 and 5 m/s, both planners, 40 seeds) collisions fell from 13 to 9 of 320 runs, person breaches from 161 to 156, and time spent backing at 0.5 m/s or more over 120° off the nose from 200 s to 5 s.
 
 ## [0.124.24] - 2026-11-22
