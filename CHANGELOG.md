@@ -6,6 +6,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.24] - 2026-11-22
+
+### Security
+- The `url` crate moves to 2.5.9, which fixes a stack overflow in `Url::origin()` on nested `blob:` URLs (RUSTSEC-2026-0592).
+
 ## [0.124.23] - 2026-11-22
 
 ### Changed
