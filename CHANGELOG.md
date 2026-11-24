@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.29] - 2026-11-24
+
 ### Fixed
 - FC link: the router's auto-detect now probes Allwinner `ttyAS*` UARTs even though the serial enumeration never lists them (without libudev it skips ports on the plain platform bus). 0.124.27 and 0.124.28 accepted `ttyAS*` names but never saw one, so a flight controller wired to the Cubie A7S UART2 still went unfound; it now connects on `/dev/ttyAS2`.
 
