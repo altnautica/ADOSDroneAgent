@@ -29,7 +29,13 @@ export interface VisionEngineStatus {
   /** `ready`, `mock` or `unavailable` (the backend cannot run here). */
   backend_state: string;
   backend_reason: string | null;
+  /** The requested backend is not in this agent build: no restart brings it
+   *  up. Absent from an older agent. */
+  backend_runtime_missing?: boolean;
   models: VisionEngineModel[];
+  /** The detector's demand state; its `cameras` names every camera the
+   *  engine runs. Null when the engine wrote no status sidecar. */
+  detection?: { cameras: Record<string, unknown> } | null;
 }
 
 interface LayerChipsState {

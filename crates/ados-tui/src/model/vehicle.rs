@@ -76,6 +76,9 @@ pub struct Telemetry {
     pub local_pos: Option<(f64, f64)>,
     /// The FC's EKF status flags and the report's age (ms).
     pub ekf: Option<(u32, u64)>,
+    /// The FC reported a HOME_POSITION with a position (`home` with a
+    /// non-zero `lat_e7`/`lon_e7`, or a `local_ned` triple).
+    pub home_reported: bool,
 }
 
 impl Telemetry {
@@ -137,6 +140,11 @@ impl Telemetry {
                 .and_then(Value::as_u64)
                 .and_then(|f| u32::try_from(f).ok())
                 .zip(walk(v, &["ekf", "age_ms"]).and_then(Value::as_u64)),
+            home_reported: {
+                let e7 = |k: &str| walk(v, &["home", k]).and_then(Value::as_f64);
+                matches!((e7("lat_e7"), e7("lon_e7")), (Some(lat), Some(lon)) if lat != 0.0 || lon != 0.0)
+                    || walk(v, &["home", "local_ned"]).is_some_and(Value::is_array)
+            },
         }
     }
 }

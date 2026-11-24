@@ -1,8 +1,8 @@
 // The text scale and the top inset of a flight-screen surface that may sit
 // outside the zoned chrome: a map filling the stage or the split pane, the
-// instruments, the vision panel. Text is sized in CSS px times the class
-// scale (×1.33 on a television), the way the zones get it through their CSS
-// zoom; inside a zone (the bottom-left card, the follow strip) the zoom
+// instruments, the vision panel. Text is sized in CSS px times the chrome
+// scale (root / 16, lib/ui-scale.ts), the way the zones get it through their
+// CSS zoom; inside a zone (the bottom-left card, the follow strip) the zoom
 // already applies the scale, so it reads 1 there. A surface the top bar
 // covers is inset below it.
 
@@ -10,8 +10,8 @@ import { useLayoutEffect, useState, type RefObject } from "react";
 
 import { useWidthClass } from "@/hooks/use-width-class";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
-import { gridMeasures } from "@/lib/cockpit-layout";
 import { topBarInset } from "@/lib/minimap-geometry";
+import { useChromeScale } from "@/lib/ui-scale";
 
 const ZONE = "[data-zone-rect]";
 const TOP_BAR = '[data-zone-rect="top_bar"]';
@@ -26,8 +26,9 @@ export interface MapChrome {
 }
 
 export function useMapChrome(ref: RefObject<HTMLElement | null>): MapChrome {
-  const { widthClass, portrait } = useWidthClass();
-  const classScale = portrait ? 1 : gridMeasures(widthClass, false).scale;
+  const { portrait } = useWidthClass();
+  const chrome = useChromeScale();
+  const classScale = portrait ? 1 : chrome;
   const [m, setM] = useState({ zoned: false, insetTop: 0 });
 
   useLayoutEffect(() => {

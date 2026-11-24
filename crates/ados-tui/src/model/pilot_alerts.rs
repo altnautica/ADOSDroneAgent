@@ -281,14 +281,20 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
         }
     }
     // Every distinct PreArm/Arm line the FC repeats: each names its own cause.
-    let mut prearm_seen: Vec<&str> = Vec::new();
+    // A line a readiness item already says (`setup_needed` carries the
+    // calibration PreArm text) is that item's, so it is not listed twice.
+    let mut prearm_seen: Vec<String> = out
+        .iter()
+        .filter(|a| a.id.starts_with("pilot:"))
+        .map(|a| prearm_body(&a.text).unwrap_or(&a.text).to_string())
+        .collect();
     for line in i.prearm.unwrap_or_default() {
         let text = prearm_body(line).unwrap_or(line);
-        if text.is_empty() || prearm_seen.contains(&text) {
+        if text.is_empty() || prearm_seen.iter().any(|s| s == text) {
             continue;
         }
-        prearm_seen.push(text);
         let text = text.to_string();
+        prearm_seen.push(text.clone());
         push(
             &mut out,
             format!("fc:{text}"),

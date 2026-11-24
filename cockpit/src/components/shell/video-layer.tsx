@@ -9,8 +9,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { VideoStatsReadout } from "@/components/feed/video-stats-readout";
-import { useWidthClass } from "@/hooks/use-width-class";
-import { classScale, linkHasNoRf, VIDEO_NOTE_TOP, videoNote } from "@/lib/flight-layout";
+import { linkHasNoRf, VIDEO_NOTE_TOP, videoNote } from "@/lib/flight-layout";
+import { useChromeScale } from "@/lib/ui-scale";
 import { isVideoDebug } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
 import { useVideoTransport } from "@/shared/use-video-transport";
@@ -68,7 +68,7 @@ export function VideoLayer({
   }, [snapshot, setVideo, onSnapshot]);
   useEffect(() => (ownsStore ? () => setVideo(null) : undefined), [ownsStore, setVideo]);
 
-  const k = classScale(useWidthClass().widthClass);
+  const k = useChromeScale();
 
   // A ground station whose radio hears nothing from the drone gets no video:
   // say so rather than "Connecting to video…" for ever.

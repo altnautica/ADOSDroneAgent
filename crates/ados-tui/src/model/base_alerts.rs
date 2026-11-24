@@ -113,7 +113,7 @@ pub fn battery_pct(battery: Option<&Batteries>, tel: Option<&Telemetry>) -> Opti
 }
 
 /// The low band: the engine's reserve when it is higher than the fallback.
-fn battery_low_pct(battery: Option<&Batteries>) -> f64 {
+pub fn battery_low_pct(battery: Option<&Batteries>) -> f64 {
     let reserve = battery.and_then(|b| b.reserve_percent).unwrap_or(0) as f64;
     battery_low_fallback_pct().max(reserve)
 }

@@ -77,6 +77,7 @@ import { isKiosk } from "@/lib/kiosk";
 import { resolveActiveCameraId } from "@/lib/overlay-geometry";
 import { connectPilotLink, pilotLinkSource } from "@/lib/pilot-link";
 import { useFeedHeroHold } from "@/lib/stream-quality";
+import { useChromeScale } from "@/lib/ui-scale";
 import { isDemoMode } from "@/lib/utils";
 import { useProfile } from "@/shared/use-profile";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
@@ -113,7 +114,9 @@ export function FeedScreen() {
   const size = useElementSize(rootRef);
   const glove = useSettingsStore((s) => s.glove);
   const { widthClass, portrait } = useWidthClass();
-  const m = gridMeasures(widthClass, glove);
+  // The chrome scale is the root against its 16 px reference (lib/ui-scale):
+  // the zones' CSS zoom tracks the panel and the UI-scale knob smoothly.
+  const m = gridMeasures(widthClass, glove, useChromeScale());
   const vehicleId = useStatusStore((s) => (groundStation ? s.status?.paired_drone?.device_id : null) ?? "local");
   const bindVehicle = useCockpitViewStore((s) => s.bindVehicle);
   const view = useCockpitViewStore((s) => s.view);
@@ -125,6 +128,11 @@ export function FeedScreen() {
     () => extensions.flatMap((ext) => mountablePanels(ext, "video.overlay").map((p) => pluginLayerId(ext.pluginId, p.id))),
     [extensions],
   );
+
+  // A ground station has no vision engine: no Vision view there.
+  useEffect(() => {
+    useCockpitViewStore.getState().setVisionOffered(!groundStation);
+  }, [groundStation]);
 
   useEffect(() => {
     bindVehicle(vehicleId, m.defaultLevel);

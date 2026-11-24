@@ -10,12 +10,13 @@
 // - hidden: no rail, only a slim tab at the screen's left edge that brings it
 //   back. In landscape the tab sits in a 48 px slot of its own beside the
 //   screen, so its hit area never covers the Feed's flight-action column.
-// The rail, icons and labels are sized in bounded px, not rem: the cockpit's
-// root rem grows with the viewport, and a rem-sized rail grew with it. Every
-// entry stays at least 48 px tall, so a drone's eleven tabs fit a 1280×800
-// kiosk without scrolling. When they still do not fit (glove mode, a short
-// window) the rail scrolls, and a chevron strip at the clipped end, in the
-// flow rather than over the entries, says there is more.
+// The rail, icons and labels are sized in rem, so they keep the same
+// proportion to the screen beside them at every size (the root is bounded,
+// lib/ui-scale.ts). Every entry stays at least 48 px tall, so a drone's
+// eleven tabs fit a 1280×800 kiosk without scrolling. When they still do not
+// fit (glove mode, a short window) the rail scrolls, and a chevron strip at
+// the clipped end, in the flow rather than over the entries, says there is
+// more.
 
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsLeft } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -39,10 +40,10 @@ function MoreHint({ axis, end, label }: { axis: "x" | "y"; end: "before" | "afte
     <div
       role="img"
       aria-label={label}
-      className={cn("pointer-events-none flex shrink-0 items-center justify-center text-muted-foreground", axis === "y" ? "h-[18px] w-full" : "h-full w-[18px]")}
+      className={cn("pointer-events-none flex shrink-0 items-center justify-center text-muted-foreground", axis === "y" ? "h-[1.125rem] w-full" : "h-full w-[1.125rem]")}
       data-testid={`rail-more-${end}`}
     >
-      <Icon className="h-[14px] w-[14px]" aria-hidden />
+      <Icon className="h-[0.875rem] w-[0.875rem]" aria-hidden />
     </div>
   );
 }
@@ -130,7 +131,7 @@ export function MenuRail() {
         <nav
           ref={navRef}
           onScroll={measure}
-          className="flex min-h-0 min-w-0 flex-1 gap-[2px] overflow-auto p-[4px] [scrollbar-width:none] landscape:flex-col portrait:flex-row"
+          className="flex min-h-0 min-w-0 flex-1 gap-[0.125rem] overflow-auto p-[0.25rem] [scrollbar-width:none] landscape:flex-col portrait:flex-row"
           aria-label={t("cockpit.shell.menu")}
         >
           {tabs.map((tab, index) => {
@@ -150,14 +151,14 @@ export function MenuRail() {
                   goTab(tab.id);
                 }}
                 className={cn(
-                  "flex shrink-0 flex-col items-center justify-center gap-[3px] rounded-md px-[2px] py-[5px] transition-colors portrait:flex-[1_0_auto] portrait:px-[6px]",
+                  "flex shrink-0 flex-col items-center justify-center gap-[0.2rem] rounded-md px-[0.125rem] py-[0.3rem] transition-colors portrait:flex-[1_0_auto] portrait:px-[0.4rem]",
                   "min-h-[calc(48px*var(--touch-scale))] min-w-[calc(48px*var(--touch-scale))]",
                   active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-surface-foreground",
                 )}
                 data-testid="rail-item"
               >
-                {Icon ? <Icon className="h-[22px] w-[22px] shrink-0" aria-hidden /> : null}
-                <span className="whitespace-nowrap text-[11px] font-medium leading-tight" data-testid="rail-label" aria-hidden>
+                {Icon ? <Icon className="h-[1.375rem] w-[1.375rem] shrink-0" aria-hidden /> : null}
+                <span className="whitespace-nowrap text-[0.6875rem] font-medium leading-tight" data-testid="rail-label" aria-hidden>
                   {t(`rail.label.${tab.id}`, { defaultValue: tab.title })}
                 </span>
               </button>
@@ -174,7 +175,7 @@ export function MenuRail() {
         className="flex min-h-[calc(48px*var(--touch-scale))] min-w-[calc(48px*var(--touch-scale))] shrink-0 items-center justify-center text-muted-foreground hover:bg-muted hover:text-surface-foreground landscape:border-t portrait:border-l border-border"
         data-testid="rail-toggle"
       >
-        <ChevronsLeft className="h-[20px] w-[20px]" aria-hidden />
+        <ChevronsLeft className="h-[1.25rem] w-[1.25rem]" aria-hidden />
       </button>
     </div>
   );

@@ -104,8 +104,8 @@
       "offline": "offline",
       "board": "board",
       "version": "version",
-      "uptimeTitle": "uptime",
-      "uptime": "up {{uptime}}",
+      "uptimeTitle": "How long the agent has run since it last started",
+      "uptime": "agent up {{uptime}}",
       "settings": "settings",
       "brand": "ADOS"
     },
@@ -1793,6 +1793,8 @@
       "offHint": "Turn it on to see depth, surfaces and detections.",
       "unreachable": "Vision is not responding",
       "unavailable": "Vision cannot run here",
+      "noRuntime": "This agent build has no detector runtime",
+      "noRuntimeHint": "Restarting will not help. Install an agent build that includes a detector runtime.",
       "turnOn": "Turn on vision",
       "restart": "Restart vision",
       "armed": "Disarm to change vision",
@@ -1821,7 +1823,8 @@
       "empty": "No detections. Point the camera at people or vehicles."
     },
     "picker": {
-      "running": "In use: {{model}}"
+      "running": "In use: {{model}}",
+      "notRunning": "Chosen, not running"
     },
     "badge": {
       "engineOff": "Vision engine is off",
@@ -2259,7 +2262,8 @@
       "profile": "Profile",
       "roleHint": "role {{role}}",
       "version": "Agent version",
-      "uptime": "Uptime",
+      "uptime": "System uptime",
+      "agentUptime": "Agent uptime",
       "board": "Board",
       "ramInstalled": "RAM installed",
       "rebootGuard": "Hold to reboot",

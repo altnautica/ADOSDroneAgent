@@ -151,6 +151,43 @@
     }
   },
   {
+    "name": "prearm_said_by_a_readiness_item_is_listed_once",
+    "input": {
+      "alerts": [],
+      "readiness": [
+        {
+          "id": "setup_needed",
+          "ok": false,
+          "severity": "block",
+          "msg": "Compass 1 not healthy"
+        }
+      ],
+      "prearm": [
+        "PreArm: Compass 1 not healthy",
+        "PreArm: RC not calibrated"
+      ],
+      "fc_status": [],
+      "storage_pct": 40,
+      "pilot_age_ms": 100,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": []
+    },
+    "expected": {
+      "severity": "critical",
+      "text": "1 blocking · 1 warning",
+      "count": 2,
+      "ids": [
+        "pilot:setup_needed",
+        "fc:RC not calibrated"
+      ],
+      "groups": [
+        "setup",
+        "flight_controller"
+      ]
+    }
+  },
+  {
     "name": "prearm_unknown_is_absent",
     "input": {
       "alerts": [],

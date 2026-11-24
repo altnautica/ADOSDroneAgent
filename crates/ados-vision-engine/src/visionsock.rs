@@ -242,6 +242,10 @@ async fn handle_list_models(engine: &Arc<VisionEngine>) -> Result<Value> {
             "backend_state",
             Value::from(engine.backend_state().as_str()),
         ),
+        (
+            "backend_runtime_missing",
+            Value::Boolean(engine.backend_runtime_missing()),
+        ),
     ];
     if let Some(reason) = engine.backend_unavailable_reason() {
         reply.push(("backend_reason", Value::from(reason)));
@@ -794,6 +798,10 @@ mod tests {
         let map = as_map(&resp);
         assert_eq!(get(&map, "backend_state"), Some(Value::from("mock")));
         assert_eq!(get(&map, "backend_reason"), None);
+        assert_eq!(
+            get(&map, "backend_runtime_missing"),
+            Some(Value::Boolean(false))
+        );
 
         let missing = VisionEngine::new(
             Box::new(crate::backend::UnavailableBackend::new(
@@ -814,6 +822,10 @@ mod tests {
         assert_eq!(
             get(&map, "backend_inference_capable"),
             Some(Value::Boolean(false))
+        );
+        assert_eq!(
+            get(&map, "backend_runtime_missing"),
+            Some(Value::Boolean(true))
         );
     }
 

@@ -15,10 +15,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useTourCapturesPad, useTourStage } from "@/components/controls/tour-stage";
-import { useWidthClass } from "@/hooks/use-width-class";
-import { gridMeasures } from "@/lib/cockpit-layout";
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { TOUR_BUTTONS, TOUR_CARDS, tourCardRect, tourPadCommand, tourStep, type Rect, type TourCursor } from "@/lib/controller-tour";
+import { useChromeScale } from "@/lib/ui-scale";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
 import { useControlsStore } from "@/stores/controls-store";
@@ -55,8 +54,7 @@ export function ControllerTour() {
   const stage = useTourStage();
   const markSeen = useControlsStore((s) => s.markTourSeen);
   const captures = useTourCapturesPad();
-  const { widthClass } = useWidthClass();
-  const scale = gridMeasures(widthClass, false).scale;
+  const scale = useChromeScale();
   const [cursor, setCursor] = useState<TourCursor>({ card: 0, focus: 0 });
   const cardRef = useRef<HTMLDivElement>(null);
   const [rect, setRect] = useState<Rect | null>(null);

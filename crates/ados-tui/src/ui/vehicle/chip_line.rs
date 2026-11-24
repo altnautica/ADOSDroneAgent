@@ -10,6 +10,7 @@ use crate::model::base_alerts::{base_alerts, BaseInputs};
 use crate::model::flight_state::{chip_inputs, flight_state_chip, stale_after_ms, ChipContext};
 use crate::model::nav_source;
 use crate::model::pilot_alerts::{pill_alerts, PillAlert, PillInputs};
+use crate::model::preflight::{preflight_failing, LIVE_FRESH_MS};
 
 use super::{pilot, VehicleTab};
 
@@ -70,17 +71,21 @@ impl VehicleTab {
         let tel = self.tel.as_ref().filter(|_| self.hidden(core).is_none());
         let auto = self.auto.as_ref();
         let pilot = auto.and_then(|a| a.pilot.as_ref());
+        let ms_since_live = self
+            .live_at
+            .map(|at| core.now.saturating_duration_since(at).as_millis() as u64);
         let base = base_alerts(&BaseInputs {
             tel,
             battery: self.bat.as_ref(),
-            ms_since_live: self
-                .live_at
-                .map(|at| core.now.saturating_duration_since(at).as_millis() as u64),
+            ms_since_live,
             armed_at_last_live: self.armed_at_live,
             fleet_apply: core.dash().and_then(|d| d.fleet_apply.as_ref()),
         });
         // The arm state: the pilot's when it publishes, else the FC's.
         let armed = pilot.map_or(tel.and_then(|t| t.armed), |p| p.armed);
+        let live =
+            tel.is_some_and(|t| t.vehicle) && ms_since_live.is_some_and(|ms| ms < LIVE_FRESH_MS);
+        let preflight = preflight_failing(tel, self.bat.as_ref(), live, &base, armed);
         pill_alerts(&PillInputs {
             alerts: &base,
             pilot,
@@ -89,7 +94,7 @@ impl VehicleTab {
             storage_pct: core.dash().and_then(|d| d.storage_pct),
             agent_unreachable: core.stale(),
             arm_unknown: armed.is_none(),
-            preflight_failing: &[],
+            preflight_failing: &preflight,
             nav_source: Some(nav_source::resolve(
                 tel,
                 auto.and_then(|a| a.nav.as_ref()),

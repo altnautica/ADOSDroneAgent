@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The labelled rail: a short label under each icon, the full page name as the
-// entry's accessible name, one Hide control, and a width bounded in px so it
-// never grows with the viewport-scaled root rem.
+// entry's accessible name, one Hide control, and a width in rem so it keeps
+// its proportion to the bounded root (lib/ui-scale.ts) at every size.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -12,6 +12,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 
 import i18n from "@/shared/i18n";
 import en from "@/shared/locales/en.json";
+import { ROOT_FONT } from "@/lib/ui-scale";
 import { SCREEN_TABLE } from "@/nav/screen-table";
 import { useSettingsStore } from "@/stores/settings-store";
 
@@ -64,11 +65,12 @@ describe("the labelled menu rail", () => {
     expect(useSettingsStore.getState().rail).toBe("labelled");
   });
 
-  it("is bounded in px, between 64 and 76", () => {
+  it("is sized in rem against the bounded root: 72-99 px wide", () => {
     const css = readFileSync(path.resolve(__dirname, "../../styles/globals.css"), "utf8");
-    const m = /--chrome-rail:\s*clamp\((\d+)px,[^;]*,\s*(\d+)px\);/.exec(css);
+    const m = /--chrome-rail:\s*calc\(([\d.]+)rem \* var\(--touch-scale\)\);/.exec(css);
     expect(m).not.toBeNull();
-    expect(Number(m![1])).toBeGreaterThanOrEqual(64);
-    expect(Number(m![2])).toBeLessThanOrEqual(76);
+    const rem = Number(m![1]);
+    expect(rem * ROOT_FONT.minPx).toBeGreaterThanOrEqual(64);
+    expect(rem * ROOT_FONT.maxPx).toBeLessThanOrEqual(100);
   });
 });

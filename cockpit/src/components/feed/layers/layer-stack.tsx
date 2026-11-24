@@ -13,7 +13,9 @@
 // - the nav-stream view lease names the on-screen camera and its enabled
 //   layers, re-sent every 2 s, dropped when the page is hidden or unmounted;
 // - depth and surfaces each hold a vision-engine demand lease
-//   (`POST /api/vision/demand {kind, camera_id, hold_s: 6}` every 2 s).
+//   (`POST /api/vision/demand {kind, camera_id, hold_s: 6}` every 2 s), only
+//   on a camera the engine's status names: it refuses any other (a node whose
+//   engine runs no camera, a ground station).
 // The loop stops while the page is hidden. The TV / kiosk class paints at
 // most 30 frames a second, since the kiosk's GPU also decodes the video.
 
@@ -33,6 +35,9 @@ import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useLayerChipsStore } from "@/stores/layer-chips-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useNodeIdentity } from "@/shared/use-profile";
+
+import { useVisionEngine } from "./use-vision-engine";
+import { engineHasCamera } from "./vision-state";
 
 /** Layers the agent computes per camera, named in the view lease. */
 const LEASED_LAYERS = ["ar_route", "ar_motion", "obstacles", "depth", "surfaces"] as const;
@@ -191,8 +196,11 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, cameraId, layerKey]);
 
-  useVisionDemand(DEMAND_LAYERS[0], cameraId, live && layers.has("depth"));
-  useVisionDemand(DEMAND_LAYERS[1], cameraId, live && layers.has("surfaces"));
+  // A demand only on a camera the engine's status names: it refuses any other.
+  useVisionEngine(live && (layers.has("depth") || layers.has("surfaces")));
+  const engineCamera = useLayerChipsStore((s) => engineHasCamera(s.vision, s.visionError, cameraId));
+  useVisionDemand(DEMAND_LAYERS[0], cameraId, engineCamera && live && layers.has("depth"));
+  useVisionDemand(DEMAND_LAYERS[1], cameraId, engineCamera && live && layers.has("surfaces"));
 
   // `O` cycles the layer level (Full → Route → Off).
   useEffect(() => {

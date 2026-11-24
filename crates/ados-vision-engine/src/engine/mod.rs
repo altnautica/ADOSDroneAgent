@@ -311,6 +311,12 @@ impl VisionEngine {
         self.backend.unavailable_reason()
     }
 
+    /// Whether the requested backend is absent from this build (no restart
+    /// can bring it up).
+    pub fn backend_runtime_missing(&self) -> bool {
+        self.backend.runtime_missing()
+    }
+
     /// The camera control routes. The source factory registers each camera
     /// it opens; `camera.control.set` looks them up.
     pub fn camera_controls(&self) -> &CameraControls {

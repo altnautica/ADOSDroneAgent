@@ -81,3 +81,40 @@ pub fn needs_calibration(text: &str) -> bool {
             || l.contains("accel")
             || l.contains("gyro"))
 }
+
+/// The text of a PreArm / Arm line without that prefix ("PreArm: Compass 1
+/// not healthy" → "Compass 1 not healthy"); any other text unchanged.
+pub fn without_arm_prefix(text: &str) -> &str {
+    ["prearm:", "arm:"]
+        .iter()
+        .find(|p| {
+            text.get(..p.len())
+                .is_some_and(|h| h.eq_ignore_ascii_case(p))
+        })
+        .map_or(text, |p| text[p.len()..].trim_start())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_arm_prefix;
+
+    #[test]
+    fn the_arm_prefix_is_dropped_once() {
+        assert_eq!(
+            without_arm_prefix("PreArm: Compass 1 not healthy"),
+            "Compass 1 not healthy"
+        );
+        assert_eq!(
+            without_arm_prefix("Arm: Gyros not calibrated"),
+            "Gyros not calibrated"
+        );
+        assert_eq!(
+            without_arm_prefix("PREARM:Accels inconsistent"),
+            "Accels inconsistent"
+        );
+        assert_eq!(
+            without_arm_prefix("Compass 1 not healthy"),
+            "Compass 1 not healthy"
+        );
+    }
+}

@@ -6,7 +6,9 @@
 // top-bar layer button, the Menu's View entry, the D-pad and the `V` / `O`
 // keys. The depth layer's options (`layers.json` `options.depth`: range Off /
 // 2 m / 5 m, Solid / Outline) persist with them. The digital zoom of the
-// shown video lasts the session.
+// shown video lasts the session. A node with no vision engine of its own (a
+// ground station) is not offered the Vision view: the cycle skips it, a set
+// to it is ignored, and a stored Vision view falls back to Pilot.
 
 import { create } from "zustand";
 
@@ -77,6 +79,9 @@ function save(vehicle: string, p: Persisted): void {
 
 export interface CockpitViewState extends Persisted {
   vehicle: string;
+  /** Whether the Vision view is offered (false on a ground station). */
+  visionOffered: boolean;
+  setVisionOffered: (offered: boolean) => void;
   /** Load the stored choice for `vehicle`; with none stored, the level is
    *  the width class's default (`layout.json` `default_layer_level`). */
   bindVehicle: (vehicle: string, defaultLevel: LayerLevel) => void;
@@ -102,12 +107,23 @@ export const useCockpitViewStore = create<CockpitViewState>((set, get) => {
   return {
     vehicle: "",
     ...load(""),
+    visionOffered: true,
+    setVisionOffered: (visionOffered) => {
+      set({ visionOffered });
+      if (!visionOffered && get().view === "vision") set({ view: "pilot" });
+    },
     bindVehicle: (vehicle, defaultLevel) => {
       if (vehicle === get().vehicle) return;
-      set({ vehicle, ...load(vehicle, defaultLevel) });
+      const p = load(vehicle, defaultLevel);
+      set({ vehicle, ...p, view: p.view === "vision" && !get().visionOffered ? "pilot" : p.view });
     },
-    setView: (view) => update({ view }),
-    cycleView: () => update({ view: nextView(get().view) }),
+    setView: (view) => {
+      if (view !== "vision" || get().visionOffered) update({ view });
+    },
+    cycleView: () => {
+      const next = nextView(get().view);
+      update({ view: next === "vision" && !get().visionOffered ? nextView(next) : next });
+    },
     setLevel: (level) => update({ level }),
     cycleLevel: () => update({ level: nextLevel(get().level) }),
     toggleLayer: (id, on) => {

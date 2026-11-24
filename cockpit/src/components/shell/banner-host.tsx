@@ -2,17 +2,17 @@
 // agent unreachable, a drone's flight controller disconnected, and the
 // one-shot cloud-posture nudge. A full-bleed screen (the Feed) has its own
 // alert stack, so there only the agent-offline banner shows. The `err` and
-// `warn` banners wrap to two lines and size in px times the width class's
-// chrome scale; the advisory cloud line stays on one truncated line. Off the
-// flight screen it also carries the one-time aircraft setup offer.
+// `warn` banners wrap to two lines and size in px times the chrome scale
+// (root / 16, lib/ui-scale.ts); the advisory cloud line stays on one
+// truncated line. Off the flight screen it also carries the one-time
+// aircraft setup offer.
 
 import { AlertCircle, AlertTriangle, Cloud } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { SetupOfferBanner } from "@/components/shell/setup-offer-banner";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
-import { useWidthClass } from "@/hooks/use-width-class";
-import { gridMeasures } from "@/lib/cockpit-layout";
+import { useChromeScale } from "@/lib/ui-scale";
 import { bannerTextStyle, shellBanners } from "@/lib/shell-banners";
 import { cn } from "@/lib/utils";
 import { useProfile } from "@/shared/use-profile";
@@ -30,8 +30,7 @@ export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
   const profile = useProfile();
   const goTab = useNavStore((s) => s.goTab);
   const nudge = useCloudPostureNudge();
-  const { widthClass } = useWidthClass();
-  const scale = gridMeasures(widthClass, false).scale;
+  const scale = useChromeScale();
 
   const banners = shellBanners({ statusStale: stale, refusal, profile, fcConnected, hasStatus }).filter(
     (b) => !fullBleed || b.id === "agent-offline",

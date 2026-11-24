@@ -10,8 +10,9 @@
 //   screen. It is what `streamQualityOf` reads back: High while the node lists
 //   that pinned lease.
 // Both are shared hero holds (`@/shared/hero-hold`): renewed at a third of the
-// lease, a failed renewal retried within seconds, a node without the route (a
-// ground station) left alone. Demo mode takes neither.
+// lease, a failed renewal retried within seconds. A ground station has no
+// profile route, so the Feed takes no hold there (nor before the profile is
+// known). Demo mode takes neither.
 
 import { create } from "zustand";
 
@@ -20,6 +21,7 @@ import { isDemoMode } from "@/lib/utils";
 import { ApiError, apiFetch, errorDetail } from "@/shared/api-fetch";
 import { toast } from "@/shared/api/toast";
 import { createHeroHold, useHeroHold, VIDEO_PROFILE_PATH, type VideoProfileState } from "@/shared/hero-hold";
+import { useProfile } from "@/shared/use-profile";
 
 export const STREAM_QUALITIES = ["auto", "high"] as const;
 export type StreamQuality = (typeof STREAM_QUALITIES)[number];
@@ -32,9 +34,11 @@ const feedHold = createHeroHold(FEED_HOLDER);
 const pinHold = createHeroHold(LEASE_OWNER, { graceMs: 0 });
 let releasePin: (() => void) | null = null;
 
-/** The Feed holds the drone on hero while it is mounted and shown. */
+/** The Feed holds the drone on hero while it is mounted and shown, on any
+ *  node but a ground station. */
 export function useFeedHeroHold(): void {
-  useHeroHold(feedHold, !isDemoMode());
+  const profile = useProfile();
+  useHeroHold(feedHold, !isDemoMode() && profile !== null && profile !== "ground_station");
 }
 
 /** The quality this window has chosen, read from the profile state: High

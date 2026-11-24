@@ -6,6 +6,7 @@ import layersJson from "@/shared/cockpit-spec/layers.json";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { gridMeasures, widthClassFor } from "@/lib/cockpit-layout";
+import { chromeScale } from "@/lib/ui-scale";
 import { BUILTIN_LAYERS, COCKPIT_VIEWS, effectiveLayers, LAYER_LEVELS } from "@/lib/cockpit-view";
 import {
   barFull,
@@ -20,7 +21,6 @@ import {
   videoHasSource,
   videoNote,
   linkHasNoRf,
-  classScale,
   FLIGHT_PX,
   flightLayout,
   HIT_AREA,
@@ -39,12 +39,21 @@ import {
 const VIEWPORTS = [
   { name: "kiosk 1920x1080", width: 1920, height: 1080, kiosk: true },
   { name: "1920x1080", width: 1920, height: 1080, kiosk: false },
+  { name: "2560x1440", width: 2560, height: 1440, kiosk: false },
+  { name: "1440x900", width: 1440, height: 900, kiosk: false },
+  { name: "1366x768", width: 1366, height: 768, kiosk: false },
   { name: "1280x800", width: 1280, height: 800, kiosk: false },
+  { name: "kiosk 1280x800", width: 1280, height: 800, kiosk: true },
+  { name: "kiosk 1024x600", width: 1024, height: 600, kiosk: true },
+  { name: "kiosk 800x480", width: 800, height: 480, kiosk: true },
   { name: "900x600", width: 900, height: 600, kiosk: false },
   { name: "760x480", width: 760, height: 480, kiosk: false },
   { name: "580x360", width: 580, height: 360, kiosk: false },
   { name: "kiosk 1280x720", width: 1280, height: 720, kiosk: true },
 ] as const;
+
+/** The chrome scale the Feed draws at in this window (lib/ui-scale.ts). */
+const scaleAt = (vp: (typeof VIEWPORTS)[number]) => chromeScale(vp.width, vp.height);
 
 function layoutsFor(vp: (typeof VIEWPORTS)[number]): { label: string; L: FlightLayout }[] {
   const widthClass = widthClassFor(vp.width, vp.kiosk);
@@ -53,7 +62,7 @@ function layoutsFor(vp: (typeof VIEWPORTS)[number]): { label: string; L: FlightL
     for (const view of COCKPIT_VIEWS)
       for (const strip of [false, true])
         for (const gimbal of [false, true]) {
-          const m = gridMeasures(widthClass, glove);
+          const m = gridMeasures(widthClass, glove, scaleAt(vp));
           out.push({
             label: `${vp.name} ${view}${strip ? " strip" : ""}${gimbal ? " gimbal" : ""}${glove ? " glove" : ""}`,
             L: flightLayout({ width: vp.width, height: vp.height, m, widthClass, view, flies: true, strip, gimbal, splitRatio: 0.6 }),
@@ -108,7 +117,7 @@ describe("the flight screen zones (cockpit spec layout.json)", () => {
         expect(L.stop.x).toBeGreaterThanOrEqual(L.topBar.x);
         expect(L.stop.x + L.stop.w).toBeLessThanOrEqual(L.topBar.x + L.topBar.w);
         // The items that never move into the Menu fit the bar at its narrowest.
-        const s = gridMeasures(widthClassFor(vp.width, vp.kiosk), false).scale;
+        const s = scaleAt(vp);
         expect(L.topBar.w / s, `${label}: bar too narrow`).toBeGreaterThanOrEqual(FLIGHT_PX.barMinW);
       }
     });
@@ -123,7 +132,7 @@ describe("the flight screen zones (cockpit spec layout.json)", () => {
     const m = gridMeasures("medium", false);
     const L = flightLayout({ width: 760, height: 480, m, widthClass: "medium", view: "pilot", flies: true, strip: false, gimbal: true, splitRatio: 0.6 });
     expect(L.rightItems).not.toContain("gimbal_pad");
-    const big = flightLayout({ width: 1280, height: 800, m: gridMeasures("expanded", false), widthClass: "expanded", view: "pilot", flies: true, strip: false, gimbal: true, splitRatio: 0.6 });
+    const big = flightLayout({ width: 1280, height: 800, m: gridMeasures("expanded", false, chromeScale(1280, 800)), widthClass: "expanded", view: "pilot", flies: true, strip: false, gimbal: true, splitRatio: 0.6 });
     expect(big.rightItems).toEqual(["shutter", "photo_video_switch", "zoom", "gimbal_pad", "camera_settings"]);
   });
 
@@ -134,9 +143,9 @@ describe("the flight screen zones (cockpit spec layout.json)", () => {
       [1280, 800, "expanded", true],
       [1920, 1080, "tv", true],
     ] as const) {
-      const L = flightLayout({ width: w, height: h, m: gridMeasures(wc, false), widthClass: wc, view: "pilot", flies: true, strip: false, gimbal: false, splitRatio: 0.5 });
+      const s = chromeScale(w, h);
+      const L = flightLayout({ width: w, height: h, m: gridMeasures(wc, false, s), widthClass: wc, view: "pilot", flies: true, strip: false, gimbal: false, splitRatio: 0.5 });
       expect(L.leftLabels, wc).toBe(labels);
-      const s = gridMeasures(wc, false).scale;
       const item = L.leftButtonPx + (labels ? FLIGHT_PX.leftLabelH : 0);
       expect(L.leftColumn!.h / s).toBeCloseTo(3 * item + 2 * L.leftGapPx);
       if (labels) expect(L.leftColumn!.w / s).toBeGreaterThanOrEqual(FLIGHT_PX.leftLabelW);
@@ -152,6 +161,19 @@ describe("the flight screen zones (cockpit spec layout.json)", () => {
     const L = flightLayout({ width: 1280, height: 800, m: gridMeasures("expanded", false), widthClass: "expanded", view: "pilot", flies: true, strip: false, gimbal: false, splitRatio: 0.6 });
     expect(L.hud.x + L.hud.w / 2).toBeCloseTo(640);
     expect(L.hud.y + L.hud.h / 2).toBeCloseTo(400);
+  });
+
+  it("shrinks a tv card on the 800×480 kiosk so the row sits at the bottom and the instruments keep their band", () => {
+    const m = gridMeasures(widthClassFor(800, true), false, chromeScale(800, 480));
+    const L = flightLayout({ width: 800, height: 480, m, widthClass: "tv", view: "pilot", flies: true, strip: false, gimbal: true, splitRatio: 0.6 });
+    expect(L.card!.w).toBeLessThan(280);
+    expect(L.card!.w).toBeGreaterThanOrEqual(FLIGHT_PX.cardMinW);
+    expect(L.card!.w / L.card!.h).toBeCloseTo(280 / 180);
+    expect(L.bottomRow!.y + L.bottomRow!.h).toBeCloseTo(480 - FLIGHT_PX.edge);
+    expect(L.hud.h).toBeGreaterThan(120);
+    // A panel with room keeps the class's card.
+    const wide = flightLayout({ width: 1920, height: 1080, m: gridMeasures("tv", false, 1.3), widthClass: "tv", view: "pilot", flies: true, strip: false, gimbal: true, splitRatio: 0.6 });
+    expect(wide.card!.w).toBeCloseTo(280 * 1.3);
   });
 });
 
@@ -270,9 +292,9 @@ describe("the no-picture note", () => {
     expect(video).not.toContain("No video source");
   });
 
-  it("is sized in px × the class scale", () => {
-    expect(classScale("tv")).toBe(layoutJson.classes.tv.scale);
-    expect(classScale("medium")).toBe(1);
+  it("is sized in px × the chrome scale", () => {
+    const video = readFileSync(path.resolve(__dirname, "../components/shell/video-layer.tsx"), "utf8");
+    expect(video).toContain("const k = useChromeScale();");
   });
 });
 
@@ -305,10 +327,12 @@ describe("the top bar's cells from the spec", () => {
     expect(stack).toContain("severityTextColor(level)");
   });
 
-  it("a tv label is never below label_min_px", () => {
-    expect(labelPx(11, "tv")).toBe(16);
-    expect(labelPx(14, "tv")).toBeCloseTo(14 * 1.33);
-    expect(labelPx(11, "medium")).toBe(11);
+  it("a tv label reads at label_min_px on a 1080p television, in proportion on a smaller panel", () => {
+    expect(labelPx(11, layoutJson.classes.tv.scale, "tv")).toBeCloseTo(layoutJson.classes.tv.label_min_px);
+    expect(labelPx(11, 1, "tv")).toBeCloseTo(layoutJson.classes.tv.label_min_px / layoutJson.classes.tv.scale);
+    expect(labelPx(14, 1.3, "tv")).toBeCloseTo(14 * 1.3);
+    expect(labelPx(11, 1, "medium")).toBe(11);
+    expect(labelPx(11, 1.125, "expanded")).toBeCloseTo(12.375);
   });
 
   it("the alert stack and the nav-source popover draw their words from the spec", () => {
@@ -405,9 +429,9 @@ describe("the newest vehicle frame's age", () => {
 });
 
 describe("the Menu's rows", () => {
-  it("read at the chrome bar type scaled by class, a tv's never below its label floor", () => {
-    expect(menuTextPx("medium")).toBe(13);
-    expect(menuTextPx("tv")).toBeCloseTo(13 * 1.33);
+  it("read at the chrome bar type at the chrome scale, a tv's never below its label floor", () => {
+    expect(menuTextPx(1, "medium")).toBe(13);
+    expect(menuTextPx(1.3, "tv")).toBeCloseTo(13 * 1.3);
     const menu = readFileSync(path.resolve(__dirname, "../components/shell/quick-menu.tsx"), "utf8");
     // The entry rows and the extension-panel buttons both take the size.
     expect(menu.match(/menuTextPx\(/g)?.length).toBeGreaterThanOrEqual(2);

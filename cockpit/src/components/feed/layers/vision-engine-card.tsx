@@ -7,6 +7,8 @@
 //   `ados-vision` unit, then the shared 2 s status poll watches it come up
 //   for up to 30 s.
 // - Not responding while enabled, or its backend unavailable: Restart vision.
+// - A build without the backend's runtime: says so, with no action, since no
+//   restart can bring it up.
 // - An agent that refuses to restart the unit on its own: vision starts after
 //   the agent restarts, so the card offers that restart instead (disarmed only).
 // - Armed: every action is disabled with the reason.
@@ -36,6 +38,7 @@ const DOT: Readonly<Record<EngineCardState, string>> = {
   needs_agent_restart: "bg-amber-400",
   unreachable: "bg-red-400",
   unavailable: "bg-red-400",
+  no_runtime: "bg-red-400",
   start_timeout: "bg-red-400",
 };
 
@@ -104,6 +107,7 @@ export function VisionEngineCard() {
     needs_agent_restart: t("vision.engine.needsAgentRestart"),
     unreachable: t("vision.engine.unreachable"),
     unavailable: t("vision.engine.unavailable"),
+    no_runtime: t("vision.engine.noRuntime"),
     start_timeout: t("vision.engine.startTimeout"),
   };
   const busy = state === "starting" || state === "agent_restarting";
@@ -134,6 +138,7 @@ export function VisionEngineCard() {
       ) : null}
       {state === "off" ? <p className="text-[0.85em] text-white/60">{t("vision.engine.offHint")}</p> : null}
       {state === "unavailable" && status?.backend_reason ? <p className="text-[0.85em] text-amber-400">{status.backend_reason}</p> : null}
+      {state === "no_runtime" ? <p className="text-[0.85em] text-white/60">{t("vision.engine.noRuntimeHint")}</p> : null}
       {state === "off" ? (
         <button type="button" className={PRIMARY} disabled={armed} onClick={() => void turnOn()}>
           {t("vision.engine.turnOn")}
@@ -149,7 +154,9 @@ export function VisionEngineCard() {
           {t("vision.engine.restartAgent")}
         </button>
       ) : null}
-      {armed && state !== "running" && !busy ? <p className="text-[0.85em] text-white/60">{t("vision.engine.armed")}</p> : null}
+      {armed && state !== "running" && state !== "no_runtime" && !busy ? (
+        <p className="text-[0.85em] text-white/60">{t("vision.engine.armed")}</p>
+      ) : null}
       {failure ? <p className="text-[0.85em] text-red-400">{failure}</p> : null}
     </section>
   );

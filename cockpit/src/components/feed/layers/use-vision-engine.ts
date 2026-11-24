@@ -3,11 +3,14 @@
 // vision layer's status chip. The answer goes into the layer chips store, so
 // every reader sees the same read and the agent sees one poll however many
 // readers are mounted. Demo mode reads a running mock engine and never polls.
+// A ground station runs no vision engine of its own (the route is a 503
+// there), so it never polls; nor does any node before its profile is known.
 
 import { useEffect } from "react";
 
 import { isDemoMode } from "@/lib/utils";
 import { apiFetch } from "@/shared/api-fetch";
+import { useProfile } from "@/shared/use-profile";
 import { useLayerChipsStore, type VisionEngineStatus } from "@/stores/layer-chips-store";
 
 export const VISION_POLL_MS = 2000;
@@ -33,10 +36,13 @@ export function pollVisionNow(): void {
   );
 }
 
-/** Keep the shared poll running while `active`. */
+/** Keep the shared poll running while `active`, on any node but a ground
+ *  station. */
 export function useVisionEngine(active: boolean): void {
+  const profile = useProfile();
+  const on = active && (isDemoMode() || (profile !== null && profile !== "ground_station"));
   useEffect(() => {
-    if (!active) return;
+    if (!on) return;
     readers++;
     if (readers === 1) {
       aborter = new AbortController();
@@ -51,5 +57,5 @@ export function useVisionEngine(active: boolean): void {
       aborter?.abort();
       aborter = null;
     };
-  }, [active]);
+  }, [on]);
 }

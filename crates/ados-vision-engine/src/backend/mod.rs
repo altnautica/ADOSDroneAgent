@@ -176,6 +176,12 @@ pub trait VisionBackend: Send + Sync {
     fn unavailable_reason(&self) -> Option<&str> {
         None
     }
+    /// Whether the requested backend does not exist in this build at all (its
+    /// runtime not compiled in, or an unknown backend name), so no restart can
+    /// bring it up. `false` for a backend that is merely not answering.
+    fn runtime_missing(&self) -> bool {
+        false
+    }
 }
 
 /// The least confidence an in-process detector decodes: the engine keeps a

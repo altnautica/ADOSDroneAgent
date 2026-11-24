@@ -42,8 +42,8 @@ export function shellBanners(i: ShellBannerInputs): ShellBanner[] {
   return out;
 }
 
-/** An `err`/`warn` banner's text: 13 px times the width class's chrome scale
- *  (×1.33 on a television), wrapping to at most two lines, so "Agent is
+/** An `err`/`warn` banner's text: 13 px times the chrome scale (root / 16,
+ *  lib/ui-scale.ts), wrapping to at most two lines, so "Agent is
  *  unreachable. Reconnecting…" reads in full in the narrow top-centre slot. */
 export const BANNER_TEXT_PX = 13;
 export const BANNER_MAX_LINES = 2;

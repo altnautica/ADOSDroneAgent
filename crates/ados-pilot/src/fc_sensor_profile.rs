@@ -339,7 +339,9 @@ pub fn check(param: impl Fn(&str) -> Option<f32>, mounts: &FcSensors) -> Vec<Fai
     // Each insert shifts the later positions by one.
     let zero = groups.into_iter().filter(|e| e.1);
     for (i, (g, _, severity, at)) in zero.enumerate() {
-        let mut f = failure(g, Some(0.0), "the lever arm from the CG".into(), severity);
+        // The parameter row's wanted column stays short; the message keeps
+        // the explanation.
+        let mut f = failure(g, Some(0.0), "set from CG".into(), severity);
         f.detail = format!("{g} all 0 (want the lever arm from the CG)");
         out.insert(at + i, f);
     }

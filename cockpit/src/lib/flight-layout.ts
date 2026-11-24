@@ -135,26 +135,22 @@ export const TOUCH_MIN_PX: number = layoutJson.touch_target.min;
 export const HIT_AREA =
   "relative before:absolute before:left-1/2 before:top-1/2 before:h-[48px] before:w-[max(100%,48px)] before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']";
 
-/** The class scale of a width class (`layout.json` `classes.<class>.scale`):
- *  text drawn outside a scaled zone is sized px × this. */
-export function classScale(widthClass: keyof typeof layoutJson.classes): number {
-  return layoutJson.classes[widthClass]?.scale ?? 1;
-}
-
-/** A label's size in CSS px outside a scaled zone: `base` × the class scale,
- *  never below the class's `label_min_px` (a television reads from across
- *  the room). */
-export function labelPx(base: number, widthClass: keyof typeof layoutJson.classes): number {
+/** A label's size in CSS px outside a scaled zone: `base` × the chrome scale
+ *  (`lib/ui-scale.ts`). A class with a `label_min_px` (a television, read
+ *  from across the room) floors the base at that minimum over the class's
+ *  spec scale, so a 1080p television reads labels at the spec minimum and a
+ *  small kiosk panel in proportion. */
+export function labelPx(base: number, scale: number, widthClass: keyof typeof layoutJson.classes): number {
   const cls = layoutJson.classes[widthClass];
-  const min = cls && "label_min_px" in cls && typeof cls.label_min_px === "number" ? cls.label_min_px : 0;
-  return Math.max(base * classScale(widthClass), min);
+  const min = cls && "label_min_px" in cls && typeof cls.label_min_px === "number" ? cls.label_min_px / cls.scale : 0;
+  return Math.max(base, min) * scale;
 }
 
-/** The Menu's row type size, CSS px: the chrome bar type scaled by the width
- *  class, so every Menu row (the entries, the Layers and overflow sections,
+/** The Menu's row type size, CSS px: the chrome bar type at the chrome
+ *  scale, so every Menu row (the entries, the Layers and overflow sections,
  *  the extension panels) reads at one size, a tv's from across the room. */
-export function menuTextPx(widthClass: keyof typeof layoutJson.classes): number {
-  return labelPx(CHROME_TOKENS.type.top_bar_px, widthClass);
+export function menuTextPx(scale: number, widthClass: keyof typeof layoutJson.classes): number {
+  return labelPx(CHROME_TOKENS.type.top_bar_px, scale, widthClass);
 }
 
 /** Whether the agent has a video source to dial: its video reports running,
@@ -233,6 +229,8 @@ export const FLIGHT_PX = {
   skillH: 48,
   skillW: { compact: 120, medium: 150, expanded: 180, tv: 180 },
   stripH: 56,
+  /** The narrowest a bottom-left card shrinks to (the medium class's card). */
+  cardMinW: 200,
   divider: 12,
   vision: { min: 240, max: 380, share: 0.28 },
 } as const;
@@ -331,7 +329,8 @@ export function flightLayout(i: FlightLayoutInput): FlightLayout {
     divider = { x: videoW, y: y0, w: FLIGHT_PX.divider, h: H - y0 };
     mapPane = { x: videoW + FLIGHT_PX.divider, y: 0, w: W - videoW - FLIGHT_PX.divider, h: H };
   } else if (i.view === "vision") {
-    const panelW = Math.round(Math.min(FLIGHT_PX.vision.max, Math.max(FLIGHT_PX.vision.min, W * FLIGHT_PX.vision.share)));
+    // Its bounds scale with the chrome, as its text does (useMapChrome).
+    const panelW = Math.round(Math.min(FLIGHT_PX.vision.max * s, Math.max(FLIGHT_PX.vision.min * s, W * FLIGHT_PX.vision.share)));
     visionPanel = { x: W - E - panelW, y: y0, w: panelW, h: H - E - y0 };
     stage = { x: 0, y: 0, w: visionPanel.x, h: H };
   }
@@ -349,11 +348,18 @@ export function flightLayout(i: FlightLayoutInput): FlightLayout {
   // skill picker bottom-right, and the telemetry row between them, or raised
   // above them where it does not fit between.
   const showCard = i.flies && i.view !== "split";
-  const cardW = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.widthPx) * s;
-  const cardH = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.heightPx) * s;
-  const card: Rect | null = showCard ? { x: stage.x + E, y: H - E - cardH, w: cardW, h: cardH } : null;
   const skillW = FLIGHT_PX.skillW[i.widthClass] * s;
   const skillPicker: Rect = { x: right(stage) - E - skillW, y: H - E - FLIGHT_PX.skillH * s, w: skillW, h: FLIGHT_PX.skillH * s };
+  // A card gives way to the full telemetry row: on a panel narrower than its
+  // class assumes (an 800 px kiosk is a tv), it shrinks, keeping its aspect,
+  // down to `cardMinW`, so the row still fits between it and the skill
+  // picker and the instruments keep their band.
+  const specW = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.widthPx) * s;
+  const specH = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.heightPx) * s;
+  const roomW = stage.w - 4 * E - FLIGHT_PX.rowFullW * s - skillW;
+  const cardW = i.m.card.kind === "card" && !i.m.distanceOnly ? Math.min(specW, Math.max(FLIGHT_PX.cardMinW * s, roomW)) : specW;
+  const cardH = (specH * cardW) / specW;
+  const card: Rect | null = showCard ? { x: stage.x + E, y: H - E - cardH, w: cardW, h: cardH } : null;
 
   let bottomRow: Rect | null = null;
   let bottomRowShort = i.m.distanceOnly;

@@ -36,7 +36,7 @@ import { useLayerChipsStore, visionEngineUp } from "@/stores/layer-chips-store";
 
 import { useVisionEngine } from "./use-vision-engine";
 import { VisionEngineCard } from "./vision-engine-card";
-import { detectorCandidates, layerLiveState, runningDetector, selectedDetector, type LayerLiveState, type ModelsList } from "./vision-state";
+import { detectorCandidates, engineRunning, layerLiveState, runningDetector, selectedDetector, type LayerLiveState, type ModelsList } from "./vision-state";
 
 /** The second tap that restarts the engine must come within this window. */
 const CONFIRM_WINDOW_MS = 3000;
@@ -47,6 +47,7 @@ function ModelPicker() {
   const { t } = useTranslation();
   const [list, setList] = useState<ModelsList | null>(null);
   const engine = useLayerChipsStore((s) => s.vision);
+  const engineError = useLayerChipsStore((s) => s.visionError);
   const [armed, setArmed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -66,6 +67,8 @@ function ModelPicker() {
   const models = detectorCandidates(list.installed);
   const running = runningDetector(engine);
   const selected = selectedDetector(list, running);
+  // The chosen model is in use only while the engine runs a usable backend.
+  const inUse = engineRunning(engine, engineError);
   const choose = (id: string) => {
     if (flying) return;
     if (armed !== id) {
@@ -91,7 +94,7 @@ function ModelPicker() {
       <h3 className={SECTION_TITLE}>{specText("vision.detector_model")}</h3>
       {models.length === 0 ? <p className="text-[0.85em] text-white/60">{specText("vision.no_models")}</p> : null}
       {flying ? <p className="text-[0.85em] text-white/60">{specText("vision.disarm_to_switch")}</p> : null}
-      {selected === null && running ? (
+      {selected === null && running && inUse ? (
         <p className="text-[0.85em] text-white/60" data-testid="vision-model-running">
           {t("vision.picker.running", { model: running })}
         </p>
@@ -118,7 +121,13 @@ function ModelPicker() {
               <span className="truncate">{m.id}</span>
             </span>
             <span className="shrink-0 text-[0.85em] text-white/60">
-              {isSelected ? specText("vision.active") : armed === m.id ? specText("vision.restart_hint") : ""}
+              {isSelected
+                ? inUse
+                  ? specText("vision.active")
+                  : t("vision.picker.notRunning")
+                : armed === m.id
+                  ? specText("vision.restart_hint")
+                  : ""}
             </span>
           </button>
         );

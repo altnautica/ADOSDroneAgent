@@ -40,12 +40,17 @@ describe("grid measures", () => {
     expect(gridMeasures("compact", false).shutterPx).toBe(56);
   });
 
-  it("scales a tv by 1.33 with focus rings always on and a 30 fps overlay cap", () => {
+  it("draws a tv with focus rings always on and a 30 fps overlay cap", () => {
     const m = gridMeasures("tv", false);
-    expect(m.scale).toBe(1.33);
     expect(m.focusRingsAlways).toBe(true);
     expect(m.overlayFpsCap).toBe(30);
     expect(gridMeasures("expanded", false).focusRingsAlways).toBe(false);
+  });
+
+  it("takes its scale from the root (lib/ui-scale), not a step per width class", () => {
+    expect(gridMeasures("tv", false).scale).toBe(1);
+    expect(gridMeasures("tv", false, 1.3).scale).toBe(1.3);
+    expect(gridMeasures("expanded", false, 1.125).scale).toBe(1.125);
   });
 
   it("grows touch targets in glove mode", () => {

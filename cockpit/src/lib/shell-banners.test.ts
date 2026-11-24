@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { shouldShowCloudNudge } from "@/hooks/use-cloud-posture-nudge";
-import { gridMeasures } from "@/lib/cockpit-layout";
+import { chromeScale } from "@/lib/ui-scale";
 import { BANNER_MAX_LINES, BANNER_TEXT_PX, bannerTextStyle, shellBanners, type ShellBannerInputs } from "@/lib/shell-banners";
 
 const base: ShellBannerInputs = {
@@ -54,10 +54,10 @@ describe("shell banner text", () => {
     expect(s.whiteSpace).toBe("normal");
   });
 
-  it("sizes in px times the width class's chrome scale", () => {
-    expect(bannerTextStyle(gridMeasures("medium", false).scale).fontSize).toBe(BANNER_TEXT_PX);
-    const tv = gridMeasures("tv", false).scale;
-    expect(tv).toBeGreaterThan(1);
-    expect(bannerTextStyle(tv).fontSize).toBeCloseTo(BANNER_TEXT_PX * tv);
+  it("sizes in px times the chrome scale", () => {
+    expect(bannerTextStyle(chromeScale(800, 480)).fontSize).toBe(BANNER_TEXT_PX);
+    const big = chromeScale(1920, 1080);
+    expect(big).toBeGreaterThan(1);
+    expect(bannerTextStyle(big).fontSize).toBeCloseTo(BANNER_TEXT_PX * big);
   });
 });

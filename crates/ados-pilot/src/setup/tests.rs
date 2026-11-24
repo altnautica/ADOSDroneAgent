@@ -1213,7 +1213,7 @@ fn setup_needed_from_prearm_text() {
     s.e.on_fc(1, 1, &m, s.now);
     assert_eq!(
         s.e.setup_needed(s.now + 31_000),
-        need("PreArm: Compass not calibrated", "compass")
+        need("Compass not calibrated", "compass")
     );
     assert_eq!(s.e.setup_needed(s.now + 36_000), None);
 }

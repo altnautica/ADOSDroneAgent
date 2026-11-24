@@ -135,6 +135,18 @@ fn an_all_zero_lever_arm_is_reported_once_per_group() {
             "RNGFND1_POS all 0 (want the lever arm from the CG)",
         ]
     );
+    // The parameter row's wanted column is short; the message explains it.
+    let rows: Vec<(String, String)> = check(|n| p.get(n).copied(), &FcSensors::default())
+        .into_iter()
+        .map(|f| (f.param.name, f.param.want))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("FLOW_POS".to_string(), "set from CG".to_string()),
+            ("RNGFND1_POS".to_string(), "set from CG".to_string()),
+        ]
+    );
     // One non-zero member passes the group.
     let p = with(&[("FLOW_POS_X", 0.0), ("FLOW_POS_Z", 0.0)]);
     assert_eq!(

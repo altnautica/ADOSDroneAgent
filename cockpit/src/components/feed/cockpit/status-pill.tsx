@@ -8,10 +8,11 @@ import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
 import { cockpitAlertActions, useAlertCentreStore } from "@/lib/alert-centre";
 import { pillWiring } from "@/lib/alerts";
-import { chromeStyle, severityColor } from "@/lib/chrome-tokens";
+import { popoverStyle, severityColor } from "@/lib/chrome-tokens";
 import { useNavSource } from "@/hooks/use-nav-source";
 import { HIT_AREA } from "@/lib/flight-layout";
 import { useBeatPhase } from "@/lib/redraw-beat";
+import { useChromeScale } from "@/lib/ui-scale";
 import { CHROME_ALERT_SKIN, useAlertSnooze, type AlertActions } from "@/shared/hud/alert-centre";
 import { AlertCentre } from "@/shared/hud/alert-rows";
 import { preflightChecks } from "@/shared/hud/preflight";
@@ -140,7 +141,8 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
  *  overlay at a time, Escape, controller back or a press outside close it
  *  (STOP still takes that first press). Mounting it is showing it, so it
  *  acknowledges what the pill counts, and an alert arriving while it is
- *  open. It scrolls inside 70 % of the viewport. */
+ *  open. It is drawn at the chrome scale and scrolls inside the room under
+ *  the pill. */
 function AlertList({
   rect,
   alerts,
@@ -161,6 +163,7 @@ function AlertList({
   onClose: () => void;
 }) {
   const titleId = useId();
+  const pop = popoverStyle(rect, 440, useChromeScale());
   const idKey = counted.map((a) => a.id).join("|");
   useEffect(() => {
     ack(idKey ? idKey.split("|") : []);
@@ -170,10 +173,10 @@ function AlertList({
       onDismiss={onClose}
       scrim="clear"
       labelledBy={titleId}
-      panelClassName="chrome-panel chrome-bar-text w-[min(440px,94vw)]"
-      panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.left, window.innerWidth - 448)), top: rect.bottom + 8 }}
+      panelClassName="chrome-panel chrome-bar-text"
+      panelStyle={pop.panel}
     >
-      <div className="max-h-[70vh] overflow-y-auto overscroll-contain p-[8px]" data-testid="status-pill-list">
+      <div className="overflow-y-auto overscroll-contain p-[8px]" style={{ maxHeight: pop.maxHeight }} data-testid="status-pill-list">
         <AlertCentre alerts={alerts} snoozed={snoozed} onSnooze={onSnooze} actions={actions} skin={CHROME_ALERT_SKIN} titleId={titleId} />
       </div>
     </Overlay>

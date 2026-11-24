@@ -29,6 +29,28 @@ describe("the cockpit view store", () => {
     expect(seen).toEqual(["map", "split", "vision", "pilot"]);
   });
 
+  it("never offers the Vision view on a ground station, and falls a stored one back to Pilot", () => {
+    const s = () => useCockpitViewStore.getState();
+    try {
+      s().bindVehicle("gs-paired", "full");
+      s().setView("vision");
+      expect(s().view).toBe("vision");
+      s().setVisionOffered(false);
+      expect(s().view).toBe("pilot");
+      s().setView("vision");
+      expect(s().view).toBe("pilot");
+      s().setView("split");
+      s().cycleView();
+      expect(s().view).toBe("pilot");
+      // A Vision view stored for another vehicle loads as Pilot.
+      mem.set("ados-cockpit-view:gs-other", JSON.stringify({ view: "vision" }));
+      s().bindVehicle("gs-other", "full");
+      expect(s().view).toBe("pilot");
+    } finally {
+      s().setVisionOffered(true);
+    }
+  });
+
   it("remembers the split divider per vehicle with the view, clamped to 0.3–0.7", () => {
     const s = () => useCockpitViewStore.getState();
     s().bindVehicle("drone-a", "full");

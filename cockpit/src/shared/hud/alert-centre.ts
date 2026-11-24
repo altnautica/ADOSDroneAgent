@@ -14,18 +14,18 @@ import type { PillAlert } from "./status-pill";
 
 type Severity = PillAlert["severity"];
 
-// Type scale, in rem with an explicit leading at every size: the panel's own
-// `chrome-bar-text` line-height is a fixed 15 px, which overlaps wrapped
-// lines at any larger size. The cockpit's root rem tracks the viewport
-// (3.2vmin: 25.6 px at 1280×800, 34.6 px at 1920×1080) while the sheet stays
-// 440 px wide, and the dashboard's root is 16 px, so each size is clamped:
-// body 14-18 px, secondary and tables 12.5-16 px, the sheet title 15-20 px.
-// The cockpit's other small menus over video (the layer badge menu) use it
-// too, so they read at the same size.
+// Type scale, in CSS px with an explicit leading at every size: the panel's
+// own `chrome-bar-text` line-height is a fixed 15 px, which overlaps wrapped
+// lines at any larger size. Body 14 px, secondary and tables 12.5 px, the
+// sheet title 15 px, against a 16 px root: the dashboard draws them as they
+// are, and the cockpit draws its popovers at its chrome scale (a CSS zoom of
+// root / 16), so they grow with the bar they open from. The cockpit's other
+// small menus over video (the layer badge menu) use it too, so they read at
+// the same size.
 export const ALERT_TEXT = {
-  body: "text-[length:clamp(14px,0.6rem,18px)] leading-[1.3]",
-  small: "text-[length:clamp(12.5px,0.52rem,16px)] leading-[1.3]",
-  title: "text-[length:clamp(15px,0.68rem,20px)] leading-[1.3]",
+  body: "text-[14px] leading-[1.3]",
+  small: "text-[12.5px] leading-[1.3]",
+  title: "text-[15px] leading-[1.3]",
 } as const;
 
 /** Whether the FC already holds the value a profile row writes. A float

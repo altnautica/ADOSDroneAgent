@@ -6,6 +6,23 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.31] - 2026-11-24
+
+### Changed
+- Cockpit sizing has one source: the root font size grows gently with the screen (16 px up to a 600 px short side, capped at 22 px) and the zoom control multiplies it, so text, the flight screen, the rail, the setup wizard and every popover scale together from the 7" kiosk to a 2560×1440 window instead of ballooning on large windows or stepping at 1600 px.
+- The cockpit rail has two states: a narrow labelled column (icon over a short label) or hidden. The icons-only mode is gone; a stored choice of it opens labelled.
+- `setup_needed` readiness text drops the "PreArm: " prefix, and an FC PreArm line that a readiness item already says is listed once.
+- The flow and rangefinder lever-arm rows read "set from CG" as the wanted value.
+- `/api/vision/status` reports `backend_runtime_missing` when the configured detector backend is not in this build; the Vision panel then says the build has no detector runtime instead of offering Restart.
+- On a ground station the cockpit no longer offers the Vision view and no longer polls video profile or vision status.
+- The TUI Vehicle tab counts the pre-flight warnings (GPS fix, home position) the cockpit counts.
+- Uptime labels say whether they are the agent's or the system's.
+
+### Fixed
+- The flight-state chip popover header no longer overlaps the rows below it.
+- Vision demand is sent only for a camera the vision engine runs.
+- The dashboard's main bundle is back under its budget (the alert drawer, chip detail and setup prompt load on demand).
+
 ## [0.124.30] - 2026-11-24
 
 ### Added

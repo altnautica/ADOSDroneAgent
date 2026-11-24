@@ -2,10 +2,11 @@
 // setup wizard (the same overview and guided flow the dashboard uses), opened
 // from Settings, from the flight-state chip's NOT READY "Set up aircraft"
 // link, from an alert's "Open setup", and on the HDMI kiosk. Drone only: a
-// ground station has no setup engine. A television or the kiosk scales it by
-// the spec's 1.33 and always draws the focus ring (the D-pad drives it
-// there); the wizard picks the side stepper or the "Step k of n" bar from the
-// width it gets.
+// ground station has no setup engine. Its type is 0.875 rem, so it reads at
+// the size of the screen frame around it at every panel size (the root is
+// the cockpit's one scale, lib/ui-scale.ts). A television or the kiosk always
+// draws the focus ring (the D-pad drives it there); the wizard picks the
+// side stepper or the "Step k of n" bar from the width it gets.
 
 import { useTranslation } from "react-i18next";
 
@@ -38,7 +39,7 @@ export function AircraftSetupScreen() {
     <ConsoleScaffold title={t("nav.aircraftSetup")} onBack={back}>
       <WizardView
         setup={setup}
-        scale={m.scale}
+        baseSize="0.875rem"
         focusRings={m.focusRingsAlways ? "always" : "visible"}
         layout={portrait || widthClass === "compact" ? "stacked" : "split"}
         openRequest={openRequest}

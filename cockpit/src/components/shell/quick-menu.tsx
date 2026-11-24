@@ -34,6 +34,7 @@ import { feedCameras } from "@/lib/feed-legs";
 import { menuTextPx, movedItems } from "@/lib/flight-layout";
 import { isKiosk } from "@/lib/kiosk";
 import { menuEntries, type MenuEntryId } from "@/lib/quick-menu-model";
+import { useChromeScale } from "@/lib/ui-scale";
 import { getScreen, tabScreens } from "@/nav/registry";
 import { specText } from "@/shared/hud/spec-text";
 import { severityTextColor } from "@/shared/hud/status-pill";
@@ -63,7 +64,7 @@ function MenuRow({
   onClick: () => void;
   entry: MenuEntryId;
 }) {
-  const fontSize = menuTextPx(useWidthClass().widthClass);
+  const fontSize = menuTextPx(useChromeScale(), useWidthClass().widthClass);
   return (
     <button
       type="button"
@@ -108,6 +109,7 @@ export function QuickMenu() {
   const [openPanel, setOpenPanel] = useState<string | null>(null);
   const kiosk = isKiosk();
   const { widthClass } = useWidthClass();
+  const chromeScale = useChromeScale();
   const movedCount = useTopBarStore((s) => s.movedCount);
   const view = useCockpitViewStore((s) => s.view);
   const cycleView = useCockpitViewStore((s) => s.cycleView);
@@ -172,7 +174,7 @@ export function QuickMenu() {
                   type="button"
                   onClick={() => setOpenPanel(`${ext.pluginId}:${p.id}`)}
                   className="touch-target min-h-[56px] rounded-md bg-muted px-[8px] text-surface-foreground hover:bg-border"
-                  style={{ fontSize: menuTextPx(widthClass) }}
+                  style={{ fontSize: menuTextPx(chromeScale, widthClass) }}
                 >
                   {p.title}
                 </button>

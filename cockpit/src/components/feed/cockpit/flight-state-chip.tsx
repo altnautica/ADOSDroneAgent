@@ -21,9 +21,10 @@ import { cockpitAlertActions, useAlertCentreStore } from "@/lib/alert-centre";
 import { Overlay } from "@/components/ui/overlay";
 import { useFlightChip, useFreshPilot } from "@/hooks/use-pilot";
 import { chipBlockingAlerts, chipButton, chipFullText, chipLines, chipLineTextColor } from "@/lib/chip-view";
-import { chromeStyle } from "@/lib/chrome-tokens";
+import { popoverStyle } from "@/lib/chrome-tokens";
 import { CHIP_MAX_FRAC, HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { useChromeScale } from "@/lib/ui-scale";
 import { CHROME_ALERT_SKIN } from "@/shared/hud/alert-centre";
 import { AlertRow } from "@/shared/hud/alert-rows";
 import { chipFullHeadline } from "@/shared/hud/flight-state";
@@ -52,6 +53,8 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   const titleId = useId();
   const textRef = useRef<HTMLSpanElement>(null);
   const [fullAt, setFullAt] = useState<DOMRect | null>(null);
+  const scale = useChromeScale();
+  const pop = fullAt ? popoverStyle(fullAt, 440, scale) : null;
   const maxWidth = `${CHIP_MAX_FRAC * 100}cqw`;
   const blocking = chipBlockingAlerts(fresh?.readiness ?? []);
 
@@ -147,15 +150,18 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
           {button.label}
         </button>
       ) : null}
-      {fullAt ? (
+      {pop ? (
         <Overlay
           onDismiss={() => setFullAt(null)}
           scrim="clear"
           labelledBy={titleId}
-          panelClassName="chrome-panel chrome-bar-text w-[min(440px,94vw)]"
-          panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(fullAt.left, window.innerWidth - 448)), top: fullAt.bottom + 8 }}
+          panelClassName="chrome-panel chrome-bar-text"
+          panelStyle={pop.panel}
         >
-          <div className="flex max-h-[70vh] flex-col gap-[4px] overflow-y-auto overscroll-contain p-[8px]" data-testid="flight-state-chip-detail">
+          <div className="flex flex-col gap-[4px] overflow-y-auto overscroll-contain p-[8px]" style={{ maxHeight: pop.maxHeight }} data-testid="flight-state-chip-detail">
+            {/* Headed by the chip's own short text; the full text, every
+                secondary line included, is the button's accessible name. It
+                never shrinks, so a long head cannot ride over the rows. */}
             <button
               id={titleId}
               type="button"
@@ -163,11 +169,12 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
                 setFullAt(null);
                 openSheet("mode");
               }}
-              aria-label={specText("chip.aria", { text: chipFullHeadline(chip.text, fresh) })}
+              aria-label={specText("chip.aria", { text: [chipFullHeadline(chip.text, fresh), ...lines.map((l) => l.text)].join(" · ") })}
               data-testid="flight-state-chip-full"
-              className="min-h-[48px] w-full p-[10px] text-left font-semibold"
+              className="flex min-h-[48px] w-full shrink-0 items-center gap-[8px] p-[10px] text-left"
             >
-              {full}
+              <span aria-hidden className="h-[8px] w-[8px] shrink-0 rounded-full" style={{ background: chip.color }} />
+              <span className="chrome-chip-text min-w-0 break-words">{chip.text}</span>
             </button>
             {blocking.length > 0 ? (
               <>

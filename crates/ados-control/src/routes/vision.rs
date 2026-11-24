@@ -259,10 +259,12 @@ async fn read_vision_status(path: &std::path::Path) -> Option<VisionStatus> {
 
 /// The `/api/vision/status` body from the engine's `list_models` reply and its
 /// work sidecar. An engine reply without a `backend_state` (none ships without
-/// one) reads as `unavailable` rather than a claimed `ready`. `source_errors`
-/// lists each camera whose frame source is failing (or silent) with the reason,
-/// empty without a sidecar; `live_inputs`, `detection` and `depth` are null
-/// without one.
+/// one) reads as `unavailable` rather than a claimed `ready`.
+/// `backend_runtime_missing` is true when the requested backend is not in this
+/// build at all (no restart can bring it up), false when the engine does not
+/// say. `source_errors` lists each camera whose frame source is failing (or
+/// silent) with the reason, empty without a sidecar; `live_inputs`,
+/// `detection` and `depth` are null without one.
 /// Every key is snake_case, the form the GCS client reads.
 fn status_body(
     resp: &Value,
@@ -284,6 +286,11 @@ fn status_body(
         "backend": field("backend"),
         "backend_state": field("backend_state").unwrap_or("unavailable"),
         "backend_reason": field("backend_reason"),
+        "backend_runtime_missing": resp
+            .as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("backend_runtime_missing")))
+            .and_then(|(_, v)| v.as_bool())
+            .unwrap_or(false),
         "source_errors": sidecar.map(|s| s.source_errors.as_slice()).unwrap_or_default(),
         "live_inputs": sidecar.map(|s| s.live_inputs),
         "detection": sidecar.and_then(|s| s.detection.as_ref()),
@@ -504,6 +511,7 @@ mod tests {
                 Value::from("backend_reason"),
                 Value::from("this build does not include the onnx inference runtime"),
             ),
+            (Value::from("backend_runtime_missing"), Value::Boolean(true)),
         ]);
         let body = status_body(
             &reply,
@@ -514,6 +522,7 @@ mod tests {
         assert_eq!(body["backend"], "onnx");
         assert_eq!(body["backend_state"], "unavailable");
         assert!(body["backend_reason"].as_str().unwrap().contains("onnx"));
+        assert_eq!(body["backend_runtime_missing"], true);
         assert_eq!(body["model_count"], 1);
         assert!(body["npu_utilization_pct"].is_null());
         // Model fields are snake_case, the form the GCS client reads.
@@ -530,6 +539,7 @@ mod tests {
         let body = status_body(&ready, Vec::new(), Some(42.5), None);
         assert_eq!(body["backend_state"], "ready");
         assert!(body["backend_reason"].is_null());
+        assert_eq!(body["backend_runtime_missing"], false);
         assert_eq!(body["npu_utilization_pct"], 42.5);
     }
 

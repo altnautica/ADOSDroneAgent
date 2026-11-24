@@ -10,11 +10,10 @@ import { Wrench } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useFreshPilot } from "@/hooks/use-pilot";
-import { useWidthClass } from "@/hooks/use-width-class";
 import { setupOfferUid } from "@/lib/aircraft-setup";
-import { gridMeasures } from "@/lib/cockpit-layout";
 import { bannerTextStyle } from "@/lib/shell-banners";
 import { liveArmed, tourAirborne } from "@/lib/controller-tour";
+import { useChromeScale } from "@/lib/ui-scale";
 import { specText } from "@/shared/hud/spec-text";
 import { fetchSetupStatus } from "@/shared/setup-wizard/client";
 import type { SetupStatus } from "@/shared/setup-wizard/types";
@@ -34,8 +33,7 @@ export function SetupOfferBanner() {
   const close = useSetupOfferStore((s) => s.close);
   const pilot = useFreshPilot();
   const telemetryArmed = useFlightStore(liveArmed);
-  const { widthClass } = useWidthClass();
-  const scale = gridMeasures(widthClass, false).scale;
+  const scale = useChromeScale();
   // The offer is pointless over the setup screen it opens.
   const onSetup = useNavStore((s) => activeScreenId(s) === "aircraft-setup");
 

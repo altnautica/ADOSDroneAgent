@@ -213,6 +213,9 @@ export function alertSource(id: string): PillSource {
   return "link";
 }
 
+/** An FC PreArm/Arm line's prefix. */
+const ARM_PREFIX = /^(PreArm|Arm):\s*/;
+
 /** Every active pill alert, worst first, then in source order. Advisories
  *  (an offline uplink) are not warnings and stay out of the pill. */
 export function pillAlerts(i: PillInputs): PillAlert[] {
@@ -268,9 +271,11 @@ export function pillAlerts(i: PillInputs): PillAlert[] {
     });
   }
   // Every distinct PreArm/Arm line the FC repeats: each names its own cause.
-  const prearmSeen = new Set<string>();
+  // A line a readiness item already says (`setup_needed` carries the
+  // calibration PreArm text) is that item's, so it is not listed twice.
+  const prearmSeen = new Set<string>(out.filter((a) => a.source === "pilot_readiness").map((a) => a.text.replace(ARM_PREFIX, "")));
   for (const line of i.prearm ?? []) {
-    const text = line.replace(/^(PreArm|Arm):\s*/, "");
+    const text = line.replace(ARM_PREFIX, "");
     if (text === "" || prearmSeen.has(text)) continue;
     prearmSeen.add(text);
     out.push({ id: `fc:${text}`, source: "fc_prearm", severity: "warning", text });

@@ -75,6 +75,38 @@ export function chromeStyle(t: ChromeTokens = CHROME_TOKENS): CSSProperties {
   } as CSSProperties;
 }
 
+/** A flight-screen popover under `anchor` (window px): the chrome tokens at
+ *  the chrome scale, as a CSS zoom like the zones' (`lib/ui-scale.ts`), so
+ *  the popover reads at the size of the bar it opens from. `widthPx` is the
+ *  unscaled width, never wider than the window less 8 px a side; the panel's
+ *  left edge sits on the anchor's (`align` "left") or its right edge on the
+ *  anchor's right, kept on screen. CSS zoom scales the panel's own offsets,
+ *  so they are given unscaled. `maxHeight` (unscaled px) is the room under
+ *  the anchor, for the panel's scroller. */
+export function popoverStyle(
+  anchor: DOMRect,
+  widthPx: number,
+  scale: number,
+  align: "left" | "right" = "left",
+): { panel: CSSProperties; maxHeight: number } {
+  const margin = 8;
+  const w = Math.min(widthPx * scale, window.innerWidth - 2 * margin);
+  const x = align === "left" ? anchor.left : anchor.right - w;
+  const left = Math.max(margin, Math.min(x, window.innerWidth - w - margin));
+  const top = anchor.bottom + margin;
+  return {
+    panel: {
+      ...chromeStyle(),
+      position: "absolute",
+      zoom: scale === 1 ? undefined : scale,
+      left: left / scale,
+      top: top / scale,
+      width: w / scale,
+    },
+    maxHeight: Math.max(0, window.innerHeight - top - margin) / scale,
+  };
+}
+
 /** The severity colour of a status-pill severity. */
 export function severityColor(s: "ok" | "warning" | "critical", t: ChromeTokens = CHROME_TOKENS): string {
   return s === "critical" ? t.severity_critical : s === "warning" ? t.severity_warning : t.severity_ok;

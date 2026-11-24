@@ -26,7 +26,10 @@ export const ZONE_TOP_CLEARANCE_PX = 140;
 
 /** The grid's measures for a width class (`layout.json` `classes`): the
  *  column button edge, the shutter edge, the bottom-left card and the chrome
- *  scale (×1.33 on a television). Glove mode grows the touch targets. */
+ *  scale. The scale is the live root against its 16 px reference
+ *  (`lib/ui-scale.ts` `chromeScale`), not a step per class: the chrome grows
+ *  smoothly with the panel and follows the UI-scale knob. Glove mode grows
+ *  the touch targets. */
 export interface GridMeasures {
   colPx: number;
   shutterPx: number;
@@ -38,7 +41,7 @@ export interface GridMeasures {
   overlayFpsCap: number | null;
 }
 
-export function gridMeasures(width: WidthClass, glove: boolean): GridMeasures {
+export function gridMeasures(width: WidthClass, glove: boolean, scale = 1): GridMeasures {
   const c = LAYOUT_CLASSES[width];
   const touch = glove ? GLOVE_TOUCH_SCALE : 1;
   const shutter = Math.max(TOUCH_TARGET.shutter, c.column_width);
@@ -47,7 +50,7 @@ export function gridMeasures(width: WidthClass, glove: boolean): GridMeasures {
   return {
     colPx: Math.round(c.column_width * touch),
     shutterPx: Math.round(shutter * touch),
-    scale: c.scale,
+    scale,
     card:
       blc.kind === "chip"
         ? { kind: "chip", sizePx: blc.size ?? 96 }

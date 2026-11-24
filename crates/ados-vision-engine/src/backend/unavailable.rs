@@ -45,4 +45,7 @@ impl VisionBackend for UnavailableBackend {
     fn unavailable_reason(&self) -> Option<&str> {
         Some(&self.reason)
     }
+    fn runtime_missing(&self) -> bool {
+        true
+    }
 }

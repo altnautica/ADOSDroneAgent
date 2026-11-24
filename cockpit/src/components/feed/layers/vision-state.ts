@@ -22,6 +22,7 @@ export type EngineCardState =
   | "off"
   | "unreachable"
   | "unavailable"
+  | "no_runtime"
   | "needs_agent_restart"
   | "agent_restarting"
   | "start_timeout"
@@ -30,6 +31,19 @@ export type EngineCardState =
 /** Whether a status read shows the engine running a usable backend. */
 export function engineRunning(status: VisionEngineStatus | null, error: boolean): boolean {
   return status !== null && !error && status.backend_state !== "unavailable";
+}
+
+/** Whether a status read shows a backend this agent build does not include,
+ *  which no restart can bring up. */
+export function runtimeMissing(status: VisionEngineStatus | null, error: boolean): boolean {
+  return status !== null && !error && status.backend_runtime_missing === true;
+}
+
+/** Whether the engine runs `cameraId`, from its status read: a demand lease
+ *  on any other camera is refused, so none is sent. False before a read and
+ *  when the read names no cameras. */
+export function engineHasCamera(status: VisionEngineStatus | null, error: boolean, cameraId: string): boolean {
+  return !error && status?.detection?.cameras != null && cameraId in status.detection.cameras;
 }
 
 /** What the card shows, from the stored flag, the last status read and the
@@ -42,6 +56,7 @@ export function engineCardState(i: {
   now: number;
 }): EngineCardState {
   if (engineRunning(i.status, i.error)) return "running";
+  if (runtimeMissing(i.status, i.error)) return "no_runtime";
   const p = i.pending;
   if (p?.kind === "starting") return i.now - p.since < VISION_START_MS ? "starting" : "start_timeout";
   if (p?.kind === "agent_restarting") return i.now - p.since < AGENT_RESTART_MS ? "agent_restarting" : "start_timeout";

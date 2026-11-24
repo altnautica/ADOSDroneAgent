@@ -16,7 +16,7 @@
 // wider panels (md:/lg:) so the essentials always fit an 800px kiosk without a
 // scrollbar the operator cannot reach.
 
-import { MoreHorizontal, Wifi, WifiOff } from "lucide-react";
+import { EthernetPort, MoreHorizontal, Network, Signal, Usb, Wifi, WifiOff, type LucideIcon } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -121,6 +121,11 @@ function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
   );
 }
 
+/** The uplink's icon by its kind (`network.uplink_type`): Wi-Fi only for a
+ *  Wi-Fi uplink; an interface the agent names but does not classify reads
+ *  as a generic network. */
+const UPLINK_ICON: Readonly<Record<string, LucideIcon>> = { eth: EthernetPort, wifi: Wifi, cellular: Signal, usb: Usb };
+
 /** The secondary readings (SNR, channel, rate, role, uplink, CPU), shown in a
  *  panel under the strip on tap so the strip never overflows. It closes on
  *  Escape, on a press outside it, and when the screen changes. */
@@ -146,12 +151,13 @@ function MoreZone({ status }: { status: GsStatus | null }) {
   const role = status?.role?.current;
   const uplink = status?.network?.uplink_type;
   const uplinkReachable = status?.network?.uplink_reachable;
+  const UplinkIcon = (uplink && UPLINK_ICON[uplink]) || Network;
 
   return (
     <div ref={anchor} className="relative shrink-0">
       <button
         type="button"
-        className="inline-flex h-[2rem] items-center rounded px-[0.4rem] text-muted-foreground hover:text-surface-foreground"
+        className="inline-flex min-h-[48px] min-w-[48px] items-center justify-center rounded px-[0.4rem] text-muted-foreground hover:text-surface-foreground"
         aria-expanded={open}
         aria-label={t("cockpit.shell.strip.more")}
         onClick={() => setOpen((v) => !v)}
@@ -168,9 +174,13 @@ function MoreZone({ status }: { status: GsStatus | null }) {
             <span className="inline-flex items-center gap-[0.25rem]">
               {/* Reachability is three-state: absent is UNKNOWN, not offline. */}
               {uplinkReachable === true ? (
-                <Wifi className="h-[0.85rem] w-[0.85rem] text-ok" aria-hidden />
+                <UplinkIcon className="h-[0.85rem] w-[0.85rem] text-ok" aria-hidden />
               ) : uplinkReachable === false ? (
-                <WifiOff className="h-[0.85rem] w-[0.85rem] text-muted-foreground" aria-hidden />
+                uplink === "wifi" ? (
+                  <WifiOff className="h-[0.85rem] w-[0.85rem] text-muted-foreground" aria-hidden />
+                ) : (
+                  <UplinkIcon className="h-[0.85rem] w-[0.85rem] text-muted-foreground" aria-hidden />
+                )
               ) : null}
               {uplink ?? DASH}
             </span>

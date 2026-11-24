@@ -15,6 +15,7 @@ import { LEASE_OWNER } from "@/lib/lease-owner";
 import { FEED_HOLDER, streamQualityOf, useFeedHeroHold, useStreamQualityStore } from "@/lib/stream-quality";
 import { ApiError, apiFetch } from "@/shared/api-fetch";
 import { HERO_LEASE_S, HERO_RELEASE_GRACE_MS, HERO_RENEW_MS, VIDEO_PROFILE_PATH } from "@/shared/hero-hold";
+import { invalidateProfile } from "@/shared/use-profile";
 
 vi.mock("@/shared/api-fetch", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -114,7 +115,20 @@ describe("the Feed's hero hold", () => {
     window.history.replaceState(null, "", "/cockpit/?demo=1");
     await mountFeed();
     await advance(HERO_RENEW_MS * 2);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(requests(FEED_HOLDER)).toEqual([]);
+  });
+
+  it("is never taken on a ground station, which has no profile route", async () => {
+    invalidateProfile();
+    fetchMock.mockImplementation(async (p) => (p === "/api/pairing/info" ? { profile: "ground_station" } : { profile: "hero", leases: [] }));
+    try {
+      await mountFeed();
+      await advance(HERO_RENEW_MS * 2);
+      expect(fetchMock).toHaveBeenCalledWith("/api/pairing/info", expect.anything());
+      expect(requests(FEED_HOLDER)).toEqual([]);
+    } finally {
+      invalidateProfile();
+    }
   });
 
   it("lives on the Feed screen itself, which the kiosk display runs too", () => {

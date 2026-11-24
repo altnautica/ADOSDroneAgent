@@ -227,7 +227,11 @@ export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) =>
           hint={role ? t("cockpit.system.roleHint", { role: t(roleWordKey(role)) }) : undefined}
         />
         <Row label={t("cockpit.system.version")} value={box?.agent_version ?? DASH} mono />
-        <Row label={t("cockpit.system.uptime")} value={fmtUptime(box?.uptime_seconds)} />
+        {/* A ground station's status carries the box's `/proc/uptime`; a drone's the agent's own. */}
+        <Row
+          label={t(profile === "ground_station" ? "cockpit.system.uptime" : "cockpit.system.agentUptime")}
+          value={fmtUptime(box?.uptime_seconds)}
+        />
         {board?.name ? (
           <Row label={t("cockpit.system.board")} value={board.name} hint={[board.soc, board.arch].filter(Boolean).join(" · ") || undefined} />
         ) : null}

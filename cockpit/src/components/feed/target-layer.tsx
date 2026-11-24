@@ -36,7 +36,7 @@ import { useDetectionLease } from "@/hooks/use-detection-lease";
 import { useNow } from "@/hooks/use-now";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
-import { gridMeasures, Z, type WidthClass } from "@/lib/cockpit-layout";
+import { Z, type WidthClass } from "@/lib/cockpit-layout";
 import { computeRenderedRect, pickActiveBatch } from "@/lib/overlay-geometry";
 import { detectorNotice } from "@/lib/detection-lease";
 import { renderProfile } from "@/lib/render-profile";
@@ -51,6 +51,7 @@ import {
   targetInputFor,
   targetMenuEntries,
 } from "@/lib/target-overlay";
+import { useChromeScale } from "@/lib/ui-scale";
 import { cn, isDemoMode } from "@/lib/utils";
 import { BoxEaser } from "@/lib/box-easer";
 import type { SmoothBox } from "@/shared/hud/box-smoothing";
@@ -123,6 +124,7 @@ export function TargetLayer({
   holdDetection = false,
 }: TargetLayerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const chromeScale = useChromeScale();
   const size = useElementSize(containerRef);
   const latest = useDetectionsStore((s) => s.latest);
   const byCamera = useDetectionsStore((s) => s.byCamera);
@@ -432,7 +434,7 @@ export function TargetLayer({
             "pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-[4px] bg-hud-glass font-mono font-semibold tracking-hud-tag text-hud-muted backdrop-blur-hud",
             pip ? "bottom-[4px] px-[5px] text-[9px]" : "bottom-[12px] px-[8px]",
           )}
-          style={pip ? undefined : { fontSize: CHROME_TOKENS.type.label_px * gridMeasures(widthClass, false).scale }}
+          style={pip ? undefined : { fontSize: CHROME_TOKENS.type.label_px * chromeScale }}
         >
           {notice}
         </span>

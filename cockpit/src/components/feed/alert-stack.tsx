@@ -10,7 +10,8 @@
 import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
-import { ALERT_TINT_PCT, classScale, labelPx } from "@/lib/flight-layout";
+import { ALERT_TINT_PCT, labelPx } from "@/lib/flight-layout";
+import { useChromeScale } from "@/lib/ui-scale";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
 import { severityTextColor, type AlertLevel } from "@/shared/hud/status-pill";
@@ -39,9 +40,9 @@ const levelLabel = (level: AlertLevel) => specText(`alert.level.${level}`);
 
 export function AlertStack() {
   const alerts = useCockpitAlerts();
-  // Sized in px × the class scale: the stack sits outside the scaled zones.
+  // Sized in px × the chrome scale: the stack sits outside the scaled zones.
   const { widthClass } = useWidthClass();
-  const k = classScale(widthClass);
+  const k = useChromeScale();
   const px = (n: number) => `${n * k}px`;
   const visible = alerts.slice(0, MAX_VISIBLE);
   const critical = visible.filter((a) => a.level === "critical");
@@ -69,7 +70,7 @@ export function AlertStack() {
           <div className="font-semibold leading-tight" style={{ fontSize: px(14) }}>
             <span
               className="uppercase tracking-wide"
-              style={{ fontSize: `${labelPx(11, widthClass)}px`, marginRight: px(6), color: levelTextColor(a.level) }}
+              style={{ fontSize: `${labelPx(11, k, widthClass)}px`, marginRight: px(6), color: levelTextColor(a.level) }}
               data-testid="alert-level"
             >
               {levelLabel(a.level)}
@@ -77,7 +78,7 @@ export function AlertStack() {
             {a.title}
           </div>
           {a.detail ? (
-            <div className="chrome-dim truncate" style={{ fontSize: `${labelPx(12, widthClass)}px` }}>
+            <div className="chrome-dim truncate" style={{ fontSize: `${labelPx(12, k, widthClass)}px` }}>
               {a.detail}
             </div>
           ) : null}

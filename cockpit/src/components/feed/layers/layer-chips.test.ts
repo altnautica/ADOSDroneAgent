@@ -56,9 +56,9 @@ describe("a layer badge's menu", () => {
     expect(menu("targets", "pilot", { engineUp: false, videoFailed: true })).toContain("Vision engine is off");
   });
 
-  it("sizes its items in the alert sheet's bounded type scale, 48 px tall, never in bare rem", () => {
+  it("sizes its items in the alert sheet's px type scale (drawn at the chrome scale), 48 px tall, never in rem", () => {
     const html = menu("depth", "pilot");
-    expect(html).toContain("text-[length:clamp(14px,0.6rem,18px)]");
+    expect(html).toContain("text-[14px] leading-[1.3]");
     expect(html).toContain("min-h-[48px]");
     expect(html).not.toMatch(/text-\[[0-9.]+rem\]/);
   });

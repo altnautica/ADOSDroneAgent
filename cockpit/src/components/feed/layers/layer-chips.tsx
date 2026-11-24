@@ -15,6 +15,7 @@ import { useTranslation } from "react-i18next";
 import { Overlay } from "@/components/ui/overlay";
 import type { CockpitView } from "@/lib/cockpit-view";
 import { MENU_MAX_WIDTH_PX, MENU_MIN_WIDTH_PX, placeMenu, type AnchorRect } from "@/lib/menu-placement";
+import { useChromeScale } from "@/lib/ui-scale";
 import { cn } from "@/lib/utils";
 import { ALERT_TEXT } from "@/shared/hud/alert-centre";
 import { layerChips, UNAVAILABLE_CHIP, VISION_CHIP_MASK, type LayerChip } from "@/shared/hud/layer-engine";
@@ -85,13 +86,17 @@ export function BadgeMenuBody({ chip, view, canSetUp, videoFailed, onClose }: Ba
 }
 
 function BadgeMenu({ anchor, ...props }: BadgeMenuProps & { anchor: AnchorRect | null }) {
-  const place = placeMenu(anchor, window.innerWidth, window.innerHeight);
+  // Drawn at the chrome scale like the bar's popovers (a CSS zoom), so it is
+  // placed in the zoomed space: the anchor and the window divided by it.
+  const s = useChromeScale();
+  const place = placeMenu(anchor && { left: anchor.left / s, top: anchor.top / s, bottom: anchor.bottom / s }, window.innerWidth / s, window.innerHeight / s);
   return (
     <Overlay
       onDismiss={props.onClose}
       scrim="clear"
       panelClassName="absolute overflow-y-auto rounded-lg border border-border bg-surface p-[4px] text-surface-foreground shadow-lg"
       panelStyle={{
+        zoom: s === 1 ? undefined : s,
         left: place.left,
         top: place.top,
         bottom: place.bottom,

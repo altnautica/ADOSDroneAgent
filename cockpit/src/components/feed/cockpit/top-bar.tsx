@@ -23,7 +23,7 @@ import { padStatusText, usePadStatus } from "@/hooks/use-gamepad";
 import { useNow } from "@/hooks/use-now";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { useWidthClass } from "@/hooks/use-width-class";
-import { CHROME_TOKENS, chromeStyle, severityColor } from "@/lib/chrome-tokens";
+import { CHROME_TOKENS, chromeStyle, popoverStyle, severityColor } from "@/lib/chrome-tokens";
 import { BUILTIN_LAYERS, layerFlag } from "@/lib/cockpit-view";
 import type { WidthClass } from "@/lib/cockpit-layout";
 import {
@@ -40,6 +40,7 @@ import {
 } from "@/lib/flight-layout";
 import { enterFlightFullscreen, exitFlightFullscreen } from "@/lib/fullscreen";
 import { isKiosk } from "@/lib/kiosk";
+import { useChromeScale } from "@/lib/ui-scale";
 import { fmtClock } from "@/lib/safety-band";
 import { requestSkill } from "@/lib/skill-runner";
 import { BUILTIN_SKILL_BY_ID } from "@/lib/skills";
@@ -138,6 +139,7 @@ function LinkItem({ text }: { text: boolean }) {
   const now = useNow(500);
   const monoNow = useNow(500, "monotonic");
   const [rect, setRect] = useState<DOMRect | null>(null);
+  const scale = useChromeScale();
   const cell = linkCell(
     vehicleFrameAgeMs({
       pilotAgeMs: pilotAt === null ? null : now - pilotAt,
@@ -165,8 +167,8 @@ function LinkItem({ text }: { text: boolean }) {
         <Overlay
           onDismiss={() => setRect(null)}
           scrim="clear"
-          panelClassName="chrome-panel chrome-bar-text w-[220px] p-[10px]"
-          panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.left, window.innerWidth - 228)), top: rect.bottom + 8 }}
+          panelClassName="chrome-panel chrome-bar-text p-[10px]"
+          panelStyle={popoverStyle(rect, 220, scale).panel}
         >
           <div data-testid="link-popover" className="flex flex-col gap-[4px]">
             <div>{cell.text}</div>
@@ -213,12 +215,13 @@ function LayerFlagsList({ className }: { className?: string }) {
 }
 
 function LayerFlagsPopover({ rect, onClose }: { rect: DOMRect; onClose: () => void }) {
+  const scale = useChromeScale();
   return (
     <Overlay
       onDismiss={onClose}
       scrim="clear"
-      panelClassName="chrome-panel chrome-bar-text w-[220px] p-[6px]"
-      panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.right - 220, window.innerWidth - 228)), top: rect.bottom + 8 }}
+      panelClassName="chrome-panel chrome-bar-text p-[6px]"
+      panelStyle={popoverStyle(rect, 220, scale, "right").panel}
     >
       <LayerFlagsList />
     </Overlay>
@@ -328,9 +331,9 @@ function FullscreenButton() {
 }
 
 /** The Menu's top-bar sections at the Menu row type size (`menuTextPx`),
- *  so they scale with the width class as the Menu's rows do. */
-function menuSectionStyle(widthClass: WidthClass): CSSProperties {
-  const px = menuTextPx(widthClass);
+ *  so they scale with the chrome as the Menu's rows do. */
+function menuSectionStyle(scale: number, widthClass: WidthClass): CSSProperties {
+  const px = menuTextPx(scale, widthClass);
   const k = px / CHROME_TOKENS.type.top_bar_px;
   return {
     ...chromeStyle(),
@@ -419,10 +422,11 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
  *  in the order they moved. */
 export function FlightMenuSection({ moved }: { moved: ReadonlySet<TopBarOverflowItem> }) {
   const { widthClass } = useWidthClass();
+  const scale = useChromeScale();
   return (
     <div
       className="chrome-bar-text flex flex-wrap items-center gap-x-[16px] gap-y-[8px] rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] p-[8px]"
-      style={menuSectionStyle(widthClass)}
+      style={menuSectionStyle(scale, widthClass)}
       aria-label={specText("cockpit.flight_status")}
       data-testid="menu-overflow"
     >
@@ -441,10 +445,11 @@ export function FlightMenuSection({ moved }: { moved: ReadonlySet<TopBarOverflow
 /** The Menu's Layers entry: the level button and every layer flag. */
 export function LayersMenuSection() {
   const { widthClass } = useWidthClass();
+  const scale = useChromeScale();
   const level = useCockpitViewStore((s) => s.level);
   const cycleLevel = useCockpitViewStore((s) => s.cycleLevel);
   return (
-    <div className="chrome-bar-text flex flex-col gap-[4px] rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] p-[8px]" style={menuSectionStyle(widthClass)} data-testid="menu-layers">
+    <div className="chrome-bar-text flex flex-col gap-[4px] rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] p-[8px]" style={menuSectionStyle(scale, widthClass)} data-testid="menu-layers">
       <button
         type="button"
         onClick={cycleLevel}

@@ -1405,7 +1405,9 @@ impl Engine {
                 .filter(|a| a.steps(WizardId::Ground).contains(&want))
                 .map_or_else(|| self.first_unfinished_ground_step(), |_| want);
             return Some(SetupNeed {
-                msg: t.clone(),
+                // The FC message group shows the PreArm line itself; this item
+                // carries the plain text, so the two read (and dedupe) alike.
+                msg: statustext::without_arm_prefix(t).to_string(),
                 step: step.to_string(),
             });
         }

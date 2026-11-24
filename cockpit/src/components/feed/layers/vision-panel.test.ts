@@ -7,7 +7,16 @@ import { effectiveLayers, forcingView } from "@/lib/cockpit-view";
 import type { VisionEngineStatus } from "@/stores/layer-chips-store";
 
 import { LayerSwitch } from "./vision-panel";
-import { AGENT_RESTART_MS, detectorCandidates, engineCardState, layerLiveState, runningDetector, selectedDetector, VISION_START_MS } from "./vision-state";
+import {
+  AGENT_RESTART_MS,
+  detectorCandidates,
+  engineCardState,
+  engineHasCamera,
+  layerLiveState,
+  runningDetector,
+  selectedDetector,
+  VISION_START_MS,
+} from "./vision-state";
 
 /** The `<input>` tags of a rendered layer switch. */
 function inputs(html: string): string[] {
@@ -99,6 +108,24 @@ describe("the vision engine card", () => {
     expect(engineCardState({ ...base, error: true, pending: { kind: "agent_restarting", since }, now: since + AGENT_RESTART_MS })).toBe(
       "start_timeout",
     );
+  });
+
+  it("says the build has no runtime, with no restart, when the backend is not in this build", () => {
+    const missing = { ...UP, backend_state: "unavailable", backend_reason: "not compiled in", backend_runtime_missing: true };
+    expect(engineCardState({ ...base, status: missing })).toBe("no_runtime");
+    expect(engineCardState({ ...base, status: missing, pending: { kind: "starting", since: base.now } })).toBe("no_runtime");
+  });
+});
+
+describe("the vision demand gate", () => {
+  it("sends a demand only on a camera the engine's status names", () => {
+    const runs = { ...UP, detection: { cameras: { main: {} } } };
+    expect(engineHasCamera(runs, false, "main")).toBe(true);
+    expect(engineHasCamera(runs, false, "belly")).toBe(false);
+    expect(engineHasCamera({ ...UP, detection: { cameras: {} } }, false, "main")).toBe(false);
+    expect(engineHasCamera(UP, false, "main")).toBe(false);
+    expect(engineHasCamera(null, false, "main")).toBe(false);
+    expect(engineHasCamera(runs, true, "main")).toBe(false);
   });
 });
 

@@ -253,16 +253,18 @@ describe("alert row", () => {
     expect(q(el, "alert-item-text")?.parentElement?.parentElement?.contains(q(el, "alert-collapse"))).toBe(true);
   });
 
-  it("sizes every word in bounded rem with its own leading, so wrapped lines never overlap", async () => {
+  it("sizes every word in px against the 16 px root with its own leading, so wrapped lines never overlap", async () => {
     const el = await render(createElement("ul", null, createElement(AlertCentre, { alerts: [alert()], snoozed: new Set<string>(), onSnooze: vi.fn(), actions: actions(), skin: CHROME_ALERT_SKIN })));
-    expect(q(el, "alert-item")?.className).toContain("text-[length:clamp(14px,0.6rem,18px)] leading-[1.3]");
-    expect(q(el, "alert-item-source")?.className).toContain("text-[length:clamp(12.5px,0.52rem,16px)] leading-[1.3]");
-    // No size without a leading beside it, and no size relative to the panel's fixed 15 px line.
+    expect(q(el, "alert-item")?.className).toContain("text-[14px] leading-[1.3]");
+    expect(q(el, "alert-item-source")?.className).toContain("text-[12.5px] leading-[1.3]");
+    // No size without a leading beside it, and no size relative to the panel's
+    // fixed 15 px line or to the root (the cockpit zooms the popover instead).
     for (const node of el.querySelectorAll("[class*='text-[']")) {
       const cls = node.getAttribute("class") ?? "";
-      if (/text-\[length:/.test(cls)) expect(cls, cls).toMatch(/leading-\[/);
+      if (/text-\[[0-9.]+px\]/.test(cls)) expect(cls, cls).toMatch(/leading-\[/);
     }
     expect(el.innerHTML).not.toMatch(/text-\[[0-9.]+(em|rem)\]/);
+    expect(el.innerHTML).not.toMatch(/text-\[length:/);
   });
 });
 
