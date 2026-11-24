@@ -52,6 +52,8 @@ impl Pilot {
             ok: false,
             severity: Severity::Warn,
             msg: "Standard take-off. Steady take-off is off.".into(),
+            params: Vec::new(),
+            fix: None,
         })
     }
 

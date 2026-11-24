@@ -116,12 +116,16 @@ impl NavImuTrack {
             ok,
             severity,
             msg,
+            params: Vec::new(),
+            fix: None,
         };
         let heading = heading.map(|r| Readiness {
             id: "nav_heading".to_owned(),
             ok: false,
             severity,
             msg: format!("{} ({r})", s.readiness.nav_heading.unconfirmed),
+            params: Vec::new(),
+            fix: None,
         });
         [Some(imu), heading]
     }

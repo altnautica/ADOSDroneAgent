@@ -137,12 +137,17 @@ pub struct FcState {
     pub pos_reset: pos_reset::ResetWatch,
     /// The attitude and local position of the last second ([`trail`]).
     pub trail: trail::Trail,
+    /// Joins a long FC text split over several STATUSTEXT chunks.
+    pub statustext_chunks: ados_protocol::statustext::StatusTextAssembler,
 }
 
 impl FcState {
     /// Fold one FC frame in. Returns `Some(prev_mode)` when the custom mode
     /// changed.
     pub fn update(&mut self, sysid: u8, compid: u8, msg: &MavMessage, now_ms: u64) -> Option<u32> {
+        for (sev, text) in self.statustext_chunks.flush_stale(now_ms) {
+            self.keep_statustext(sev, text, now_ms);
+        }
         match msg {
             MavMessage::HEARTBEAT(h) => {
                 if h.autopilot == MavAutopilot::MAV_AUTOPILOT_INVALID
@@ -277,8 +282,15 @@ impl FcState {
                     self.extnav.on_text(&text, now_ms);
                     self.pos_reset.on_text(&text, self.armed, now_ms);
                 }
-                if !text.is_empty() && (s.severity as u8) <= STATUSTEXT_MIN_SEVERITY {
-                    self.push_statustext(s.severity as u8, text, now_ms);
+                let done = self.statustext_chunks.push_untagged(
+                    sysid,
+                    compid,
+                    s.severity as u8,
+                    &s.text,
+                    now_ms,
+                );
+                for (sev, text) in done {
+                    self.keep_statustext(sev, text, now_ms);
                 }
             }
             MavMessage::SYS_STATUS(s) => {
@@ -361,6 +373,13 @@ impl FcState {
             _ => {}
         }
         None
+    }
+
+    /// Ring a reassembled FC line when it is WARNING or worse.
+    fn keep_statustext(&mut self, severity: u8, text: String, now_ms: u64) {
+        if !text.is_empty() && severity <= STATUSTEXT_MIN_SEVERITY {
+            self.push_statustext(severity, text, now_ms);
+        }
     }
 
     /// Add a line to the STATUSTEXT ring the surfaces read: an FC line, or

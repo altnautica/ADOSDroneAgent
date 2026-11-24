@@ -467,3 +467,5 @@ fn the_lift_off_bits_never_fail_the_profile() {
     let profile = find(&items, "fc_profile").unwrap();
     assert!(profile.ok, "{profile:?}");
 }
+
+mod wire;

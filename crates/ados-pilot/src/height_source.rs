@@ -93,6 +93,8 @@ pub fn item(
         ok,
         severity: Severity::Warn,
         msg,
+        params: Vec::new(),
+        fix: None,
     })
 }
 

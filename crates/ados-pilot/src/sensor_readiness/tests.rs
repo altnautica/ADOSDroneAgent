@@ -141,7 +141,7 @@ fn param_rows_block_only_with_block_severity_and_fused_flow() {
         Some((
             false,
             Severity::Block,
-            format!("{mismatch}: RNGFND1_TYPE 0 (want 10)")
+            format!("{mismatch}: RNGFND1_TYPE 0 (want 10 or 32)")
         ))
     );
     assert_eq!(

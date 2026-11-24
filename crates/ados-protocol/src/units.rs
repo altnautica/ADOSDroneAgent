@@ -243,6 +243,7 @@ pub const UNITS: &[UnitSpec] = &[
         profiles: GS_VISOR,
         start_on_install: false,
         appliance_only: true,
+        idle_ok: true,
         ..gs_unit("ados-oled-i2c.service", Some(Hardware))
     },
     UnitSpec {

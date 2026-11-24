@@ -55,6 +55,75 @@ fn frame_classes(cx: &Cx) -> Vec<Value> {
     v
 }
 
+/// The picture of a frame class option (`setup-images/<key>.svg`): the
+/// class's X layout, so the picker shows how many arms it has.
+fn class_image(class: u8) -> Option<&'static str> {
+    match class {
+        ardupilot_plane::FRAME_CLASS_TAILSITTER => Some("vtol_transition"),
+        c => ardupilot_copter::layout(c, 1).map(|(k, _)| k),
+    }
+}
+
+/// The picture of a frame type option: the quad drawn in that arm layout.
+fn type_image(frame_type: u8) -> Option<&'static str> {
+    ardupilot_copter::layout(1, frame_type).map(|(k, _)| k)
+}
+
+/// An option value as the key of `images` (`1`, `"elevon"`), the way a
+/// surface prints the value.
+fn option_key(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if f.fract() == 0.0 => format!("{}", f as i64),
+            _ => n.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// An enum input with `images: {<option>: <setup-image key>}`, so a surface
+/// can draw the options as a picture picker. The options stay bare values.
+fn with_images(mut input: Value, image: impl Fn(&Value) -> Option<String>) -> Value {
+    let images: Map<String, Value> = input["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| Some((option_key(o), Value::from(image(o)?))))
+        .collect();
+    input["images"] = Value::Object(images);
+    input
+}
+
+fn class_input(value: f64, options: Vec<Value>) -> Value {
+    with_images(
+        input_enum(Value::from(value), options, "setup.input.frame_class"),
+        |o| class_image(o.as_u64()? as u8).map(str::to_string),
+    )
+}
+
+fn type_input(value: f64) -> Value {
+    with_images(
+        input_enum(
+            Value::from(value),
+            vec![0.into(), 1.into(), 3.into()],
+            "setup.input.frame_type",
+        ),
+        |o| type_image(o.as_u64()? as u8).map(str::to_string),
+    )
+}
+
+fn wing_input(value: String) -> Value {
+    with_images(
+        input_enum(
+            Value::from(value),
+            vec!["normal".into(), "elevon".into(), "vtail".into()],
+            "setup.input.wing",
+        ),
+        |o| Some(format!("surfaces_{}", o.as_str()?)),
+    )
+}
+
 impl Frame {
     fn inputs(&self, cx: &Cx) -> Map<String, Value> {
         let mut inputs = Map::new();
@@ -74,62 +143,18 @@ impl Frame {
                 );
             }
             (_, Class::Fixedwing) => {
-                inputs.insert(
-                    "wing".into(),
-                    input_enum(
-                        Value::from(wing(cx)),
-                        vec!["normal".into(), "elevon".into(), "vtail".into()],
-                        "setup.input.wing",
-                    ),
-                );
+                inputs.insert("wing".into(), wing_input(wing(cx)));
             }
-            (_, Class::Vtol) => {
+            (_, class) => {
                 let (c, t) = class_names(cx);
                 inputs.insert(
                     "frame_class".into(),
-                    input_enum(
-                        Value::from(p(c, 1.0)),
-                        frame_classes(cx),
-                        "setup.input.frame_class",
-                    ),
+                    class_input(p(c, 1.0), frame_classes(cx)),
                 );
-                inputs.insert(
-                    "frame_type".into(),
-                    input_enum(
-                        Value::from(p(t, 1.0)),
-                        vec![0.into(), 1.into(), 3.into()],
-                        "setup.input.frame_type",
-                    ),
-                );
-                if !tailsitter(cx) {
-                    inputs.insert(
-                        "wing".into(),
-                        input_enum(
-                            Value::from(wing(cx)),
-                            vec!["normal".into(), "elevon".into(), "vtail".into()],
-                            "setup.input.wing",
-                        ),
-                    );
+                inputs.insert("frame_type".into(), type_input(p(t, 1.0)));
+                if class == Class::Vtol && !tailsitter(cx) {
+                    inputs.insert("wing".into(), wing_input(wing(cx)));
                 }
-            }
-            (_, Class::Multirotor) => {
-                let (c, t) = class_names(cx);
-                inputs.insert(
-                    "frame_class".into(),
-                    input_enum(
-                        Value::from(p(c, 1.0)),
-                        frame_classes(cx),
-                        "setup.input.frame_class",
-                    ),
-                );
-                inputs.insert(
-                    "frame_type".into(),
-                    input_enum(
-                        Value::from(p(t, 1.0)),
-                        vec![0.into(), 1.into(), 3.into()],
-                        "setup.input.frame_type",
-                    ),
-                );
             }
         }
         if cx.adapter.copter_like() || cx.adapter.fw == Fw::Px4 {
@@ -306,5 +331,91 @@ impl Step for Frame {
         self.writing = true;
         self.core.running();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use ados_protocol::mavlink::ardupilotmega::MavType;
+    use serde_json::Value;
+
+    use super::{ardupilot_copter, class_image, type_image};
+    use crate::setup::fake_fc::{ap_copter_params, FakeFc, TICK};
+    use crate::setup::schema::{StepState, WizardId};
+    use crate::setup::Engine;
+
+    fn image_exists(key: &str) -> bool {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../web-shared/src/cockpit-spec/setup-images")
+            .join(format!("{key}.svg"))
+            .is_file()
+    }
+
+    /// The copter frame step offers a picture for every frame class and type
+    /// option, and each picture ships in the spec's setup-images.
+    #[test]
+    fn every_copter_frame_option_has_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(dir.path(), 1_794_268_800_000);
+        let mut fc = FakeFc::new(MavType::MAV_TYPE_QUADROTOR, ap_copter_params());
+        let mut now = 0;
+        let mut tick = |e: &mut Engine, now: &mut u64| {
+            *now += TICK;
+            fc.step(e, *now);
+        };
+        while !(e.uid.is_some() && e.params.complete()) {
+            assert!(now < 20_000, "FC not identified");
+            tick(&mut e, &mut now);
+        }
+        assert_eq!(e.start(WizardId::Ground, now)["ok"], Value::Bool(true));
+        let view = loop {
+            assert!(now < 80_000, "frame step not reached");
+            if let Some(v) = e
+                .current_view()
+                .filter(|v| v.step == "frame" && v.state == StepState::WaitingUser)
+            {
+                break v;
+            }
+            tick(&mut e, &mut now);
+        };
+        for name in ["frame_class", "frame_type"] {
+            let input = &view.args["inputs"][name];
+            let options = input["options"].as_array().expect("options");
+            assert!(!options.is_empty(), "{name} has options");
+            for o in options {
+                let key = super::option_key(o);
+                let image = input["images"][&key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name} option {key} has no image"));
+                assert!(
+                    image_exists(image),
+                    "{name} option {key}: {image}.svg missing"
+                );
+            }
+        }
+    }
+
+    /// Every supported copter layout, and every option picture, ships.
+    #[test]
+    fn every_layout_image_ships() {
+        for class in [1u8, 2, 3] {
+            for frame_type in [0u8, 1, 3] {
+                if let Some((key, _)) = ardupilot_copter::layout(class, frame_type) {
+                    assert!(image_exists(key), "{key}.svg missing");
+                }
+            }
+            assert!(class_image(class).is_some_and(image_exists));
+        }
+        for frame_type in [0u8, 1, 3] {
+            assert!(type_image(frame_type).is_some_and(image_exists));
+        }
+        for wing in ["normal", "elevon", "vtail"] {
+            assert!(image_exists(&format!("surfaces_{wing}")));
+        }
+        assert!(
+            class_image(super::ardupilot_plane::FRAME_CLASS_TAILSITTER).is_some_and(image_exists)
+        );
     }
 }

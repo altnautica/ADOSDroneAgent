@@ -8,6 +8,7 @@ pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
     r.get("/api/v1/fc-setup", fc_setup::get_fc_setup)
         .post("/api/v1/fc-setup/revert", fc_setup::post_revert)
         .post("/api/v1/fc-setup/{wizard}/start", fc_setup::post_start)
+        .post("/api/v1/fc-setup/{wizard}/resume", fc_setup::post_resume)
         .post("/api/v1/fc-setup/{wizard}/abort", fc_setup::post_abort)
         .post(
             "/api/v1/fc-setup/{wizard}/steps/{step}/run",

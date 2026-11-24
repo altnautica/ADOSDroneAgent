@@ -125,6 +125,20 @@ pub fn fc_avoid_margin_m(pilot_margin_m: f32) -> Option<f32> {
     (pilot_margin_m - m >= FC_AVOID_GAP_MIN_M - 1e-4).then_some(m)
 }
 
+/// The one FC avoidance parameter that conflicts with the pilot's brake.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AvoidConflict {
+    pub name: &'static str,
+    pub have: f32,
+    pub want: String,
+}
+
+impl fmt::Display for AvoidConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {} (want {})", self.name, self.have, self.want)
+    }
+}
+
 /// The FC's own avoidance against the pilot's flight, from its parameters
 /// (`lookup`) and the pilot's margin: `Some(why)` when it would act before
 /// the pilot's brake: fence or beacon avoidance (an `AVOID_ENABLE` bit other
@@ -134,14 +148,21 @@ pub fn fc_avoid_margin_m(pilot_margin_m: f32) -> Option<f32> {
 /// `AVOID_ENABLE` 0 never conflicts, whatever the other backstop rows hold:
 /// the vehicle flies with the pilot's brake alone, as it did before the
 /// backstop. `None` while a row it needs is unread or absent.
-pub fn avoid_conflict(pilot_margin_m: f32, lookup: impl Fn(&str) -> Option<f32>) -> Option<String> {
+pub fn avoid_conflict(
+    pilot_margin_m: f32,
+    lookup: impl Fn(&str) -> Option<f32>,
+) -> Option<AvoidConflict> {
     let enable = lookup(AVOID_ENABLE)?;
     let bits = enable.max(0.0) as u32;
     let proximity = AVOID_PROXIMITY as u32;
     let fits = fc_avoid_margin_m(pilot_margin_m).is_some();
     if bits & !proximity != 0 || (bits & proximity != 0 && !fits) {
         let want = if fits { "0 or 2" } else { "0" };
-        return Some(format!("{AVOID_ENABLE} {enable} (want {want})"));
+        return Some(AvoidConflict {
+            name: AVOID_ENABLE,
+            have: enable,
+            want: want.to_owned(),
+        });
     }
     if bits & proximity == 0 {
         return None;
@@ -149,8 +170,11 @@ pub fn avoid_conflict(pilot_margin_m: f32, lookup: impl Fn(&str) -> Option<f32>)
     let have = lookup(AVOID_MARGIN)?;
     // Centimetres, as the FC stores it.
     let most = ((pilot_margin_m - FC_AVOID_GAP_MIN_M) * 100.0 + 1e-3).floor() / 100.0;
-    (have > most + 1e-4)
-        .then(|| format!("{AVOID_MARGIN} {have} (want ≤ {most} with {AVOID_ENABLE} 2)"))
+    (have > most + 1e-4).then(|| AvoidConflict {
+        name: AVOID_MARGIN,
+        have,
+        want: format!("≤ {most} with {AVOID_ENABLE} 2"),
+    })
 }
 
 /// `row` as the pilot flying with margin `pilot_margin_m` wants it:

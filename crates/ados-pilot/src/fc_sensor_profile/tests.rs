@@ -61,7 +61,7 @@ fn eq_range_and_max() {
     assert_eq!(
         run(&p, &FcSensors::default()),
         [
-            "FLOW_TYPE 0 (want 5)",
+            "FLOW_TYPE 0 (want 5 or 7)",
             "FLOW_FXSCALER 900 (want -800 to 800)",
             "EK3_FLOW_DELAY 0 (want 1 to 250)",
             "RNGFND1_MAX 20 (want at most 12)",
@@ -183,6 +183,31 @@ fn some_port_must_stop_forwarding() {
         .filter(|(k, _)| !k.starts_with("SERIAL"))
         .collect();
     assert!(run(&p, &FcSensors::default()).is_empty());
+}
+
+#[test]
+fn msp_flow_and_rangefinder_pass_without_forwarding_options() {
+    // An MTF-01P on MSP: no MAVLink port, so the forwarding row does not apply.
+    let p = with(&[
+        ("FLOW_TYPE", 7.0),
+        ("RNGFND1_TYPE", 32.0),
+        ("SERIAL3_PROTOCOL", 32.0),
+        ("SERIAL3_OPTIONS", 0.0),
+    ]);
+    assert!(run(&p, &FcSensors::default()).is_empty());
+    // A flow type that is neither MAVLink nor MSP still fails, as a row.
+    let p = with(&[("FLOW_TYPE", 6.0)]);
+    let f = check(|n| p.get(n).copied(), &FcSensors::default());
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].detail, "FLOW_TYPE 6 (want 5 or 7)");
+    assert_eq!(f[0].param.name, "FLOW_TYPE");
+    assert_eq!(f[0].param.have, Some(6.0));
+    assert_eq!(f[0].param.want, "5 or 7");
+    let p = with(&[("RNGFND1_TYPE", 1.0)]);
+    assert_eq!(
+        run(&p, &FcSensors::default()),
+        ["RNGFND1_TYPE 1 (want 10 or 32)"]
+    );
 }
 
 #[test]

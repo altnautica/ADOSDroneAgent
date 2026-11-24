@@ -1,6 +1,8 @@
 //! Readiness items shown in the pre-flight checklist and the chip.
 
-use ados_protocol::pilot::{ControlMode, PlaceClass, RcReceiver, Readiness, Severity};
+use ados_protocol::pilot::{
+    ControlMode, ParamDiff, PlaceClass, RcReceiver, Readiness, ReadinessFix, Severity,
+};
 
 use crate::fc::FcState;
 use crate::fc_profile::{
@@ -8,11 +10,42 @@ use crate::fc_profile::{
 };
 
 fn item(id: &str, ok: bool, severity: Severity, msg: impl Into<String>) -> Readiness {
+    item_with(id, ok, severity, msg, Vec::new(), None)
+}
+
+/// An item with its parameter rows and fix.
+pub(crate) fn item_with(
+    id: &str,
+    ok: bool,
+    severity: Severity,
+    msg: impl Into<String>,
+    params: Vec<ParamDiff>,
+    fix: Option<ReadinessFix>,
+) -> Readiness {
     Readiness {
         id: id.to_owned(),
         ok,
         severity,
         msg: msg.into(),
+        params,
+        fix,
+    }
+}
+
+/// A parameter row; the FC's `f32` reads back as it prints (`0.05`, not
+/// `0.0500000007`).
+pub(crate) fn diff(name: &str, have: Option<f32>, want: impl Into<String>) -> ParamDiff {
+    ParamDiff {
+        name: name.to_owned(),
+        have: have.map(|v| v.to_string().parse().unwrap_or(f64::from(v))),
+        want: want.into(),
+    }
+}
+
+/// Open Aircraft setup at firmware detection.
+fn detect_fix() -> ReadinessFix {
+    ReadinessFix::SetupStep {
+        step: "detect".to_owned(),
     }
 }
 
@@ -149,17 +182,24 @@ pub fn items(
         Some(Firmware::Ardupilot) => {
             out.push(item("firmware", true, Severity::Block, "ArduPilot"));
         }
-        Some(Firmware::Px4) => out.push(item(
-            "firmware",
-            mode != ControlMode::Ados,
-            Severity::Block,
-            "ADOS Pilot flies ArduPilot; use FC control on PX4",
-        )),
-        None => out.push(item(
+        Some(Firmware::Px4) => {
+            let ok = mode != ControlMode::Ados;
+            out.push(item_with(
+                "firmware",
+                ok,
+                Severity::Block,
+                "ADOS Pilot flies ArduPilot; use FC control on PX4",
+                Vec::new(),
+                (!ok).then(detect_fix),
+            ))
+        }
+        None => out.push(item_with(
             "firmware",
             false,
             Severity::Block,
             "Flight controller firmware not identified",
+            Vec::new(),
+            Some(detect_fix()),
         )),
     }
     if let Some(fw) = fc.firmware {
@@ -198,6 +238,7 @@ fn profile_item(
 ) -> Readiness {
     let class = fc.vehicle_class();
     let mut missing = Vec::new();
+    let mut params = Vec::new();
     let mut unread = false;
     // The battery actions are the `battery_failsafe` item's: their right
     // value depends on the GNSS sources and the place class. The RC
@@ -214,11 +255,13 @@ fn profile_item(
             RowCheck::Absent if being_read(fc, row) => unread = true,
             RowCheck::Absent => {
                 if let Some(why) = row.absent_blocks {
-                    missing.push(format!("{} absent ({why})", row.name))
+                    missing.push(format!("{} absent ({why})", row.name));
+                    params.push(diff(row.name, None, why));
                 }
             }
             RowCheck::Mismatch { name, have, want } => {
-                missing.push(format!("{name} {have} (want {want})"))
+                missing.push(format!("{name} {have} (want {want})"));
+                params.push(diff(name, Some(have), want.to_string()));
             }
         }
     }
@@ -230,7 +273,10 @@ fn profile_item(
         unread |= [AVOID_ENABLE, AVOID_MARGIN]
             .into_iter()
             .any(|n| lookup(n).is_none() && !fc.param_absent(n));
-        missing.extend(avoid_conflict(margin_m, lookup));
+        if let Some(c) = avoid_conflict(margin_m, lookup) {
+            missing.push(c.to_string());
+            params.push(diff(c.name, Some(c.have), c.want));
+        }
     }
     let severity = if mode == ControlMode::Ados {
         Severity::Block
@@ -238,11 +284,13 @@ fn profile_item(
         Severity::Warn
     };
     if !missing.is_empty() {
-        item(
+        item_with(
             "fc_profile",
             false,
             severity,
             format!("FC parameters differ: {}", missing.join(", ")),
+            params,
+            Some(ReadinessFix::ApplyProfile),
         )
     } else if unread {
         item(
@@ -288,16 +336,19 @@ fn backstop_item(
         return None;
     }
     let (mut missing, mut absent, mut unread) = (Vec::new(), Vec::new(), false);
+    let mut params = Vec::new();
     for row in &rows {
         match check_row(row, place, |n| fc.params.get(n).copied()) {
             RowCheck::Ok => {}
             RowCheck::Absent if being_read(fc, row) => unread = true,
             RowCheck::Absent => absent.push(row.name),
-            RowCheck::Mismatch { name, have, want } if row.reboot => missing.push(format!(
-                "{name} {have} (want {want}, used after an FC reboot)"
-            )),
             RowCheck::Mismatch { name, have, want } => {
-                missing.push(format!("{name} {have} (want {want})"))
+                missing.push(if row.reboot {
+                    format!("{name} {have} (want {want}, used after an FC reboot)")
+                } else {
+                    format!("{name} {have} (want {want})")
+                });
+                params.push(diff(name, Some(have), want.to_string()));
             }
         }
     }
@@ -330,7 +381,15 @@ fn backstop_item(
     } else {
         (true, "FC proximity backstop set".to_owned())
     };
-    Some(item("fc_backstop", ok, Severity::Warn, msg))
+    let fix = (!missing.is_empty()).then_some(ReadinessFix::ApplyProfile);
+    Some(item_with(
+        "fc_backstop",
+        ok,
+        Severity::Warn,
+        msg,
+        params,
+        fix,
+    ))
 }
 
 /// The first blocking item that is not ok.

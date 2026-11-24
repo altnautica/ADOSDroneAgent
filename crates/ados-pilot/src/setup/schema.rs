@@ -64,6 +64,8 @@ pub enum WizardState {
     Done,
     Failed,
     Aborted,
+    /// Was running when the agent stopped; `resume` continues it.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -33,6 +33,8 @@ impl Pilot {
                 msg: v
                     .clone()
                     .unwrap_or_else(|| "Aircraft setup complete".into()),
+                params: Vec::new(),
+                fix: None,
             });
         }
         if let Some(item) = self.mission_inferred() {
@@ -46,6 +48,8 @@ impl Pilot {
                 ok: false,
                 severity: ados_protocol::pilot::Severity::Block,
                 msg: super::position_check::readiness_msg(&p),
+                params: Vec::new(),
+                fix: None,
             });
         }
         if let Some(item) = self.place_class_item() {
@@ -97,6 +101,8 @@ impl Pilot {
                 "Confined profile needs the vehicle's outer radius: props, guards or cage (pilot.prop_tip_radius_m)"
                     .into()
             },
+            params: Vec::new(),
+            fix: None,
         })
     }
 
@@ -113,6 +119,8 @@ impl Pilot {
             ok: false,
             severity: ados_protocol::pilot::Severity::Warn,
             msg: "FC firmware < 4.5: mission state is inferred".into(),
+            params: Vec::new(),
+            fix: None,
         })
     }
 

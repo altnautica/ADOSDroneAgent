@@ -133,6 +133,8 @@ pub struct VehicleState {
     pub gimbal_device_at: Option<std::time::Instant>,
     /// The last 10 s of PreArm/Arm STATUSTEXT, oldest first.
     pub prearm: std::collections::VecDeque<(std::time::Instant, String)>,
+    /// Joins chunked STATUSTEXT before it enters [`Self::prearm`].
+    pub prearm_chunks: PrearmChunks,
     /// The mission block the mission mirror computes ([`crate::mission_mirror`]);
     /// `None` until it has run once.
     pub mission: Option<Value>,
@@ -224,6 +226,7 @@ impl Default for VehicleState {
             gimbal: None,
             gimbal_device_at: None,
             prearm: std::collections::VecDeque::new(),
+            prearm_chunks: PrearmChunks::default(),
             mission: None,
             landed_state: None,
             clock: crate::clock::RouterClock::wall(),
@@ -273,11 +276,7 @@ impl VehicleState {
             MavMessage::STATUSTEXT(m) => {
                 let end = m.text.iter().position(|&b| b == 0).unwrap_or(m.text.len());
                 let text = String::from_utf8_lossy(&m.text[..end]);
-                if text.starts_with("PreArm:") || text.starts_with("Arm:") {
-                    let now = self.clock.now();
-                    self.prearm.push_back((now, text.trim().to_owned()));
-                    self.prune_prearm(now);
-                }
+                self.on_prearm_chunk(m.severity as u8, &m.text);
                 if let Some(fw) = ArduPilotFirmware::from_banner(&text) {
                     self.firmware = Some(fw);
                     if !self.last_heartbeat.is_empty() {
@@ -453,18 +452,6 @@ impl VehicleState {
             _ => None,
         }
     }
-
-    /// Drop PreArm texts older than the window and bound the ring.
-    fn prune_prearm(&mut self, now: std::time::Instant) {
-        while self
-            .prearm
-            .front()
-            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= PREARM_WINDOW)
-            || self.prearm.len() > PREARM_MAX
-        {
-            self.prearm.pop_front();
-        }
-    }
 }
 
 /// Pitch and yaw in degrees from a `[w, x, y, z]` quaternion (aerospace
@@ -491,7 +478,9 @@ mod modes;
 pub use modes::*;
 mod source;
 pub use source::*;
+mod prearm;
 mod wire;
+pub use prearm::PrearmChunks;
 
 #[cfg(test)]
 mod tests;

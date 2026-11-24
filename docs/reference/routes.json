@@ -858,6 +858,15 @@
     {
       "method": "POST",
       "notes": null,
+      "path": "/api/v1/fc-setup/{wizard}/resume",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
       "path": "/api/v1/fc-setup/{wizard}/start",
       "public": false,
       "relay_forbidden": false,

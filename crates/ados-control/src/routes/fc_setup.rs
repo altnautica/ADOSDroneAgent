@@ -3,6 +3,8 @@
 //!
 //! * `GET  /api/v1/fc-setup`: the wizards, their steps and the setup report.
 //! * `POST /api/v1/fc-setup/{wizard}/start`
+//! * `POST /api/v1/fc-setup/{wizard}/resume`: continue a wizard an agent
+//!   restart interrupted, at its first unfinished step.
 //! * `POST /api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}` (`{args}`)
 //! * `POST /api/v1/fc-setup/{wizard}/steps/{step}/run`
 //! * `POST /api/v1/fc-setup/{wizard}/abort`
@@ -142,6 +144,14 @@ pub async fn post_start(Path(wizard): Path<String>) -> Response {
         return bad_wizard();
     }
     respond(request("setup.start", json!({"wizard": wizard})).await)
+}
+
+/// `POST /api/v1/fc-setup/{wizard}/resume`
+pub async fn post_resume(Path(wizard): Path<String>) -> Response {
+    if !valid_wizard(&wizard) {
+        return bad_wizard();
+    }
+    respond(request("setup.resume", json!({"wizard": wizard})).await)
 }
 
 /// `POST /api/v1/fc-setup/{wizard}/abort`

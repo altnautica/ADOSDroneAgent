@@ -1,15 +1,15 @@
 //! The flow and rangefinder parameter rules of `cockpit-spec/sensor-health.json`
 //! (`params`), parsed from the spec so every surface evaluates one table.
 //!
-//! Rule kinds: `eq`, `ne`, `range`, `max`, `multiple_of` (conjoined with any
-//! other key of the same object), `mount` with an `else` rule for an
+//! Rule kinds: `eq`, `ne`, `one_of`, `range`, `max`, `multiple_of` (conjoined
+//! with any other key of the same object), `mount` with an `else` rule for an
 //! undeclared mount, `group_not_all_zero` (reported once per group) and
 //! `no_forward_any_port`; a row's `when` map gates it on other parameters.
 //! A row whose parameter is absent from the FC table is skipped.
 
 use std::sync::LazyLock;
 
-use ados_protocol::pilot::Severity;
+use ados_protocol::pilot::{ParamDiff, Severity};
 use serde_json::Value;
 
 use crate::config::FcSensors;
@@ -19,6 +19,7 @@ use crate::sensor_spec::spec;
 enum Clause {
     Eq(f64),
     Ne(f64),
+    OneOf(Vec<f64>),
     Range(f64, f64),
     Max(f64),
     MultipleOf(f64),
@@ -71,6 +72,21 @@ pub struct Failure {
     /// `FLOW_ORIENT_YAW 4500 (want multiple of 9000)`.
     pub detail: String,
     pub severity: Severity,
+    /// The same failure as one parameter row.
+    pub param: ParamDiff,
+}
+
+fn failure(name: &str, have: Option<f64>, want: String, severity: Severity) -> Failure {
+    let shown = have.map(|v| v as f32);
+    let detail = match shown {
+        Some(v) => format!("{name} {v} (want {want})"),
+        None => format!("{name} (want {want})"),
+    };
+    Failure {
+        detail,
+        severity,
+        param: crate::readiness::diff(name, shown, want),
+    }
 }
 
 fn num(v: &Value) -> Option<f64> {
@@ -84,6 +100,13 @@ fn parse_rule(v: &Value) -> Rule {
         match k.as_str() {
             "eq" => r.clauses.extend(num(v).map(Clause::Eq)),
             "ne" => r.clauses.extend(num(v).map(Clause::Ne)),
+            "one_of" => r.clauses.push(Clause::OneOf(
+                v.as_array()
+                    .expect("sensor-health.json: one_of takes a list")
+                    .iter()
+                    .filter_map(num)
+                    .collect(),
+            )),
             "max" => r.clauses.extend(num(v).map(Clause::Max)),
             "multiple_of" => r.clauses.extend(num(v).map(Clause::MultipleOf)),
             "range" => {
@@ -202,15 +225,22 @@ fn mount_value(m: &FcSensors, key: &str) -> Option<(f64, f64)> {
     }
 }
 
-/// The first failing clause's `want` text, `None` when all pass.
+/// The first failing clause's wanted value (`5`, `not 0`, `5 or 7`), `None`
+/// when all pass.
 fn first_fail(clauses: &[Clause], v: f64) -> Option<String> {
-    clauses.iter().find_map(|c| match *c {
-        Clause::Eq(x) if (v - x).abs() > 1e-3 => Some(format!("want {x}")),
-        Clause::Ne(x) if (v - x).abs() <= 1e-3 => Some(format!("want not {x}")),
-        Clause::Range(a, b) if v < a || v > b => Some(format!("want {a} to {b}")),
-        Clause::Max(m) if v > m => Some(format!("want at most {m}")),
-        Clause::MultipleOf(m) if m != 0.0 && ((v / m).round() * m - v).abs() > 0.5 => {
-            Some(format!("want multiple of {m}"))
+    clauses.iter().find_map(|c| match c {
+        Clause::Eq(x) if (v - x).abs() > 1e-3 => Some(format!("{x}")),
+        Clause::Ne(x) if (v - x).abs() <= 1e-3 => Some(format!("not {x}")),
+        Clause::OneOf(xs) if !xs.iter().any(|x| (v - x).abs() <= 1e-3) => Some(
+            xs.iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+                .join(" or "),
+        ),
+        Clause::Range(a, b) if v < *a || v > *b => Some(format!("{a} to {b}")),
+        Clause::Max(m) if v > *m => Some(format!("at most {m}")),
+        Clause::MultipleOf(m) if *m != 0.0 && ((v / m).round() * m - v).abs() > 0.5 => {
+            Some(format!("multiple of {m}"))
         }
         _ => None,
     })
@@ -256,15 +286,23 @@ pub fn check(param: impl Fn(&str) -> Option<f32>, mounts: &FcSensors) -> Vec<Fai
             _ => None,
         }) {
             if no_forward_ok(nf, &param) == Some(false) {
+                let name = nf.options_param.replace("{n}", "n");
+                let want = format!(
+                    "the flow port's forwarding off: a port with {} set, or {} {}",
+                    nf.options_mask,
+                    nf.mav_param.replace("{n}", "n"),
+                    nf.mav_mask
+                );
                 out.push(Failure {
                     detail: format!(
                         "{} no port with {} set, nor {} {} (want the flow port's forwarding off)",
-                        nf.options_param.replace("{n}", "n"),
+                        name,
                         nf.options_mask,
                         nf.mav_param.replace("{n}", "n"),
                         nf.mav_mask
                     ),
                     severity: row.severity,
+                    param: crate::readiness::diff(&name, None, want),
                 });
             }
             continue;
@@ -278,10 +316,7 @@ pub fn check(param: impl Fn(&str) -> Option<f32>, mounts: &FcSensors) -> Vec<Fai
         let rule = match (declared, &row.rule.otherwise) {
             (Some((want, tol)), _) => {
                 if (v - want).abs() > tol {
-                    out.push(Failure {
-                        detail: format!("{} {} (want {want})", row.name, v as f32),
-                        severity: row.severity,
-                    });
+                    out.push(failure(&row.name, Some(v), want.to_string(), row.severity));
                 }
                 continue;
             }
@@ -298,17 +333,15 @@ pub fn check(param: impl Fn(&str) -> Option<f32>, mounts: &FcSensors) -> Vec<Fai
             }
         }
         if let Some(want) = first_fail(&rule.clauses, v) {
-            out.push(Failure {
-                detail: format!("{} {} ({want})", row.name, v as f32),
-                severity: row.severity,
-            });
+            out.push(failure(&row.name, Some(v), want, row.severity));
         }
     }
     // Each insert shifts the later positions by one.
     let zero = groups.into_iter().filter(|e| e.1);
     for (i, (g, _, severity, at)) in zero.enumerate() {
-        let detail = format!("{g} all 0 (want the lever arm from the CG)");
-        out.insert(at + i, Failure { detail, severity });
+        let mut f = failure(g, Some(0.0), "the lever arm from the CG".into(), severity);
+        f.detail = format!("{g} all 0 (want the lever arm from the CG)");
+        out.insert(at + i, f);
     }
     out
 }

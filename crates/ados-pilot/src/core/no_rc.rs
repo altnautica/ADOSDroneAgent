@@ -125,6 +125,8 @@ impl Pilot {
                     LinkLossAction::Hold => "holds",
                 }
             ),
+            params: Vec::new(),
+            fix: None,
         }];
         out.push(Readiness {
             id: "rc_seen".into(),
@@ -135,6 +137,8 @@ impl Pilot {
             } else {
                 "No controller detected".into()
             },
+            params: Vec::new(),
+            fix: None,
         });
         if p.link_loss_action == LinkLossAction::Hold {
             out.push(Readiness {
@@ -142,6 +146,8 @@ impl Pilot {
                 ok: false,
                 severity: Severity::Block,
                 msg: "No controller: a dropped link must return or land, not hold".into(),
+                params: Vec::new(),
+                fix: None,
             });
         } else if p.link_loss_s > NO_RC_LINK_LOSS_WARN_S {
             out.push(Readiness {
@@ -152,6 +158,8 @@ impl Pilot {
                     "No controller: a dropped link waits {} s ({NO_RC_LINK_LOSS_WARN_S} s or less advised)",
                     p.link_loss_s
                 ),
+                params: Vec::new(),
+                fix: None,
             });
         }
         out

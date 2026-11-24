@@ -65,6 +65,7 @@ pub mod sidecar;
 pub mod simclock;
 pub mod source_probe;
 pub mod state;
+pub mod statustext;
 pub mod tap;
 pub mod units;
 pub mod vision_depth;

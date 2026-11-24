@@ -17,6 +17,7 @@ pub mod flight;
 pub mod measure;
 pub mod out;
 pub mod params;
+mod resume;
 pub mod schema;
 pub mod service;
 pub mod statustext;
@@ -309,6 +310,7 @@ impl Engine {
         };
         self.state = self.store.load(&uid);
         self.state.uid_source = Some(source);
+        self.mark_interrupted();
         self.snapshot_body = self
             .state
             .data
@@ -1178,6 +1180,10 @@ impl Engine {
             "setup.list" => serde_json::to_value(self.view(now)).unwrap_or(Value::Null),
             "setup.start" => match wiz() {
                 Some(w) => self.start(w, now),
+                None => reply_err("bad_wizard"),
+            },
+            "setup.resume" => match wiz() {
+                Some(w) => self.resume(w, now),
                 None => reply_err("bad_wizard"),
             },
             "setup.run_step" => match (wiz(), body.get("step").and_then(Value::as_str)) {

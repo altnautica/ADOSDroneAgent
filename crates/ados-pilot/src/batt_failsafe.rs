@@ -29,7 +29,9 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use ados_protocol::pilot::{ControlMode, PlaceClass, Readiness, Severity, VehicleClass};
+use ados_protocol::pilot::{
+    ControlMode, PlaceClass, Readiness, ReadinessFix, Severity, VehicleClass,
+};
 use serde::Deserialize;
 
 use crate::fc::FcState;
@@ -192,16 +194,36 @@ pub fn profile_value(name: &str, value: f32, class: VehicleClass, lands: bool) -
 }
 
 fn item(ok: bool, severity: Severity, msg: impl Into<String>) -> Readiness {
-    Readiness {
-        id: ID.to_owned(),
-        ok,
-        severity,
-        msg: msg.into(),
-    }
+    crate::readiness::item_with(ID, ok, severity, msg, Vec::new(), None)
 }
 
-/// The item for an ArduPilot flight controller flying in `place`.
+/// The item for an ArduPilot flight controller flying in `place`. When the
+/// battery actions differ from [`recommended`], it carries them as parameter
+/// rows and the ADOS profile as the fix.
 pub fn item_for(fc: &FcState, mode: ControlMode, place: PlaceClass) -> Readiness {
+    let mut r = grade(fc, mode, place);
+    if r.ok {
+        return r;
+    }
+    let p = |n: &str| fc.params.get(n).copied();
+    let lands = fc.vehicle_class() == VehicleClass::Multirotor && lands_on_low(place, p);
+    let rec = recommended(fc.vehicle_class(), lands);
+    for (name, want) in ACTIONS.into_iter().zip([rec.low, rec.crt]) {
+        let (Some(have), Some(want)) = (p(name), want) else {
+            continue;
+        };
+        if (have - want).abs() >= 0.5 {
+            r.params
+                .push(crate::readiness::diff(name, Some(have), want.to_string()));
+        }
+    }
+    if !r.params.is_empty() {
+        r.fix = Some(ReadinessFix::ApplyProfile);
+    }
+    r
+}
+
+fn grade(fc: &FcState, mode: ControlMode, place: PlaceClass) -> Readiness {
     let p = |n: &str| fc.params.get(n).copied();
     let hazard = if mode == ControlMode::Ados {
         Severity::Block

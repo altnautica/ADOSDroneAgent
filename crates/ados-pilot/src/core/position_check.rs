@@ -313,6 +313,8 @@ impl Pilot {
             ok,
             severity,
             msg,
+            params: Vec::new(),
+            fix: None,
         })
     }
 }

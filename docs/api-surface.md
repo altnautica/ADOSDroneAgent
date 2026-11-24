@@ -111,6 +111,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/fc-setup/revert` |  |
 | WS | `/api/v1/fc-setup/stream` | unauthenticated by design |
 | POST | `/api/v1/fc-setup/{wizard}/abort` |  |
+| POST | `/api/v1/fc-setup/{wizard}/resume` |  |
 | POST | `/api/v1/fc-setup/{wizard}/start` |  |
 | POST | `/api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}` |  |
 | POST | `/api/v1/fc-setup/{wizard}/steps/{step}/run` |  |
@@ -274,7 +275,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-249 native routes.
+250 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

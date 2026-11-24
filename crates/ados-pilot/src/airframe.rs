@@ -386,6 +386,8 @@ impl Airframe {
             ok,
             severity,
             msg,
+            params: Vec::new(),
+            fix: None,
         };
         #[cfg(test)]
         if self.force_healthy {

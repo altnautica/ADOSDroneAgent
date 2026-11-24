@@ -25,6 +25,7 @@ Type=simple
 User=root
 ExecStart=/opt/ados/bin/ados-oled-i2c
 Restart=always
+RestartPreventExitStatus=0
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

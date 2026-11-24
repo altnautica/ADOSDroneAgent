@@ -161,6 +161,22 @@ fn a_unit_that_exits_zero_when_done_is_not_restarted_for_it() {
 }
 
 #[test]
+fn the_optional_oled_panel_parks_when_no_panel_answers() {
+    let u = ados_protocol::units::find("ados-oled-i2c.service").expect("oled unit");
+    assert!(
+        u.idle_ok,
+        "a board with no panel exits 0; that is idle, not a crash"
+    );
+}
+
+#[test]
+fn the_vision_engine_can_be_restarted_from_the_api() {
+    // The cockpit's "Turn on vision" and "Restart vision" call the restart route.
+    let u = ados_protocol::units::find("ados-vision").expect("vision unit");
+    assert!(u.api_restartable);
+}
+
+#[test]
 fn the_net_daemon_owns_wifi_on_ground_station_and_visor_only() {
     use ados_protocol::units::{net_daemon_owns_wifi, HostKind};
     for p in ["ground_station", "ground-station", "visor"] {

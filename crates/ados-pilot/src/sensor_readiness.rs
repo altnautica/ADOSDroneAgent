@@ -8,7 +8,7 @@
 //! item fails with the spec's `warning` text, which every surface's status
 //! pill shows as `pilot:flow`.
 
-use ados_protocol::pilot::{ControlMode, FlowState, LidarState, Readiness, Severity};
+use ados_protocol::pilot::{ControlMode, FlowState, LidarState, Readiness, ReadinessFix, Severity};
 
 use crate::config::FcSensors;
 use crate::fc::FcState;
@@ -33,12 +33,14 @@ pub struct SensorCtx<'a> {
 }
 
 fn item(id: &str, ok: bool, severity: Severity, msg: impl Into<String>) -> Readiness {
-    Readiness {
-        id: id.to_owned(),
-        ok,
-        severity,
-        msg: msg.into(),
-    }
+    crate::readiness::item_with(id, ok, severity, msg, Vec::new(), None)
+}
+
+/// Open Settings › Sensors.
+fn sensors_fix() -> Option<ReadinessFix> {
+    Some(ReadinessFix::Settings {
+        section: "sensors".to_owned(),
+    })
 }
 
 /// The FC is set up for flow, or flow has arrived.
@@ -78,7 +80,9 @@ fn rangefinder(fc: &FcState, now_ms: u64) -> Readiness {
     if fc.rangefinder_agl(now_ms).is_some() || fc.landed() && fc.rangefinder.is_some() {
         item("rangefinder", true, Severity::Warn, &t.ok)
     } else {
-        item("rangefinder", false, Severity::Warn, &t.absent)
+        let mut r = item("rangefinder", false, Severity::Warn, &t.absent);
+        r.fix = sensors_fix();
+        r
     }
 }
 
@@ -107,7 +111,11 @@ fn flow(fc: &FcState, fuses: bool, now_ms: u64) -> Readiness {
         FlowState::Ok => item("flow", true, lost_sev, &t.ok),
         FlowState::Low => item("flow", false, Severity::Warn, &t.low),
         FlowState::Lost => item("flow", false, lost_sev, &t.lost),
-        FlowState::Absent => item("flow", false, lost_sev, &t.absent),
+        FlowState::Absent => {
+            let mut r = item("flow", false, lost_sev, &t.absent);
+            r.fix = sensors_fix();
+            r
+        }
     }
 }
 
@@ -127,11 +135,15 @@ fn params(fc: &FcState, fuses: bool, mounts: &FcSensors) -> Readiness {
         return item("sensor_params", true, severity, &t.ok);
     }
     let details: Vec<&str> = failures.iter().map(|f| f.detail.as_str()).collect();
-    item(
+    let params: Vec<_> = failures.iter().map(|f| f.param.clone()).collect();
+    let names = params.iter().map(|p| p.name.clone()).collect();
+    crate::readiness::item_with(
         "sensor_params",
         false,
         severity,
         format!("{}: {}", t.mismatch, details.join(", ")),
+        params,
+        Some(ReadinessFix::Parameters { names }),
     )
 }
 
