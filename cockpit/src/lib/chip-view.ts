@@ -6,8 +6,8 @@
 import { openAircraftSetup } from "@/lib/aircraft-setup";
 import { runCockpitAction } from "@/lib/cockpit-actions";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
-import type { ReadinessItem } from "@/shared/hud/cockpit-frames";
-import { CHIP_COMPACT_PARTS, type ChipView } from "@/shared/hud/flight-state";
+import type { PilotState, ReadinessItem } from "@/shared/hud/cockpit-frames";
+import { CHIP_COMPACT_PARTS, chipFullHeadline, type ChipView } from "@/shared/hud/flight-state";
 import { specText } from "@/shared/hud/spec-text";
 import { pillAlerts, severityTextColor, type PillAlert } from "@/shared/hud/status-pill";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
@@ -49,9 +49,10 @@ export function chipLineTextColor(color: string): string {
   return CHROME_TOKENS.text_dim;
 }
 
-/** The chip's whole text, read by screen readers as its label. */
-export function chipFullText(text: string, lines: readonly { text: string }[]): string {
-  return specText("chip.full_text", { text: [text, ...lines.map((l) => l.text)].join(" · ") });
+/** The chip's whole text, read by screen readers as its label: the first
+ *  blocking item's full message where the face shows its short title. */
+export function chipFullText(text: string, lines: readonly { text: string }[], pilot: PilotState | null): string {
+  return specText("chip.full_text", { text: [chipFullHeadline(text, pilot), ...lines.map((l) => l.text)].join(" · ") });
 }
 
 /** The readiness items that block take-off, as the alert centre's rows

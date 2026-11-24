@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::autonomy::Pilot;
+use super::pilot_alerts::short_title;
 
 pub mod readouts;
 mod secondary;
@@ -393,7 +394,7 @@ pub fn chip_inputs(p: &Pilot, age_ms: u64, ctx: &ChipContext) -> Option<ChipFact
         .readiness
         .iter()
         .find(|r| !r.ok && r.block)
-        .map(|r| r.msg.clone());
+        .map(|r| short_title(&r.msg, !r.params.is_empty()).to_string());
     let mission = p.mission.as_ref();
     Some(ChipFacts {
         ready: first_block.is_none(),

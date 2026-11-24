@@ -25,7 +25,7 @@ import layoutJson from "../cockpit-spec/layout.json";
 import tokens from "../cockpit-spec/tokens.json";
 import { BATTERY_CRITICAL_PCT, batteryLowPct, batteryReading, type BatteryHealthInput, type FcBatteryInput } from "./battery";
 import type { FcStatusText, MissionStall, ParamDiff, PilotState, ReadinessFix, ReadinessItem } from "./cockpit-frames";
-import { CHIP_STALE_AFTER_MS } from "./flight-state";
+import { CHIP_STALE_AFTER_MS, shortTitle } from "./flight-state";
 import { missionStallOverlay } from "./mission-stall";
 import type { NavSourceKind, NavSourceResult } from "./nav-source";
 import { hasSpecText, specText } from "./spec-text";
@@ -536,9 +536,7 @@ export interface PillSummary {
  *  carries the detail, so the title is the plain words before the first
  *  colon ("FC parameters differ"); the full text stays the accessible name. */
 export function alertTitle(a: Pick<PillAlert, "text" | "params">): string {
-  if (!a.params || a.params.length === 0) return a.text;
-  const at = a.text.indexOf(": ");
-  return at > 0 ? a.text.slice(0, at) : a.text;
+  return shortTitle(a.text, a.params);
 }
 
 /** The pill's face for the active alerts and the acknowledged ids. One

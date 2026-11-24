@@ -49,6 +49,8 @@ import { AIRFRAME_RESET_ACTION, AIRFRAME_RESET_KEY } from "@/shared/hud/liftoff"
 import { refusalText } from "@/shared/hud/refusal";
 import { simClockLabel } from "@/shared/hud/sim-clock";
 import { specText } from "@/shared/hud/spec-text";
+import { chipFullHeadline } from "@/shared/hud/flight-state";
+import type { PilotState } from "@/shared/hud/cockpit-frames";
 import type { PillAlert } from "@/shared/hud/status-pill";
 import { useProfile } from "@/shared/use-profile";
 import { placeMargins } from "@/shared/place-class";
@@ -90,11 +92,13 @@ function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
  *  item as an alert row (its parameter table and fix), and "Warnings (n)",
  *  which opens the alert centre. */
 function FlightChip({
+  pilot,
   blocking,
   warnings,
   actions,
   onOpenAlerts,
 }: {
+  pilot: PilotState | null;
   blocking: readonly PillAlert[];
   warnings: number;
   actions: AlertActions;
@@ -105,6 +109,9 @@ function FlightChip({
   const [open, setOpen] = useState(false);
   const detailId = useId();
   if (!chip) return null;
+  // The face shows the blocking item's short title; screen readers get its
+  // whole message.
+  const fullText = specText("chip.full_text", { text: [chipFullHeadline(chip.text, pilot), ...chip.secondary.map((l) => l.text)].join(" · ") });
   const face = (
     <>
       <span className="min-w-0 truncate">{chip.text}</span>
@@ -126,12 +133,13 @@ function FlightChip({
             aria-controls={detailId}
             className={cn(faceClass, "max-md:min-h-11")}
             style={{ color: chipTextColor(chip.color), borderColor: chip.color }}
+            aria-label={fullText}
             data-testid="flight-chip"
           >
             {face}
           </button>
         ) : (
-          <span className={faceClass} style={{ color: chipTextColor(chip.color), borderColor: chip.color }} data-testid="flight-chip">
+          <span className={faceClass} style={{ color: chipTextColor(chip.color), borderColor: chip.color }} aria-label={fullText} role="status" data-testid="flight-chip">
             {face}
           </span>
         )}
@@ -331,6 +339,7 @@ function VehicleStatus() {
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="vehicle-status">
       <FlightChip
+        pilot={pilot}
         blocking={blocking}
         warnings={pill.alerts.filter((a) => a.severity === "warning").length}
         actions={actions}

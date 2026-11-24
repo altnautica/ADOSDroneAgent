@@ -333,16 +333,21 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
     out
 }
 
-/// An alert's one-line title (`alertTitle`): with parameter rows behind it
-/// the rows carry the detail, so the title is the words before the first
-/// `": "` ("FC parameters differ").
+/// An alert's one-line title (`alertTitle`).
 pub fn alert_title(a: &PillAlert) -> &str {
-    if a.params.is_empty() {
-        return &a.text;
+    short_title(&a.text, !a.params.is_empty())
+}
+
+/// A readiness or alert message's one-line title (`shortTitle`): with
+/// parameter rows behind it the rows carry the detail, so the title is the
+/// words before the first `": "` ("FC parameters differ").
+pub fn short_title(text: &str, has_params: bool) -> &str {
+    if !has_params {
+        return text;
     }
-    match a.text.find(": ") {
-        Some(at) if at > 0 => &a.text[..at],
-        _ => &a.text,
+    match text.find(": ") {
+        Some(at) if at > 0 => &text[..at],
+        _ => text,
     }
 }
 

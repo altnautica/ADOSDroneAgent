@@ -26,6 +26,7 @@ import { CHIP_MAX_FRAC, HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
 import { CHROME_ALERT_SKIN } from "@/shared/hud/alert-centre";
 import { AlertRow } from "@/shared/hud/alert-rows";
+import { chipFullHeadline } from "@/shared/hud/flight-state";
 import { goalKindChipText } from "@/shared/hud/goal-kind";
 import { confinedChipText } from "@/shared/hud/route-check";
 import { sensingChipText } from "@/shared/hud/sensing";
@@ -69,7 +70,7 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   const button = chipButton(chip.button);
   const lines = chipLines(chip, radioFallback);
   const shown = compact ? chipLines(chip, radioFallback, true) : lines;
-  const full = chipFullText(chip.text, lines);
+  const full = chipFullText(chip.text, lines, fresh);
   const truncated = () => textRef.current !== null && textRef.current.scrollWidth > textRef.current.clientWidth + 1;
 
   return (
@@ -162,7 +163,7 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
                 setFullAt(null);
                 openSheet("mode");
               }}
-              aria-label={specText("chip.aria", { text: chip.text })}
+              aria-label={specText("chip.aria", { text: chipFullHeadline(chip.text, fresh) })}
               data-testid="flight-state-chip-full"
               className="min-h-[48px] w-full p-[10px] text-left font-semibold"
             >

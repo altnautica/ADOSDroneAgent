@@ -5,6 +5,7 @@ vi.mock("@/stores/cockpit-ui-store", async (orig) => ({ ...(await orig<object>()
 
 import { chipButton, chipFullText, chipLines } from "@/lib/chip-view";
 import { runCockpitAction } from "@/lib/cockpit-actions";
+import type { PilotState } from "@/shared/hud/cockpit-frames";
 import type { ChipView } from "@/shared/hud/flight-state";
 import chipCases from "@/shared/hud/fixtures/chip-cases.json";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
@@ -40,7 +41,20 @@ describe("the flight-state chip", () => {
     const chip: ChipView = { ruleId: "x", text: "PILOT · NORMAL", color: "#fff", dim: false, button: null, secondary: [{ id: "control_mode", text: "ADOS PILOT", color: "#aaa" }] };
     expect(chipLines(chip, false).map((l) => l.text)).toEqual(["ADOS PILOT"]);
     expect(chipLines(chip, true).map((l) => l.text)).toEqual(["ADOS PILOT", "Reduced update rate (radio)"]);
-    expect(chipFullText(chip.text, chipLines(chip, true))).toBe("Flight state: PILOT · NORMAL · ADOS PILOT · Reduced update rate (radio)");
+    expect(chipFullText(chip.text, chipLines(chip, true), null)).toBe("Flight state: PILOT · NORMAL · ADOS PILOT · Reduced update rate (radio)");
+  });
+
+  it("reads the blocking item's whole message to screen readers while the face shows its title", () => {
+    const e = expected("idle_not_ready_fc_profile_params_reads_title");
+    const msg = "FC parameters differ: MAV_GCS_SYSID 255 (want 1)";
+    const pilot = {
+      readiness: [{ id: "fc_profile", ok: false, severity: "block", msg, params: [{ name: "MAV_GCS_SYSID", have: 255, want: "1" }] }],
+    } as unknown as PilotState;
+    expect(e.text).toBe("Not ready · FC parameters differ");
+    expect(chipFullText(e.text, [], pilot)).toBe(`Flight state: Not ready · ${msg}`);
+    // Without parameter rows the face already carries the whole message.
+    const plain = { readiness: [{ id: "position", ok: false, severity: "block", msg: "No position estimate" }] } as unknown as PilotState;
+    expect(chipFullText("Not ready · No position estimate", [], plain)).toBe("Flight state: Not ready · No position estimate");
   });
 
   it("keeps the stick parts on the compact face and drops the rest", () => {

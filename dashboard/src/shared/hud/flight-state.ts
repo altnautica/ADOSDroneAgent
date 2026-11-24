@@ -383,9 +383,29 @@ export function flightStateChip(f: ChipFacts): ChipView {
   };
 }
 
-/** The first blocking readiness message, or null. */
+/** A readiness or alert message's one-line title. With parameter rows
+ *  behind it the rows carry the detail, so the title is the plain words
+ *  before the first colon ("FC parameters differ"). */
+export function shortTitle(text: string, params: readonly unknown[] | null | undefined): string {
+  if (!params || params.length === 0) return text;
+  const at = text.indexOf(": ");
+  return at > 0 ? text.slice(0, at) : text;
+}
+
+/** The first blocking readiness item's title, or null. */
 export function firstBlock(p: PilotState | null): string | null {
-  return p?.readiness.find((r) => !r.ok && r.severity === "block")?.msg ?? null;
+  const r = p?.readiness.find((r) => !r.ok && r.severity === "block");
+  return r ? shortTitle(r.msg, r.params) : null;
+}
+
+/** The chip text with the first blocking item's whole message in place of
+ *  its short title: the face reads "Not ready · FC parameters differ",
+ *  screen readers and the detail heading the full message. */
+export function chipFullHeadline(text: string, p: PilotState | null): string {
+  const r = p?.readiness.find((r) => !r.ok && r.severity === "block");
+  if (!r) return text;
+  const short = shortTitle(r.msg, r.params);
+  return short !== r.msg && text.endsWith(short) ? text.slice(0, text.length - short.length) + r.msg : text;
 }
 
 /** Facts for the chip rules from one pilot state. Exported for tests. */
