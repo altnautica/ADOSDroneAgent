@@ -1,11 +1,12 @@
 import { ChevronDown } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { CountdownCard } from "@/components/panels/countdown-card";
 import { PlaceCard } from "@/components/panels/place-card";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { BATTERY_POLL_MS, useBatteryHealth } from "@/hooks/use-battery-health";
 import { useConfig } from "@/hooks/use-config";
 import { navPilot, useFlightChip } from "@/hooks/use-flight-chip";
@@ -25,6 +26,7 @@ import {
   airframeResetAlertId,
   batteryFixAlertId,
   freshNavFrames,
+  homeAlerts,
   homeFollow,
   homePill,
   homeStatusLines,
@@ -40,11 +42,15 @@ import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
 import { severityClasses } from "@/shared/format";
+import { CARD_ALERT_SKIN, useAlertSnooze, type AlertActions } from "@/shared/hud/alert-centre";
+import { AlertCentre, AlertRow } from "@/shared/hud/alert-rows";
 import { BATTERY_FAILSAFE_FIX_KEY, BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
 import { AIRFRAME_RESET_ACTION, AIRFRAME_RESET_KEY } from "@/shared/hud/liftoff";
 import { refusalText } from "@/shared/hud/refusal";
 import { simClockLabel } from "@/shared/hud/sim-clock";
 import { specText } from "@/shared/hud/spec-text";
+import type { PillAlert } from "@/shared/hud/status-pill";
+import { useProfile } from "@/shared/use-profile";
 import { placeMargins } from "@/shared/place-class";
 import { rerunStep } from "@/shared/setup-wizard/client";
 
@@ -79,26 +85,77 @@ function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
   );
 }
 
-/** Who flies the aircraft now, read-only (the cockpit's flight-state chip). */
-function FlightChip() {
+/** Who flies the aircraft now (the cockpit's flight-state chip). While
+ *  readiness items block take-off the chip opens its detail: each blocking
+ *  item as an alert row (its parameter table and fix), and "Warnings (n)",
+ *  which opens the alert centre. */
+function FlightChip({
+  blocking,
+  warnings,
+  actions,
+  onOpenAlerts,
+}: {
+  blocking: readonly PillAlert[];
+  warnings: number;
+  actions: AlertActions;
+  onOpenAlerts: () => void;
+}) {
   const { t } = useTranslation();
   const chip = useFlightChip();
+  const [open, setOpen] = useState(false);
+  const detailId = useId();
   if (!chip) return null;
+  const face = (
+    <>
+      <span className="min-w-0 truncate">{chip.text}</span>
+      {blocking.length > 0 ? <ChevronDown aria-hidden className={cn("h-3 w-3 transition-transform", open && "rotate-180")} /> : null}
+    </>
+  );
+  const faceClass = cn(
+    "inline-flex items-center gap-1.5 max-w-full truncate rounded-full border px-2.5 py-0.5 font-mono font-semibold",
+    chip.dim && "opacity-60",
+  );
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs" aria-label={t("home.flightState")}>
-      <span
-        className={cn("max-w-full truncate rounded-full border px-2.5 py-0.5 font-mono font-semibold", chip.dim && "opacity-60")}
-        style={{ color: chipTextColor(chip.color), borderColor: chip.color }}
-        title={chip.text}
-        data-testid="flight-chip"
-      >
-        {chip.text}
-      </span>
-      {chip.secondary.map((l) => (
-        <span key={l.text} className="max-w-full truncate font-mono" style={{ color: chipTextColor(l.color) }} title={l.text}>
-          {l.text}
-        </span>
-      ))}
+    <div className="flex flex-col gap-1.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs" aria-label={t("home.flightState")}>
+        {blocking.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setOpen(!open)}
+            aria-expanded={open}
+            aria-controls={detailId}
+            className={cn(faceClass, "max-md:min-h-11")}
+            style={{ color: chipTextColor(chip.color), borderColor: chip.color }}
+            data-testid="flight-chip"
+          >
+            {face}
+          </button>
+        ) : (
+          <span className={faceClass} style={{ color: chipTextColor(chip.color), borderColor: chip.color }} data-testid="flight-chip">
+            {face}
+          </span>
+        )}
+        {chip.secondary.map((l) => (
+          <span key={l.text} className="max-w-full truncate font-mono" style={{ color: chipTextColor(l.color) }}>
+            {l.text}
+          </span>
+        ))}
+      </div>
+      {open && blocking.length > 0 ? (
+        <div id={detailId} className="rounded-lg border border-border bg-card p-2 text-sm" data-testid="flight-chip-detail">
+          <div className="px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">{t("alerts.chip.blocking")}</div>
+          <ul className="flex flex-col">
+            {blocking.map((a) => (
+              <AlertRow key={a.key} alert={a} actions={actions} skin={CARD_ALERT_SKIN} snoozed={false} />
+            ))}
+          </ul>
+          {warnings > 0 ? (
+            <button type="button" onClick={onOpenAlerts} className="min-h-9 px-1 text-left underline max-md:min-h-11" data-testid="flight-chip-warnings">
+              {t("alerts.chip.warnings", { count: warnings })}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -203,7 +260,16 @@ function VehicleStatus() {
   // and the pilot, follow and nav frames only while fresh.
   const fresh = freshNavFrames(nav.data, nav.dataUpdatedAt, now);
   const liveTelemetry = liveData(tel, VEHICLE_TELEMETRY_POLL_MS, now) ?? null;
-  const pill = homePill({ ...inputs, nav: fresh.nav, armSources: { pilot: fresh.pilot, telemetry: liveTelemetry } });
+  const homeInputs = { ...inputs, nav: fresh.nav, armSources: { pilot: fresh.pilot, telemetry: liveTelemetry } };
+  const all = homeAlerts(homeInputs);
+  // Keys prune only while the pilot frame and the agent answer: a stale
+  // frame drops its items without their conditions having cleared.
+  const { snoozed, setSnoozed } = useAlertSnooze(all, !all.some((a) => a.id === "pilot_not_answering" || a.id === "agent_unreachable"));
+  const pill = homePill(homeInputs, snoozed, all);
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const alertsTitleId = useId();
+  const navigate = useNavigate();
+  const profile = useProfile();
   const fixAlertId = batteryFixAlertId({ pilot: fresh.pilot, telemetry: liveTelemetry });
   const resetAlertId = airframeResetAlertId({ pilot: fresh.pilot, telemetry: liveTelemetry });
   const [resetRefusal, setResetRefusal] = useState<string | null>(null);
@@ -224,8 +290,49 @@ function VehicleStatus() {
   });
   const card = countdownCard(fresh.pilot, inputs.pilotAgeMs ?? 0, now);
   const place = placeCard(fresh.pilot, placeMargins(config.data));
+  const go = (path: string) => {
+    setAlertsOpen(false);
+    navigate(path);
+  };
+  // A ground station has no setup engine of its own: setup fixes read as a
+  // hint. The dashboard has no parameter editor.
+  const actions: AlertActions = {
+    openSetup: profile === "ground_station" ? null : () => go("/settings/aircraft-setup"),
+    openSettings: (section) => go(`/settings/${section}`),
+    openParameters: null,
+    extra: (a) =>
+      a.id === fixAlertId ? (
+        <Link
+          to="/settings/aircraft-setup"
+          onClick={() => {
+            // The setup page's stream shows the step's result.
+            rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step).catch(() => undefined);
+          }}
+          data-testid="status-fix-battery-failsafe"
+          className="inline-flex min-h-9 items-center font-semibold underline max-md:min-h-11"
+        >
+          {specText(BATTERY_FAILSAFE_FIX_KEY)}
+        </Link>
+      ) : a.id === resetAlertId ? (
+        <button
+          type="button"
+          onClick={resetAirframe}
+          data-testid="status-airframe-reset"
+          className="inline-flex min-h-9 items-center font-semibold underline max-md:min-h-11"
+        >
+          {specText(AIRFRAME_RESET_KEY)}
+        </button>
+      ) : null,
+  };
+  const blocking = all.filter((a) => a.source === "pilot_readiness" && a.severity === "critical");
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="vehicle-status">
+      <FlightChip
+        blocking={blocking}
+        warnings={pill.alerts.filter((a) => a.severity === "warning").length}
+        actions={actions}
+        onOpenAlerts={() => setAlertsOpen(true)}
+      />
       {card ? <CountdownCard card={card} send={sendPilotAction} /> : null}
       {place ? <PlaceCard card={place} send={sendPilotAction} /> : null}
       {fresh.pilot?.simClock ? (
@@ -237,57 +344,36 @@ function VehicleStatus() {
           {simClockLabel(fresh.pilot.simClock)}
         </span>
       ) : null}
-      <details className="group">
-        <summary
-          className={cn(
-            "inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-medium max-md:min-h-11",
-            PILL_TONE[pill.severity],
-          )}
-          data-severity={pill.severity}
-          data-testid="status-pill"
+      <button
+        type="button"
+        onClick={() => setAlertsOpen(true)}
+        aria-haspopup="dialog"
+        className={cn(
+          "inline-flex max-w-full items-center gap-1.5 self-start rounded-full border px-2.5 py-0.5 font-medium max-md:min-h-11",
+          PILL_TONE[pill.severity],
+        )}
+        data-severity={pill.severity}
+        data-testid="status-pill"
+      >
+        <span className="truncate">{pill.text}</span>
+        {all.length > 0 ? <ChevronDown aria-hidden className="h-3 w-3 -rotate-90" /> : null}
+      </button>
+      {resetRefusal ? (
+        <span role="status" data-testid="status-airframe-reset-refusal" className="mt-1 block text-destructive">
+          {resetRefusal}
+        </span>
+      ) : null}
+      <Dialog open={alertsOpen} onOpenChange={setAlertsOpen}>
+        <DialogContent
+          aria-labelledby={alertsTitleId}
+          aria-describedby={undefined}
+          // A side drawer: the full height at the right edge.
+          className="left-auto right-0 top-0 h-full max-w-md translate-x-0 translate-y-0 overflow-y-auto rounded-none border-y-0 border-r-0 p-4 pt-12 text-sm data-[state=closed]:zoom-out-100 data-[state=open]:zoom-in-100"
+          data-testid="status-alerts"
         >
-          <span className="truncate" title={pill.text}>{pill.text}</span>
-          {pill.count > 0 ? <ChevronDown aria-hidden className="h-3 w-3 transition-transform group-open:rotate-180" /> : null}
-        </summary>
-        {pill.count > 0 ? (
-          <ul className="mt-1.5 flex flex-col gap-0.5 pl-1" data-testid="status-alerts">
-            {pill.alerts.map((a) => (
-              <li key={a.id} className="flex items-baseline gap-2">
-                <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", a.severity === "critical" ? "bg-destructive" : "bg-warn")} />
-                <span className="text-muted-foreground">{specText(`cockpit.status.source.${a.source}`)}</span>
-                <span>{a.text}</span>
-                {a.id === fixAlertId ? (
-                  <Link
-                    to="/settings/aircraft-setup"
-                    onClick={() => {
-                      // The setup page's stream shows the step's result.
-                      rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step).catch(() => undefined);
-                    }}
-                    data-testid="status-fix-battery-failsafe"
-                    className="font-semibold underline max-md:inline-flex max-md:min-h-11 max-md:items-center"
-                  >
-                    {specText(BATTERY_FAILSAFE_FIX_KEY)}
-                  </Link>
-                ) : a.id === resetAlertId ? (
-                  <button
-                    type="button"
-                    onClick={resetAirframe}
-                    data-testid="status-airframe-reset"
-                    className="font-semibold underline max-md:inline-flex max-md:min-h-11 max-md:items-center"
-                  >
-                    {specText(AIRFRAME_RESET_KEY)}
-                  </button>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {resetRefusal ? (
-          <span role="status" data-testid="status-airframe-reset-refusal" className="mt-1 block text-destructive">
-            {resetRefusal}
-          </span>
-        ) : null}
-      </details>
+          <AlertCentre alerts={all} snoozed={snoozed} onSnooze={setSnoozed} actions={actions} skin={CARD_ALERT_SKIN} titleId={alertsTitleId} />
+        </DialogContent>
+      </Dialog>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono text-muted-foreground">
         {lines.linkLoss ? <span className="text-warn">{lines.linkLoss}</span> : null}
         {lines.agl ? (
@@ -329,7 +415,6 @@ export function StatusTiles() {
 
   return (
     <div className="flex flex-col gap-3">
-      <FlightChip />
       <VehicleStatus />
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {ts.map((t) => (

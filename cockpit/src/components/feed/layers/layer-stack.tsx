@@ -32,6 +32,7 @@ import type { VideoFeedState } from "@/shared/video-transport";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useLayerChipsStore } from "@/stores/layer-chips-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
+import { useNodeIdentity } from "@/shared/use-profile";
 
 /** Layers the agent computes per camera, named in the view lease. */
 const LEASED_LAYERS = ["ar_route", "ar_motion", "obstacles", "depth", "surfaces"] as const;
@@ -103,6 +104,10 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
     return !p || !p.armed || p.owner === "pilot" || p.owner === "fc_mode";
   });
 
+  // A ground station has no obstacle or AR provider of its own: those chips
+  // wait for the layer's first frame from the drone.
+  const chipsAfterFirstFrame = useNodeIdentity().profile === "ground_station";
+
   const visible = usePageVisible();
   const lost = isVideoLost(videoState, isDemoMode());
   const live = visible && !lost && view !== "map";
@@ -121,6 +126,7 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
       depthRangeM,
       depthMode,
       fpsCap,
+      chipsAfterFirstFrame,
       // The chips stack with the banners in the alert column (LayerChips).
       onChips: useLayerChipsStore.getState().setMask,
     });
@@ -160,10 +166,11 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
       depthRangeM,
       depthMode,
       fpsCap,
+      chipsAfterFirstFrame,
     });
     // `layerKey` stands for `layers` (a fresh Set each render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, layerKey, level, videoWidth, videoHeight, missionState, avoid, showLoaded, depthRangeM, depthMode, fpsCap]);
+  }, [cameraId, layerKey, level, videoWidth, videoHeight, missionState, avoid, showLoaded, depthRangeM, depthMode, fpsCap, chipsAfterFirstFrame]);
 
   // Loop runs only while something is watched.
   useEffect(() => {

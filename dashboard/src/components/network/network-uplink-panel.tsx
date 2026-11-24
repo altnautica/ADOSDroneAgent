@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { COARSE_HIT_AREA } from "@/lib/hit-area";
-import { cellularCapDetail, legKey, legLabel, moveEntry } from "@/lib/uplink-view";
+import { cellularCapDetail, ethernetLegView, legKey, legLabel, moveEntry } from "@/lib/uplink-view";
 import { cn } from "@/lib/utils";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import {
@@ -115,12 +115,16 @@ function GsUplinkMatrix() {
       : null;
   const activeLeg = activeToken ? legKey(activeToken) : null;
 
-  // Ethernet: the agent's aggregate view carries a placeholder link leg on the
-  // current front (no live ethernet seam), so a hard "no link" would be a false
-  // negative. Lead with the authoritative active-uplink report; otherwise it is
-  // genuinely not reported.
-  const ethernetLeg: LegState =
-    activeLeg === "ethernet"
+  // Ethernet: the live wired-port leg when the agent reports a carrier;
+  // otherwise lead with the active-uplink report, else genuinely not reported.
+  const eth = ethernetLegView(net?.ethernet);
+  const ethernetLeg: LegState = eth
+    ? {
+        state: eth.link ? t("uplink.state.connected") : t("uplink.state.notConnected"),
+        known: true,
+        detail: eth.detail,
+      }
+    : activeLeg === "ethernet"
       ? { state: carrying, known: true, detail: null }
       : { state: notReported, known: false, detail: null };
 

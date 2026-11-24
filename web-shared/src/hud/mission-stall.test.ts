@@ -208,7 +208,16 @@ describe("the stall in the status pill", () => {
 
   it("raises one critical pilot item reading the overlay title", () => {
     const items = pillAlerts({ ...base, pilotAgeMs: 100, missionStall: golden.missionStall });
-    expect(items).toEqual([{ id: "mission_stall", source: "pilot", severity: "critical", text: "No progress to waypoint 3 for 15 s · Skipping in 33 s" }]);
+    expect(items).toEqual([
+      {
+        id: "mission_stall",
+        source: "pilot",
+        severity: "critical",
+        text: "No progress to waypoint 3 for 15 s · Skipping in 33 s",
+        group: "navigation",
+        key: "mission_stall|No progress to waypoint 3 for 15 s · Skipping in 33 s",
+      },
+    ]);
   });
 
   it("drops it with a stale pilot state or no stall", () => {

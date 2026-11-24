@@ -10,7 +10,6 @@ import { useCallback } from "react";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
 import { readFailed } from "@/lib/read-failed";
-import type { Tone } from "@/lib/tone";
 import { useResource } from "@/shared/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH, fmtChannel, fmtDbm, fmtInt, fmtMbps } from "@/shared/format";
@@ -22,6 +21,8 @@ import "@/shared/i18n";
 import { linkKeyStatusView } from "@/shared/link-key-status";
 import { useProfile } from "@/shared/use-profile";
 import { UplinkHandoverSection } from "./uplink-handover-section";
+import { linkStateKey, linkTone, regionLabelKey } from "./link-state";
+import { VideoReceiveSection } from "./video-receive-section";
 
 interface WfbStatus {
   state?: string;
@@ -88,36 +89,6 @@ interface HistorySample {
 interface WfbHistory {
   samples?: HistorySample[];
   count?: number;
-}
-
-function linkTone(state: string | undefined, active: boolean | undefined): Tone {
-  switch (state) {
-    case "connected":
-      return "ok";
-    case "degraded":
-    case "rf_unverified":
-      return "warn";
-    case "connecting":
-      return "muted";
-    default:
-      return active ? "warn" : "err";
-  }
-}
-
-/** The link state's label key; an unlisted state reads as unknown. */
-const LINK_STATE_KEYS = {
-  connected: "cockpit.link.state.connected",
-  degraded: "cockpit.link.state.degraded",
-  rf_unverified: "cockpit.link.state.rf_unverified",
-  connecting: "cockpit.link.state.connecting",
-  searching: "cockpit.link.state.searching",
-  disconnected: "cockpit.link.state.disconnected",
-  stopped: "cockpit.link.state.stopped",
-  stale: "cockpit.link.state.stale",
-} as const;
-
-function linkStateKey(state: string): (typeof LINK_STATE_KEYS)[keyof typeof LINK_STATE_KEYS] | "cockpit.link.state.unknown" {
-  return state in LINK_STATE_KEYS ? LINK_STATE_KEYS[state as keyof typeof LINK_STATE_KEYS] : "cockpit.link.state.unknown";
 }
 
 /** A tiny inline RSSI sparkline over the recent history samples (best-effort:
@@ -200,6 +171,7 @@ export function LinkScreen() {
       ) : (
         <div className="flex flex-col gap-[0.15rem]">
           {isGroundStation ? <UplinkHandoverSection /> : null}
+          {isGroundStation ? <VideoReceiveSection /> : null}
           <SectionHeader>{t("cockpit.link.diagnosis")}</SectionHeader>
           {diag ? (
             <Row
@@ -214,20 +186,20 @@ export function LinkScreen() {
           )}
           <Row
             label={t("cockpit.link.framesSeen")}
-            value={fmtInt(w?.packets_all)}
+            value={w?.packets_all != null ? t("cockpit.link.perSecond", { n: fmtInt(w.packets_all) }) : DASH}
             hint={t("cockpit.link.framesSeenHint")}
             tone={w?.link_diag === "deaf" ? "warn" : undefined}
           />
           <Row
             label={t("cockpit.link.decryptErrors")}
-            value={fmtInt(w?.decrypt_errors)}
+            value={w?.decrypt_errors != null ? t("cockpit.link.perSecond", { n: fmtInt(w.decrypt_errors) }) : DASH}
             hint={t("cockpit.link.decryptErrorsHint")}
             tone={(w?.decrypt_errors ?? 0) > 0 ? "warn" : undefined}
           />
           {w?.fanout_forwarded != null ? (
             <Row
               label={t("cockpit.link.forwarded")}
-              value={fmtInt(w.fanout_forwarded)}
+              value={t("cockpit.link.total", { n: fmtInt(w.fanout_forwarded) })}
               hint={t("cockpit.link.forwardedHint")}
             />
           ) : null}
@@ -250,7 +222,14 @@ export function LinkScreen() {
             value={fmtDbm(w?.tx_power_dbm)}
             hint={w?.tx_power_max_dbm != null ? t("cockpit.link.txPowerMax", { dbm: fmtDbm(w.tx_power_max_dbm) }) : undefined}
           />
-          <Row label={t("cockpit.link.regDomain")} value={w?.regulatory_domain ?? w?.reg_domain ?? DASH} />
+          <Row
+            label={t("cockpit.link.regDomain")}
+            value={(() => {
+              const domain = w?.regulatory_domain ?? w?.reg_domain ?? null;
+              const key = regionLabelKey(domain);
+              return key ? t(key) : (domain ?? DASH);
+            })()}
+          />
 
           <SectionHeader>{t("cockpit.link.packets")}</SectionHeader>
           <Row label={t("cockpit.link.received")} value={fmtInt(w?.packets_received)} />
@@ -282,7 +261,7 @@ export function LinkScreen() {
           <Row
             label={t("cockpit.link.paired")}
             left={<Dot tone={pair.data == null ? "warn" : pair.data.paired ? "ok" : "muted"} />}
-            value={pair.data == null ? DASH : pair.data.paired ? t("cockpit.pair.linked") : t("cockpit.link.notPaired")}
+            value={pair.data == null ? DASH : pair.data.paired ? t("cockpit.pair.bound") : t("cockpit.link.notPaired")}
             tone={pair.data?.paired ? "ok" : "muted"}
           />
           {pair.data?.paired_with_device_id ? (

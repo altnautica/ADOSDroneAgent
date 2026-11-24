@@ -138,11 +138,71 @@ export type PilotOwner = (typeof PILOT_OWNERS)[number];
 export type AvoidState = "clear" | "detour" | "blocked" | "off" | "stale" | "unavailable";
 export type VehicleClass = "multirotor" | "fixedwing" | "vtol";
 
+/** One flight-controller parameter a readiness item compares: the FC's
+ *  value (null while the FC does not report it) and what the rule wants, as
+ *  text ("1", "5 or 7"). */
+export interface ParamDiff {
+  name: string;
+  have: number | null;
+  want: string;
+}
+
+/** What fixes a failing readiness item: run the setup engine's ADOS profile
+ *  step, open Aircraft setup at a step, open a settings section, or open the
+ *  parameter editor at these names. */
+export type ReadinessFix =
+  | { kind: "apply_profile" }
+  | { kind: "setup_step"; step: string }
+  | { kind: "settings"; section: string }
+  | { kind: "parameters"; names: string[] };
+
 export interface ReadinessItem {
   id: string;
   ok: boolean;
   severity: "block" | "warn";
   msg: string;
+  /** The parameter rows behind the item; absent when it names none. */
+  params?: ParamDiff[];
+  /** The fix the agent offers; absent when none. */
+  fix?: ReadinessFix;
+}
+
+/** A readiness item's `params`, keeping only well-formed rows; null when
+ *  absent or empty. */
+export function parseParamDiffs(v: unknown): ParamDiff[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: ParamDiff[] = [];
+  for (const r of v) {
+    const o = obj(r);
+    const name = o ? str(o.name) : null;
+    if (!o || name === null) continue;
+    out.push({ name, have: num(o.have), want: str(o.want) ?? (num(o.want) !== null ? String(o.want) : "") });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** A readiness item's `fix`; null when absent or of an unknown kind. */
+export function parseReadinessFix(v: unknown): ReadinessFix | null {
+  const o = obj(v);
+  if (!o) return null;
+  switch (o.kind) {
+    case "apply_profile":
+      return { kind: "apply_profile" };
+    case "setup_step": {
+      const step = str(o.step);
+      return step === null ? null : { kind: "setup_step", step };
+    }
+    case "settings": {
+      const section = str(o.section);
+      return section === null ? null : { kind: "settings", section };
+    }
+    case "parameters": {
+      const names = Array.isArray(o.names) ? o.names.filter((n): n is string => typeof n === "string") : [];
+      return names.length > 0 ? { kind: "parameters", names } : null;
+    }
+    default:
+      return null;
+  }
 }
 
 export interface LaunchSequence {
@@ -291,12 +351,17 @@ export function parsePilotState(raw: unknown): PilotState | null {
       const o = obj(r);
       const id = o ? str(o.id) : null;
       if (!o || id === null) continue;
-      readiness.push({
+      const item: ReadinessItem = {
         id,
         ok: o.ok === true,
         severity: o.severity === "warn" ? "warn" : "block",
         msg: str(o.msg) ?? "",
-      });
+      };
+      const params = parseParamDiffs(o.params);
+      if (params) item.params = params;
+      const fix = parseReadinessFix(o.fix);
+      if (fix) item.fix = fix;
+      readiness.push(item);
     }
   }
   const is = obj(p.input_session);

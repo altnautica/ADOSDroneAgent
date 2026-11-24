@@ -16,8 +16,8 @@
 // wider panels (md:/lg:) so the essentials always fit an 800px kiosk without a
 // scrollbar the operator cannot reach.
 
-import { Wifi, WifiOff } from "lucide-react";
-import type { ReactNode } from "react";
+import { MoreHorizontal, Wifi, WifiOff } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { SignalBars } from "@/components/shell/signal-bars";
@@ -33,6 +33,7 @@ import { linkDiagView, type LinkDiagView } from "@/lib/link-diag";
 import type { GsStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import "@/shared/i18n";
+import { linkMeasured, stripPaired } from "./strip-view";
 
 /** Map a bare link state string to a tone, the fallback when the agent has not
  *  yet classified the link with a verdict. Only the states that name a fault
@@ -72,7 +73,7 @@ function Item({
 }
 
 /** The one-glance RF verdict pill (icon + short label), tinted by tone. */
-function VerdictChip({ view }: { view: LinkDiagView }) {
+export function VerdictChip({ view }: { view: LinkDiagView }) {
   const Icon = view.icon;
   const tint =
     view.tone === "ok"
@@ -85,7 +86,7 @@ function VerdictChip({ view }: { view: LinkDiagView }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-[0.28rem] rounded-full px-[0.42rem] py-[0.08rem]",
+        "inline-flex shrink-0 items-center gap-[0.28rem] whitespace-nowrap rounded-full px-[0.42rem] py-[0.08rem]",
         tint,
       )}
     >
@@ -95,17 +96,16 @@ function VerdictChip({ view }: { view: LinkDiagView }) {
   );
 }
 
-/** LEFT zone — the RF link. */
+/** LEFT zone — the RF link: verdict, RSSI and loss only. */
 function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
   const { t } = useTranslation();
   const view = linkDiagView(link?.link_diag);
   const dotTone = view ? view.tone : stateTone(link?.state);
-  const loss = link?.loss_percent ?? null;
-  const bitrate =
-    link?.bitrate_mbps != null ? fmtMbps(link.bitrate_mbps) : fmtKbpsAsMbps(link?.bitrate_kbps);
+  // Nothing decoded: loss is not measured, so show a dash, never 0.0%.
+  const loss = linkMeasured(link) ? (link?.loss_percent ?? null) : null;
 
   return (
-    <div className="flex items-center gap-[0.6rem]">
+    <div className="flex shrink-0 items-center gap-[0.6rem] whitespace-nowrap">
       <Dot tone={dotTone} />
       {view ? <VerdictChip view={view} /> : null}
       <span className="inline-flex items-center gap-[0.32rem]">
@@ -115,27 +115,65 @@ function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
       <Item label={t("cockpit.shell.strip.loss")}>
         <span className={loss != null && loss > 5 ? "text-warn" : undefined}>{fmtLossPct(loss)}</span>
       </Item>
-      <Item label={t("cockpit.shell.strip.snr")} className="hidden md:flex">
-        {fmtDb(link?.snr_db)}
-      </Item>
-      <Item label={t("cockpit.shell.strip.channel")} className="hidden lg:flex">
-        {fmtChannel(link?.channel)}
-      </Item>
-      <Item label={t("cockpit.shell.strip.rate")} className="hidden lg:flex">
-        {bitrate}
-      </Item>
     </div>
   );
 }
 
-/** RIGHT zone — the box + reach state. */
-function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean }) {
+/** The secondary readings (SNR, channel, rate, role, uplink, CPU), shown in a
+ *  panel under the strip on tap so the strip never overflows. */
+function MoreZone({ status }: { status: GsStatus | null }) {
   const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const link = status?.link;
+  const measured = linkMeasured(link);
+  const bitrate = !measured
+    ? DASH
+    : link?.bitrate_mbps != null
+      ? fmtMbps(link.bitrate_mbps)
+      : fmtKbpsAsMbps(link?.bitrate_kbps);
   const role = status?.role?.current;
   const uplink = status?.network?.uplink_type;
   const uplinkReachable = status?.network?.uplink_reachable;
-  const paired = Boolean(status?.paired_drone?.device_id);
-  const cpu = status?.system?.cpu_pct ?? null;
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        className="inline-flex h-[2rem] items-center rounded px-[0.4rem] text-muted-foreground hover:text-surface-foreground"
+        aria-expanded={open}
+        aria-label={t("cockpit.shell.strip.more")}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <MoreHorizontal className="h-[1rem] w-[1rem]" aria-hidden />
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-full z-50 mt-[0.3rem] flex flex-col gap-[0.35rem] rounded-md border border-border bg-surface px-[0.75rem] py-[0.5rem] shadow-lg">
+          <Item label={t("cockpit.shell.strip.snr")}>{measured ? fmtDb(link?.snr_db) : DASH}</Item>
+          <Item label={t("cockpit.shell.strip.channel")}>{fmtChannel(link?.channel)}</Item>
+          <Item label={t("cockpit.shell.strip.rate")}>{bitrate}</Item>
+          {role ? <Item label={t("cockpit.shell.strip.role")}>{role}</Item> : null}
+          <Item label={t("cockpit.shell.strip.uplink")}>
+            <span className="inline-flex items-center gap-[0.25rem]">
+              {/* Reachability is three-state: absent is UNKNOWN, not offline. */}
+              {uplinkReachable === true ? (
+                <Wifi className="h-[0.85rem] w-[0.85rem] text-ok" aria-hidden />
+              ) : uplinkReachable === false ? (
+                <WifiOff className="h-[0.85rem] w-[0.85rem] text-muted-foreground" aria-hidden />
+              ) : null}
+              {uplink ?? DASH}
+            </span>
+          </Item>
+          <Item label={t("cockpit.shell.strip.cpu")}>{fmtPct(status?.system?.cpu_pct ?? null)}</Item>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** RIGHT zone — the box state: pair, temperature, clock. */
+function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean }) {
+  const { t } = useTranslation();
+  const paired = stripPaired(status);
   const temp = status?.system?.temp_c ?? null;
   const recording = status?.recording === true || status?.video?.recording === true;
   const tempClass = temp == null ? undefined : temp >= 80 ? "text-err" : temp >= 70 ? "text-warn" : undefined;
@@ -143,7 +181,7 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
   const standby = uplinkState?.state === "standby" ? uplinkState : null;
 
   return (
-    <div className="flex items-center gap-[0.9rem]">
+    <div className="flex shrink-0 items-center gap-[0.9rem] whitespace-nowrap">
       {recording ? (
         <span className="inline-flex items-center gap-[0.28rem] text-err">
           <span className="h-[0.5rem] w-[0.5rem] animate-pulse rounded-full bg-err" aria-hidden />
@@ -159,31 +197,10 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
           </span>
         </span>
       ) : null}
-      {role ? (
-        <Item label={t("cockpit.shell.strip.role")} className="hidden lg:flex">
-          {role}
-        </Item>
-      ) : null}
-      <Item label={t("cockpit.shell.strip.uplink")} className="hidden md:flex">
-        <span className="inline-flex items-center gap-[0.25rem]">
-          {/* Reachability is three-state: only badge it when the node actually
-              reports it. Absent (undefined) is UNKNOWN, not "not reachable", so
-              it shows no icon rather than a misleading offline badge. */}
-          {uplinkReachable === true ? (
-            <Wifi className="h-[0.85rem] w-[0.85rem] text-ok" aria-hidden />
-          ) : uplinkReachable === false ? (
-            <WifiOff className="h-[0.85rem] w-[0.85rem] text-muted-foreground" aria-hidden />
-          ) : null}
-          {uplink ?? DASH}
-        </span>
-      </Item>
       <Item label={t("cockpit.shell.strip.pair")}>
         <span className={paired ? "text-ok" : "text-muted-foreground"}>
-          {paired ? t("cockpit.shell.strip.linked") : t("cockpit.shell.strip.none")}
+          {paired ? t("cockpit.shell.strip.bound") : t("cockpit.shell.strip.none")}
         </span>
-      </Item>
-      <Item label={t("cockpit.shell.strip.cpu")} className="hidden lg:flex">
-        {fmtPct(cpu)}
       </Item>
       <Item label={t("cockpit.shell.strip.temp")}>
         <span className={tempClass}>{fmtTemp(temp)}</span>
@@ -192,6 +209,7 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
         <WallClock />
       </span>
       {stale ? <span className="text-[0.75rem] text-warn">{t("cockpit.shell.strip.stale")}</span> : null}
+      <MoreZone status={status} />
     </div>
   );
 }
@@ -203,7 +221,7 @@ export function StatusStrip() {
   return (
     <div
       className={cn(
-        "flex shrink-0 items-center gap-[0.9rem] overflow-hidden px-[0.75rem]",
+        "relative flex shrink-0 items-center gap-[0.9rem] px-[0.75rem]",
         CHROME.stripHeight,
         "border-b border-border bg-surface/70",
         stale && "opacity-70",

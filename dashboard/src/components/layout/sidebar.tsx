@@ -1,3 +1,4 @@
+import { ChevronsLeft } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -11,7 +12,25 @@ const MobileNavDrawer = lazy(() =>
   import("@/components/layout/mobile-nav-drawer").then((m) => ({ default: m.MobileNavDrawer })),
 );
 
+/** The desktop sidebar's collapse button: labelled (w-56) ↔ icons only (w-16),
+ *  the state the UI store persists. No hooks, so a test can press it. */
+export function SidebarToggle({ collapsed, label }: { collapsed: boolean; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={() => useUiStore.getState().toggleSidebar()}
+      aria-label={label}
+      aria-expanded={!collapsed}
+      title={label}
+      className="mt-auto flex min-h-11 shrink-0 items-center justify-center border-t border-border text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+    >
+      <ChevronsLeft className={cn("h-4 w-4 transition-transform", collapsed && "rotate-180")} aria-hidden />
+    </button>
+  );
+}
+
 export function Sidebar() {
+  const { t } = useTranslation();
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const mobileNavOpen = useUiStore((s) => s.mobileNavOpen);
   // Once loaded the drawer stays mounted, so later opens are instant and
@@ -29,6 +48,7 @@ export function Sidebar() {
         )}
       >
         <SidebarNav collapsed={collapsed} />
+        <SidebarToggle collapsed={collapsed} label={collapsed ? t("rail.expandSidebar") : t("rail.collapseSidebar")} />
       </aside>
 
       {drawerLoaded && (

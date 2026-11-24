@@ -3,7 +3,9 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseArFrame, parseDepthFrame, parseObstaclesFrame, type DepthFrame } from "./cockpit-frames";
-import { chipTexts, LayerEngine, LayerFrameStore, type LayerConfig } from "./layer-engine";
+import { CHIP_IDS, chipTexts, layerChips, LayerEngine, LayerFrameStore, type LayerConfig } from "./layer-engine";
+
+const bit = (id: (typeof CHIP_IDS)[number]) => 1 << CHIP_IDS.indexOf(id);
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
 const ar = parseArFrame(JSON.parse(readFileSync(path.join(FIXTURES, "ar-frame.json"), "utf8")))!;
@@ -181,6 +183,31 @@ describe("LayerEngine", () => {
     expect(masks).toEqual([masks[0], 0]);
   });
 
+  it("reports a never-delivered obstacles or AR layer only once it has delivered, when asked to", () => {
+    const masks: number[] = [];
+    setup({ onChips: (m) => masks.push(m), chipsAfterFirstFrame: true });
+    frame(2100);
+    // Nothing ever arrived: no provider, no chip.
+    expect(masks).toEqual([]);
+  });
+
+  it("still reports a delivered layer that stopped, when asked to wait for a first frame", () => {
+    const masks: number[] = [];
+    const { store } = setup({ onChips: (m) => masks.push(m), chipsAfterFirstFrame: true });
+    store.putAr(ar, clock);
+    store.putObstacles(obstacles, clock);
+    frame();
+    frame(2100);
+    expect(chipTexts(masks[0])).toEqual(["Obstacles unavailable", "AR unavailable"]);
+  });
+
+  it("reports never-delivered layers by default", () => {
+    const masks: number[] = [];
+    setup({ onChips: (m) => masks.push(m) });
+    frame();
+    expect(chipTexts(masks[0])).toEqual(["Obstacles unavailable", "AR unavailable"]);
+  });
+
   it("draws nothing for a camera the frame does not carry", () => {
     const { store, calls } = setup({ cameraId: "down", layers: new Set(["ar_route"]) });
     store.putAr(ar, clock);
@@ -263,5 +290,35 @@ describe("LayerEngine", () => {
     store.putAr(ar, clock);
     frame();
     expect(engine.stats().frames).toBe(1);
+  });
+});
+
+describe("layerChips", () => {
+  it("says the vision engine is off for its own layers and no data for the rest", () => {
+    const mask = bit("depth") | bit("surfaces") | bit("obstacles") | bit("ar") | bit("targets");
+    expect(layerChips(mask, false).map((c) => [c.layer, c.reason])).toEqual([
+      ["depth", "engine_off"],
+      ["surfaces", "engine_off"],
+      ["obstacles", "no_data"],
+      ["ar", "no_data"],
+      ["targets", "engine_off"],
+    ]);
+    expect(layerChips(mask, true).every((c) => c.reason === "no_data")).toBe(true);
+    // An unknown engine state is not "off".
+    expect(layerChips(mask, null).every((c) => c.reason === "no_data")).toBe(true);
+  });
+
+  it("carries the chip text and the layer flags each chip stands for", () => {
+    const [depth, ar] = layerChips(bit("depth") | bit("ar"), true);
+    expect(depth).toEqual({ id: "depth", layer: "depth", layers: ["depth"], text: "Depth unavailable", reason: "no_data" });
+    expect(ar.layers).toEqual(["ar_route", "ar_motion"]);
+    expect(ar.text).toBe("AR unavailable");
+  });
+
+  it("marks unscaled depth and approximate AR as degraded, whatever the engine", () => {
+    expect(layerChips(bit("depthUnscaled") | bit("arApprox"), false).map((c) => [c.layer, c.reason])).toEqual([
+      ["depth", "degraded"],
+      ["ar", "degraded"],
+    ]);
   });
 });

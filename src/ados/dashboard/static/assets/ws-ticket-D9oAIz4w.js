@@ -1,1 +1,0 @@
-import{r as e}from"./api-fetch-61fZDWOi.js";var t=`ados-ws-ticket`;async function n(t,n){try{let r=await fetch(`/api/_ws/ticket`,{method:`POST`,headers:{"Content-Type":`application/json`,...e()},body:JSON.stringify({scope:t}),signal:n});return r.ok?(await r.json()).ticket??null:null}catch{return null}}function r(e){return e?[t,e]:[]}export{n,r,t};

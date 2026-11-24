@@ -28,6 +28,11 @@ export function legKey(token: string): LegKey | null {
     case "ap":
       return "ap";
     default:
+      // The router's live sentinel carries the kernel name (eth0, end0, wlan1…).
+      if (token.startsWith("eth") || token.startsWith("en")) return "ethernet";
+      if (token.startsWith("wwan")) return "cellular";
+      if (token.startsWith("usb")) return "usb";
+      if (token.startsWith("wlan")) return "wifi";
       return null;
   }
 }
@@ -73,9 +78,10 @@ export function activeUplink(net: GsNetworkView | null): string | null {
   return typeof net?.active_uplink === "string" && net.active_uplink.length > 0 ? net.active_uplink : null;
 }
 
-/** One row per leg, in matrix order. Ethernet and USB have no live leg in the
- *  aggregate view, so they read "carrying traffic" only when the agent names
- *  them active, and "not reported" otherwise (never a false "no link"). */
+/** One row per leg, in matrix order. Ethernet reads its live wired-port leg;
+ *  USB (and an Ethernet the agent did not report) reads "carrying traffic" only
+ *  when the agent names it active, and "not reported" otherwise (never a false
+ *  "no link"). */
 export function legStates(net: GsNetworkView | null): LegState[] {
   const token = activeUplink(net);
   const active = token ? legKey(token) : null;
@@ -129,7 +135,18 @@ export function legStates(net: GsNetworkView | null): LegState[] {
       : { ...base, state: { key: "uplink.state.off" }, known: true, detail: null };
   })();
 
-  return [passive("ethernet"), wifiLeg, cellularLeg, passive("usb"), apLeg];
+  const eth = net?.ethernet ?? null;
+  const ethernetLeg: LegState = (() => {
+    if (!eth || typeof eth.link !== "boolean") return passive("ethernet");
+    const base = { leg: "ethernet" as const, active: active === "ethernet" };
+    const detail =
+      [eth.ip, typeof eth.speed_mbps === "number" ? `${eth.speed_mbps} Mb/s` : null].filter(Boolean).join(" · ") || null;
+    return eth.link
+      ? { ...base, state: { key: "uplink.state.connected" }, known: true, detail }
+      : { ...base, state: { key: "uplink.state.notConnected" }, known: true, detail: null };
+  })();
+
+  return [ethernetLeg, wifiLeg, cellularLeg, passive("usb"), apLeg];
 }
 
 /** Move `list[index]` by `delta`; null when out of range. */

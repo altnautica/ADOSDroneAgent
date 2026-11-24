@@ -1,0 +1,47 @@
+{
+  "v": 1,
+  "readiness": {
+    "fc_profile": "setup",
+    "battery_failsafe": "setup",
+    "fc_backstop": "setup",
+    "sensor_params": "setup",
+    "firmware": "setup",
+    "airframe_balance": "setup",
+    "flow": "sensors",
+    "rangefinder": "sensors",
+    "lidar": "sensors",
+    "position": "navigation",
+    "controller": "link"
+  },
+  "id": {
+    "setup_abort": "setup",
+    "failsafe": "flight_controller",
+    "mission_stall": "navigation",
+    "agent_unreachable": "link",
+    "pilot_not_answering": "link"
+  },
+  "source": {
+    "fc_status_text": "flight_controller",
+    "fc_prearm": "flight_controller",
+    "nav_source": "navigation",
+    "battery": "power",
+    "link": "link",
+    "video": "link",
+    "controller": "link",
+    "storage": "system",
+    "preflight": "other",
+    "pilot": "other",
+    "pilot_readiness": "other"
+  },
+  "order": ["setup", "flight_controller", "sensors", "navigation", "power", "link", "system", "other"],
+  "titles": {
+    "setup": "Flight controller setup",
+    "flight_controller": "Flight controller messages",
+    "sensors": "Sensors",
+    "navigation": "Navigation",
+    "power": "Power",
+    "link": "Link and video",
+    "system": "System",
+    "other": "Other"
+  }
+}

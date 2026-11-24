@@ -1,13 +1,15 @@
 // The flight-state chip's parts beyond the shared view: the inline button's
-// words and action, the extra reduced-rate line, and the full text the chip
-// shows on hover or tap once it is truncated.
+// words and action, the extra reduced-rate line, the full text screen
+// readers get as the chip's label, and the blocking readiness rows its
+// detail popover lists.
 
 import { openAircraftSetup } from "@/lib/aircraft-setup";
 import { runCockpitAction } from "@/lib/cockpit-actions";
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import type { ReadinessItem } from "@/shared/hud/cockpit-frames";
 import { CHIP_COMPACT_PARTS, type ChipView } from "@/shared/hud/flight-state";
 import { specText } from "@/shared/hud/spec-text";
-import { severityTextColor } from "@/shared/hud/status-pill";
+import { pillAlerts, severityTextColor, type PillAlert } from "@/shared/hud/status-pill";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
 
 /** The chip's inline button: its words and what a press does. */
@@ -47,7 +49,13 @@ export function chipLineTextColor(color: string): string {
   return CHROME_TOKENS.text_dim;
 }
 
-/** The chip's whole text, as its tooltip and its tap panel read it. */
+/** The chip's whole text, read by screen readers as its label. */
 export function chipFullText(text: string, lines: readonly { text: string }[]): string {
   return specText("chip.full_text", { text: [text, ...lines.map((l) => l.text)].join(" · ") });
+}
+
+/** The readiness items that block take-off, as the alert centre's rows
+ *  (parameter table and fix included). */
+export function chipBlockingAlerts(readiness: readonly ReadinessItem[]): PillAlert[] {
+  return pillAlerts({ alerts: [], readiness, prearm: undefined, storagePct: null }).filter((a) => a.severity === "critical");
 }

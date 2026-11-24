@@ -10,10 +10,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { withArmedRetry } from "@/shared/api/armed-retry";
+import { boundPeerId, shortFingerprint, type PairPeerWire } from "@/shared/api/pair-view";
 import { toast, toastFromError } from "@/shared/api/toast";
 import { useProfile } from "@/shared/use-profile";
 
-interface WfbPair {
+interface WfbPair extends PairPeerWire {
   paired?: boolean;
   paired_with_device_id?: string | null;
   fingerprint?: string | null;
@@ -76,7 +77,16 @@ export function RfLinkCard() {
         ) : paired ? (
           <div className="grid grid-cols-[130px_1fr] gap-y-1 text-sm">
             <span className="text-xs text-muted-foreground">{t("cockpit.pair.pairedDrone", { peer })}</span>
-            <span className="font-mono truncate">{rf.data?.paired_with_device_id ?? t("cockpit.pair.linked")}</span>
+            <span className="font-mono truncate">
+              {[
+                boundPeerId(rf.data) ?? t("cockpit.pair.peerUnknown"),
+                shortFingerprint(rf.data?.fingerprint)
+                  ? t("cockpit.pair.keyShort", { fp: shortFingerprint(rf.data?.fingerprint) })
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
             {rf.data?.fingerprint && (
               <>
                 <span className="text-xs text-muted-foreground">{t("cockpit.pair.fingerprint")}</span>

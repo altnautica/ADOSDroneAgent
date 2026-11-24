@@ -1,22 +1,25 @@
 // The setup wizard's live state for a React surface: one `GET /api/v1/fc-setup`
 // read, then the setup stream folded in frame by frame, plus the operator's
-// requests (start, step action, re-run, abort, revert). Each request applies
-// the engine's reply at once, so the screen moves before the next frame lands.
+// requests (start, resume, step action, re-run, abort, revert). Each request
+// applies the engine's reply at once, so the screen moves before the next
+// frame lands.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   abortWizard,
   fetchSetupStatus,
+  loadErrorText,
   openSetupStream,
   rerunStep,
+  resumeWizard,
   revertToSnapshot,
   runStepAction,
   setupErrorKey,
   startWizard,
 } from "./client";
 import { applyFrame, withStep, withWizard } from "./parse";
-import { setupText } from "./strings";
+import { setupErrorText } from "./strings";
 import type { SetupStatus, SetupStep, SetupValue, Wizard } from "./types";
 
 export interface FcSetupController {
@@ -27,24 +30,29 @@ export interface FcSetupController {
    *  it has been closed or silent for 5 s (the stream keeps alive at 1 Hz),
    *  true again on reconnect. Always true when the stream is not held open. */
   streamUp: boolean;
-  /** The last failed read, or null. */
+  /** The last failed read as display text (the engine's message, or "not
+   *  available on this node" for a 503), or null. */
   loadError: string | null;
   /** The last refused or failed request, as display text, or null. */
   requestError: string | null;
   /** The request in flight (`<wizard>`, `<wizard>/<step>/<action>`, `revert`), or null. */
   busy: string | null;
   refresh: () => Promise<void>;
-  start: (wizard: string) => Promise<void>;
+  /** Start (or start over) a wizard; resolves true when the engine took it. */
+  start: (wizard: string) => Promise<boolean>;
+  /** Continue an interrupted wizard where it stopped; true when it did. */
+  resume: (wizard: string) => Promise<boolean>;
   abort: (wizard: string) => Promise<void>;
   action: (step: SetupStep, actionId: string, args?: Record<string, SetupValue>) => Promise<void>;
-  rerun: (step: SetupStep) => Promise<void>;
+  /** Run one step on its own; true when the engine took it. */
+  rerun: (step: SetupStep) => Promise<boolean>;
   /** Restore a parameter snapshot; resolves to the restored count, or null on failure. */
   revert: (snapshot: string) => Promise<number | null>;
 }
 
 function requestMessage(err: unknown): string {
   const key = setupErrorKey(err);
-  if (key) return setupText(key);
+  if (key) return setupErrorText(key);
   return err instanceof Error ? err.message : String(err);
 }
 
@@ -69,7 +77,7 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
       setStatus(next);
       setLoadError(null);
     } catch (err) {
-      if (mounted.current) setLoadError(err instanceof Error ? err.message : String(err));
+      if (mounted.current) setLoadError(loadErrorText(err));
     } finally {
       if (mounted.current) setLoading(false);
     }
@@ -84,7 +92,7 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
         setLoadError(null);
       })
       .catch((err: unknown) => {
-        if (mounted.current) setLoadError(err instanceof Error ? err.message : String(err));
+        if (mounted.current) setLoadError(loadErrorText(err));
       })
       .finally(() => {
         if (mounted.current) setLoading(false);
@@ -117,11 +125,13 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
     }
   }, []);
 
-  const applyWizard = (w: Wizard | null) => {
+  const applyWizard = (w: Wizard | null): boolean => {
     if (w) setStatus((s) => (s ? withWizard(s, w) : s));
+    return w !== null;
   };
-  const applyStep = (step: SetupStep | null) => {
+  const applyStep = (step: SetupStep | null): boolean => {
     if (step) setStatus((s) => (s ? withStep(s, step) : s));
+    return step !== null;
   };
 
   return {
@@ -133,13 +143,17 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
     busy,
     refresh,
     start: async (wizard) => applyWizard(await request(wizard, () => startWizard(wizard))),
-    abort: async (wizard) => applyWizard(await request(wizard, () => abortWizard(wizard))),
-    action: async (step, actionId, args) =>
+    resume: async (wizard) => applyWizard(await request(wizard, () => resumeWizard(wizard))),
+    abort: async (wizard) => {
+      applyWizard(await request(wizard, () => abortWizard(wizard)));
+    },
+    action: async (step, actionId, args) => {
       applyStep(
         await request(`${step.wizard}/${step.step}/${actionId}`, () =>
           runStepAction(step.wizard, step.step, actionId, args),
         ),
-      ),
+      );
+    },
     rerun: async (step) =>
       applyStep(await request(`${step.wizard}/${step.step}/run`, () => rerunStep(step.wizard, step.step))),
     revert: async (snapshot) => {

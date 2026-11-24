@@ -71,6 +71,10 @@ export interface LayerConfig {
    *  only when the set changes, and with 0 on `stop`), so the host can stack
    *  them with its own banners where nothing covers them. */
   onChips?: (mask: number) => void;
+  /** When set, the Obstacles and AR chips show only once that layer has
+   *  delivered a frame: on a node where neither may have a provider (a ground
+   *  station), a layer that never arrived is not "unavailable", it is absent. */
+  chipsAfterFirstFrame?: boolean;
 }
 
 export interface PaintStats {
@@ -113,6 +117,57 @@ export const CHIP_IDS: readonly ChipId[] = ["depth", "depthUnscaled", "surfaces"
 /** The chip texts of a reported mask, in stacking order. */
 export function chipTexts(mask: number): string[] {
   return CHIP_IDS.filter((_, i) => (mask & (1 << i)) !== 0).map((id) => CHIP_TEXT[id]);
+}
+
+/**
+ * Why a status chip shows:
+ * - `engine_off`: the layer comes from the vision engine and the engine is off
+ *   or unreachable;
+ * - `no_data`: the layer's frames stopped (older than {@link HIDE_AFTER_MS});
+ * - `degraded`: frames arrive but are approximate (unscaled depth, AR placed
+ *   without a camera pose).
+ */
+export type ChipReason = "engine_off" | "no_data" | "degraded";
+
+/** One status chip as the host shows it: `layer` names it ("depth", "ar"),
+ *  `layers` are the layer flags it stands for (AR is the route and motion
+ *  layers), `text` is the chip text. */
+export interface LayerChip {
+  id: ChipId;
+  layer: ChipLayer;
+  layers: readonly string[];
+  text: string;
+  reason: ChipReason;
+}
+
+/** The layer a chip names. */
+export type ChipLayer = "depth" | "surfaces" | "obstacles" | "ar" | "targets";
+
+/** Per chip: the layer it names, the flags it stands for, whether the vision
+ *  engine produces its data (obstacles and AR come from the pilot and the nav
+ *  stream) and whether it reports degraded data rather than none. */
+const CHIP_META: Readonly<Record<ChipId, { layer: ChipLayer; layers: readonly string[]; vision: boolean; degraded: boolean }>> = {
+  depth: { layer: "depth", layers: ["depth"], vision: true, degraded: false },
+  depthUnscaled: { layer: "depth", layers: ["depth"], vision: true, degraded: true },
+  surfaces: { layer: "surfaces", layers: ["surfaces"], vision: true, degraded: false },
+  obstacles: { layer: "obstacles", layers: ["obstacles"], vision: false, degraded: false },
+  ar: { layer: "ar", layers: ["ar_route", "ar_motion"], vision: false, degraded: false },
+  arApprox: { layer: "ar", layers: ["ar_route", "ar_motion"], vision: false, degraded: true },
+  targets: { layer: "targets", layers: ["targets"], vision: true, degraded: false },
+};
+
+/** The chips the vision engine feeds, as a mask: only these need its status. */
+export const VISION_CHIP_MASK: number = CHIP_IDS.reduce((m, id, i) => (CHIP_META[id].vision ? m | (1 << i) : m), 0);
+
+/** The structured chips of a reported mask, in stacking order. `engineUp` is
+ *  the vision engine's state (`GET /api/vision/status`): false when it is off
+ *  or unreachable, null while unknown. */
+export function layerChips(mask: number, engineUp: boolean | null): LayerChip[] {
+  return CHIP_IDS.filter((_, i) => (mask & (1 << i)) !== 0).map((id) => {
+    const m = CHIP_META[id];
+    const reason: ChipReason = m.degraded ? "degraded" : engineUp === false && m.vision ? "engine_off" : "no_data";
+    return { id, layer: m.layer, layers: m.layers, text: CHIP_TEXT[id], reason };
+  });
 }
 
 export class LayerEngine {
@@ -362,7 +417,10 @@ export class LayerEngine {
       if (g && (g.scaleSource ?? s.depth.data.scaleSource) === "none") this.chip("depthUnscaled");
     }
     if (L.has("surfaces") && surfVis === "hidden") this.chip("surfaces");
-    if (L.has("obstacles") && obstVis === "hidden") this.chip("obstacles");
+    // A node with no provider for a layer (`chipsAfterFirstFrame`) reports it
+    // unavailable only after it has delivered a frame.
+    const quiet = this.cfg.chipsAfterFirstFrame === true;
+    if (L.has("obstacles") && obstVis === "hidden" && !(quiet && s.obstacles.data === null)) this.chip("obstacles");
 
     // AR (route z50, motion z60).
     const wantAr = L.has("ar_route") || L.has("ar_motion");
@@ -371,7 +429,7 @@ export class LayerEngine {
       const frame = s.ar.data;
       const arCam = frame ? (frame.cameras[cam] ?? null) : null;
       const status = arStatusChip(frame, arCam, arVis === "hidden");
-      if (status) this.chip(status === "AR ≈" ? "arApprox" : "ar");
+      if (status && !(quiet && frame === null)) this.chip(status === "AR ≈" ? "arApprox" : "ar");
       if (arVis !== "hidden" && arCam) {
         if (this.arLaidVersion !== s.ar.version) {
           this.arLaidVersion = s.ar.version;

@@ -321,11 +321,12 @@ describe("the top bar's cells from the spec", () => {
     expect(pop).toContain('specText("nav_source.no_ack")');
   });
 
-  it("the chip is capped at max_frac of the bar with its full text on hover and tap", () => {
+  it("the chip is capped at max_frac of the bar with its full text as its label and on tap", () => {
     expect(CHIP_MAX_FRAC).toBe(0.4);
     expect(chip).toContain("${CHIP_MAX_FRAC * 100}cqw");
     expect(bar).toContain('containerType: "inline-size"');
-    expect(chip).toContain("title={full}");
+    expect(chip).toContain("aria-label={full}");
+    expect(chip).not.toContain("title={full}");
     expect(chip).toContain('data-testid="flight-state-chip-full"');
   });
 });

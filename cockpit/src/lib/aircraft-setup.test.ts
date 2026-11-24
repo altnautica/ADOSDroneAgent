@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadOfferedUids, markSetupOffered, SETUP_OFFERED_KEY, setupOfferUid } from "@/lib/aircraft-setup";
+import {
+  AIRCRAFT_SETUP_SCREEN_ID,
+  loadOfferedUids,
+  markSetupOffered,
+  openAircraftSetup,
+  SETUP_OFFERED_KEY,
+  setupOfferUid,
+  takePendingSetupStep,
+} from "@/lib/aircraft-setup";
+import { useNavStore } from "@/stores/nav-store";
 import type { SetupStatus, Wizard } from "@/shared/setup-wizard/types";
 
 const mem = new Map<string, string>();
@@ -55,5 +64,21 @@ describe("aircraft setup offer text", () => {
     expect(s["setup.banner.title"]).toBe("Set up this aircraft");
     expect(s["setup.banner.open"]).toBe("Open");
     expect(s["setup.banner.later"]).toBe("Later");
+  });
+});
+
+describe("opening Aircraft setup at a step", () => {
+  it("leaves the step pending for the screen, read once", () => {
+    openAircraftSetup("ados_profile");
+    const stack = useNavStore.getState().detailStack;
+    expect(stack[stack.length - 1]).toBe(AIRCRAFT_SETUP_SCREEN_ID);
+    expect(takePendingSetupStep()).toBe("ados_profile");
+    expect(takePendingSetupStep()).toBeNull();
+  });
+
+  it("an open without a step clears a step left pending", () => {
+    openAircraftSetup("frame");
+    openAircraftSetup();
+    expect(takePendingSetupStep()).toBeNull();
   });
 });

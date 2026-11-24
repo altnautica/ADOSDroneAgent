@@ -108,7 +108,14 @@ export function parseInput(name: string, raw: unknown): StepInput | null {
     step: num(raw.step),
     unit: str(raw.unit),
     label_key,
+    images: isObj(raw.images) ? stringMap(raw.images) : {},
   };
+}
+
+function stringMap(v: Obj): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, s] of Object.entries(v)) if (typeof s === "string" && s !== "") out[k] = s;
+  return out;
 }
 
 function parseInputs(raw: unknown): StepInput[] {

@@ -107,3 +107,12 @@ describe("agent down", () => {
     expect([t.value, t.sub]).toEqual(["—", "—"]);
   });
 });
+
+describe("VID tile", () => {
+  it("says no stream when the pipeline is ready but nothing flows", () => {
+    const snap = (bitrate: number) =>
+      ({ fc: { connected: false }, video: { state: "ready", bitrate_kbps: bitrate } }) as unknown as DashboardSnapshot;
+    expect(tile({ snapshot: snap(0) }, "VID").value).toBe("No stream");
+    expect(tile({ snapshot: snap(4000) }, "VID").value).not.toBe("No stream");
+  });
+});

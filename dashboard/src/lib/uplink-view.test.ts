@@ -4,7 +4,7 @@ import path from "node:path";
 import type { TFunction } from "i18next";
 import { describe, expect, it } from "vitest";
 
-import { cellularCapDetail, moveEntry } from "./uplink-view";
+import { cellularCapDetail, ethernetLegView, legKey, moveEntry } from "./uplink-view";
 
 const t = ((key: string, opts?: Record<string, unknown>) =>
   opts ? `${key}:${JSON.stringify(opts)}` : key) as unknown as TFunction;
@@ -36,5 +36,17 @@ describe("uplink matrix", () => {
   it("gives the order arrows a 44 px target on a phone", () => {
     expect(panel).toMatch(/max-md:h-11 max-md:w-11/);
     expect(panel).toMatch(/COARSE_HIT_AREA/);
+  });
+});
+
+describe("ethernetLegView", () => {
+  it("reads the live wired port and maps the sentinel's kernel names", () => {
+    expect(ethernetLegView({ link: true, ip: "10.0.0.2", speed_mbps: 1000 })).toEqual({
+      link: true,
+      detail: "10.0.0.2 · 1000 Mb/s",
+    });
+    expect(ethernetLegView({ link: false, ip: null })).toEqual({ link: false, detail: null });
+    expect(ethernetLegView(null)).toBeNull();
+    expect(legKey("end0")).toBe("ethernet");
   });
 });

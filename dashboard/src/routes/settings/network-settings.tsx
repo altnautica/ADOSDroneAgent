@@ -8,11 +8,13 @@ import { RiskBadge } from "@/components/settings/risk-badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { WifiPanel } from "@/components/wifi/wifi-panel";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { postApply } from "@/shared/api/apply-actions";
 import { toast, toastFromError } from "@/shared/api/toast";
 import { getWifiStatus } from "@/shared/api/wifi";
 import { resolveHotspotSsid } from "@/shared/api/hotspot";
+import { getGsNetwork } from "@/shared/api/uplink";
 
 export function NetworkSettings() {
   const { t } = useTranslation();
@@ -35,9 +37,19 @@ export function NetworkSettings() {
     }
   }, [status.data]);
 
+  // A ground station runs its AP on its own interface (never the WFB radio)
+  // under its own name; its live AP leg names both.
+  const isGround = useNodeIdentity().profile === "ground_station";
+  const gsNet = useQuery({
+    queryKey: ["gs-network", "ap"],
+    queryFn: () => getGsNetwork(),
+    refetchInterval: 10_000,
+    enabled: isGround,
+  });
+  const gsAp = isGround ? gsNet.data?.ap : null;
   const hotspotSsid = useMemo(
-    () => resolveHotspotSsid(status.data?.network),
-    [status.data?.network],
+    () => resolveHotspotSsid(status.data?.network, gsAp),
+    [status.data?.network, gsAp],
   );
 
   async function commitHotspot(next: boolean) {
@@ -105,6 +117,16 @@ export function NetworkSettings() {
                 ) : (
                   t("settings.network.hotspotHintUnnamed")
                 )}
+                {hotspotSsid.iface ? (
+                  <>
+                    {" "}
+                    <Trans
+                      i18nKey="settings.network.hotspotHintIface"
+                      values={{ iface: hotspotSsid.iface }}
+                      components={{ code: <span className="font-mono" /> }}
+                    />
+                  </>
+                ) : null}
               </div>
               <div className="text-xs text-warn">
                 {t("settings.network.hotspotWarning")}

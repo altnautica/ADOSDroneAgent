@@ -30,6 +30,7 @@ import { getScreen, homeTabFor, tabScreens } from "@/nav/registry";
 import { useNodeIdentity } from "@/shared/use-profile";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
+import { useSettingsStore } from "@/stores/settings-store";
 import type { ScreenContext } from "@/nav/navigator";
 
 // The quick menu loads the first time it is opened, outside the Feed's chunk.
@@ -52,6 +53,19 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   useEffect(() => {
     void loadExtensions();
   }, [loadExtensions]);
+
+  // `[` cycles the menu rail: labelled → icons only → hidden → labelled.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "[" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+      useSettingsStore.getState().cycleRail();
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Mid-session re-probe: a refused request asks the gate's probe whether the
   // credential is really gone. A refusal of that one request (a denied plugin

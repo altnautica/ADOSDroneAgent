@@ -8,8 +8,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useNow } from "@/hooks/use-now";
-import { useResource } from "@/hooks/use-resource";
+import { useQuery } from "@tanstack/react-query";
+import { resourceQueryOptions } from "@/hooks/use-resource";
 import { roleLabel } from "@/lib/enum-labels";
+import { meshReadEnabled } from "@/lib/node-identity";
 import { liveData } from "@/lib/freshness";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { ApiError } from "@/shared/api-fetch";
@@ -42,14 +44,20 @@ const MESH_POLL_MS = 2_000;
 export function MeshPanel() {
   const { t } = useTranslation();
   const identity = useNodeIdentity();
-  const mesh = useResource<MeshState>("gs-mesh", "/api/v1/ground-station/mesh", MESH_POLL_MS);
+  // A direct ground station is in no mesh: the route answers 404, so it is
+  // not called at all.
+  const meshRead = meshReadEnabled(identity.role);
+  const mesh = useQuery({
+    ...resourceQueryOptions<MeshState>("gs-mesh", "/api/v1/ground-station/mesh", MESH_POLL_MS),
+    enabled: meshRead,
+  });
   const now = useNow(1_000);
 
   const m = liveData(mesh, MESH_POLL_MS, now);
   // `{}` means the agent holds no current snapshot: the poll loop is not
   // reporting, which is not the same as "no peers".
   const current = m != null && m.up !== undefined;
-  const notInMesh = mesh.error instanceof ApiError && mesh.error.status === 404;
+  const notInMesh = !meshRead || (mesh.error instanceof ApiError && mesh.error.status === 404);
   const role = m?.role || identity.role;
   const neighbors = m?.neighbors ?? [];
 

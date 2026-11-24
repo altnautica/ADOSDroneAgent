@@ -16,7 +16,7 @@ import { useResource } from "@/shared/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH } from "@/shared/format";
 import { fmtMb } from "@/lib/format-status";
-import { laneForToken, uplinkTokenLabel } from "@/lib/uplink-lanes";
+import { ethernetLaneView, laneForToken, uplinkTokenLabel, type EthernetLane } from "@/lib/uplink-lanes";
 import "@/shared/i18n";
 
 interface WifiClientLane {
@@ -27,9 +27,8 @@ interface WifiClientLane {
   ip?: string | null;
 }
 interface GsNetwork {
-  /** Always null on the native front: no live ethernet probe exists, so the
-   *  leg is "not probed", never "down". */
-  ethernet?: null;
+  /** The board's wired port (link, ip, speed), or null when it has none. */
+  ethernet?: EthernetLane | null;
   wifi_client?: WifiClientLane;
   /** The router's interface-role token (eth0 / wlan0_client / wwan0 / usb0). */
   active_uplink?: string | null;
@@ -94,6 +93,7 @@ export function UplinkScreen() {
   const active = n?.active_uplink ?? null;
   const activeLane = laneForToken(active);
   const wifi = n?.wifi_client;
+  const eth = ethernetLaneView(n?.ethernet);
   const m = modem.data;
 
   const wifiDetail = [wifi?.ssid, wifi?.ip].filter(Boolean).join(" · ") || undefined;
@@ -117,9 +117,13 @@ export function UplinkScreen() {
     body = (
       <div className="flex flex-col gap-[0.15rem]">
         <SectionHeader>{t("cockpit.uplink.lanes")}</SectionHeader>
-        {/* The agent has no live ethernet or USB-tether probe; those lanes are
-            known only when they are the active uplink. */}
-        <LaneRow name={t("uplink.leg.ethernet")} up={null} active={activeLane === "ethernet"} />
+        {/* The USB tether has no live probe; it is known only when active. */}
+        <LaneRow
+          name={t("uplink.leg.ethernet")}
+          up={eth.up}
+          active={activeLane === "ethernet"}
+          detail={eth.detail}
+        />
         <LaneRow
           name={t("uplink.leg.wifi")}
           up={typeof wifi?.connected === "boolean" ? wifi.connected : null}

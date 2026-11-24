@@ -2,10 +2,12 @@
 // multiplies the fluid root font-size (styles/globals.css `--ui-scale`) so an
 // operator can size the whole layout up or down for their panel and eyesight
 // without changing the layout itself. The theme picks the token set
-// (`data-theme` on the root) and glove mode grows every touch target.
+// (`data-theme` on the root) and glove mode grows every touch target. The
+// menu rail's state (labelled / icons only / hidden) is remembered here too.
 
 import { create } from "zustand";
 
+import { isKiosk } from "@/lib/kiosk";
 import type { MinimapPin } from "@/shared/hud/minimap-mode";
 import type { RadarScaleSetting } from "@/shared/hud/radar-scan";
 
@@ -93,6 +95,26 @@ function loadRadarScale(): RadarScaleSetting {
   return n === 3 || n === 6 || n === 12 ? n : "auto";
 }
 
+const RAIL_KEY = "ados-cockpit-rail";
+
+/** The menu rail's three states: icons with labels, icons only, or hidden
+ *  behind an edge tab. One toggle (and the `[` key) cycles them in this order. */
+export type RailState = "labelled" | "compact" | "hidden";
+export const RAIL_STATES: readonly RailState[] = ["labelled", "compact", "hidden"];
+
+/** The stored rail state; with none stored, icons only on the kiosk's small
+ *  panel and labelled in a browser. */
+export function loadRail(): RailState {
+  const raw = loadString(RAIL_KEY);
+  if (raw === "labelled" || raw === "compact" || raw === "hidden") return raw;
+  return isKiosk() ? "compact" : "labelled";
+}
+
+/** The state after `rail` in the cycle (hidden wraps to labelled). */
+export function nextRail(rail: RailState): RailState {
+  return RAIL_STATES[(RAIL_STATES.indexOf(rail) + 1) % RAIL_STATES.length];
+}
+
 interface SettingsState {
   /** Altitude tape reference: home-relative or above mean sea level. */
   altRef: AltRef;
@@ -111,6 +133,10 @@ interface SettingsState {
   /** The proximity radar's display range, or `auto`. */
   radarScale: RadarScaleSetting;
   setRadarScale: (scale: RadarScaleSetting) => void;
+  /** The menu rail's state, remembered per device. */
+  rail: RailState;
+  setRail: (rail: RailState) => void;
+  cycleRail: () => void;
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -150,4 +176,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     saveString(RADAR_SCALE_KEY, String(radarScale));
     set({ radarScale });
   },
+  rail: loadRail(),
+  setRail: (rail) => {
+    saveString(RAIL_KEY, rail);
+    set({ rail });
+  },
+  cycleRail: () => get().setRail(nextRail(get().rail)),
 }));

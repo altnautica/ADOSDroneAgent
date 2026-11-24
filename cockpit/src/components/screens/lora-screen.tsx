@@ -20,6 +20,7 @@ import type { AgentConfig } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
 import {
   CRSF_STATUS_PATH,
+  crsfLaneEnabled,
   LORA_BEACONS_PATH,
   LORA_PATH,
   LORA_REGIONS_PATH,
@@ -138,15 +139,16 @@ export function LoraScreen() {
     useCallback((s: AbortSignal) => apiFetch<{ beacons?: LoraBeacon[] }>(LORA_BEACONS_PATH, { signal: s }), []),
     5_000,
   );
-  // The RC lane's modules exist only on a ground station; a drone has no route.
-  const crsf = useResource(
-    useCallback((s: AbortSignal) => apiFetch<{ modules?: CrsfModule[] }>(CRSF_STATUS_PATH, { signal: s }), []),
-    5_000,
-    { enabled: profile === "ground_station" },
-  );
   const config = useResource(
     useCallback((s: AbortSignal) => apiFetch<AgentConfig>("/api/config", { signal: s }), []),
     30_000,
+  );
+  // The RC lane's modules exist only on a ground station whose lane is on;
+  // otherwise the route answers 404, so it is not called.
+  const crsf = useResource(
+    useCallback((s: AbortSignal) => apiFetch<{ modules?: CrsfModule[] }>(CRSF_STATUS_PATH, { signal: s }), []),
+    5_000,
+    { enabled: profile === "ground_station" && crsfLaneEnabled(config.data) },
   );
   const armed = useResource(useCallback((s: AbortSignal) => getArmedReading(s), []), 1_000);
 

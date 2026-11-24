@@ -17,6 +17,14 @@ const IMAGE_URLS = import.meta.glob<string>("../cockpit-spec/setup-images/*.svg"
   import: "default",
 });
 
+/** The motor-order pictures as markup, so the outputs step can mark the motor
+ *  under test. */
+const MOTOR_SVGS = import.meta.glob<string>("../cockpit-spec/setup-images/motor_order_*.svg", {
+  eager: true,
+  query: "?raw",
+  import: "default",
+});
+
 /** Fill `{arg}` placeholders from `args`; an unknown placeholder stays as written. */
 export function interpolate(template: string, args: Record<string, SetupValue>): string {
   return template.replace(/\{([A-Za-z0-9_]+)\}/g, (whole, name: string) => {
@@ -37,6 +45,19 @@ export function setupText(
   const bodyVariant = /^(setup\.[^.]+\.body)\.[^.]+$/.exec(key);
   const template = table[key] ?? (bodyVariant ? table[bodyVariant[1]] : undefined);
   return template === undefined ? key : interpolate(template, args);
+}
+
+/** Whether the spec carries `key`. */
+export function hasSetupText(key: string): boolean {
+  return key in STRINGS;
+}
+
+/** The words for an engine refusal code (`{ok:false, err:"armed"}`): its
+ *  `setup.err.<code>`, else `setup.blocker.<code>`, else the code. */
+export function setupErrorText(code: string): string {
+  if (`setup.err.${code}` in STRINGS) return setupText(`setup.err.${code}`);
+  if (`setup.blocker.${code}` in STRINGS) return setupText(`setup.blocker.${code}`);
+  return setupText(code);
 }
 
 /** An enum option's text: its own `label_key`, else the engine's convention
@@ -66,6 +87,24 @@ export function paramNote(step: string, name: string): string | null {
 export function setupImageUrl(key: string | null): string | null {
   if (!key) return null;
   return IMAGE_URLS[`../cockpit-spec/setup-images/${key}.svg`] ?? null;
+}
+
+/** A motor-order picture as markup with motor `n` (the number drawn on it)
+ *  filled in the warning colour, or null when `key` is not a motor-order
+ *  picture or has no motor `n`. */
+export function motorOrderMarkup(key: string | null, n: number, sources: Readonly<Record<string, string>> = MOTOR_SVGS): string | null {
+  if (!key) return null;
+  const svg = sources[`../cockpit-spec/setup-images/${key}.svg`];
+  if (!svg) return null;
+  const motor = new RegExp(
+    `<circle cx="([\\d.]+)" cy="([\\d.]+)" r="([\\d.]+)"/>\\s*(<text x="\\1" y="\\2" )fill="#EDEDED"([^>]*>${n}</text>)`,
+  );
+  if (!motor.test(svg)) return null;
+  return svg.replace(
+    motor,
+    (_all, x: string, y: string, r: string, open: string, rest: string) =>
+      `<circle cx="${x}" cy="${y}" r="${Number(r) + 2}" style="fill:hsl(var(--warn));stroke:hsl(var(--warn))"/>${open}fill="#111111"${rest}`,
+  );
 }
 
 /** A value as the wizard shows it: numbers to at most three decimals,

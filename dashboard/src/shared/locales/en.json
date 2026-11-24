@@ -228,7 +228,10 @@
         "connecting": "Connecting",
         "stale": "Stale",
         "error": "Error",
-        "disabled": "Disabled"
+        "disabled": "Disabled",
+        "searching": "Searching",
+        "deaf": "No RF from drone",
+        "noPeer": "No drone heard"
       },
       "gnssFix": {
         "none": "No fix",
@@ -282,6 +285,7 @@
       "cld": "CLD",
       "pair": "PAIR",
       "linked": "linked",
+      "noStream": "No stream",
       "off": "off",
       "betaflightMsp": "betaflight · msp",
       "inavMsp": "inav · msp",
@@ -498,8 +502,8 @@
   "video": {
     "panel": {
       "title": "Video",
-      "wfbWaitDetail": "drone TX {{state}}",
-      "wfbWaitDetailChannel": "drone TX {{state}} on ch {{channel}}",
+      "wfbWaitDetail": "radio {{state}}",
+      "wfbWaitDetailChannel": "radio {{state}} on ch {{channel}}",
       "badgeLive": "live · {{transport}}",
       "badgeFrozen": "{{transport}} · frozen",
       "badgeConnecting": "connecting",
@@ -820,8 +824,9 @@
       "hotspotFailed": "Hotspot toggle failed.",
       "hotspotUpdated": "Hotspot updated.",
       "hotspotTitle": "Wi-Fi hotspot",
-      "hotspotHintNamed": "Spins up a captive AP named <code>{{ssid}}</code> on wlan0 so a phone or laptop can join the agent over Wi-Fi and finish onboarding without a wired connection.",
-      "hotspotHintUnnamed": "Spins up a captive AP on wlan0 so a phone or laptop can join the agent over Wi-Fi and finish onboarding without a wired connection. This agent has not reported the network name, so check the configured hotspot SSID on the rig before you go looking for it.",
+      "hotspotHintNamed": "Spins up a captive AP named <code>{{ssid}}</code> so a phone or laptop can join the agent over Wi-Fi and finish onboarding without a wired connection.",
+      "hotspotHintUnnamed": "Spins up a captive AP so a phone or laptop can join the agent over Wi-Fi and finish onboarding without a wired connection. This agent has not reported the network name, so check the configured hotspot SSID on the rig before you go looking for it.",
+      "hotspotHintIface": "It broadcasts on <code>{{iface}}</code>.",
       "hotspotWarning": "Enabling this disconnects any active Wi-Fi client link (the radio can host one or the other, not both).",
       "confirmTitle": "Switch wlan0 to setup AP?",
       "confirmBodyNamed": "The agent is currently joined to <current>{{current}}</current>. Enabling the setup hotspot will drop that link. The rig stays reachable via the <code>{{ssid}}</code> AP or any other uplink (ethernet, USB tether, 4G) until you toggle the hotspot back off.",
@@ -1749,6 +1754,63 @@
       "confirm": "Reboot"
     }
   },
+  "rail": {
+    "toCompact": "Show icons only",
+    "toHidden": "Hide menu",
+    "show": "Show menu",
+    "moreBelow": "More menu items below",
+    "moreAbove": "More menu items above",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar"
+  },
+  "vision": {
+    "close": "Close Vision",
+    "engine": {
+      "title": "Vision engine",
+      "running": "Running",
+      "starting": "Starting vision…",
+      "off": "Vision is off",
+      "offHint": "Turn it on to see depth, surfaces and detections.",
+      "unreachable": "Vision is not responding",
+      "unavailable": "Vision cannot run here",
+      "turnOn": "Turn on vision",
+      "restart": "Restart vision",
+      "armed": "Disarm to change vision",
+      "needsAgentRestart": "Vision starts after the agent restarts (about 10 s).",
+      "restartAgent": "Restart agent",
+      "agentRestarting": "Restarting the agent…",
+      "startTimeout": "Vision did not start. Check Settings › Vision.",
+      "failed": "Could not change vision: {{error}}"
+    },
+    "layer": {
+      "receiving": "Receiving",
+      "noData": "No data",
+      "engineOff": "Engine off",
+      "depthOptions": "Depth options"
+    },
+    "layerName": {
+      "depth": "Depth",
+      "surfaces": "Surfaces",
+      "obstacles": "Obstacles",
+      "ar": "AR",
+      "targets": "Targets"
+    },
+    "detections": {
+      "count_one": "{{count}} detection",
+      "count_other": "{{count}} detections",
+      "empty": "No detections. Point the camera at people or vehicles."
+    },
+    "badge": {
+      "engineOff": "Vision engine is off",
+      "noData": "No data from {{layer}} for 2 s",
+      "unscaled": "No range sensor to scale depth",
+      "approx": "AR placement is approximate",
+      "turnOff": "Turn off",
+      "closeView": "Close Vision view",
+      "setUp": "Set up",
+      "options": "{{layer}} options"
+    }
+  },
   "lora": {
     "title": "LoRa",
     "loadFailed": "Could not read the LoRa status.",
@@ -1928,6 +1990,7 @@
     "wizardState": {
       "not_started": "Not started",
       "running": "Running",
+      "interrupted": "Interrupted",
       "done": "Complete",
       "failed": "Failed",
       "aborted": "Aborted"
@@ -1947,6 +2010,51 @@
       "noSnapshots": "No snapshot yet."
     },
     "streamDown": "Live updates lost: reconnecting. The running step may be out of date."
+  },
+  "alerts": {
+    "title": "Alerts",
+    "blocking_one": "{{count}} blocking",
+    "blocking_other": "{{count}} blocking",
+    "warnings_one": "{{count}} warning",
+    "warnings_other": "{{count}} warnings",
+    "showHidden": "Show hidden ({{count}})",
+    "hideHidden": "Hide hidden ({{count}})",
+    "allClear": "All clear: nothing needs attention",
+    "hiddenNote_one": "{{count}} hidden",
+    "hiddenNote_other": "{{count}} hidden",
+    "param": {
+      "name": "Parameter",
+      "current": "Current",
+      "wanted": "Wanted",
+      "notReported": "not reported",
+      "showAll": "Show all {{count}}",
+      "showFewer": "Show fewer"
+    },
+    "action": {
+      "apply": "Apply recommended values",
+      "openSetup": "Open setup",
+      "openSettings": "Open settings",
+      "openParameters": "Open parameters",
+      "hide": "Hide",
+      "unhide": "Show again",
+      "collapse": "Collapse",
+      "expand": "Expand",
+      "cancel": "Cancel"
+    },
+    "groundHint": "Fix from the drone's Aircraft setup (Mission Control or the drone's cockpit)",
+    "apply": {
+      "reading": "Reading the recommended values…",
+      "writes": "Values to write",
+      "snapshot": "A snapshot is saved first; you can restore it from Aircraft setup › Setup report.",
+      "writing": "Writing values…",
+      "done": "Recommended values written",
+      "failed": "The values were not written."
+    },
+    "chip": {
+      "blocking": "What blocks take-off",
+      "noBlocking": "Nothing blocks take-off",
+      "warnings": "Warnings ({{count}})"
+    }
   },
   "cockpit": {
     "video": {
@@ -2146,6 +2254,9 @@
     },
     "params": {
       "title": "Parameters",
+      "filtered_one": "Filtered: {{count}} parameter",
+      "filtered_other": "Filtered: {{count}} parameters",
+      "clearFilter": "Clear",
       "mspFc": "This flight controller speaks MSP (Betaflight or iNav). Configure it on the MSP screen.",
       "badNumber": "{{name}}: enter a number.",
       "saving": "Saving {{done}}/{{total}}…",
@@ -2193,7 +2304,9 @@
       "unpairArmed": "The vehicle is armed. Unpairing waits until it disarms.",
       "unpairArmedUnknown": "The vehicle's arm state is not known yet. Unpairing waits until it reports disarmed.",
       "codeLabel": "Pairing code — enter in Mission Control",
-      "linked": "linked",
+      "bound": "bound",
+      "peerUnknown": "drone not identified",
+      "keyShort": "key {{fp}}",
       "unpairedState": "unpaired",
       "windowOpen": "Pair window open",
       "rfLink": "Radio link",
@@ -2458,6 +2571,21 @@
     "stale": "Stale",
     "link": {
       "noHistory": "No link-quality history yet.",
+      "perSecond": "{{n}} /s",
+      "total": "{{n}} total",
+      "regionUnrestricted": "Unrestricted",
+      "video": {
+        "title": "Video receive",
+        "stream": "Stream",
+        "tracks": "Codec",
+        "viewers": "Viewers",
+        "latency": "Latency",
+        "latencyHint": "Glass to glass, from the frame timestamps",
+        "receiving": "Receiving",
+        "noStream": "No stream",
+        "serverDown": "Media server down",
+        "unknown": "Unknown"
+      },
       "title": "Radio link",
       "notAvailable": "The radio link is not available on this profile.",
       "diagnosis": "Diagnosis",
@@ -2513,7 +2641,10 @@
         "disconnected": "Disconnected",
         "stopped": "Stopped",
         "unknown": "Unknown",
-        "stale": "Stale"
+        "stale": "Stale",
+        "binding": "Binding",
+        "auto_pairing": "Auto-pairing",
+        "unpaired": "Unpaired"
       }
     },
     "uplink": {
@@ -2559,7 +2690,8 @@
         "role": "Role",
         "uplink": "Uplink",
         "pair": "Pair",
-        "linked": "linked",
+        "bound": "bound",
+        "more": "More readings",
         "none": "none",
         "cpu": "CPU",
         "temp": "Temp",

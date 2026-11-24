@@ -25,6 +25,20 @@ describe("legStates", () => {
     expect(legs[2]).toMatchObject({ state: { raw: "registered" }, detail: "42%" });
     expect(legs[4].state).toEqual({ key: "uplink.state.standingDown", params: { reason: null } });
   });
+
+  it("renders the live Ethernet leg the API reports", () => {
+    const legs = legStates({
+      active_uplink: "eth0",
+      ethernet: { available: true, iface: "eth0", link: true, ip: "10.0.0.2", speed_mbps: 1000 },
+    });
+    expect(legs[0]).toMatchObject({
+      leg: "ethernet",
+      active: true,
+      known: true,
+      state: { key: "uplink.state.connected" },
+      detail: "10.0.0.2 · 1000 Mb/s",
+    });
+  });
 });
 
 describe("moveEntry", () => {

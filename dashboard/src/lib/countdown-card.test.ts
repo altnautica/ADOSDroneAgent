@@ -138,7 +138,7 @@ describe("the stall in the Home status pill", () => {
   it("raises one critical item reading the stall", () => {
     const pill = homePill(inputs);
     const item = pill.alerts.find((a) => a.id === "mission_stall");
-    expect(item).toEqual({ id: "mission_stall", source: "pilot", severity: "critical", text: "No progress to waypoint 3 for 15 s · Skipping in 33 s" });
+    expect(item).toMatchObject({ id: "mission_stall", source: "pilot", severity: "critical", text: "No progress to waypoint 3 for 15 s · Skipping in 33 s", group: "navigation" });
     expect(pill.severity).toBe("critical");
   });
 

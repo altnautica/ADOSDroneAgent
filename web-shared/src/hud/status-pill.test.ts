@@ -2,8 +2,30 @@ import { describe, expect, it } from "vitest";
 
 import layout from "../cockpit-spec/layout.json";
 import type { BatteryHealthInput } from "./battery";
+import alertGroups from "../cockpit-spec/alert-groups.json";
+import type { ReadinessItem } from "./cockpit-frames";
 import pillCases from "./fixtures/pill-cases.json";
-import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, radioFleetApplyOf, repairingMisKeyed, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs, type PairRearm, type PillInputs } from "./status-pill";
+import {
+  ALERT_GROUPS,
+  alertGroup,
+  alertSource,
+  baseAlerts,
+  controllerLost,
+  failsafeText,
+  groupAlerts,
+  pilotFailsafe,
+  pillAlerts,
+  pillSummary,
+  radioFleetApplyOf,
+  repairingMisKeyed,
+  STORAGE_CRIT_PCT,
+  STORAGE_WARN_PCT,
+  unsnoozedAlerts,
+  type BaseAlertInputs,
+  type PairRearm,
+  type PillAlert,
+  type PillInputs,
+} from "./status-pill";
 
 function inputs(over: Partial<BaseAlertInputs> = {}): BaseAlertInputs {
   return { status: null, telemetry: null, battery: null, msSinceLive: 0, video: "live", ...over };
@@ -282,7 +304,7 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
       const i = c.input;
       const alerts = pillAlerts({
         alerts: i.alerts as { id: string; level: "critical" | "warning" | "advisory"; title: string }[],
-        readiness: i.readiness as { id: string; ok: boolean; severity: "block" | "warn"; msg: string }[],
+        readiness: i.readiness as unknown as ReadinessItem[],
         prearm: i.prearm ?? undefined,
         storagePct: i.storage_pct,
         fcStatus: i.fc_status.map((s) => ({ severity: s.severity, text: s.text, ageMs: s.age_ms })),
@@ -298,7 +320,18 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
         navSource: i.nav_source as PillInputs["navSource"],
       });
       const s = pillSummary(alerts, new Set());
-      expect({ severity: s.severity, text: s.text, count: s.count, ids: alerts.map((a) => a.id) }).toEqual(c.expected);
+      const e = c.expected as typeof c.expected & { detail?: unknown };
+      const { detail, ...face } = e;
+      expect({
+        severity: s.severity,
+        text: s.text,
+        count: s.count,
+        ids: alerts.map((a) => a.id),
+        groups: groupAlerts(alerts, new Set()).map((g) => g.group),
+      }).toEqual(face);
+      if (detail) {
+        expect(alerts.map((a) => ({ id: a.id, group: a.group, key: a.key, params: a.params, fix: a.fix }))).toEqual(detail);
+      }
     });
   }
 });
@@ -320,5 +353,83 @@ describe("failsafe item", () => {
   it("shows only from a fresh pilot state", () => {
     expect(pillAlerts({ ...none, fcFailsafe: true }).map((a) => a.id)).toEqual(["failsafe"]);
     expect(pillAlerts({ ...none, pilotAgeMs: null, fcFailsafe: true }).map((a) => a.id)).toEqual(["pilot_not_answering"]);
+  });
+});
+
+describe("alert groups", () => {
+  const fcProfile: ReadinessItem = {
+    id: "fc_profile",
+    ok: false,
+    severity: "block",
+    msg: "FC parameters differ",
+    params: [{ name: "MAV_GCS_SYSID", have: 255, want: "1" }],
+    fix: { kind: "apply_profile" },
+  };
+  const fcTexts = [
+    { severity: 4, text: "EKF variance", ageMs: 100 },
+    { severity: 4, text: "Compass interference", ageMs: 200 },
+  ];
+
+  it("the spec orders every group, and each section title comes from it", () => {
+    expect([...alertGroups.order].sort()).toEqual([...ALERT_GROUPS].sort());
+    for (const g of ALERT_GROUPS) expect(typeof alertGroups.titles[g]).toBe("string");
+  });
+
+  it("maps readiness ids, alert ids and sources, and unmapped ids to other", () => {
+    expect(alertGroup("pilot:fc_profile", "pilot_readiness")).toBe("setup");
+    expect(alertGroup("pilot:flow", "pilot_readiness")).toBe("sensors");
+    expect(alertGroup("pilot:something_new", "pilot_readiness")).toBe("other");
+    expect(alertGroup("fcst:EKF variance", "fc_status_text")).toBe("flight_controller");
+    expect(alertGroup("alert:batt_low", "battery")).toBe("power");
+    expect(alertGroup("alert:gps_no_3d", "nav_source")).toBe("navigation");
+    expect(alertGroup("storage", "storage")).toBe("system");
+    expect(alertGroup("setup_abort", "pilot")).toBe("setup");
+  });
+
+  it("an fc_profile critical and two FC texts group as setup, then flight controller", () => {
+    const alerts = pillAlerts({ ...none, readiness: [fcProfile], fcStatus: fcTexts });
+    const sections = groupAlerts(alerts, new Set());
+    expect(sections.map((s) => [s.group, s.title, s.alerts.length, s.hidden])).toEqual([
+      ["setup", "Flight controller setup", 1, 0],
+      ["flight_controller", "Flight controller messages", 2, 0],
+    ]);
+    expect(sections[0].alerts[0]).toMatchObject({ params: fcProfile.params, fix: { kind: "apply_profile" }, key: "pilot:fc_profile|FC parameters differ" });
+  });
+
+  it("orders critical before warning inside a group, then as raised", () => {
+    const alerts = pillAlerts({
+      ...none,
+      fcStatus: [{ severity: 4, text: "A", ageMs: 0 }, { severity: 2, text: "B", ageMs: 0 }, { severity: 4, text: "C", ageMs: 0 }],
+    });
+    expect(groupAlerts(alerts, new Set())[0].alerts.map((a) => a.text)).toEqual(["B", "A", "C"]);
+  });
+
+  it("folds identical texts in a group into one row at the worst severity", () => {
+    const a: PillAlert[] = [
+      { id: "x", source: "fc_status_text", severity: "warning", text: "Same", group: "flight_controller", key: "x|Same" },
+      { id: "y", source: "fc_prearm", severity: "critical", text: "Same", group: "flight_controller", key: "y|Same" },
+    ];
+    const [s] = groupAlerts(a, new Set());
+    expect(s.alerts.map((r) => [r.id, r.severity])).toEqual([["x", "critical"]]);
+  });
+
+  it("a snoozed warning moves to hidden; a snoozed critical stays, collapsed", () => {
+    const alerts = pillAlerts({ ...none, readiness: [fcProfile], fcStatus: fcTexts });
+    const warn = alerts.find((a) => a.text === "EKF variance");
+    const crit = alerts.find((a) => a.id === "pilot:fc_profile");
+    const snoozed = new Set([warn!.key, crit!.key]);
+    const sections = groupAlerts(alerts, snoozed);
+    expect(sections[0].alerts).toEqual([{ ...crit, collapsed: true }]);
+    expect(sections[1].alerts.map((a) => a.text)).toEqual(["Compass interference"]);
+    expect(sections[1].hidden).toBe(1);
+    // The pill counts the snoozed critical and drops the snoozed warning.
+    expect(pillSummary(unsnoozedAlerts(alerts, snoozed), new Set()).count).toBe(2);
+  });
+
+  it("a section whose every alert is hidden stays, empty, with its hidden count", () => {
+    const alerts = pillAlerts({ ...none, fcStatus: [fcTexts[0]] });
+    expect(groupAlerts(alerts, new Set([alerts[0].key]))).toEqual([
+      { group: "flight_controller", title: "Flight controller messages", alerts: [], hidden: 1 },
+    ]);
   });
 });

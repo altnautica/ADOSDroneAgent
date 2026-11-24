@@ -16,7 +16,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -44,6 +45,9 @@
       "count": 1,
       "ids": [
         "alert:batt_low"
+      ],
+      "groups": [
+        "power"
       ]
     }
   },
@@ -81,6 +85,11 @@
         "alert:link_lost",
         "alert:batt_low",
         "fc:Compass not calibrated"
+      ],
+      "groups": [
+        "flight_controller",
+        "power",
+        "link"
       ]
     }
   },
@@ -107,7 +116,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -132,6 +142,9 @@
       "count": 1,
       "ids": [
         "fc:RC not calibrated"
+      ],
+      "groups": [
+        "flight_controller"
       ]
     }
   },
@@ -152,7 +165,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -191,6 +205,9 @@
       "ids": [
         "fcst:Crash: Disarming",
         "fcst:EKF3 lane switch 1"
+      ],
+      "groups": [
+        "flight_controller"
       ]
     }
   },
@@ -229,6 +246,9 @@
       "count": 1,
       "ids": [
         "fcst:Vibration compensation ON"
+      ],
+      "groups": [
+        "flight_controller"
       ]
     }
   },
@@ -249,7 +269,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -271,6 +292,9 @@
       "count": 1,
       "ids": [
         "storage"
+      ],
+      "groups": [
+        "system"
       ]
     }
   },
@@ -293,6 +317,9 @@
       "count": 1,
       "ids": [
         "storage"
+      ],
+      "groups": [
+        "system"
       ]
     }
   },
@@ -315,6 +342,9 @@
       "count": 1,
       "ids": [
         "storage"
+      ],
+      "groups": [
+        "system"
       ]
     }
   },
@@ -335,7 +365,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -377,6 +408,10 @@
       "ids": [
         "pilot:position",
         "pilot:agl"
+      ],
+      "groups": [
+        "navigation",
+        "other"
       ]
     }
   },
@@ -406,6 +441,9 @@
       "count": 1,
       "ids": [
         "pilot:controller"
+      ],
+      "groups": [
+        "link"
       ]
     }
   },
@@ -464,6 +502,13 @@
         "pilot:agl",
         "fc:Throttle too high",
         "fcst:EKF variance"
+      ],
+      "groups": [
+        "flight_controller",
+        "navigation",
+        "power",
+        "system",
+        "other"
       ]
     }
   },
@@ -486,6 +531,9 @@
       "count": 1,
       "ids": [
         "pilot_not_answering"
+      ],
+      "groups": [
+        "link"
       ]
     }
   },
@@ -521,6 +569,9 @@
       "count": 1,
       "ids": [
         "pilot_not_answering"
+      ],
+      "groups": [
+        "link"
       ]
     }
   },
@@ -550,6 +601,9 @@
       "count": 1,
       "ids": [
         "pilot:position"
+      ],
+      "groups": [
+        "navigation"
       ]
     }
   },
@@ -580,6 +634,11 @@
         "storage",
         "alert:batt_low",
         "pilot_not_answering"
+      ],
+      "groups": [
+        "power",
+        "link",
+        "system"
       ]
     }
   },
@@ -602,6 +661,9 @@
       "count": 1,
       "ids": [
         "agent_unreachable"
+      ],
+      "groups": [
+        "link"
       ]
     }
   },
@@ -624,6 +686,9 @@
       "count": 1,
       "ids": [
         "controller_lost"
+      ],
+      "groups": [
+        "link"
       ]
     }
   },
@@ -651,6 +716,9 @@
       "count": 1,
       "ids": [
         "preflight:gps"
+      ],
+      "groups": [
+        "other"
       ]
     }
   },
@@ -683,6 +751,9 @@
       "ids": [
         "preflight:gps",
         "preflight:compass"
+      ],
+      "groups": [
+        "other"
       ]
     }
   },
@@ -705,6 +776,9 @@
       "count": 1,
       "ids": [
         "storage"
+      ],
+      "groups": [
+        "system"
       ]
     }
   },
@@ -729,6 +803,9 @@
       "count": 1,
       "ids": [
         "failsafe"
+      ],
+      "groups": [
+        "flight_controller"
       ]
     }
   },
@@ -753,6 +830,9 @@
       "count": 1,
       "ids": [
         "failsafe"
+      ],
+      "groups": [
+        "flight_controller"
       ]
     }
   },
@@ -777,6 +857,9 @@
       "count": 1,
       "ids": [
         "failsafe"
+      ],
+      "groups": [
+        "flight_controller"
       ]
     }
   },
@@ -808,6 +891,9 @@
       "ids": [
         "failsafe",
         "fcst:EKF variance"
+      ],
+      "groups": [
+        "flight_controller"
       ]
     }
   },
@@ -832,6 +918,9 @@
       "count": 1,
       "ids": [
         "pilot_not_answering"
+      ],
+      "groups": [
+        "link"
       ]
     }
   },
@@ -855,6 +944,9 @@
       "count": 1,
       "ids": [
         "setup_abort"
+      ],
+      "groups": [
+        "setup"
       ]
     }
   },
@@ -889,6 +981,11 @@
         "failsafe",
         "setup_abort",
         "pilot:gps"
+      ],
+      "groups": [
+        "setup",
+        "flight_controller",
+        "other"
       ]
     }
   },
@@ -912,6 +1009,9 @@
       "count": 1,
       "ids": [
         "setup_abort"
+      ],
+      "groups": [
+        "setup"
       ]
     }
   },
@@ -935,6 +1035,9 @@
       "count": 1,
       "ids": [
         "pilot_not_answering"
+      ],
+      "groups": [
+        "link"
       ]
     }
   },
@@ -956,7 +1059,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -982,7 +1086,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -1009,6 +1114,9 @@
       "count": 1,
       "ids": [
         "nav_source_degraded"
+      ],
+      "groups": [
+        "navigation"
       ]
     }
   },
@@ -1036,6 +1144,9 @@
       "count": 1,
       "ids": [
         "nav_source_degraded"
+      ],
+      "groups": [
+        "navigation"
       ]
     }
   },
@@ -1061,7 +1172,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -1086,7 +1198,8 @@
       "severity": "ok",
       "text": "All systems OK",
       "count": 0,
-      "ids": []
+      "ids": [],
+      "groups": []
     }
   },
   {
@@ -1094,7 +1207,12 @@
     "input": {
       "alerts": [],
       "readiness": [
-        { "id": "battery_failsafe", "ok": false, "severity": "block", "msg": "Battery failsafe does nothing: set low = SmartRTL or Land, critical = Land" }
+        {
+          "id": "battery_failsafe",
+          "ok": false,
+          "severity": "block",
+          "msg": "Battery failsafe does nothing: set low = SmartRTL or Land, critical = Land"
+        }
       ],
       "prearm": [],
       "fc_status": [],
@@ -1108,7 +1226,12 @@
       "severity": "critical",
       "text": "Battery failsafe does nothing: set low = SmartRTL or Land, critical = Land",
       "count": 1,
-      "ids": ["pilot:battery_failsafe"]
+      "ids": [
+        "pilot:battery_failsafe"
+      ],
+      "groups": [
+        "setup"
+      ]
     }
   },
   {
@@ -1116,7 +1239,12 @@
     "input": {
       "alerts": [],
       "readiness": [
-        { "id": "battery_failsafe", "ok": false, "severity": "warn", "msg": "Reading battery failsafe parameters" }
+        {
+          "id": "battery_failsafe",
+          "ok": false,
+          "severity": "warn",
+          "msg": "Reading battery failsafe parameters"
+        }
       ],
       "prearm": [],
       "fc_status": [],
@@ -1130,7 +1258,12 @@
       "severity": "warning",
       "text": "Reading battery failsafe parameters",
       "count": 1,
-      "ids": ["pilot:battery_failsafe"]
+      "ids": [
+        "pilot:battery_failsafe"
+      ],
+      "groups": [
+        "setup"
+      ]
     }
   },
   {
@@ -1140,7 +1273,11 @@
       "readiness": [],
       "prearm": [],
       "fc_status": [
-        { "severity": 2, "text": "Low battery: landing", "age_ms": 500 }
+        {
+          "severity": 2,
+          "text": "Low battery: landing",
+          "age_ms": 500
+        }
       ],
       "storage_pct": 40,
       "pilot_age_ms": 100,
@@ -1153,7 +1290,12 @@
       "severity": "critical",
       "text": "Low battery: landing",
       "count": 1,
-      "ids": ["low_battery"]
+      "ids": [
+        "low_battery"
+      ],
+      "groups": [
+        "power"
+      ]
     }
   },
   {
@@ -1174,7 +1316,12 @@
       "severity": "critical",
       "text": "Low battery: returning home",
       "count": 1,
-      "ids": ["low_battery"]
+      "ids": [
+        "low_battery"
+      ],
+      "groups": [
+        "power"
+      ]
     }
   },
   {
@@ -1195,7 +1342,119 @@
       "severity": "warning",
       "text": "Pilot not answering",
       "count": 1,
-      "ids": ["pilot_not_answering"]
+      "ids": [
+        "pilot_not_answering"
+      ],
+      "groups": [
+        "link"
+      ]
+    }
+  },
+  {
+    "name": "readiness_params_and_fix_ride_along",
+    "input": {
+      "alerts": [],
+      "readiness": [
+        {
+          "id": "fc_profile",
+          "ok": false,
+          "severity": "block",
+          "msg": "FC parameters differ from the ADOS profile: MAV_GCS_SYSID 255 (want 1)",
+          "params": [
+            {
+              "name": "MAV_GCS_SYSID",
+              "have": 255,
+              "want": "1"
+            },
+            {
+              "name": "FS_GCS_ENABLE",
+              "have": null,
+              "want": "5"
+            }
+          ],
+          "fix": {
+            "kind": "apply_profile"
+          }
+        },
+        {
+          "id": "sensor_params",
+          "ok": false,
+          "severity": "warn",
+          "msg": "Flow and rangefinder parameters differ",
+          "params": [
+            {
+              "name": "FLOW_TYPE",
+              "have": 6,
+              "want": "5 or 7"
+            }
+          ],
+          "fix": {
+            "kind": "parameters",
+            "names": [
+              "FLOW_TYPE"
+            ]
+          }
+        }
+      ],
+      "prearm": [],
+      "fc_status": [],
+      "storage_pct": 40,
+      "pilot_age_ms": 100,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": []
+    },
+    "expected": {
+      "severity": "critical",
+      "text": "2 warnings",
+      "count": 2,
+      "ids": [
+        "pilot:fc_profile",
+        "pilot:sensor_params"
+      ],
+      "groups": [
+        "setup"
+      ],
+      "detail": [
+        {
+          "id": "pilot:fc_profile",
+          "group": "setup",
+          "key": "pilot:fc_profile|FC parameters differ from the ADOS profile: MAV_GCS_SYSID 255 (want 1)",
+          "params": [
+            {
+              "name": "MAV_GCS_SYSID",
+              "have": 255,
+              "want": "1"
+            },
+            {
+              "name": "FS_GCS_ENABLE",
+              "have": null,
+              "want": "5"
+            }
+          ],
+          "fix": {
+            "kind": "apply_profile"
+          }
+        },
+        {
+          "id": "pilot:sensor_params",
+          "group": "setup",
+          "key": "pilot:sensor_params|Flow and rangefinder parameters differ",
+          "params": [
+            {
+              "name": "FLOW_TYPE",
+              "have": 6,
+              "want": "5 or 7"
+            }
+          ],
+          "fix": {
+            "kind": "parameters",
+            "names": [
+              "FLOW_TYPE"
+            ]
+          }
+        }
+      ]
     }
   }
 ]

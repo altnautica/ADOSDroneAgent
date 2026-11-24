@@ -2,33 +2,42 @@
 // now (cockpit spec `flight-state.json`), its colour, the secondary line, and
 // the inline button a state offers (Take control, Resume, Abort, Set up
 // aircraft). The chip never takes more than `top_bar.chip.max_frac` of the
-// bar; past it the text ends in an ellipsis and the full text shows on hover
-// (its tooltip) or on a tap, which opens it in a small panel whose press
-// opens the Mode sheet. A tap on a chip that fits opens the Mode sheet.
+// bar; past it the text ends in an ellipsis. A tap on a truncated chip, or
+// on one while readiness items block take-off, opens its detail popover:
+// the full text (a press opens the Mode sheet), each blocking item as an
+// alert row (its parameter table and fix), and "Warnings (n)", which opens
+// the alert centre. A tap on any other chip opens the Mode sheet. Screen
+// readers get the full text as the chip's label.
 // Beside it, a "Confined" badge while the pilot flies the confined-place
 // profile, and (outside compact bars) the sensing badge, "Sensing: 3D lidar ·
 // ≤ 4.2 m/s", while the fresh pilot frame reports its sensing tier, and the
 // goal badge, "Follow intent · view 15° 8 m" or "Ring", while a skill's goal
 // flies.
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
+import { cockpitAlertActions, useAlertCentreStore } from "@/lib/alert-centre";
 import { Overlay } from "@/components/ui/overlay";
 import { useFlightChip, useFreshPilot } from "@/hooks/use-pilot";
-import { chipButton, chipFullText, chipLines, chipLineTextColor } from "@/lib/chip-view";
+import { chipBlockingAlerts, chipButton, chipFullText, chipLines, chipLineTextColor } from "@/lib/chip-view";
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { CHIP_MAX_FRAC, HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { CHROME_ALERT_SKIN } from "@/shared/hud/alert-centre";
+import { AlertRow } from "@/shared/hud/alert-rows";
 import { goalKindChipText } from "@/shared/hud/goal-kind";
 import { confinedChipText } from "@/shared/hud/route-check";
 import { sensingChipText } from "@/shared/hud/sensing";
 import { specText } from "@/shared/hud/spec-text";
+import { useNodeIdentity } from "@/shared/use-profile";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 /** `fit`: the bar has nothing left to move into the Menu, so the chip
  *  truncates its text rather than push the battery or STOP off the bar. */
 export function FlightStateChip({ compact = false, fit = false }: { compact?: boolean; fit?: boolean }) {
+  const { t } = useTranslation();
   const chip = useFlightChip();
   const radioFallback = useNavStreamStore((s) => s.radioFallback);
   const confined = useNavStreamStore((s) => (s.pilot ? confinedChipText(s.pilot.data) : null));
@@ -36,9 +45,14 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   const sensing = sensingChipText(fresh?.sensing ?? null);
   const goal = goalKindChipText(fresh?.goalKind ?? null, fresh?.view ?? null);
   const openSheet = useCockpitUiStore((s) => s.openSheet);
+  const warnings = useAlertCentreStore((s) => s.warnings);
+  const openAlerts = useAlertCentreStore((s) => s.open);
+  const { profile } = useNodeIdentity();
+  const titleId = useId();
   const textRef = useRef<HTMLSpanElement>(null);
   const [fullAt, setFullAt] = useState<DOMRect | null>(null);
   const maxWidth = `${CHIP_MAX_FRAC * 100}cqw`;
+  const blocking = chipBlockingAlerts(fresh?.readiness ?? []);
 
   if (!chip) {
     return (
@@ -68,9 +82,9 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
     >
       <button
         type="button"
-        onClick={(e) => (truncated() ? setFullAt(e.currentTarget.getBoundingClientRect()) : openSheet("mode"))}
-        aria-label={specText("chip.aria", { text: chip.text })}
-        title={full}
+        onClick={(e) => (truncated() || blocking.length > 0 ? setFullAt(e.currentTarget.getBoundingClientRect()) : openSheet("mode"))}
+        aria-label={full}
+        aria-haspopup={blocking.length > 0 ? "dialog" : undefined}
         data-testid="flight-state-chip"
         className={cn(HIT_AREA, "flex h-[var(--fs-control)] min-w-0 shrink items-center gap-[6px] rounded-[var(--fs-radius-sm)] border bg-transparent px-[10px] text-left transition-transform duration-150 ease-out active:scale-[0.97]")}
         // An outline in the state colour, a dot in it, and the words in the
@@ -136,21 +150,54 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
         <Overlay
           onDismiss={() => setFullAt(null)}
           scrim="clear"
-          panelClassName="chrome-panel chrome-bar-text w-[min(360px,90vw)]"
-          panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(fullAt.left, window.innerWidth - 368)), top: fullAt.bottom + 8 }}
+          labelledBy={titleId}
+          panelClassName="chrome-panel chrome-bar-text w-[min(440px,94vw)]"
+          panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(fullAt.left, window.innerWidth - 448)), top: fullAt.bottom + 8 }}
         >
-          <button
-            type="button"
-            onClick={() => {
-              setFullAt(null);
-              openSheet("mode");
-            }}
-            aria-label={specText("chip.aria", { text: chip.text })}
-            data-testid="flight-state-chip-full"
-            className="min-h-[48px] w-full p-[10px] text-left"
-          >
-            {full}
-          </button>
+          <div className="flex max-h-[70vh] flex-col gap-[4px] overflow-y-auto overscroll-contain p-[8px]" data-testid="flight-state-chip-detail">
+            <button
+              id={titleId}
+              type="button"
+              onClick={() => {
+                setFullAt(null);
+                openSheet("mode");
+              }}
+              aria-label={specText("chip.aria", { text: chip.text })}
+              data-testid="flight-state-chip-full"
+              className="min-h-[48px] w-full p-[10px] text-left font-semibold"
+            >
+              {full}
+            </button>
+            {blocking.length > 0 ? (
+              <>
+                <div className="chrome-label px-[4px]">{t("alerts.chip.blocking")}</div>
+                <ul className="flex flex-col" data-testid="flight-state-chip-blocking">
+                  {blocking.map((a) => (
+                    <AlertRow
+                      key={a.key}
+                      alert={a}
+                      actions={cockpitAlertActions(profile, () => setFullAt(null))}
+                      skin={CHROME_ALERT_SKIN}
+                      snoozed={false}
+                    />
+                  ))}
+                </ul>
+              </>
+            ) : null}
+            {warnings > 0 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setFullAt(null);
+                  openAlerts();
+                }}
+                data-testid="flight-state-chip-warnings"
+                className="min-h-[48px] w-full px-[10px] text-left underline"
+              >
+                {t("alerts.chip.warnings", { count: warnings })}
+              </button>
+            ) : null}
+          </div>
         </Overlay>
       ) : null}
     </span>

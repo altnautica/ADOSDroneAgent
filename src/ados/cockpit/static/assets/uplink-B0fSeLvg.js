@@ -1,0 +1,1 @@
+import{n as e}from"./api-fetch-TwMoyHVt.js";function t(){return e(`/api/v1/ground-station/network`)}function n(t){return e(`/api/v1/ground-station/network/priority`,{method:`PUT`,body:{priority:t}})}function r(t){return e(`/api/v1/ground-station/network/share_uplink`,{method:`PUT`,body:{enabled:t}})}export{r as n,n as r,t};

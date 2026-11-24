@@ -13,7 +13,7 @@ import { useNow } from "@/hooks/use-now";
 import { useWfb, WFB_POLL_MS } from "@/hooks/use-wfb";
 import { liveData } from "@/lib/freshness";
 import { cn } from "@/lib/utils";
-import { wfbStale, wfbStateBadge } from "@/lib/wfb-state";
+import { wfbMeasured, wfbStale, wfbStateBadge } from "@/lib/wfb-state";
 import { linkKeyStatusView } from "@/shared/link-key-status";
 import { fmtBitrate, fmtNum, fmtDbm } from "@/shared/format";
 
@@ -32,12 +32,14 @@ export function WfbRxPanel() {
   const channel = w?.actual_channel ?? null;
   const freq = w?.frequency_mhz ?? null;
   const rssi = w?.rssi_dbm ?? null;
-  const snr = w?.snr_db ?? null;
+  // Nothing decoded: loss, SNR and rate are not measured (a dash, never 0.0%).
+  const measured = wfbMeasured(w as { packets_received?: number | null; link_diag?: string | null } | null);
+  const snr = measured ? (w?.snr_db ?? null) : null;
   const noise = w?.noise_dbm ?? null;
-  const loss = typeof w?.loss_percent === "number" ? w.loss_percent : null;
+  const loss = measured && typeof w?.loss_percent === "number" ? w.loss_percent : null;
   const fecRecovered = w?.fec_recovered ?? null;
   const fecFailed = w?.fec_failed ?? null;
-  const bitrate = w?.bitrate_kbps ?? 0;
+  const bitrate = measured ? (w?.bitrate_kbps ?? null) : null;
   const restarts = w?.restart_count ?? 0;
   const adapterMissing =
     state === "disabled" || (state === "error" && !iface);
@@ -95,7 +97,7 @@ export function WfbRxPanel() {
             )}
 
             <div className="text-xs text-muted-foreground">{t("wfb.fields.bitrate")}</div>
-            <div className="font-mono">{fmtBitrate(bitrate)}</div>
+            <div className="font-mono">{bitrate != null ? fmtBitrate(bitrate) : "—"}</div>
 
             <div className="text-xs text-muted-foreground">{t("wfb.fields.packetLoss")}</div>
             <div

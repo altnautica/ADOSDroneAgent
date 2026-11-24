@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildBanners } from "@/shared/api/banners";
-import { gateDecision, groundRoleFrom } from "./node-identity";
+import { gateDecision, groundRoleFrom, meshReadEnabled } from "./node-identity";
 
 describe("gateDecision", () => {
   it("passes through only while the profile is not answered yet (auto)", () => {
@@ -75,5 +75,14 @@ describe("buildBanners", () => {
     ]);
     expect(buildBanners({ ...base, profile: "drone", fleetApply: fleet("applied") })).toEqual([]);
     expect(buildBanners({ ...base, profile: "ground_station", fleetApply: fleet("deferred_armed") })).toEqual([]);
+  });
+});
+
+describe("meshReadEnabled", () => {
+  it("does not read the mesh route on a direct ground station", () => {
+    expect(meshReadEnabled(groundRoleFrom("direct"))).toBe(false);
+    expect(meshReadEnabled(groundRoleFrom(null))).toBe(false);
+    expect(meshReadEnabled("relay")).toBe(true);
+    expect(meshReadEnabled("receiver")).toBe(true);
   });
 });

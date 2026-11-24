@@ -16,8 +16,10 @@ import type { SetupStatus } from "@/shared/agent-api.generated";
 import { postApply } from "@/shared/api/apply-actions";
 import { resolveHotspotSsid } from "@/shared/api/hotspot";
 import { toast } from "@/shared/api/toast";
+import { getGsNetwork } from "@/shared/api/uplink";
 import { getWifiStatus } from "@/shared/api/wifi";
 import "@/shared/i18n";
+import { useProfile } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
 import { ResidualMissingNote, SectionGroup, SlideConfirmDialog } from "./section-kit";
 import { toastActionError } from "./section-hooks";
@@ -45,7 +47,15 @@ export function HotspotSection() {
     setEnabled(agentEnabled);
   }
 
-  const ssid = resolveHotspotSsid(setup.data?.network);
+  // A ground station runs its AP on its own interface (never the WFB radio)
+  // under its own name; its live AP leg names both.
+  const isGround = useProfile() === "ground_station";
+  const gsNet = useResource(
+    useCallback(() => getGsNetwork(), []),
+    10_000,
+    { enabled: isGround },
+  );
+  const ssid = resolveHotspotSsid(setup.data?.network, isGround ? gsNet.data?.ap : null);
 
   const commit = async (next: boolean) => {
     setEnabled(next);
@@ -96,6 +106,16 @@ export function HotspotSection() {
           ) : (
             t("settings.network.hotspotHintUnnamed")
           )}
+          {ssid.iface ? (
+            <>
+              {" "}
+              <Trans
+                i18nKey="settings.network.hotspotHintIface"
+                values={{ iface: ssid.iface }}
+                components={{ code: <span className="font-mono" /> }}
+              />
+            </>
+          ) : null}
         </p>
         <p className="px-[0.75rem] text-[0.8rem] text-warn">{t("settings.network.hotspotWarning")}</p>
       </SectionGroup>

@@ -36,8 +36,25 @@ export function legKey(token: string): "ethernet" | "wifi" | "cellular" | "usb" 
     case "ap":
       return "ap";
     default:
+      // The router's live sentinel carries the kernel name (eth0, end0, wlan1…).
+      if (token.startsWith("eth") || token.startsWith("en")) return "ethernet";
+      if (token.startsWith("wwan")) return "cellular";
+      if (token.startsWith("usb")) return "usb";
+      if (token.startsWith("wlan")) return "wifi";
       return null;
   }
+}
+
+/** The live wired-port leg: `link` true/false when the agent reports a carrier
+ *  (with ip and speed as the detail), else null so the caller falls back to
+ *  the active-uplink report. */
+export function ethernetLegView(
+  eth: { link?: boolean | null; ip?: string | null; speed_mbps?: number | null } | null | undefined,
+): { link: boolean; detail: string | null } | null {
+  if (!eth || typeof eth.link !== "boolean") return null;
+  const detail =
+    [eth.ip, typeof eth.speed_mbps === "number" ? `${eth.speed_mbps} Mb/s` : null].filter(Boolean).join(" · ") || null;
+  return { link: eth.link, detail: eth.link ? detail : null };
 }
 
 /** Move `list[index]` by `delta`; null when out of range (nothing to write). */

@@ -10,6 +10,7 @@ import { MeshPanel } from "@/components/panels/mesh-panel";
 import { SourcesPanel } from "@/components/panels/sources-panel";
 import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
 import { UplinkHandoverPanel } from "@/components/panels/uplink-handover-panel";
+import { VideoReceivePanel } from "@/components/panels/video-receive-panel";
 
 interface ShellProps {
   title: string;
@@ -33,10 +34,11 @@ export function ReceiveRoute() {
   const { t } = useTranslation();
   return (
     <PageShell
-      title={t("nav.receive")}
+      title={t("nav.link")}
       blurb={t("app.pages.receiveBlurb")}
     >
       <WfbRxPanel />
+      <VideoReceivePanel />
       <UplinkHandoverPanel />
     </PageShell>
   );

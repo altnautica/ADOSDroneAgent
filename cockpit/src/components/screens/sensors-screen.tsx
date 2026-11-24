@@ -213,7 +213,7 @@ export function SensorsScreen() {
       {profile === "drone" || profile === "ground_station" ? (
         <div className="mb-[0.4rem]">
           <Row label={t("cockpit.sensors.calibrate")} hint={t("cockpit.sensors.calibrateHint")} />
-          <ActionButton label={t("cockpit.sensors.calibrateOpen")} icon={Wrench} onClick={openAircraftSetup} />
+          <ActionButton label={t("cockpit.sensors.calibrateOpen")} icon={Wrench} onClick={() => openAircraftSetup()} />
         </div>
       ) : null}
       {body}

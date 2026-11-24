@@ -158,8 +158,9 @@ export const SCREEN_TABLE: readonly ScreenMeta[] = [
     labelKey: "nav.aircraftSetup",
     icon: Wrench,
     // Opened from Settings and from the flight-state chip's "Set up aircraft".
+    // Drone only: a ground station has no flight controller setup engine.
     kind: "detail",
-    profiles: ["drone", "ground_station"],
+    profiles: ["drone"],
   },
   {
     id: "logs",

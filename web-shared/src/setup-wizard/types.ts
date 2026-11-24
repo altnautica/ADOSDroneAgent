@@ -57,6 +57,9 @@ export interface StepInput {
   step: number | null;
   unit: string | null;
   label_key: string;
+  /** A picture per option (`setup-images/<key>.svg`), keyed by the option
+   *  value as text; empty when the options are words only. */
+  images: Record<string, string>;
 }
 
 /** A flight-controller parameter a step will write (`step.args.params`, the
@@ -87,9 +90,11 @@ export interface SetupStep {
 
 export type WizardId = "ground" | "air";
 
-export type WizardState = "not_started" | "running" | "done" | "failed" | "aborted";
+/** `interrupted`: the wizard was running when the agent restarted; its step
+ *  records survive and `resume` continues from the first unfinished step. */
+export type WizardState = "not_started" | "running" | "interrupted" | "done" | "failed" | "aborted";
 
-export const WIZARD_STATES: readonly WizardState[] = ["not_started", "running", "done", "failed", "aborted"];
+export const WIZARD_STATES: readonly WizardState[] = ["not_started", "running", "interrupted", "done", "failed", "aborted"];
 
 export interface Wizard {
   id: string;

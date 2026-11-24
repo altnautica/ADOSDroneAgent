@@ -19,11 +19,25 @@ import { useNavStore } from "@/stores/nav-store";
 /** The registry id of the Aircraft setup screen. */
 export const AIRCRAFT_SETUP_SCREEN_ID = "aircraft-setup";
 
-/** Open the Aircraft setup screen (a no-op when it is already on top). */
-export function openAircraftSetup(): void {
+/** The step the next Aircraft setup screen opens at, set by the last open
+ *  that named one; read once. */
+let pendingStep: string | null = null;
+
+/** Open the Aircraft setup screen (a no-op when it is already on top); with
+ *  `step`, the screen opens that step (`takePendingSetupStep`). An open
+ *  without a step clears any step left pending. */
+export function openAircraftSetup(step?: string): void {
+  pendingStep = step ?? null;
   const nav = useNavStore.getState();
   if (nav.detailStack[nav.detailStack.length - 1] === AIRCRAFT_SETUP_SCREEN_ID) return;
   nav.openDetail(AIRCRAFT_SETUP_SCREEN_ID);
+}
+
+/** The step the last open asked for, or null; reading it clears it. */
+export function takePendingSetupStep(): string | null {
+  const step = pendingStep;
+  pendingStep = null;
+  return step;
 }
 
 /** The battery failsafe fix: open Aircraft setup and run the ground

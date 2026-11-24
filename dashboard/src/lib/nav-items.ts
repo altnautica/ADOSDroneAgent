@@ -37,7 +37,7 @@ export interface NavItem {
 const NAV: Partial<Record<RouteKey, { labelKey: ParseKeys; icon: LucideIcon }>> = {
   home: { labelKey: "nav.home", icon: Home },
   pairing: { labelKey: "nav.pairing", icon: Link2 },
-  receive: { labelKey: "nav.receive", icon: Antenna },
+  receive: { labelKey: "nav.link", icon: Antenna },
   mesh: { labelKey: "nav.mesh", icon: Network },
   sources: { labelKey: "nav.sources", icon: Layers },
   extensions: { labelKey: "nav.extensions", icon: Plug },

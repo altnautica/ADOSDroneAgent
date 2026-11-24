@@ -2,17 +2,20 @@
 // `fc.setup`):
 //   GET  /api/v1/fc-setup                                    wizards, state, report
 //   POST /api/v1/fc-setup/{wizard}/start                     -> {ok, wizard}
+//   POST /api/v1/fc-setup/{wizard}/resume                    -> {ok, wizard} (an interrupted run)
 //   POST /api/v1/fc-setup/{wizard}/steps/{step}/actions/{id} {args?} -> {ok, step}
 //   POST /api/v1/fc-setup/{wizard}/steps/{step}/run          -> {ok, step}
 //   POST /api/v1/fc-setup/{wizard}/abort                     -> {ok, wizard}
 //   POST /api/v1/fc-setup/revert {snapshot}                  -> {ok, restored}
 //   WS   /api/v1/fc-setup/stream                             step/wizard frames, 5 Hz while running
-// A refusal is HTTP 409/422 with `{ok:false, err:"<msg_key>"}`.
+// A refusal is HTTP 409/422 with `{ok:false, err:"<msg_key>"}`; a node with no
+// setup engine (no pilot service, e.g. a ground station) answers 503.
 
 import { ApiError, apiFetch } from "../api-fetch";
 import { mintWsTicket, ticketProtocols } from "../ws-ticket";
 
 import { parseFrame, parseStatus, parseStep, parseWizard } from "./parse";
+import { setupErrorText, setupText } from "./strings";
 import type { SetupFrame, SetupStatus, SetupStep, SetupValue, Wizard } from "./types";
 
 export const FC_SETUP_BASE = "/api/v1/fc-setup";
@@ -24,6 +27,7 @@ const seg = encodeURIComponent;
 export const fcSetupUrls = {
   status: () => FC_SETUP_BASE,
   start: (wizard: string) => `${FC_SETUP_BASE}/${seg(wizard)}/start`,
+  resume: (wizard: string) => `${FC_SETUP_BASE}/${seg(wizard)}/resume`,
   action: (wizard: string, step: string, action: string) =>
     `${FC_SETUP_BASE}/${seg(wizard)}/steps/${seg(step)}/actions/${seg(action)}`,
   run: (wizard: string, step: string) => `${FC_SETUP_BASE}/${seg(wizard)}/steps/${seg(step)}/run`,
@@ -40,6 +44,16 @@ export function setupErrorKey(err: unknown): string | null {
   const body = err.body;
   if (body && typeof body === "object" && "err" in body && typeof body.err === "string") return body.err;
   return null;
+}
+
+/** A failed status read as display text. A 503 means this node has no setup
+ *  engine to ask (no flight controller service, as on a ground station), so
+ *  it reads as that rather than as a transport error. */
+export function loadErrorText(err: unknown): string {
+  const key = setupErrorKey(err);
+  if (key) return setupErrorText(key);
+  if (err instanceof ApiError && err.status === 503) return setupText("setup.blocker.setup_unavailable");
+  return err instanceof Error ? err.message : String(err);
 }
 
 function badBody(path: string): Error {
@@ -69,6 +83,11 @@ async function postStep(path: string, body: unknown): Promise<SetupStep> {
 
 export function startWizard(wizard: string): Promise<Wizard> {
   return postWizard(fcSetupUrls.start(wizard));
+}
+
+/** Continue an `interrupted` wizard from its first unfinished step. */
+export function resumeWizard(wizard: string): Promise<Wizard> {
+  return postWizard(fcSetupUrls.resume(wizard));
 }
 
 export function abortWizard(wizard: string): Promise<Wizard> {

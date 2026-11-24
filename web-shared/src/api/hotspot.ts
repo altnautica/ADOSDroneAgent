@@ -16,14 +16,21 @@
  */
 
 import type { NetworkStatus } from "../agent-api.generated";
+import type { GsApLeg } from "./uplink";
 
 export type HotspotSsid =
-  | { known: true; ssid: string }
-  | { known: false };
+  | { known: true; ssid: string; iface: string | null }
+  | { known: false; iface: string | null };
 
-/** Read the access point name the agent published, if it published one. */
-export function resolveHotspotSsid(network?: NetworkStatus): HotspotSsid {
-  const ssid = network?.hotspot_ssid?.trim();
-  if (!ssid) return { known: false };
-  return { known: true, ssid };
+/** Read the access point name the agent published, if it published one.
+ *
+ * On a ground station the live AP leg of `/api/v1/ground-station/network`
+ * (`ap`) is the authority: it names the SSID hostapd broadcasts and the
+ * interface it runs on, which is not the WFB radio. It wins over the status
+ * payload's name. The interface is null when no AP leg was read. */
+export function resolveHotspotSsid(network?: NetworkStatus, ap?: GsApLeg | null): HotspotSsid {
+  const iface = ap?.interface?.trim() || null;
+  const ssid = ap?.ssid?.trim() || network?.hotspot_ssid?.trim();
+  if (!ssid) return { known: false, iface };
+  return { known: true, ssid, iface };
 }

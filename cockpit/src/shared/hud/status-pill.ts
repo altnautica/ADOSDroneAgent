@@ -20,10 +20,11 @@
 //             waiting for the vehicle to land (never in the pill)
 // Every rule reads a real field; an unknown reading never alerts.
 
+import alertGroupsJson from "../cockpit-spec/alert-groups.json";
 import layoutJson from "../cockpit-spec/layout.json";
 import tokens from "../cockpit-spec/tokens.json";
 import { BATTERY_CRITICAL_PCT, batteryLowPct, batteryReading, type BatteryHealthInput, type FcBatteryInput } from "./battery";
-import type { FcStatusText, MissionStall, PilotState, ReadinessItem } from "./cockpit-frames";
+import type { FcStatusText, MissionStall, ParamDiff, PilotState, ReadinessFix, ReadinessItem } from "./cockpit-frames";
 import { CHIP_STALE_AFTER_MS } from "./flight-state";
 import { missionStallOverlay } from "./mission-stall";
 import type { NavSourceKind, NavSourceResult } from "./nav-source";
@@ -223,12 +224,52 @@ export function severityTextColor(s: PillSeverity): string {
   return tokens.chrome.text;
 }
 
+export type { ParamDiff, ReadinessFix } from "./cockpit-frames";
+
+/** The alert list's sections (cockpit spec `alert-groups.json` `order`). */
+export const ALERT_GROUPS = ["setup", "flight_controller", "sensors", "navigation", "power", "link", "system", "other"] as const;
+export type AlertGroup = (typeof ALERT_GROUPS)[number];
+
+interface AlertGroupsSpec {
+  readiness: Record<string, string>;
+  id: Record<string, string>;
+  source: Record<string, string>;
+  order: string[];
+  titles: Record<string, string>;
+}
+const GROUPS_SPEC: AlertGroupsSpec = alertGroupsJson;
+
+function asGroup(g: string | undefined): AlertGroup {
+  return (ALERT_GROUPS as readonly string[]).includes(g ?? "") ? (g as AlertGroup) : "other";
+}
+
+/** The section of an alert: a readiness item by its readiness id, else by
+ *  the alert id, else by its source; anything unmapped is `other`. */
+export function alertGroup(id: string, source: PillSource): AlertGroup {
+  if (id.startsWith("pilot:")) return asGroup(GROUPS_SPEC.readiness[id.slice("pilot:".length)]);
+  return asGroup(GROUPS_SPEC.id[id] ?? GROUPS_SPEC.source[source]);
+}
+
+/** A section's title (`alert-groups.json` `titles`). */
+export function alertGroupTitle(g: AlertGroup): string {
+  return GROUPS_SPEC.titles[g] ?? g;
+}
+
 export interface PillAlert {
   id: string;
   source: PillSource;
   severity: "warning" | "critical";
   text: string;
+  group: AlertGroup;
+  /** The snooze key: `id|text`, so the same id with new words shows again. */
+  key: string;
+  /** The parameter rows behind a readiness item. */
+  params?: ParamDiff[];
+  /** The fix a readiness item offers. */
+  fix?: ReadinessFix;
 }
+
+type DraftAlert = Omit<PillAlert, "group" | "key">;
 
 export interface PillInputs {
   alerts: readonly { id: string; level: AlertLevel; title: string }[];
@@ -338,7 +379,7 @@ export function alertSource(id: string): PillSource {
 /** Every active pill alert, worst first, then in source order. Advisories
  *  (an offline uplink) are not warnings and stay out of the pill. */
 export function pillAlerts(i: PillInputs): PillAlert[] {
-  const out: PillAlert[] = [];
+  const out: DraftAlert[] = [];
   for (const a of i.alerts) {
     if (a.level === "advisory") continue;
     out.push({ id: `alert:${a.id}`, source: alertSource(a.id), severity: a.level, text: a.title });
@@ -366,7 +407,10 @@ export function pillAlerts(i: PillInputs): PillAlert[] {
   for (const r of pilotStale ? [] : i.readiness) {
     if (r.ok) continue;
     // A blocking item refuses take-off: critical, as the pre-flight sheet fails it.
-    out.push({ id: `pilot:${r.id}`, source: "pilot_readiness", severity: r.severity === "block" ? "critical" : "warning", text: r.msg || r.id });
+    const a: DraftAlert = { id: `pilot:${r.id}`, source: "pilot_readiness", severity: r.severity === "block" ? "critical" : "warning", text: r.msg || r.id };
+    if (r.params && r.params.length > 0) a.params = r.params;
+    if (r.fix) a.fix = r.fix;
+    out.push(a);
   }
   if (i.controllerLost && !pilotStale) {
     out.push({ id: "controller_lost", source: "controller", severity: "warning", text: specText("alert.controller_lost") });
@@ -415,7 +459,64 @@ export function pillAlerts(i: PillInputs): PillAlert[] {
       text: specText("cockpit.status.storage_used", { pct: Math.round(i.storagePct) }),
     });
   }
-  return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "critical" ? -1 : 1));
+  return out
+    .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "critical" ? -1 : 1))
+    .map((a) => ({ ...a, group: alertGroup(a.id, a.source), key: `${a.id}|${a.text}` }));
+}
+
+/** The alerts the pill counts: a snoozed warning drops out, a snoozed
+ *  critical stays (it only folds in the list). */
+export function unsnoozedAlerts(alerts: readonly PillAlert[], snoozed: ReadonlySet<string>): PillAlert[] {
+  return alerts.filter((a) => a.severity === "critical" || !snoozed.has(a.key));
+}
+
+/** An alert in a section; `collapsed` marks a snoozed critical. */
+export type GroupedAlert = PillAlert & { collapsed?: boolean };
+
+export interface AlertSection {
+  group: AlertGroup;
+  title: string;
+  alerts: GroupedAlert[];
+  /** Snoozed warnings left out of `alerts`. */
+  hidden: number;
+}
+
+/** The alert list's sections, in the spec's group order; inside one, critical
+ *  before warning, then as raised. One row per text in a section (the worst
+ *  severity wins). A snoozed warning is counted in `hidden`; a snoozed
+ *  critical stays, `collapsed`. Empty sections are left out. */
+export function groupAlerts(alerts: readonly PillAlert[], snoozed: ReadonlySet<string>): AlertSection[] {
+  const byGroup = new Map<AlertGroup, GroupedAlert[]>();
+  for (const a of alerts) {
+    let g = byGroup.get(a.group);
+    if (!g) {
+      g = [];
+      byGroup.set(a.group, g);
+    }
+    const same = g.find((b) => b.text === a.text);
+    if (same) {
+      if (a.severity === "critical") same.severity = "critical";
+      continue;
+    }
+    g.push({ ...a });
+  }
+  const out: AlertSection[] = [];
+  for (const name of GROUPS_SPEC.order) {
+    const group = asGroup(name);
+    const g = byGroup.get(group);
+    if (!g) continue;
+    const shown: GroupedAlert[] = [];
+    let hidden = 0;
+    for (const a of g) {
+      if (!snoozed.has(a.key)) shown.push(a);
+      else if (a.severity === "critical") shown.push({ ...a, collapsed: true });
+      else hidden += 1;
+    }
+    // Stable: equal severities keep the order they were raised in.
+    shown.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "critical" ? -1 : 1));
+    out.push({ group, title: alertGroupTitle(group), alerts: shown, hidden });
+  }
+  return out;
 }
 
 export interface PillSummary {

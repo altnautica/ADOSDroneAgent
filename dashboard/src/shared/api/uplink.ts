@@ -42,8 +42,19 @@ export interface GsModemLeg {
   state?: string | null;
 }
 
+// The board's wired port, or null when it has none.
+export interface GsEthernetLeg {
+  available?: boolean;
+  iface?: string | null;
+  link?: boolean | null;
+  speed_mbps?: number | null;
+  ip?: string | null;
+  gateway?: string | null;
+}
+
 export interface GsNetworkView {
   ap?: GsApLeg;
+  ethernet?: GsEthernetLeg | null;
   wifi_client?: GsWifiClientLeg;
   modem_4g?: GsModemLeg;
   // The agent's own selected uplink token (e.g. "eth0", "wlan0_client"), or

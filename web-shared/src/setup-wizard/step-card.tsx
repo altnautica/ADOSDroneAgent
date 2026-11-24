@@ -1,22 +1,27 @@
-// One setup step, drawn generically from the step schema: title, body (spec
-// text keys with the step's args filled in), the pose/motor-order picture, a
-// progress ring, the outputs step's yes/no question, operator inputs, the
-// parameters it will write, the live
-// values, blockers, the result, and the action buttons with their confirm
-// style. The closing `ados_intro` step is the same data in the "Meet ADOS
-// Pilot" layout.
+// One setup step as a guided screen, drawn generically from the step schema:
+// a large picture (the pose, the frame layout, or the motor-order diagram
+// with the motor under test marked), a progress ring, one sentence on what to
+// do now, the outputs step's yes/no question, the inputs, then one primary
+// action with any others smaller beside it. What the step writes sits in a
+// closed "What this changes" disclosure; live values, blockers and the
+// result follow. The closing `ados_intro` step is the same data in the "Meet
+// ADOS Pilot" layout.
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, Gamepad2, Navigation, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, Gamepad2, Navigation, ShieldCheck, TriangleAlert } from "lucide-react";
 
 import { FOCUS_RING, HoldButton, ProgressRing, StatePill, WizardButton } from "./controls";
 import { inputArgs, liveRows, outputQuestion } from "./parse";
-import { formatValue, optionText, paramNote, setupImageUrl, setupLabel, setupText } from "./strings";
-import type { InputOption, ParamRow, SetupAction, SetupStep, SetupValue, StepInput } from "./types";
+import { InputField } from "./step-inputs";
+import { formatValue, motorOrderMarkup, paramNote, setupImageUrl, setupLabel, setupText } from "./strings";
+import type { ParamRow, SetupAction, SetupStep, SetupValue, StepInput } from "./types";
 
 /** The step id whose actions render as the "Meet ADOS Pilot" screen. */
 export const ADOS_INTRO_STEP = "ados_intro";
+
+/** The larger primary button of a guided step: glove-sized on the kiosk. */
+const PRIMARY_LARGE = "min-h-[4em] min-w-[12em] px-[1.8em] text-[1.15em]";
 
 export interface StepCardProps {
   step: SetupStep;
@@ -24,6 +29,25 @@ export interface StepCardProps {
   busy: boolean;
   error: string | null;
   onAction: (step: SetupStep, actionId: string, args?: Record<string, SetupValue>) => void;
+}
+
+/** A step's actions split into the one primary (the first primary-styled
+ *  action) and the rest; the outputs step's yes/no answers are both primary. */
+function splitActions(step: SetupStep): { primary: SetupAction[]; secondary: SetupAction[] } {
+  if (outputQuestion(step)) {
+    const answers = step.actions.filter((a) => a.id === "answer_yes" || a.id === "answer_no");
+    if (answers.length) return { primary: answers, secondary: step.actions.filter((a) => !answers.includes(a)) };
+  }
+  const first = step.actions.find((a) => a.style === "primary");
+  return { primary: first ? [first] : [], secondary: step.actions.filter((a) => a !== first) };
+}
+
+/** The outputs step drives motors: it carries the props-off banner. */
+function drivesMotors(step: SetupStep): boolean {
+  return (
+    step.step === "outputs" &&
+    (step.image?.startsWith("motor_order_") === true || step.actions.some((a) => a.confirm === "hold_props_off"))
+  );
 }
 
 export function StepCard({ step, busy, error, onAction }: StepCardProps) {
@@ -35,84 +59,161 @@ export function StepCard({ step, busy, error, onAction }: StepCardProps) {
     return <MeetAdosPilot step={step} busy={busy} error={error} onFire={fire} />;
   }
 
-  const image = setupImageUrl(step.image);
   const question = outputQuestion(step);
+  // A step whose inputs carry pictures (the frame layouts, the wing types):
+  // the picture picker is the visual, so the step's own picture is not drawn.
+  const pickers = step.inputs.filter((i) => Object.keys(i.images).length > 0);
+  const fields = step.inputs.filter((i) => Object.keys(i.images).length === 0);
+  const motorSvg = question?.kind === "motor" ? motorOrderMarkup(step.image, question.index) : null;
+  const image = motorSvg || pickers.length ? null : setupImageUrl(step.image);
   const live = liveRows(step);
   const showRing = step.progress !== null || step.state === "running";
   const result = step.result ? Object.entries(step.result) : [];
+  const title = setupText(step.title_key, step.args);
+  const { primary, secondary } = splitActions(step);
+  const input = (i: StepInput) => (
+    <InputField
+      key={i.name}
+      input={i}
+      value={i.name in edits ? edits[i.name] : i.value}
+      onChange={(v) => setEdits((e) => ({ ...e, [i.name]: v }))}
+    />
+  );
+  const hasVisual = Boolean(image || motorSvg || showRing || pickers.length || live.length || result.length);
 
   return (
     <section className="flex flex-col gap-[0.9em] rounded-xl border border-border bg-card p-[1.1em] text-card-foreground">
       <header className="flex flex-wrap items-start justify-between gap-[0.6em]">
-        <h2 className="text-[1.35em] font-semibold leading-tight tracking-tight">{setupText(step.title_key, step.args)}</h2>
+        <h2 className="text-[1.45em] font-semibold leading-tight tracking-tight">{title}</h2>
         <StatePill state={step.state} />
       </header>
 
-      {step.body_key ? (
-        <p className="whitespace-pre-line text-[1em] leading-snug text-muted-foreground">{setupText(step.body_key, step.args)}</p>
-      ) : null}
+      {/* Wide: the visual left (at most 45 %), what to do right. Narrow: stacked,
+          with the picture held to a third of the screen height. */}
+      <div
+        className={
+          hasVisual
+            ? "flex flex-col gap-[1em] lg:grid lg:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] lg:items-start lg:gap-[1.4em]"
+            : "flex flex-col gap-[1em]"
+        }
+      >
+        {hasVisual ? (
+          <div className="flex min-w-0 flex-col gap-[0.8em]" data-testid="setup-visual">
+            {image || motorSvg || showRing ? (
+              <div className="flex items-center justify-center gap-[1em]">
+                {motorSvg ? (
+                  <div
+                    role="img"
+                    aria-label={title}
+                    className="min-w-0 flex-1 rounded-lg bg-letterbox p-[0.4em] [&>svg]:mx-auto [&>svg]:h-auto [&>svg]:max-h-[35vh] [&>svg]:w-full lg:[&>svg]:max-h-[42vh]"
+                    // The spec's own motor-order picture, with one motor recoloured.
+                    dangerouslySetInnerHTML={{ __html: motorSvg }}
+                  />
+                ) : image ? (
+                  // The spec draws these as light line art for a dark surface, so
+                  // they sit on the letterbox tone in either theme.
+                  <img
+                    src={image}
+                    alt={title}
+                    className="max-h-[35vh] min-w-0 flex-1 rounded-lg bg-letterbox object-contain p-[0.4em] lg:max-h-[42vh]"
+                  />
+                ) : null}
+                {showRing ? <ProgressRing value={step.progress} size="6em" /> : null}
+              </div>
+            ) : null}
+            {pickers.map(input)}
+            {live.length ? <ValueTable title="setupWizard.live" group="live" rows={live} args={step.args} /> : null}
+            {result.length ? <ValueTable title="setupWizard.result" group="result" rows={result} args={step.args} tone="ok" /> : null}
+          </div>
+        ) : null}
 
-      {image || showRing ? (
-        <div className="flex flex-wrap items-center gap-[1.2em]">
-          {image ? (
-            // The spec draws these as light line art for a dark surface, so
-            // they sit on the letterbox tone in either theme.
-            <img
-              src={image}
-              alt={setupText(step.title_key, step.args)}
-              className="h-[12em] w-auto max-w-full rounded-lg bg-letterbox p-[0.5em]"
-            />
+        <div className="flex min-w-0 flex-col gap-[0.9em]">
+          {step.body_key ? (
+            <p className="whitespace-pre-line text-[1.1em] leading-snug text-foreground">{setupText(step.body_key, step.args)}</p>
           ) : null}
-          {showRing ? <ProgressRing value={step.progress} size={image ? "6em" : "5em"} /> : null}
+
+          {question ? (
+            <p className="rounded-lg border border-warn/40 bg-warn/10 px-[0.9em] py-[0.6em] text-[1.25em] font-semibold text-foreground">
+              {setupText(question.question_key, { ...step.args, n: question.index, index: question.index, kind: question.kind })}
+            </p>
+          ) : null}
+
+          {fields.length ? (
+            // As many across as fit (prop, KV and cells on one row on the
+            // kiosk). A focused field scrolls clear of the sticky action bar.
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(8.5em,1fr))] gap-[0.8em] [&_input]:scroll-mb-[7em]">
+              {fields.map(input)}
+            </div>
+          ) : null}
+
+          {step.blockers.length ? (
+            <ul className="flex flex-col gap-[0.35em] rounded-lg border border-err/40 bg-err/10 px-[0.9em] py-[0.6em] text-[0.95em] text-err">
+              {step.blockers.map((b) => (
+                <li key={b} className="flex items-start gap-[0.5em]">
+                  <AlertTriangle className="mt-[0.15em] h-[1em] w-[1em] shrink-0" aria-hidden />
+                  <span>{setupText(b, step.args)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {error ? <p className="text-[0.95em] text-err" role="alert">{error}</p> : null}
+
+          {step.actions.length ? (
+            // Sticks to the bottom of the scrolling screen when the inputs run
+            // past it, so the primary action (and, when motors spin, the
+            // props-off warning above it) is always in view.
+            <div
+              className="sticky bottom-0 z-10 -mx-[0.3em] flex flex-col gap-[0.6em] border-t border-border bg-card px-[0.3em] pb-[0.4em] pt-[0.6em] shadow-[0_-0.6em_0.8em_-0.6em_rgb(0_0_0/0.45)]"
+              data-testid="setup-actions"
+            >
+              {drivesMotors(step) ? (
+                <p
+                  data-testid="setup-props-off"
+                  className="flex items-center gap-[0.6em] rounded-lg border border-err/50 bg-err/10 px-[0.9em] py-[0.5em] text-[1.05em] font-semibold text-err"
+                >
+                  <TriangleAlert className="h-[1.3em] w-[1.3em] shrink-0" aria-hidden />
+                  {setupText("setup.overview.props_off")}
+                </p>
+              ) : null}
+              <div className="flex flex-wrap items-center gap-[0.8em]">
+                {primary.map((a) => (
+                  <ActionControl key={a.id} action={a} step={step} disabled={busy} onFire={fire} className={PRIMARY_LARGE} />
+                ))}
+                {secondary.map((a) => (
+                  <ActionControl key={a.id} action={a} step={step} disabled={busy} onFire={fire} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {step.params.length ? (
+            <details className="group rounded-lg border border-border bg-muted/20" data-testid="setup-params">
+              <summary className={`flex min-h-[3.43em] cursor-pointer list-none items-center gap-[0.5em] rounded-lg px-[0.9em] text-[0.95em] font-semibold ${FOCUS_RING}`}>
+                <ChevronRight className="h-[1em] w-[1em] transition-transform group-open:rotate-90" aria-hidden />
+                {setupText("setup.overview.changes")}
+                <span className="font-normal text-muted-foreground">({step.params.length})</span>
+              </summary>
+              <ParamTable step={step.step} rows={step.params} />
+            </details>
+          ) : null}
         </div>
-      ) : null}
-
-      {question ? (
-        <p className="rounded-lg border border-warn/40 bg-warn/10 px-[0.9em] py-[0.7em] text-[1.15em] font-medium text-foreground">
-          {setupText(question.question_key, { ...step.args, n: question.index, index: question.index, kind: question.kind })}
-        </p>
-      ) : null}
-
-      {step.inputs.length ? (
-        <div className="grid grid-cols-1 gap-[0.7em] sm:grid-cols-2">
-          {step.inputs.map((input) => (
-            <InputField
-              key={input.name}
-              input={input}
-              value={input.name in edits ? edits[input.name] : input.value}
-              onChange={(v) => setEdits((e) => ({ ...e, [input.name]: v }))}
-            />
-          ))}
-        </div>
-      ) : null}
-
-      {step.params.length ? <ParamTable step={step.step} rows={step.params} /> : null}
-
-      {live.length ? <ValueTable title="setupWizard.live" group="live" rows={live} args={step.args} /> : null}
-
-      {step.blockers.length ? (
-        <ul className="flex flex-col gap-[0.35em] rounded-lg border border-err/40 bg-err/10 px-[0.9em] py-[0.6em] text-[0.95em] text-err">
-          {step.blockers.map((b) => (
-            <li key={b} className="flex items-start gap-[0.5em]">
-              <AlertTriangle className="mt-[0.15em] h-[1em] w-[1em] shrink-0" aria-hidden />
-              <span>{setupText(b, step.args)}</span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-
-      {result.length ? <ValueTable title="setupWizard.result" group="result" rows={result} args={step.args} tone="ok" /> : null}
-
-      {error ? <p className="text-[0.95em] text-err" role="alert">{error}</p> : null}
-
-      {step.actions.length ? (
-        <div className="flex flex-wrap gap-[0.6em]">
-          {step.actions.map((a) => (
-            <ActionControl key={a.id} action={a} step={step} disabled={busy} onFire={fire} />
-          ))}
-        </div>
-      ) : null}
+      </div>
     </section>
+  );
+}
+
+/** The 1 s confirmation shown over a step that just finished, before the
+ *  guided view moves on. */
+export function StepDoneBanner({ step }: { step: SetupStep }) {
+  return (
+    <p
+      role="status"
+      className="flex items-center gap-[0.6em] rounded-xl border border-ok/50 bg-ok/10 px-[1em] py-[0.8em] text-[1.15em] font-semibold text-ok"
+    >
+      <CheckCircle2 className="h-[1.3em] w-[1.3em]" aria-hidden />
+      {setupText("setup.overview.step_done", { title: setupText(step.title_key, step.args) })}
+    </p>
   );
 }
 
@@ -127,7 +228,7 @@ function ActionControl({
   step: SetupStep;
   disabled: boolean;
   onFire: (id: string) => void;
-  /** Extra classes for a tap button (the intro's larger primary). */
+  /** Extra classes (the larger primary). */
   className?: string;
 }) {
   const { t } = useTranslation();
@@ -147,6 +248,7 @@ function ActionControl({
           hint={setupText("setup.confirm.hold")}
           disabled={disabled}
           onConfirm={() => onFire(action.id)}
+          className={className}
         />
       );
     case "hold_props_off":
@@ -157,6 +259,7 @@ function ActionControl({
           hint={t("setupWizard.holdTo", { action: label })}
           disabled={disabled}
           onConfirm={() => onFire(action.id)}
+          className={className}
         />
       );
   }
@@ -166,25 +269,20 @@ function ActionControl({
  *  says (the obstacle backstop rows of the ADOS safety profile). */
 function ParamTable({ step, rows }: { step: string; rows: ParamRow[] }) {
   return (
-    <div className="rounded-lg border border-border bg-muted/20 px-[0.9em] py-[0.6em]" data-testid="setup-params">
-      <h3 className="mb-[0.3em] text-[0.75em] font-semibold uppercase tracking-wide text-muted-foreground">
-        {setupText(`setup.${step}.params`)}
-      </h3>
-      <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-[1.2em] gap-y-[0.25em] text-[1em]">
-        {rows.map((r) => {
-          const note = paramNote(step, r.name);
-          return (
-            <div key={r.name} className="contents">
-              <dt className="min-w-0 text-muted-foreground">
-                <span className="font-mono text-foreground">{r.name}</span>
-                {note ? <span className="block text-[0.85em]">{note}</span> : null}
-              </dt>
-              <dd className="text-right font-mono tabular-nums text-foreground">{formatValue(r.value)}</dd>
-            </div>
-          );
-        })}
-      </dl>
-    </div>
+    <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-[1.2em] gap-y-[0.25em] px-[0.9em] pb-[0.7em] text-[1em]">
+      {rows.map((r) => {
+        const note = paramNote(step, r.name);
+        return (
+          <div key={r.name} className="contents">
+            <dt className="min-w-0 text-muted-foreground">
+              <span className="font-mono text-foreground">{r.name}</span>
+              {note ? <span className="block text-[0.85em]">{note}</span> : null}
+            </dt>
+            <dd className="text-right font-mono tabular-nums text-foreground">{formatValue(r.value)}</dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }
 
@@ -214,68 +312,6 @@ function ValueTable({
         ))}
       </dl>
     </div>
-  );
-}
-
-function InputField({
-  input,
-  value,
-  onChange,
-}: {
-  input: StepInput;
-  value: SetupValue;
-  onChange: (v: SetupValue) => void;
-}) {
-  const label = setupText(input.label_key);
-  const control = "min-h-[3.43em] rounded-lg border border-input bg-background px-[0.8em] text-[1em] text-foreground";
-  if (input.kind === "number") {
-    return (
-      <label className="flex flex-col gap-[0.3em] text-[0.9em] text-muted-foreground">
-        <span>
-          {label}
-          {input.unit ? ` (${input.unit})` : ""}
-        </span>
-        <input
-          type="number"
-          inputMode="decimal"
-          value={value === null ? "" : String(value)}
-          min={input.min ?? undefined}
-          max={input.max ?? undefined}
-          step={input.step ?? "any"}
-          onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
-          className={`${control} font-mono tabular-nums ${FOCUS_RING}`}
-        />
-      </label>
-    );
-  }
-  const options: InputOption[] =
-    input.kind === "bool"
-      ? [
-          { value: true, label_key: "setup.action.yes" },
-          { value: false, label_key: "setup.action.no" },
-        ]
-      : input.options;
-  return (
-    <fieldset className="flex flex-col gap-[0.3em] text-[0.9em] text-muted-foreground">
-      <legend className="mb-[0.3em]">{label}</legend>
-      <div className="flex flex-wrap gap-[0.4em]">
-        {options.map(({ value: o, label_key }) => {
-          const on = o === value;
-          const text = optionText(input.label_key, o, label_key);
-          return (
-            <button
-              key={String(o)}
-              type="button"
-              aria-pressed={on}
-              onClick={() => onChange(o)}
-              className={`${control} ${FOCUS_RING} ${on ? "border-primary bg-primary/15 text-primary" : "hover:bg-muted"}`}
-            >
-              {text}
-            </button>
-          );
-        })}
-      </div>
-    </fieldset>
   );
 }
 

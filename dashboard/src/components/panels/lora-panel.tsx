@@ -16,6 +16,7 @@ import { useConfig } from "@/hooks/use-config";
 import { loraSourceLabel, loraTransportLabel } from "@/lib/state-labels";
 import {
   CRSF_STATUS_PATH,
+  crsfLaneEnabled,
   LORA_BEACONS_PATH,
   LORA_PATH,
   LORA_REGIONS_PATH,
@@ -274,10 +275,11 @@ export function LoraPanel() {
   const config = useConfig();
   const snapshot = useSnapshot();
   const profile = useNodeProfile();
-  // The RC lane's modules exist only on a ground station; a drone has no route.
+  // The RC lane's modules exist only on a ground station whose lane is on;
+  // otherwise the route answers 404, so it is not called.
   const crsf = useQuery({
     ...resourceQueryOptions<{ modules?: CrsfModule[] }>("crsf", CRSF_STATUS_PATH, 5_000),
-    enabled: profile === "ground_station",
+    enabled: profile === "ground_station" && crsfLaneEnabled(config.data),
     retry: false,
   });
   const [nowMs, setNowMs] = useState(() => Date.now());

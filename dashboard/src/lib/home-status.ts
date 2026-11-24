@@ -10,8 +10,9 @@
 // video of its own, so it raises no frozen-video item. The lines read the
 // pilot and follow frames only while fresh (`freshNavFrames`).
 //
-// The card is read-mostly: its only actions are the waiting prompt's resume
-// and stop, written to the follow-me config (`sendFollowAction`).
+// The card is read-mostly: its actions are the waiting prompt's resume and
+// stop, written to the follow-me config (`sendFollowAction`), and the alert
+// centre's fixes (`@/shared/hud/alert-rows`).
 
 import type { NavStatusBody, NavStatusEntry } from "@/hooks/use-nav-status";
 import { apiFetch } from "@/shared/api-fetch";
@@ -33,7 +34,7 @@ import { sensingChipText } from "@/shared/hud/sensing";
 import { moversLine } from "@/shared/hud/movers";
 import { specText } from "@/shared/hud/spec-text";
 import { storagePct, type StorageStatusFull } from "@/shared/hud/storage";
-import { baseAlerts, controllerLost, pillAlerts, pillSummary, pilotFailsafe, type PillSummary } from "@/shared/hud/status-pill";
+import { baseAlerts, controllerLost, pillAlerts, pillSummary, pilotFailsafe, unsnoozedAlerts, type PillAlert, type PillSummary } from "@/shared/hud/status-pill";
 
 import type { VehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
 
@@ -116,9 +117,9 @@ export function airframeResetAlertId(i: Pick<HomeStatusInputs, "pilot" | "teleme
   return item && airframeResettable(item, pillArmed(i.armSources ?? i)) ? `pilot:${AIRFRAME_BALANCE_ID}` : null;
 }
 
-/** The pill and its alert list, from the cockpit's inputs. The dashboard
- *  has no acknowledge action (read-only), so every alert counts as unseen. */
-export function homePill(i: HomeStatusInputs): PillSummary {
+/** Every active pill alert, from the cockpit's inputs: the alert centre's
+ *  rows. */
+export function homeAlerts(i: HomeStatusInputs): PillAlert[] {
   const alerts = baseAlerts({
     telemetry: i.telemetry,
     battery: i.battery,
@@ -129,25 +130,28 @@ export function homePill(i: HomeStatusInputs): PillSummary {
   });
   const checks = preflightChecks({ telemetry: i.telemetry, battery: i.battery, live: i.live });
   const armed = pillArmed(i.armSources ?? i);
-  return pillSummary(
-    pillAlerts({
-      alerts,
-      readiness: i.pilot?.readiness ?? [],
-      prearm: i.telemetry?.prearm,
-      storagePct: storagePct(i.status),
-      fcStatus: i.pilot?.statustext,
-      pilotAgeMs: i.pilotAgeMs,
-      agentReachable: i.agentReachable,
-      controllerLost: controllerLost(i.pilot),
-      ...pilotFailsafe(i.pilot),
-      setupAbort: i.pilot?.setupAbort ?? null,
-      missionStall: i.pilot?.missionStall ?? null,
-      preflightFailing: preflightFailing(checks, alerts, armed),
-      armed,
-      navSource: homeNavSource(i),
-    }),
-    new Set(),
-  );
+  return pillAlerts({
+    alerts,
+    readiness: i.pilot?.readiness ?? [],
+    prearm: i.telemetry?.prearm,
+    storagePct: storagePct(i.status),
+    fcStatus: i.pilot?.statustext,
+    pilotAgeMs: i.pilotAgeMs,
+    agentReachable: i.agentReachable,
+    controllerLost: controllerLost(i.pilot),
+    ...pilotFailsafe(i.pilot),
+    setupAbort: i.pilot?.setupAbort ?? null,
+    missionStall: i.pilot?.missionStall ?? null,
+    preflightFailing: preflightFailing(checks, alerts, armed),
+    armed,
+    navSource: homeNavSource(i),
+  });
+}
+
+/** The pill's face: every alert but the snoozed warnings counts. The
+ *  dashboard has no acknowledge action, so every alert counts as unseen. */
+export function homePill(i: HomeStatusInputs, snoozed: ReadonlySet<string> = new Set(), all: readonly PillAlert[] = homeAlerts(i)): PillSummary {
+  return pillSummary(unsnoozedAlerts(all, snoozed), new Set());
 }
 
 /** The pilot and follow frames of the last nav-status body while each is

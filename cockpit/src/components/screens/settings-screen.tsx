@@ -95,9 +95,8 @@ export function SettingsScreen({
         onAll={() => drill("")}
         onControls={() => dispatch({ kind: "open-detail", id: "settings:!controls" })}
         onAircraftSetup={
-          identity.profile === "drone" || identity.profile === "ground_station"
-            ? () => dispatch({ kind: "open-detail", id: "aircraft-setup" })
-            : null
+          // The setup engine runs next to the flight controller: drone only.
+          identity.profile === "drone" ? () => dispatch({ kind: "open-detail", id: "aircraft-setup" }) : null
         }
         onAppearance={() => dispatch({ kind: "open-detail", id: "settings:!appearance" })}
         sections={visibleSections(identity.profile, identity.role).map((s) => s.id)}

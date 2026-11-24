@@ -12,9 +12,9 @@ describe("flight chip on the dashboard card", () => {
     expect(chipTextColor("#2979FF")).toBe("color-mix(in oklab, #2979FF 62%, hsl(var(--foreground)))");
   });
 
-  it("never paints chip text in the raw overlay hue, and stays one line", () => {
+  it("never paints chip text in the raw overlay hue, and stays one line with no tooltip", () => {
     expect(TILES).not.toMatch(/style=\{\{ color: (chip|l)\.color/);
     expect(TILES).toMatch(/max-w-full truncate rounded-full border/);
-    expect(TILES).toMatch(/title=\{chip\.text\}/);
+    expect(TILES).not.toMatch(/title=\{chip\.text\}/);
   });
 });

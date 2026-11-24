@@ -49,6 +49,10 @@ const WFB: Record<string, ParseKeys> = {
   stale: "panels.state.wfb.stale",
   error: "panels.state.wfb.error",
   disabled: "panels.state.wfb.disabled",
+  // The ground receiver's own states and the link verdicts that name a cause.
+  searching: "panels.state.wfb.searching",
+  deaf: "panels.state.wfb.deaf",
+  no_peer: "panels.state.wfb.noPeer",
 };
 
 /** A WFB link state. */

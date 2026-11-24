@@ -75,6 +75,14 @@ export interface CrsfModule {
 
 export const CRSF_STATUS_PATH = "/api/v1/ground-station/crsf";
 
+/** Whether the RC lane is configured on (`radio.crsf.enabled`). The CRSF
+ *  status route answers 404 while no lane runs, so a page reads it only when
+ *  the lane is on: the lane is off by default. */
+export function crsfLaneEnabled(config: unknown): boolean {
+  const radio = (config as { radio?: { crsf?: { enabled?: unknown } } } | null | undefined)?.radio;
+  return radio?.crsf?.enabled === true;
+}
+
 export interface LoraBeacon {
   node_id: number;
   kind: string;

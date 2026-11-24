@@ -12,6 +12,12 @@ export function groundRoleFrom(raw: string | null | undefined): GroundRole {
   return "direct";
 }
 
+/** Whether this ground station's mesh state is worth reading: a direct
+ *  station is in no mesh, and its mesh route answers 404. */
+export function meshReadEnabled(role: GroundRole): boolean {
+  return role !== "direct";
+}
+
 export type GateDecision = "pass" | "mismatch" | "unavailable";
 
 /** What kind of machine the agent runs on. `unknown` is a node whose status has

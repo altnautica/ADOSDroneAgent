@@ -61,12 +61,15 @@ export function HoldButton({
   hint,
   onConfirm,
   disabled,
+  className = "",
 }: {
   style: ActionStyle;
   label: string;
   hint: string;
   onConfirm: () => void;
   disabled?: boolean;
+  /** Extra classes (a larger primary in the guided step). */
+  className?: string;
 }) {
   const [progress, setProgress] = useState(0);
   const startedAt = useRef<number | null>(null);
@@ -126,7 +129,7 @@ export function HoldButton({
       }}
       onBlur={cancel}
       onContextMenu={(e) => e.preventDefault()}
-      className={`${actionButtonClass(style)} touch-none select-none flex-col !gap-[0.1em] py-[0.4em]`}
+      className={`${actionButtonClass(style)} touch-none select-none flex-col !gap-[0.1em] py-[0.4em] ${className}`}
     >
       <span
         aria-hidden

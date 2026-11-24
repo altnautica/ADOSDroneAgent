@@ -103,8 +103,8 @@
     "pos_tolerance_m": 0.01
   },
   "params": [
-    { "name": "FLOW_TYPE", "rule": { "eq": 5 }, "severity": "block", "reason": "MAVLink optical flow (MTF-01P on an FC serial port)" },
-    { "name": "RNGFND1_TYPE", "rule": { "eq": 10 }, "severity": "block", "reason": "MAVLink rangefinder" },
+    { "name": "FLOW_TYPE", "rule": { "one_of": [5, 7] }, "severity": "block", "reason": "Optical flow over MAVLink (5) or MSP (7)" },
+    { "name": "RNGFND1_TYPE", "rule": { "one_of": [10, 32] }, "severity": "block", "reason": "Rangefinder over MAVLink (10) or MSP (32)" },
     { "name": "RNGFND1_ORIENT", "rule": { "eq": 25 }, "severity": "block", "reason": "Rangefinder faces down" },
     { "name": "FLOW_ORIENT_YAW", "rule": { "mount": "flow.yaw_cdeg", "else": { "multiple_of": 9000, "range": [-17999, 18000] } }, "severity": "block", "reason": "A wrong flow yaw inverts the velocity feedback" },
     { "name": "FLOW_FXSCALER", "rule": { "range": [-800, 800] }, "severity": "warn", "reason": "Flow scaler within ArduPilot's range" },
@@ -119,7 +119,7 @@
     { "name": "RNGFND1_MAX", "rule": { "max": 12 }, "severity": "warn", "reason": "MTF-01P range is 12 m at most (8 m in bright light)" },
     { "name": "EK3_SRC_OPTIONS", "rule": { "eq": 0 }, "severity": "warn", "reason": "Flow sources not fused together" },
     { "name": "PRX_IGN_GND", "rule": { "eq": 1 }, "when": { "PRX1_TYPE": { "ne": 0 }, "RNGFND1_ORIENT": { "eq": 25 } }, "severity": "warn", "reason": "Proximity ignores ground returns near the floor" },
-    { "name": "SERIALn_OPTIONS", "rule": { "no_forward_any_port": { "serial": { "protocol_param": "SERIAL{n}_PROTOCOL", "protocols": [1, 2], "options_param": "SERIAL{n}_OPTIONS", "mask": 1024 }, "mav": { "options_param": "MAV{n}_OPTIONS", "mask": 2 }, "n": [1, 9] } }, "severity": "warn", "reason": "The flow module's port must not forward MAVLink (SERIALn_OPTIONS 1024, or MAVn_OPTIONS 2 on 4.7 and later); the port is not known, so any port passes" }
+    { "name": "SERIALn_OPTIONS", "rule": { "no_forward_any_port": { "serial": { "protocol_param": "SERIAL{n}_PROTOCOL", "protocols": [1, 2], "options_param": "SERIAL{n}_OPTIONS", "mask": 1024 }, "mav": { "options_param": "MAV{n}_OPTIONS", "mask": 2 }, "n": [1, 9] } }, "when": { "FLOW_TYPE": { "eq": 5 } }, "severity": "warn", "reason": "A MAVLink flow module's port must not forward MAVLink (SERIALn_OPTIONS 1024, or MAVn_OPTIONS 2 on 4.7 and later); the port is not known, so any port passes" }
   ],
-  "params_note": "Rows apply only when FLOW_TYPE is non-zero or OPTICAL_FLOW has been seen (FLOW_TYPE itself, RNGFND1_TYPE and RNGFND1_ORIENT always apply then). A row whose parameter is absent from the FC table is skipped. mount rules compare against the declared mount (pos within pos_tolerance_m, yaw exact); without a declaration the else rule applies. group_not_all_zero fails only when every parameter of the group is 0, reported once per group. no_forward_any_port passes when for any n in [1, 9] SERIAL{n}_PROTOCOL is in protocols and SERIAL{n}_OPTIONS has mask set, or MAV{n}_OPTIONS has mask set."
+  "params_note": "Rows apply only when FLOW_TYPE is non-zero or OPTICAL_FLOW has been seen (FLOW_TYPE itself, RNGFND1_TYPE and RNGFND1_ORIENT always apply then). A row whose parameter is absent from the FC table is skipped. one_of passes when the value equals any listed value. mount rules compare against the declared mount (pos within pos_tolerance_m, yaw exact); without a declaration the else rule applies. group_not_all_zero fails only when every parameter of the group is 0, reported once per group. no_forward_any_port passes when for any n in [1, 9] SERIAL{n}_PROTOCOL is in protocols and SERIAL{n}_OPTIONS has mask set, or MAV{n}_OPTIONS has mask set; it applies only to MAVLink flow (FLOW_TYPE 5)."
 }

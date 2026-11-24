@@ -38,6 +38,7 @@ import { DASH } from "@/shared/format";
 import "@/shared/i18n";
 import { useProfile } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
+import { boundPeerId, shortFingerprint, type PairPeerWire } from "@/shared/api/pair-view";
 
 interface PairingInfo {
   device_id?: string | null;
@@ -49,7 +50,7 @@ interface PairingInfo {
   pairing_code?: string | null;
   mdns_host?: string | null;
 }
-interface WfbPair {
+interface WfbPair extends PairPeerWire {
   paired?: boolean;
   paired_with_device_id?: string | null;
   paired_at?: string | null;
@@ -385,6 +386,15 @@ export function PairScreen() {
   const rfKnown = rf.data != null;
   const rfPaired = rf.data?.paired ?? false;
   const rfTone: Tone = !rfKnown ? "warn" : rfPaired ? "ok" : "muted";
+  // "Bound" is the key state; the drone is named from the config peer or its
+  // fleet slot, with the key it is bound under.
+  const boundFp = shortFingerprint(rf.data?.fingerprint);
+  const boundSummary = [
+    boundPeerId(rf.data) ?? t("cockpit.pair.peerUnknown"),
+    boundFp ? t("cockpit.pair.keyShort", { fp: boundFp }) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const windowOpen = pending.data?.open ?? false;
   const phase = bindView(bind.data);
 
@@ -396,7 +406,7 @@ export function PairScreen() {
           <Dot tone={rfTone} />
           <span className="text-[0.8rem] text-surface-foreground">
             {t("cockpit.pair.radioState", {
-              state: !rfKnown ? DASH : rfPaired ? t("cockpit.pair.linked") : t("cockpit.pair.unpairedState"),
+              state: !rfKnown ? DASH : rfPaired ? t("cockpit.pair.bound") : t("cockpit.pair.unpairedState"),
             })}
           </span>
           <StaleBadge stale={rf.stale || info.stale} />
@@ -425,7 +435,7 @@ export function PairScreen() {
             <Row
               label={t("cockpit.pair.pairedDrone", { peer })}
               left={<Dot tone="ok" />}
-              value={rf.data?.paired_with_device_id ?? t("cockpit.pair.linked")}
+              value={boundSummary}
               tone="ok"
             />
             {rf.data?.fingerprint ? <Row label={t("cockpit.pair.fingerprint")} value={rf.data.fingerprint} /> : null}

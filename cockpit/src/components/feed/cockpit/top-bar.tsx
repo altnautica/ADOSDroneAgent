@@ -13,6 +13,9 @@ import { Check, ChevronDown, Gamepad2, Layers, Maximize2, Menu, Minimize2, Octag
 import type { LucideIcon } from "lucide-react";
 
 import { FlightStateChip } from "@/components/feed/cockpit/flight-state-chip";
+import { VerdictChip } from "@/components/shell/status-strip";
+import { linkDiagView } from "@/lib/link-diag";
+import { useNodeIdentity } from "@/shared/use-profile";
 import { StatusPill } from "@/components/feed/cockpit/status-pill";
 import { NavSourceChip } from "@/components/feed/nav-source-chip";
 import { Overlay } from "@/components/ui/overlay";
@@ -337,6 +340,20 @@ function menuSectionStyle(widthClass: WidthClass): CSSProperties {
   } as CSSProperties;
 }
 
+/** The RF link verdict on a ground station's Feed, where the status strip is
+ *  not shown: the station's one glance at whether the drone's radio is heard.
+ *  Nothing on a drone, or before the agent has classified the link. */
+function GsRfVerdict() {
+  const ground = useNodeIdentity().profile === "ground_station";
+  const view = linkDiagView(useStatusStore((s) => s.status?.link?.link_diag));
+  if (!ground || !view) return null;
+  return (
+    <span className="shrink-0" data-zone="rf_verdict">
+      <VerdictChip view={view} />
+    </span>
+  );
+}
+
 export function TopBar({ compact = false }: { compact?: boolean }) {
   const command = useNavStore((s) => s.command);
   const ctx = useSkillContext();
@@ -358,6 +375,7 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
     >
       <div ref={row} className="flex min-w-0 flex-1 items-center gap-[12px] overflow-x-clip">
         <FlightStateChip compact={compact} fit={full} />
+        <GsRfVerdict />
         <StatusPill compact={compact} fit={full} />
         <BatteryItem compact={compact} />
         {!moved.has("link_icon") ? <LinkItem text={!moved.has("link_text")} /> : null}

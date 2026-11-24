@@ -1,22 +1,25 @@
 // The top bar's status pill and its alert list.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { CheckCircle2 } from "lucide-react";
 
 import { Overlay } from "@/components/ui/overlay";
 import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
 import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
+import { cockpitAlertActions, useAlertCentreStore } from "@/lib/alert-centre";
 import { pillWiring } from "@/lib/alerts";
-import { chromeStyle, severityColor, severityIcon } from "@/lib/chrome-tokens";
+import { chromeStyle, severityColor } from "@/lib/chrome-tokens";
 import { useNavSource } from "@/hooks/use-nav-source";
 import { HIT_AREA } from "@/lib/flight-layout";
 import { useBeatPhase } from "@/lib/redraw-beat";
+import { CHROME_ALERT_SKIN, useAlertSnooze, type AlertActions } from "@/shared/hud/alert-centre";
+import { AlertCentre } from "@/shared/hud/alert-rows";
 import { preflightChecks } from "@/shared/hud/preflight";
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
-import { pillAlerts, pillSummary, severityTextColor, type PillAlert } from "@/shared/hud/status-pill";
+import { pillAlerts, pillSummary, severityTextColor, unsnoozedAlerts, type PillAlert } from "@/shared/hud/status-pill";
 import { simClockLabel } from "@/shared/hud/sim-clock";
+import { useNodeIdentity } from "@/shared/use-profile";
 import { useFlightStore } from "@/stores/flight-store";
 import { useStatusPillStore } from "@/stores/status-pill-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -45,6 +48,7 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
   const storagePct = useStatusStore((s) => s.status?.system?.disk_pct ?? null);
   const acked = useStatusPillStore((s) => s.acked);
   const ack = useStatusPillStore((s) => s.ack);
+  const { profile } = useNodeIdentity();
   // The list's anchor, read when the pill is pressed; null while closed.
   const [rect, setRect] = useState<DOMRect | null>(null);
   const pillRef = useRef<HTMLButtonElement>(null);
@@ -61,8 +65,20 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
     checks: preflightChecks({ telemetry, battery, live }),
     alerts,
   });
-  const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus, ...wiring, armed, navSource }), acked);
+  const all = pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus, ...wiring, armed, navSource });
+  // Keys prune only while the pilot frame and the agent answer: a stale
+  // frame drops its items without their conditions having cleared.
+  const { snoozed, setSnoozed } = useAlertSnooze(all, !all.some((a) => a.id === "pilot_not_answering" || a.id === "agent_unreachable"));
+  const summary = pillSummary(unsnoozedAlerts(all, snoozed), acked);
   const color = severityColor(summary.severity);
+  const warnings = summary.alerts.filter((a) => a.severity === "warning").length;
+  useEffect(() => {
+    useAlertCentreStore.setState({ warnings });
+  }, [warnings]);
+  const openSeq = useAlertCentreStore((s) => s.openSeq);
+  useEffect(() => {
+    if (openSeq > 0 && pillRef.current) setRect(pillRef.current.getBoundingClientRect());
+  }, [openSeq]);
 
   return (
     <>
@@ -105,29 +121,47 @@ export function StatusPill({ compact, fit }: { compact: boolean; fit: boolean })
         </span>
       ) : null}
       {rect ? (
-        <AlertList rect={rect} alerts={summary.alerts} ack={ack} onClose={() => setRect(null)} />
+        <AlertList
+          rect={rect}
+          alerts={all}
+          counted={summary.alerts}
+          snoozed={snoozed}
+          onSnooze={setSnoozed}
+          actions={cockpitAlertActions(profile, () => setRect(null))}
+          ack={ack}
+          onClose={() => setRect(null)}
+        />
       ) : null}
     </>
   );
 }
 
-/** The pill's alert list, on the shared overlay frame below the pill: one
+/** The pill's alert centre, on the shared overlay frame below the pill: one
  *  overlay at a time, Escape, controller back or a press outside close it
  *  (STOP still takes that first press). Mounting it is showing it, so it
- *  acknowledges what it lists, and an alert arriving while it is open. */
+ *  acknowledges what the pill counts, and an alert arriving while it is
+ *  open. It scrolls inside 70 % of the viewport. */
 function AlertList({
   rect,
   alerts,
+  counted,
+  snoozed,
+  onSnooze,
+  actions,
   ack,
   onClose,
 }: {
   rect: DOMRect;
   alerts: readonly PillAlert[];
+  counted: readonly PillAlert[];
+  snoozed: ReadonlySet<string>;
+  onSnooze: (key: string, on: boolean) => void;
+  actions: AlertActions;
   ack: (ids: string[]) => void;
   onClose: () => void;
 }) {
   const titleId = useId();
-  const idKey = alerts.map((a) => a.id).join("|");
+  const idKey = counted.map((a) => a.id).join("|");
   useEffect(() => {
     ack(idKey ? idKey.split("|") : []);
   }, [idKey, ack]);
@@ -136,42 +170,11 @@ function AlertList({
       onDismiss={onClose}
       scrim="clear"
       labelledBy={titleId}
-      panelClassName="chrome-panel chrome-bar-text w-[min(360px,90vw)]"
-      panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)), top: rect.bottom + 8 }}
+      panelClassName="chrome-panel chrome-bar-text w-[min(440px,94vw)]"
+      panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.left, window.innerWidth - 448)), top: rect.bottom + 8 }}
     >
-      <div className="flex max-h-[60vh] flex-col gap-[4px] overflow-y-auto p-[8px]" data-testid="status-pill-list">
-        <div id={titleId} className="chrome-label px-[4px]" data-testid="status-pill-list-title">
-          {specText("cockpit.alerts.title")}
-        </div>
-        {alerts.length === 0 ? (
-          <div className="flex items-center gap-[8px] px-[4px] py-[6px]" style={{ color: severityColor("ok") }}>
-            <CheckCircle2 className="chrome-icon" aria-hidden />
-            {specText("cockpit.status.ok")}
-          </div>
-        ) : (
-          alerts.map((a) => (
-            // Text first, its source under it; the glyph is the spec's
-            // severity icon in the severity colour.
-            <div key={a.id} data-testid="alert-item" data-severity={a.severity} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
-              <span
-                data-testid="alert-item-icon"
-                className="chrome-icon mt-[1px] flex shrink-0 items-center justify-center font-bold leading-none"
-                style={{ color: severityColor(a.severity) }}
-                aria-hidden
-              >
-                {severityIcon(a.severity)}
-              </span>
-              <div className="min-w-0">
-                <div data-testid="alert-item-text" style={a.severity === "critical" ? { color: severityTextColor("critical") } : undefined}>
-                  {a.text}
-                </div>
-                <div data-testid="alert-item-source" className="chrome-label">
-                  {specText(`cockpit.status.source.${a.source}`)}
-                </div>
-              </div>
-            </div>
-          ))
-        )}
+      <div className="max-h-[70vh] overflow-y-auto overscroll-contain p-[8px]" data-testid="status-pill-list">
+        <AlertCentre alerts={alerts} snoozed={snoozed} onSnooze={onSnooze} actions={actions} skin={CHROME_ALERT_SKIN} titleId={titleId} />
       </div>
     </Overlay>
   );

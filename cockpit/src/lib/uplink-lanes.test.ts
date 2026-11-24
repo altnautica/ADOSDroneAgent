@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { fmtTq } from "@/shared/format";
-import { laneForToken, uplinkTokenLabel } from "./uplink-lanes";
+import { ethernetLaneView, laneForToken, uplinkTokenLabel } from "./uplink-lanes";
 
 describe("uplink lane tokens", () => {
   it("maps the router's interface-role tokens to their lanes", () => {
@@ -18,6 +18,21 @@ describe("uplink lane tokens", () => {
     expect(laneForToken("ppp0")).toBeNull();
     expect(laneForToken(null)).toBeNull();
     expect(uplinkTokenLabel("ppp0")).toBe("ppp0");
+  });
+});
+
+describe("ethernet lane", () => {
+  it("renders the live wired port the API reports", () => {
+    expect(ethernetLaneView({ link: true, ip: "10.0.0.2", speed_mbps: 1000 })).toEqual({
+      up: true,
+      detail: "10.0.0.2 · 1000 Mb/s",
+    });
+    expect(ethernetLaneView(null)).toEqual({ up: null });
+  });
+
+  it("maps the sentinel's kernel names to lanes", () => {
+    expect(laneForToken("end0")).toBe("ethernet");
+    expect(laneForToken("wlan1")).toBe("wifi");
   });
 });
 

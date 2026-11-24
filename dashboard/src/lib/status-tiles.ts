@@ -119,7 +119,9 @@ export function buildTiles({ snapshot: s, status: cfg, fcVariant, fcReachable, p
     : {
     label: i18n.t("panels.tiles.vid"),
     icon: Video,
-    value: vBitrate > 0 ? fmtBitrate(vBitrate) : videoStateLabel(vState),
+    // A pipeline that reads "ready" with nothing flowing has no stream; it
+    // must not read as ready to watch.
+    value: vBitrate > 0 ? fmtBitrate(vBitrate) : vState === "ready" ? i18n.t("panels.tiles.noStream") : videoStateLabel(vState),
     sub: vBitrate > 0 ? i18n.t("panels.tiles.live") : "—",
     severity: severityFromState(vState),
   };

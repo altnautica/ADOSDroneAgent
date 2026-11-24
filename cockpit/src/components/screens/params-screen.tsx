@@ -9,6 +9,7 @@
 // configured on the MSP screen.
 
 import { nonDefault, outOfRange, paramMatches } from "@/lib/params-entry";
+import { filterByNames, useParamFilterStore } from "@/lib/param-filter";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -108,12 +109,19 @@ function ParametersTab({ identity }: { identity: FcIdentity | null }) {
 
   const rows = useMemo(() => buildRows(params.data?.params ?? {}), [params.data]);
   const counts = useMemo(() => categoryCounts(rows), [rows]);
+  // An alert's "Open parameters" names the rows to show; the category list
+  // does not narrow them further.
+  const nameFilter = useParamFilterStore((s) => s.names);
+  const clearNameFilter = useParamFilterStore((s) => s.clear);
   const visible = useMemo(
     () =>
-      filterRows(rows, { category, search: "", modifiedOnly, modified: new Set(drafts.keys()) }).filter((r) =>
-        paramMatches(r.name, meta?.get(r.name), search),
-      ),
-    [rows, category, search, modifiedOnly, drafts, meta],
+      filterRows([...filterByNames(rows, nameFilter)], {
+        category: nameFilter ? null : category,
+        search: "",
+        modifiedOnly,
+        modified: new Set(drafts.keys()),
+      }).filter((r) => paramMatches(r.name, meta?.get(r.name), search)),
+    [rows, nameFilter, category, search, modifiedOnly, drafts, meta],
   );
 
   async function save() {
@@ -301,8 +309,16 @@ function ParametersTab({ identity }: { identity: FcIdentity | null }) {
       {dirtyCount > 0 && !writeBlock ? (
         <p className="text-[0.75rem] text-muted-foreground">{t("telemetry.params.confirmWarning")}</p>
       ) : null}
+      {nameFilter ? (
+        <div className="flex flex-wrap items-center gap-[0.5rem]" data-testid="params-name-filter">
+          <span className="rounded-full border border-border px-[0.6rem] py-[0.2rem] text-[0.85rem]">
+            {t("cockpit.params.filtered", { count: nameFilter.length })}
+          </span>
+          <ActionButton label={t("cockpit.params.clearFilter")} onClick={clearNameFilter} />
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1">
-        <TwoPane showDetailInPortrait={picked} list={categories} detail={list} />
+        <TwoPane showDetailInPortrait={picked || nameFilter !== null} list={categories} detail={list} />
       </div>
       {editing?.kind === "enum" && editingMeta?.values ? (
         <OptionSheet
