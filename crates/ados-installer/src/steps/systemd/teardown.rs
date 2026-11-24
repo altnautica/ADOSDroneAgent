@@ -32,6 +32,50 @@ pub(super) fn prune_retired_units_in(systemd_dir: &Path, systemctl: &mut dyn FnM
     }
 }
 
+/// The unit states in which a retired unit still holds a process.
+const LIVE_STATES: [&str; 4] = ["active", "activating", "deactivating", "reloading"];
+
+/// Clear what the prune could not: a retired unit still running, or stuck
+/// stopping, when the prune's `stop` was issued is killed outright, then every
+/// retired unit's failed state is reset, so none stays listed as failed after
+/// the install. Run after the start step, when no supervisor restarts them.
+pub(crate) fn reap_retired_units() {
+    reap_retired_units_in(
+        &mut |unit| {
+            exec::run("systemctl", &["show", "-p", "ActiveState", "--value", unit])
+                .stdout
+                .trim()
+                .to_string()
+        },
+        &mut |args| {
+            let _ = exec::run("systemctl", args);
+        },
+        &mut || std::thread::sleep(std::time::Duration::from_secs(1)),
+    );
+}
+
+/// [`reap_retired_units`] against an injected state probe, `systemctl` runner
+/// and sleep.
+pub(crate) fn reap_retired_units_in(
+    state: &mut dyn FnMut(&str) -> String,
+    systemctl: &mut dyn FnMut(&[&str]),
+    sleep: &mut dyn FnMut(),
+) {
+    for &unit in RETIRED_UNITS {
+        if LIVE_STATES.contains(&state(unit).as_str()) {
+            systemctl(&["kill", "--signal=SIGKILL", unit]);
+            for _ in 0..10 {
+                if !LIVE_STATES.contains(&state(unit).as_str()) {
+                    break;
+                }
+                sleep();
+            }
+            tracing::info!(unit, "killed a retired unit still running");
+        }
+        systemctl(&["reset-failed", unit]);
+    }
+}
+
 /// Prune udev rules retired in a prior release, then reload so the removal takes
 /// effect in the same install. Idempotent — a rule already gone is a no-op.
 pub(super) fn prune_retired_udev_rules() {

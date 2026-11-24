@@ -250,3 +250,91 @@ fn mediamtx_only_asserted_where_the_installer_fetches_it() {
         );
     }
 }
+
+/// Script camera-state reads: each `(state, pipeline_state, reason)`, `None`
+/// for no fresh reading; the last entry repeats.
+fn reads(
+    script: &[Option<(&str, &str, Option<&str>)>],
+) -> impl FnMut() -> Option<(String, String, Option<String>)> {
+    let script: Vec<_> = script
+        .iter()
+        .map(|r| r.map(|(s, p, why)| (s.to_string(), p.to_string(), why.map(str::to_string))))
+        .collect();
+    let mut i = 0;
+    move || {
+        let r = script[i.min(script.len() - 1)].clone();
+        i += 1;
+        r
+    }
+}
+
+#[test]
+fn a_pipeline_that_reaches_streaming_passes() {
+    let script = [
+        None,
+        Some(("present", "starting", None)),
+        Some(("present", "streaming", None)),
+    ];
+    assert_eq!(
+        runtime::video_verdict(reads(&script), 30, || {}),
+        runtime::VideoVerdict::Streaming
+    );
+}
+
+#[test]
+fn a_rig_with_no_camera_is_not_a_video_failure() {
+    let script = [Some(("missing", "unknown", None))];
+    assert_eq!(
+        runtime::video_verdict(reads(&script), 30, || {}),
+        runtime::VideoVerdict::NoCamera
+    );
+}
+
+#[test]
+fn a_persistent_pipeline_error_is_named_with_its_reason() {
+    let script = [Some((
+        "present",
+        "error",
+        Some("encoder_spawn_failed: Operation not permitted"),
+    ))];
+    assert_eq!(
+        runtime::video_verdict(reads(&script), 30, || {}),
+        runtime::VideoVerdict::Error("encoder_spawn_failed: Operation not permitted".into())
+    );
+}
+
+#[test]
+fn the_previous_run_s_error_does_not_decide_when_the_new_run_streams() {
+    // The sidecar the restarted service replaces can still read once.
+    let script = [
+        Some(("present", "error", Some("old"))),
+        Some(("present", "starting", None)),
+        Some(("present", "streaming", None)),
+    ];
+    assert_eq!(
+        runtime::video_verdict(reads(&script), 30, || {}),
+        runtime::VideoVerdict::Streaming
+    );
+}
+
+#[test]
+fn a_pipeline_that_never_streams_reports_its_last_state() {
+    let mut sleeps = 0;
+    let script = [Some(("present", "starting", None))];
+    assert_eq!(
+        runtime::video_verdict(reads(&script), 30, || sleeps += 1),
+        runtime::VideoVerdict::NotStreaming("starting".into())
+    );
+    assert_eq!(sleeps, 29);
+    assert_eq!(
+        runtime::video_verdict(reads(&[None]), 3, || {}),
+        runtime::VideoVerdict::NotStreaming("absent".into())
+    );
+}
+
+#[test]
+fn failed_units_are_read_off_the_plain_listing() {
+    let out = "ados-plugin-x.service loaded failed failed ADOS plugin x\n";
+    assert_eq!(runtime::failed_unit_names(out), ["ados-plugin-x.service"]);
+    assert!(runtime::failed_unit_names("").is_empty());
+}

@@ -44,6 +44,7 @@ pub use hardening::*;
 pub(crate) use lists::*;
 pub use reconcile::*;
 pub use render::*;
+pub(crate) use teardown::reap_retired_units;
 use teardown::*;
 
 /// systemd unit install + enable (NOT start).

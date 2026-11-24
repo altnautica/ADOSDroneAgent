@@ -1,7 +1,5 @@
 //! Health: assert the REQUIRED components are actually up. Required. The final
-//! gate before the install result is written. Ports `run_health_gate`
-//! (`scripts/install.d/14-orchestration.sh:565`) PLUS one new check that closes
-//! a gap in the bash gate.
+//! gate before the install result is written.
 //!
 //! REQUIRED checks, in order:
 //!   1. venv importable        — `/opt/ados/venv/bin/python -c "import ados"`.
@@ -46,6 +44,9 @@
 //!      bash gate never asserted them here).
 //!   9. **NEW** — `mediamtx` (the video relay) is present. Best-effort: a miss
 //!      degrades streaming but does not fail the install (recorded non-required).
+//!  10. Best-effort runtime checks ([`runtime`]): the video pipeline reaches
+//!      `streaming`, and no `ados-*` unit is failed. Retired units are reaped
+//!      first, so none lingers failed after the install.
 //!
 //! Each miss is recorded into `ctx.failures` as Required, so the graph's
 //! status derivation flips to `failed` and the result names the missing piece.
@@ -372,6 +373,7 @@ impl Step for Health {
         if ctx.env.os != "linux" {
             return StepOutcome::Ok;
         }
+        crate::steps::systemd::reap_retired_units();
 
         let mut misses: Vec<String> = Vec::new();
 
@@ -392,11 +394,8 @@ impl Step for Health {
             }
         }
 
-        // 4. REST reachable. The start step has just stopped and started the supervisor,
-        // so first wait (bounded) for the control front's unit to be active:
-        // probing the port while the unit is still cycling is a race, and a unit
-        // that never comes up is named with the state systemd reports instead of
-        // surfacing only as an unreachable port.
+        // 4. REST reachable. The start step just restarted the supervisor, so wait
+        // (bounded) for the control front's unit first; a miss names its state.
         if let Err(state) = wait_until_active(control_active_state, CONTROL_ACTIVE_POLLS, || {
             std::thread::sleep(CONTROL_ACTIVE_POLL)
         }) {
@@ -412,10 +411,8 @@ impl Step for Health {
             misses.push("api-reachable".to_string());
         }
 
-        // 5. Every Hard prebuilt binary the profile ships is present +
-        // executable. This re-verifies what the fetch step placed (a binary that
-        // vanished or was truncated before health time would otherwise
-        // crash-loop its unit behind a healthy report), from the same catalog.
+        // 5. Every Hard prebuilt binary the profile ships is present + executable,
+        // re-verified from the same catalog the fetch step placed them by.
         for svc in missing_hard_binaries(&ctx.profile, |dest| is_executable(Path::new(dest))) {
             misses.push(format!("binary-missing:{svc}"));
         }
@@ -467,14 +464,15 @@ impl Step for Health {
             misses.extend(missing_radio_stack());
         }
 
-        // 9. mediamtx is best-effort (the video relay). A missing one degrades
-        // streaming but must not abort an otherwise-working install, so record
-        // it as a non-required failure rather than adding it to `misses`. Only
-        // checked on profiles the installer fetches it for.
+        // 9. mediamtx is best-effort (the video relay): a miss degrades streaming
+        // and is recorded non-required. Only on profiles it is fetched for.
         if mediamtx_missing(&ctx.profile, mediamtx_present) {
             ctx.failures.record("mediamtx-missing", false);
             tracing::warn!("mediamtx not present; video streaming degraded");
         }
+        // 10. The video pipeline streams, and no agent unit is failed.
+        runtime::check_video(ctx);
+        runtime::sweep_failed_units(ctx);
 
         if misses.is_empty() {
             tracing::info!("install health gate: OK");
@@ -498,3 +496,5 @@ impl Step for Health {
 
 #[cfg(test)]
 mod tests;
+
+mod runtime;

@@ -69,6 +69,41 @@ fn installer_prunes_retired_units() {
 }
 
 #[test]
+fn a_retired_unit_stuck_stopping_is_killed_then_cleared() {
+    let mut health_states = vec!["failed", "deactivating"];
+    let mut calls: Vec<Vec<String>> = Vec::new();
+    let mut sleeps = 0;
+    reap_retired_units_in(
+        &mut |unit| match unit {
+            "ados-health.service" => health_states.pop().unwrap_or("failed").to_string(),
+            _ => "inactive".to_string(),
+        },
+        &mut |args| calls.push(args.iter().map(|a| a.to_string()).collect()),
+        &mut || sleeps += 1,
+    );
+    let of = |unit: &str| -> Vec<String> {
+        calls
+            .iter()
+            .filter(|c| c.last().map(String::as_str) == Some(unit))
+            .map(|c| c.join(" "))
+            .collect()
+    };
+    assert_eq!(
+        of("ados-health.service"),
+        [
+            "kill --signal=SIGKILL ados-health.service",
+            "reset-failed ados-health.service"
+        ]
+    );
+    // An inactive retired unit is only cleared, never signalled.
+    assert_eq!(
+        of("ados-discovery.service"),
+        ["reset-failed ados-discovery.service"]
+    );
+    assert_eq!(sleeps, 0);
+}
+
+#[test]
 fn hailo_unit_enabled_on_drone() {
     assert!(profile_enable_units("drone", HOST).contains(&"ados-vision-hailo.service"));
     assert!(!profile_enable_units("ground_station", HOST).contains(&"ados-vision-hailo.service"));
