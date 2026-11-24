@@ -79,4 +79,4 @@ nix = { workspace = true }
 # is a Linux concept, so this is confined to the Linux target; off Linux the
 # modem manager compiles with the D-Bus path disabled (always-fallback).
 # Crate-specific (no other crate speaks D-Bus), declared here.
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio"] }
