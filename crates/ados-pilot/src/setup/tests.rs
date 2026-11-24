@@ -222,6 +222,19 @@ impl Sim {
     }
 }
 
+/// Detect reports the parameters the FC sent in this download, not every name
+/// the store has ever held: a name left from an earlier table (a firmware
+/// change, a removed feature) made "Parameters read" exceed the FC's count.
+#[test]
+fn detect_counts_the_parameters_downloaded_not_every_name_seen() {
+    let mut s = Sim::copter();
+    s.e.params.seed("STALE_FROM_AN_OLDER_TABLE", 1.0);
+    let r = s.e.start(G, s.now);
+    assert_eq!(r["ok"], json!(true), "{r}");
+    s.wait_step("frame", StepState::WaitingUser);
+    assert_eq!(s.result(G, "detect")["params"], json!(s.fc.params.len()));
+}
+
 #[test]
 fn full_ground_copter_flow() {
     let mut s = Sim::copter();

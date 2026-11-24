@@ -104,8 +104,10 @@ impl ParamStore {
         names.iter().copied().find(|n| self.has(n))
     }
 
-    pub fn count(&self) -> usize {
-        self.values.len()
+    /// Parameters the FC has sent in the current download (distinct indices),
+    /// not every name the store has ever held.
+    pub fn downloaded(&self) -> usize {
+        self.by_index.len()
     }
 
     pub fn total(&self) -> Option<u16> {

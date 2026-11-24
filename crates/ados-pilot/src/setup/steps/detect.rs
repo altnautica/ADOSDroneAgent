@@ -31,7 +31,7 @@ impl Step for Detect {
 
     fn tick(&mut self, cx: &mut Cx) {
         self.core.progress = Some(cx.params.download_progress());
-        self.core.set_live("params", cx.params.count());
+        self.core.set_live("params", cx.params.downloaded());
         if cx.fc.uid.is_none() && cx.now.saturating_sub(self.asked_ms) >= RETRY_MS {
             self.asked_ms = cx.now;
             cx.out.request_message(MSG_AUTOPILOT_VERSION);
@@ -69,7 +69,7 @@ impl Step for Detect {
                         .map(|(_, s)| serde_json::json!(s))
                         .unwrap_or(Value::Null),
                 ),
-                ("params", Value::from(cx.params.count())),
+                ("params", Value::from(cx.params.downloaded())),
                 (
                     "mission_state_inferred",
                     Value::from(
