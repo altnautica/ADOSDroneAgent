@@ -256,34 +256,74 @@ impl FcConnection {
         }
         let consoles =
             kernel_console_ports(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
-        match tokio_serial::available_ports() {
-            Ok(ports) => {
-                let mut candidates: Vec<FcCandidate> = ports
-                    .into_iter()
-                    .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
-                    .filter(|p| {
-                        !matches!(&p.port_type, tokio_serial::SerialPortType::UsbPort(info)
-                            if is_sensor_hub(info.vid, info.pid))
-                    })
-                    .filter(|p| !is_crsf(&p.port_name))
-                    .filter(|p| !consoles.contains(&p.port_name))
-                    .map(|p| FcCandidate {
-                        usb: match &p.port_type {
-                            tokio_serial::SerialPortType::UsbPort(info) => {
-                                Some((info.vid, info.pid))
-                            }
-                            _ => None,
-                        },
-                        name: p.port_name,
-                    })
-                    .collect();
-                // Stable: equal ranks keep the enumeration order.
-                candidates.sort_by_key(candidate_rank);
-                candidates
-            }
+        let mut candidates: Vec<FcCandidate> = match tokio_serial::available_ports() {
+            Ok(ports) => ports
+                .into_iter()
+                .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
+                .filter(|p| {
+                    !matches!(&p.port_type, tokio_serial::SerialPortType::UsbPort(info)
+                        if is_sensor_hub(info.vid, info.pid))
+                })
+                .filter(|p| !is_crsf(&p.port_name))
+                .filter(|p| !consoles.contains(&p.port_name))
+                .map(|p| FcCandidate {
+                    usb: match &p.port_type {
+                        tokio_serial::SerialPortType::UsbPort(info) => Some((info.vid, info.pid)),
+                        _ => None,
+                    },
+                    name: p.port_name,
+                })
+                .collect(),
             Err(_) => Vec::new(),
-        }
+        };
+        let listed: Vec<String> = candidates.iter().map(|c| c.name.clone()).collect();
+        let dev_nodes = std::fs::read_dir("/dev")
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        candidates.extend(
+            unlisted_soc_uarts(&dev_nodes, &listed, &consoles)
+                .into_iter()
+                .filter(|name| !is_crsf(name))
+                .map(|name| FcCandidate { name, usb: None }),
+        );
+        // Stable: equal ranks keep the enumeration order.
+        candidates.sort_by_key(candidate_rank);
+        candidates
     }
+}
+
+/// SoC UART families the serial enumeration never lists. Without libudev it
+/// keeps only ports whose sysfs parent is a USB, PCI, PnP, AMBA or serial-base
+/// device, and an Allwinner BSP kernel's `ttyAS*` UARTs hang off the plain
+/// platform bus, so a flight controller wired to one was never probed.
+const UNLISTED_SOC_UART_PREFIXES: &[&str] = &["ttyAS"];
+
+/// The `/dev` nodes (`dev_nodes`, bare names) of the SoC UART families the
+/// enumeration skips, as `/dev/<name>`, minus any already `listed` and every
+/// kernel console, sorted.
+pub(super) fn unlisted_soc_uarts(
+    dev_nodes: &[String],
+    listed: &[String],
+    consoles: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = dev_nodes
+        .iter()
+        .filter(|n| {
+            UNLISTED_SOC_UART_PREFIXES.iter().any(|p| {
+                n.strip_prefix(p).is_some_and(|rest| {
+                    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+        })
+        .map(|n| format!("/dev/{n}"))
+        .filter(|p| !listed.contains(p) && !consoles.contains(p))
+        .collect();
+    out.sort();
+    out
 }
 
 /// The device nodes the kernel command line names as consoles: each
@@ -344,7 +384,7 @@ pub(super) fn fallback_open_allowed(sole: bool, cand: &FcCandidate) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::kernel_console_ports;
+    use super::{kernel_console_ports, unlisted_soc_uarts};
 
     #[test]
     fn kernel_console_ports_reads_every_console_arg() {
@@ -354,5 +394,22 @@ mod tests {
             vec!["/dev/ttyAS0".to_string(), "/dev/tty1".to_string()]
         );
         assert!(kernel_console_ports("").is_empty());
+    }
+
+    #[test]
+    fn an_allwinner_fc_uart_the_enumeration_skips_is_still_a_candidate() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // An A733 /dev: the console ttyAS0, the FC on ttyAS2, unrelated nodes.
+        let dev = names(&[
+            "ttyAS2", "ttyAS0", "tty1", "ttyASX", "ttyAS", "null", "video0",
+        ]);
+        assert_eq!(
+            unlisted_soc_uarts(&dev, &[], &names(&["/dev/ttyAS0", "/dev/tty1"])),
+            ["/dev/ttyAS2"]
+        );
+        // A port the enumeration already listed is not added twice.
+        assert!(
+            unlisted_soc_uarts(&dev, &names(&["/dev/ttyAS2"]), &names(&["/dev/ttyAS0"])).is_empty()
+        );
     }
 }
