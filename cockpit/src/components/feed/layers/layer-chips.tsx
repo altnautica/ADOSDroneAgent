@@ -3,21 +3,24 @@
 // instead of on the layer canvas, where a banner would cover them.
 //
 // Each badge is a button. It opens a small menu that says why the badge shows
-// (the vision engine is off, or the layer sent nothing for 2 s) and offers two
-// fixes: Turn off switches the layer off (or, when the open view forces it on,
-// closes that view instead), and Set up opens Settings › Vision on a node that
-// has that section.
+// (the vision engine is off, the video has failed, or the layer sent nothing
+// for 2 s) and offers two fixes: Turn off switches the layer off (or, when the
+// open view forces it on, closes that view instead), and Set up opens
+// Settings › Vision on a node that has that section. The menu reads in the
+// alert sheet's bounded type scale, so it stays chrome-sized on a large panel.
 
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { ListItem } from "@/components/ui/list-item";
 import { Overlay } from "@/components/ui/overlay";
 import type { CockpitView } from "@/lib/cockpit-view";
 import { MENU_MAX_WIDTH_PX, MENU_MIN_WIDTH_PX, placeMenu, type AnchorRect } from "@/lib/menu-placement";
+import { cn } from "@/lib/utils";
+import { ALERT_TEXT } from "@/shared/hud/alert-centre";
 import { layerChips, UNAVAILABLE_CHIP, VISION_CHIP_MASK, type LayerChip } from "@/shared/hud/layer-engine";
 import { useNodeIdentity } from "@/shared/use-profile";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
+import { useFeedStore } from "@/stores/feed-store";
 import { useLayerChipsStore, visionEngineUp } from "@/stores/layer-chips-store";
 import { useNavStore } from "@/stores/nav-store";
 
@@ -29,12 +32,19 @@ export interface BadgeMenuProps {
   view: CockpitView;
   /** Settings › Vision exists on this node (an aircraft profile). */
   canSetUp: boolean;
+  /** The Feed's video has failed: a layer drawn from it gets no frames. */
+  videoFailed: boolean;
   onClose: () => void;
 }
 
+const MENU_ITEM = cn(
+  "flex min-h-[48px] w-full items-center rounded-md px-[12px] text-left text-surface-foreground hover:bg-muted active:bg-muted",
+  ALERT_TEXT.body,
+);
+
 /** The badge menu's content: the reason line, then Turn off (or Close Vision
  *  view) and Set up. */
-export function BadgeMenuBody({ chip, view, canSetUp, onClose }: BadgeMenuProps) {
+export function BadgeMenuBody({ chip, view, canSetUp, videoFailed, onClose }: BadgeMenuProps) {
   const { t } = useTranslation();
   const layer = t(`vision.layerName.${chip.layer}` as const);
   const reason =
@@ -44,7 +54,9 @@ export function BadgeMenuBody({ chip, view, canSetUp, onClose }: BadgeMenuProps)
         ? chip.layer === "ar"
           ? t("vision.badge.approx")
           : t("vision.badge.unscaled")
-        : t("vision.badge.noData", { layer });
+        : videoFailed
+          ? t("vision.badge.noDataVideoFailed", { layer })
+          : t("vision.badge.noData", { layer });
   const off = badgeTurnOff(chip, view);
   const run = (fn: () => void) => () => {
     onClose();
@@ -52,15 +64,21 @@ export function BadgeMenuBody({ chip, view, canSetUp, onClose }: BadgeMenuProps)
   };
   return (
     <>
-      <p className="px-[0.75rem] py-[0.4rem] text-[0.8rem] text-muted-foreground" data-testid="layer-chip-reason">
+      <p className={cn("px-[12px] py-[6px] text-muted-foreground", ALERT_TEXT.small)} data-testid="layer-chip-reason">
         {reason}
       </p>
-      <ListItem
-        headline={off === "close_view" ? t("vision.badge.closeView") : t("vision.badge.turnOff")}
-        onClick={run(() => turnOffBadge(chip, view))}
-      />
+      <button type="button" className={MENU_ITEM} onClick={run(() => turnOffBadge(chip, view))} data-testid="layer-chip-turn-off">
+        {off === "close_view" ? t("vision.badge.closeView") : t("vision.badge.turnOff")}
+      </button>
       {canSetUp ? (
-        <ListItem headline={t("vision.badge.setUp")} onClick={run(() => useNavStore.getState().openDetail(VISION_SETTINGS_SCREEN))} />
+        <button
+          type="button"
+          className={MENU_ITEM}
+          onClick={run(() => useNavStore.getState().openDetail(VISION_SETTINGS_SCREEN))}
+          data-testid="layer-chip-set-up"
+        >
+          {t("vision.badge.setUp")}
+        </button>
       ) : null}
     </>
   );
@@ -72,7 +90,7 @@ function BadgeMenu({ anchor, ...props }: BadgeMenuProps & { anchor: AnchorRect |
     <Overlay
       onDismiss={props.onClose}
       scrim="clear"
-      panelClassName="absolute overflow-y-auto rounded-lg border border-border bg-surface py-[0.25rem] text-surface-foreground shadow-lg"
+      panelClassName="absolute overflow-y-auto rounded-lg border border-border bg-surface p-[4px] text-surface-foreground shadow-lg"
       panelStyle={{
         left: place.left,
         top: place.top,
@@ -93,6 +111,7 @@ export function LayerChips() {
   const engineUp = useLayerChipsStore(visionEngineUp);
   const view = useCockpitViewStore((s) => s.view);
   const { profile } = useNodeIdentity();
+  const videoFailed = useFeedStore((s) => s.video.state === "failed");
   const [open, setOpen] = useState<{ chip: LayerChip; anchor: AnchorRect } | null>(null);
   const refs = useRef(new Map<string, HTMLButtonElement>());
   useVisionEngine((mask & VISION_CHIP_MASK) !== 0);
@@ -124,7 +143,9 @@ export function LayerChips() {
           {chip.text}
         </button>
       ))}
-      {open ? <BadgeMenu chip={open.chip} anchor={open.anchor} view={view} canSetUp={canSetUp} onClose={() => setOpen(null)} /> : null}
+      {open ? (
+        <BadgeMenu chip={open.chip} anchor={open.anchor} view={view} canSetUp={canSetUp} videoFailed={videoFailed} onClose={() => setOpen(null)} />
+      ) : null}
     </div>
   );
 }

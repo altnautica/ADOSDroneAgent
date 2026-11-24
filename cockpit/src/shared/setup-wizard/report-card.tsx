@@ -6,14 +6,15 @@ import { useTranslation } from "react-i18next";
 import { ChevronRight, FileClock } from "lucide-react";
 
 import { FOCUS_RING, HoldButton } from "./controls";
-import { vehicleClassLabel } from "./overview";
+import { firmwareLabel, resultRows, snapshotTime, vehicleClassLabel } from "./overview";
 import { formatValue, setupLabel, setupText } from "./strings";
 import type { SetupReport, SetupSnapshot, Wizard } from "./types";
 import type { FcSetupController } from "./use-fc-setup";
 
+/** When the snapshot was taken, as a local date and time (the engine names
+ *  it `2026-11-24T13-09-07Z`); the file name only when it is not a time. */
 function snapshotDate(s: SetupSnapshot): string {
-  const d = new Date(s.ts);
-  return Number.isNaN(d.getTime()) ? s.file : d.toLocaleString();
+  return snapshotTime(s.ts) ?? snapshotTime(s.file) ?? s.file;
 }
 
 export function RevertOffer({ snapshot, setup }: { snapshot: SetupSnapshot; setup: FcSetupController }) {
@@ -50,7 +51,7 @@ export function ReportCard({ report, wizards, setup }: { report: SetupReport; wi
   const steps = Object.entries(report.steps);
   const meta: Array<[string, string | null]> = [
     [t("setupWizard.report.date"), report.date ? new Date(report.date).toLocaleString() : null],
-    [t("setupWizard.report.firmware"), [report.firmware, report.firmware_version].filter(Boolean).join(" ") || null],
+    [t("setupWizard.report.firmware"), [firmwareLabel(report.firmware), report.firmware_version].filter(Boolean).join(" ") || null],
     [t("setupWizard.report.vehicle"), vehicleClassLabel(t, report.vehicle_class)],
   ];
   return (
@@ -66,7 +67,7 @@ export function ReportCard({ report, wizards, setup }: { report: SetupReport; wi
           {meta.map(([k, v]) => (
             <div key={k} className="contents">
               <dt className="text-muted-foreground">{k}</dt>
-              <dd className="capitalize text-foreground">{v ?? "—"}</dd>
+              <dd className="text-foreground">{v ?? "—"}</dd>
             </div>
           ))}
         </dl>
@@ -76,7 +77,7 @@ export function ReportCard({ report, wizards, setup }: { report: SetupReport; wi
               <div key={stepId} className="rounded-lg border border-border bg-muted/20 px-[0.9em] py-[0.6em]">
                 <h4 className="mb-[0.3em] text-[0.95em] font-semibold">{titles[stepId] ?? stepId}</h4>
                 <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-[1.2em] gap-y-[0.2em] text-[0.9em]">
-                  {Object.entries(values).map(([k, v]) => (
+                  {resultRows(values).map(([k, v]) => (
                     <div key={k} className="contents">
                       <dt className="truncate text-muted-foreground">{setupLabel("result", k)}</dt>
                       <dd className="text-right font-mono tabular-nums">{formatValue(v)}</dd>
@@ -95,7 +96,7 @@ export function ReportCard({ report, wizards, setup }: { report: SetupReport; wi
           {report.snapshots.length ? (
             report.snapshots.map((s) => (
               <div key={s.file} className="flex flex-wrap items-center justify-between gap-[0.6em] text-[0.95em]">
-                <span className="font-mono">{s.file}</span>
+                <span>{snapshotDate(s)}</span>
                 <HoldButton
                   style="secondary"
                   label={setupText("setup.action.revert")}

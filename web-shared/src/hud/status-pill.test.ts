@@ -9,6 +9,7 @@ import {
   ALERT_GROUPS,
   alertGroup,
   alertSource,
+  alertTitle,
   baseAlerts,
   controllerLost,
   failsafeText,
@@ -188,9 +189,32 @@ describe("status pill", () => {
       pillAlerts({ ...none, alerts: [lowBattery, linkLost], prearm: ["PreArm: Compass not calibrated"] }),
       new Set(),
     );
-    expect(many).toMatchObject({ severity: "critical", text: "3 warnings", count: 3 });
+    expect(many).toMatchObject({ severity: "critical", text: "1 blocking · 2 warnings", count: 3 });
     expect(many.alerts[0].source).toBe("link");
     expect(pillSummary(many.alerts, new Set(many.alerts.map((a) => a.id))).flashing).toBe(false);
+  });
+
+  it("never lets a warning count hide a blocker", () => {
+    const crit = (id: string): PillAlert => ({ id, source: "link", severity: "critical", text: id, group: "link", key: id });
+    const warn = (id: string): PillAlert => ({ ...crit(id), severity: "warning" });
+    expect(pillSummary([crit("a"), crit("b")], new Set()).text).toBe("2 blocking");
+    expect(pillSummary([crit("a"), warn("b")], new Set()).text).toBe("1 blocking · 1 warning");
+    expect(pillSummary([crit("a"), crit("b"), warn("c"), warn("d")], new Set()).text).toBe("2 blocking · 2 warnings");
+    expect(pillSummary([warn("a"), warn("b")], new Set()).text).toBe("2 warnings");
+  });
+
+  it("titles an alert with parameter rows by the words before its colon", () => {
+    const params = [{ name: "MAV_GCS_SYSID", have: 255, want: "1" }];
+    expect(alertTitle({ text: "FC parameters differ: MAV_GCS_SYSID 255 (want 1)", params })).toBe("FC parameters differ");
+    expect(alertTitle({ text: "FC proximity backstop not set: PRX1_TYPE 0 (want 2). The pilot's brake flies alone", params })).toBe(
+      "FC proximity backstop not set",
+    );
+    expect(alertTitle({ text: "Compass: not calibrated" })).toBe("Compass: not calibrated");
+  });
+
+  it("lists every distinct PreArm line, once each", () => {
+    const a = pillAlerts({ ...none, prearm: ["PreArm: Rangefinder 1: No Data", "PreArm: SERIAL6_OPTIONS bit 10", "PreArm: Rangefinder 1: No Data"] });
+    expect(a.map((x) => x.text)).toEqual(["Rangefinder 1: No Data", "SERIAL6_OPTIONS bit 10"]);
   });
 
   it("collects pilot readiness, FC pre-arm and storage, never an advisory", () => {

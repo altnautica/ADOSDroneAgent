@@ -7,7 +7,7 @@ import { effectiveLayers, forcingView } from "@/lib/cockpit-view";
 import type { VisionEngineStatus } from "@/stores/layer-chips-store";
 
 import { LayerSwitch } from "./vision-panel";
-import { AGENT_RESTART_MS, engineCardState, layerLiveState, VISION_START_MS } from "./vision-state";
+import { AGENT_RESTART_MS, detectorCandidates, engineCardState, layerLiveState, runningDetector, selectedDetector, VISION_START_MS } from "./vision-state";
 
 /** The `<input>` tags of a rendered layer switch. */
 function inputs(html: string): string[] {
@@ -99,5 +99,38 @@ describe("the vision engine card", () => {
     expect(engineCardState({ ...base, error: true, pending: { kind: "agent_restarting", since }, now: since + AGENT_RESTART_MS })).toBe(
       "start_timeout",
     );
+  });
+});
+
+describe("the detector model picker", () => {
+  // The bench's list: the registry was never fetched, so no file carries a task.
+  const bare = [
+    { id: "midas_v21_small_256" },
+    { id: "osnet_x0_25_reid_256x128" },
+    { id: "yolox_tiny_person_320" },
+    { id: "yolox_tiny_person_640" },
+  ];
+
+  it("lists detection models only: by task, else not by a depth or re-id model's name", () => {
+    expect(detectorCandidates(bare).map((m) => m.id)).toEqual(["yolox_tiny_person_320", "yolox_tiny_person_640"]);
+    expect(detectorCandidates([{ id: "a", task: "depth" }, { id: "b", task: "Detection" }, { id: "c", task: "reid" }]).map((m) => m.id)).toEqual(["b"]);
+  });
+
+  it("marks the chosen model, else the engine's running detector matched by id or registry id", () => {
+    const engine: VisionEngineStatus = {
+      backend: "rknn",
+      backend_state: "ready",
+      backend_reason: null,
+      models: [
+        { id: "reid_osnet_x0_25_v1", kind: "tracking", fps: null, latency_ms: null, backend_loaded: true },
+        { id: "person_yolox_tiny_v1", kind: "detection", fps: null, latency_ms: null, backend_loaded: true },
+      ],
+    };
+    expect(runningDetector(engine)).toBe("person_yolox_tiny_v1");
+    expect(selectedDetector({ installed: bare, active: "yolox_tiny_person_640" }, runningDetector(engine))).toBe("yolox_tiny_person_640");
+    const registered = [{ id: "yolox_tiny_person_320", task: "detection", registry_id: "person_yolox_tiny_v1" }];
+    expect(selectedDetector({ installed: registered, active: null }, runningDetector(engine))).toBe("yolox_tiny_person_320");
+    // A depth model is never the detector, whatever is configured.
+    expect(selectedDetector({ installed: bare, active: "midas_v21_small_256" }, null)).toBeNull();
   });
 });

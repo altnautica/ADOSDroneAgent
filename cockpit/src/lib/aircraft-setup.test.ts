@@ -2,12 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AIRCRAFT_SETUP_SCREEN_ID,
+  clearPendingSetupStep,
   loadOfferedUids,
   markSetupOffered,
   openAircraftSetup,
+  pendingSetupStep,
   SETUP_OFFERED_KEY,
   setupOfferUid,
-  takePendingSetupStep,
 } from "@/lib/aircraft-setup";
 import { useNavStore } from "@/stores/nav-store";
 import type { SetupStatus, Wizard } from "@/shared/setup-wizard/types";
@@ -68,17 +69,33 @@ describe("aircraft setup offer text", () => {
 });
 
 describe("opening Aircraft setup at a step", () => {
-  it("leaves the step pending for the screen, read once", () => {
+  it("leaves the step pending for the screen until it is handled", () => {
     openAircraftSetup("ados_profile");
     const stack = useNavStore.getState().detailStack;
     expect(stack[stack.length - 1]).toBe(AIRCRAFT_SETUP_SCREEN_ID);
-    expect(takePendingSetupStep()).toBe("ados_profile");
-    expect(takePendingSetupStep()).toBeNull();
+    const req = pendingSetupStep();
+    expect(req?.step).toBe("ados_profile");
+    clearPendingSetupStep(req!.seq);
+    expect(pendingSetupStep()).toBeNull();
+  });
+
+  it("gives each open a new request, also when the screen is already on top", () => {
+    openAircraftSetup("frame");
+    const first = pendingSetupStep()!;
+    const depth = useNavStore.getState().detailStack.length;
+    openAircraftSetup("ados_profile");
+    const second = pendingSetupStep()!;
+    expect(useNavStore.getState().detailStack.length).toBe(depth);
+    expect(second.step).toBe("ados_profile");
+    expect(second.seq).not.toBe(first.seq);
+    // A late clear of the older request leaves the newer one.
+    clearPendingSetupStep(first.seq);
+    expect(pendingSetupStep()).toEqual(second);
   });
 
   it("an open without a step clears a step left pending", () => {
     openAircraftSetup("frame");
     openAircraftSetup();
-    expect(takePendingSetupStep()).toBeNull();
+    expect(pendingSetupStep()).toBeNull();
   });
 });

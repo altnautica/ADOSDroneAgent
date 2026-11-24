@@ -79,7 +79,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "3 warnings",
+      "text": "1 blocking · 2 warnings",
       "count": 3,
       "ids": [
         "alert:link_lost",
@@ -121,13 +121,14 @@
     }
   },
   {
-    "name": "prearm_newest_wins",
+    "name": "prearm_each_distinct_line",
     "input": {
       "alerts": [],
       "readiness": [],
       "prearm": [
         "PreArm: Gyros inconsistent",
-        "PreArm: RC not calibrated"
+        "PreArm: RC not calibrated",
+        "PreArm: Gyros inconsistent"
       ],
       "fc_status": [],
       "storage_pct": 40,
@@ -138,9 +139,10 @@
     },
     "expected": {
       "severity": "warning",
-      "text": "RC not calibrated",
-      "count": 1,
+      "text": "2 warnings",
+      "count": 2,
       "ids": [
+        "fc:Gyros inconsistent",
         "fc:RC not calibrated"
       ],
       "groups": [
@@ -200,7 +202,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "2 warnings",
+      "text": "1 blocking · 1 warning",
       "count": 2,
       "ids": [
         "fcst:Crash: Disarming",
@@ -403,7 +405,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "2 warnings",
+      "text": "1 blocking · 1 warning",
       "count": 2,
       "ids": [
         "pilot:position",
@@ -493,7 +495,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "6 warnings",
+      "text": "2 blocking · 4 warnings",
       "count": 6,
       "ids": [
         "alert:batt_crit",
@@ -628,7 +630,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "3 warnings",
+      "text": "1 blocking · 2 warnings",
       "count": 3,
       "ids": [
         "storage",
@@ -887,7 +889,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "2 warnings",
+      "text": "1 blocking · 1 warning",
       "count": 2,
       "ids": [
         "failsafe",
@@ -976,7 +978,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "3 warnings",
+      "text": "1 blocking · 2 warnings",
       "count": 3,
       "ids": [
         "failsafe",
@@ -1407,7 +1409,7 @@
     },
     "expected": {
       "severity": "critical",
-      "text": "2 warnings",
+      "text": "1 blocking · 1 warning",
       "count": 2,
       "ids": [
         "pilot:fc_profile",
@@ -1456,6 +1458,83 @@
           }
         }
       ]
+    }
+  },
+  {
+    "name": "only_blocking_reads_blocking",
+    "input": {
+      "alerts": [],
+      "readiness": [
+        { "id": "setup_needed", "ok": false, "severity": "block", "msg": "Aircraft setup needed" },
+        { "id": "position", "ok": false, "severity": "block", "msg": "No position estimate" }
+      ],
+      "prearm": [],
+      "fc_status": [],
+      "storage_pct": 40,
+      "pilot_age_ms": 100,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": []
+    },
+    "expected": {
+      "severity": "critical",
+      "text": "2 blocking",
+      "count": 2,
+      "ids": ["pilot:setup_needed", "pilot:position"],
+      "groups": ["setup", "navigation"]
+    }
+  },
+  {
+    "name": "supervised_liftoff_sits_in_setup",
+    "input": {
+      "alerts": [],
+      "readiness": [
+        { "id": "supervised_liftoff", "ok": false, "severity": "warn", "msg": "Standard take-off. Steady take-off is off." }
+      ],
+      "prearm": [],
+      "fc_status": [],
+      "storage_pct": 40,
+      "pilot_age_ms": 100,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": []
+    },
+    "expected": {
+      "severity": "warning",
+      "text": "Standard take-off. Steady take-off is off.",
+      "count": 1,
+      "ids": ["pilot:supervised_liftoff"],
+      "groups": ["setup"]
+    }
+  },
+  {
+    "name": "one_alert_with_params_reads_its_short_title",
+    "input": {
+      "alerts": [],
+      "readiness": [
+        {
+          "id": "fc_profile",
+          "ok": false,
+          "severity": "block",
+          "msg": "FC parameters differ: MAV_GCS_SYSID 255 (want 1)",
+          "params": [{ "name": "MAV_GCS_SYSID", "have": 255, "want": "1" }],
+          "fix": { "kind": "apply_profile" }
+        }
+      ],
+      "prearm": [],
+      "fc_status": [],
+      "storage_pct": 40,
+      "pilot_age_ms": 100,
+      "agent_reachable": true,
+      "controller_lost": false,
+      "preflight_failing": []
+    },
+    "expected": {
+      "severity": "critical",
+      "text": "FC parameters differ",
+      "count": 1,
+      "ids": ["pilot:fc_profile"],
+      "groups": ["setup"]
     }
   }
 ]

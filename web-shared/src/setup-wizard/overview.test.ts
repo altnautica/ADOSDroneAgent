@@ -2,9 +2,22 @@ import { describe, expect, it } from "vitest";
 
 import { ApiError } from "../api-fetch";
 import { fcSetupUrls, loadErrorText } from "./client";
-import { cardState, cardSummary, overviewPrimary, wizardCards, wizardProgress } from "./overview";
+import {
+  cardState,
+  cardSummary,
+  cardTarget,
+  firmwareLabel,
+  isCancelled,
+  overviewPrimary,
+  readinessFlags,
+  resultRows,
+  runningStep,
+  snapshotTime,
+  wizardCards,
+  wizardProgress,
+} from "./overview";
 import { parseInput, parseStatus, parseWizard } from "./parse";
-import { motorOrderMarkup, setupErrorText, setupText } from "./strings";
+import { motorOrderMarkup, setupErrorText, setupLabel, setupText } from "./strings";
 import type { SetupStep, StepState, Wizard, WizardState } from "./types";
 
 function step(id: string, state: StepState, extra: Partial<SetupStep> = {}): SetupStep {
@@ -160,5 +173,122 @@ describe("setup errors", () => {
     expect(setupErrorText("armed")).toBe("Disarm first");
     expect(setupErrorText("ground_not_done")).toBe("Complete the aircraft setup first");
     expect(setupErrorText("no_such_code")).toBe("no_such_code");
+  });
+});
+
+describe("card states from the flight controller's truth", () => {
+  const ground = [
+    step("detect", "pending"),
+    step("frame", "pending"),
+    step("accel", "pending"),
+    step("battery", "pending"),
+    step("ados_profile", "pending"),
+  ];
+
+  it("counts a wizard filed as done as done, step records or not", () => {
+    const w = wizard("done", ground);
+    expect(wizardProgress(w)).toEqual({ done: 4, total: 4 });
+    expect(wizardCards(w).every((c) => c.state === "done")).toBe(true);
+    // A step with a state of its own keeps it.
+    const failed = wizard("done", [step("frame", "done"), step("battery", "failed")]);
+    expect(wizardCards(failed).find((c) => c.id === "battery")?.state).toBe("attention");
+  });
+
+  it("flags the card a failing readiness item's fix points at", () => {
+    const flags = readinessFlags([
+      {
+        id: "fc_profile",
+        ok: false,
+        severity: "block",
+        msg: "FC parameters differ: MAV_GCS_SYSID 255 (want 1)",
+        params: [{ name: "MAV_GCS_SYSID", have: 255, want: "1" }],
+        fix: { kind: "apply_profile" },
+      },
+      { id: "setup_needed", ok: false, severity: "block", msg: "Aircraft setup not completed", fix: { kind: "setup_step", step: "frame" } },
+      { id: "rangefinder", ok: false, severity: "warn", msg: "No rangefinder", fix: { kind: "settings", section: "sensors" } },
+      { id: "battery_failsafe", ok: true, severity: "block", msg: "ok", fix: { kind: "setup_step", step: "battery" } },
+    ]);
+    expect([...flags.keys()]).toEqual(["ados_profile", "frame"]);
+    const byId = Object.fromEntries(wizardCards(wizard("done", ground), flags).map((c) => [c.id, c]));
+    expect(byId.safety.state).toBe("attention");
+    expect(cardSummary(byId.safety)).toBe("MAV_GCS_SYSID 255 → 1");
+    expect(byId.frame.state).toBe("attention");
+    expect(cardSummary(byId.frame)).toBe("Aircraft setup not completed");
+    expect(byId.battery.state).toBe("done");
+    // The card opens the flagged step first.
+    const sensors = wizardCards(wizard("not_started", [step("accel", "done"), step("compass", "pending")]), new Map([["accel", "x"]]))[0];
+    expect(cardTarget(sensors, new Map([["accel", "x"]])).step).toBe("accel");
+    // A run in progress on the flagged card stays in progress.
+    const running = wizardCards(wizard("running", [step("ados_profile", "waiting_user")]), flags)[0];
+    expect(running.state).toBe("in_progress");
+  });
+
+  it("reads an operator-cancelled step as neutral, not needing attention", () => {
+    const cancelled = step("frame", "failed", { blockers: ["setup.blocker.cancelled"] });
+    expect(isCancelled(cancelled)).toBe(true);
+    expect(cardState([cancelled])).toBe("not_set");
+    expect(isCancelled(step("frame", "failed", { blockers: ["setup.blocker.timeout"] }))).toBe(false);
+    expect(setupText("setup.state.cancelled")).toBe("Cancelled");
+  });
+
+  it("says After setup on flight-tuning cards that wait on the aircraft setup", () => {
+    const air: Wizard = {
+      ...wizard("not_started", [step("preflight", "pending"), step("autotune", "pending")]),
+      id: "air",
+      available: false,
+      blockers: ["setup.blocker.ground_not_done"],
+    };
+    expect(wizardCards(air).map((c) => c.state)).toEqual(["after_setup", "after_setup"]);
+    expect(setupText("setup.card.state.after_setup")).toBe("After setup");
+    expect(wizardCards({ ...air, available: true, blockers: [] }).map((c) => c.state)).toEqual(["not_set", "not_set"]);
+  });
+});
+
+describe("a run in progress outside the wizard's own state", () => {
+  it("reads Continue whenever a run is in progress, whatever the filed state", () => {
+    expect(overviewPrimary("done", true).kind).toBe("continue");
+    expect(overviewPrimary("aborted", true).kind).toBe("continue");
+    expect(overviewPrimary("done").kind).toBe("run_again");
+  });
+
+  it("takes the running step from the status's top-level running", () => {
+    const w = wizard("done", [step("ados_profile", "waiting_user")]);
+    const status = { uid: "fc", firmware: "ardupilot", firmware_version: null, vehicle_class: null, wizards: [w], report: null };
+    expect(runningStep({ ...status, running: { wizard: "ground", step: "ados_profile" } }, w)).toBe("ados_profile");
+    expect(runningStep({ ...status, running: { wizard: "air", step: "autotune" } }, w)).toBeNull();
+    expect(runningStep({ ...status, running: null }, w)).toBeNull();
+  });
+});
+
+describe("setup copy", () => {
+  it("names firmware as its project writes it", () => {
+    expect(firmwareLabel("ardupilot")).toBe("ArduPilot");
+    expect(firmwareLabel("px4")).toBe("PX4");
+    expect(firmwareLabel("Betaflight")).toBe("Betaflight");
+    expect(firmwareLabel("betaflight")).toBe("Betaflight");
+    expect(firmwareLabel(null)).toBeNull();
+  });
+
+  it("shows plain result rows: internal keys left out, firmware named", () => {
+    const rows = resultRows({
+      firmware: "ardupilot",
+      firmware_version: "4.8.0",
+      vehicle_class: "multirotor",
+      uid: "abc",
+      uid_source: "uid2",
+      params: 1433,
+      mission_state_inferred: false,
+    });
+    expect(rows.map(([k]) => k)).toEqual(["firmware", "firmware_version", "vehicle_class", "params"]);
+    expect(rows[0][1]).toBe("ArduPilot");
+    expect(setupLabel("result", "params")).toBe("Parameters read");
+    expect(resultRows(null)).toEqual([]);
+  });
+
+  it("reads a snapshot name as a date and time", () => {
+    const at = snapshotTime("2026-11-24T13-09-07Z.param");
+    expect(at).toBe(new Date("2026-11-24T13:09:07Z").toLocaleString());
+    expect(snapshotTime("2026-11-24T13:09:07Z")).toBe(at);
+    expect(snapshotTime("setup.param")).toBeNull();
   });
 });

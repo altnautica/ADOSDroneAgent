@@ -11,9 +11,15 @@ import { BadgeMenuBody } from "./layer-chips";
 
 const chip = (id: ChipId, engineUp: boolean | null = true) => layerChips(1 << CHIP_IDS.indexOf(id), engineUp)[0];
 
-function menu(id: ChipId, view: "pilot" | "vision", opts: { engineUp?: boolean; canSetUp?: boolean } = {}): string {
+function menu(id: ChipId, view: "pilot" | "vision", opts: { engineUp?: boolean; canSetUp?: boolean; videoFailed?: boolean } = {}): string {
   return renderToStaticMarkup(
-    createElement(BadgeMenuBody, { chip: chip(id, opts.engineUp ?? true), view, canSetUp: opts.canSetUp ?? true, onClose: () => {} }),
+    createElement(BadgeMenuBody, {
+      chip: chip(id, opts.engineUp ?? true),
+      view,
+      canSetUp: opts.canSetUp ?? true,
+      videoFailed: opts.videoFailed ?? false,
+      onClose: () => {},
+    }),
   );
 }
 
@@ -42,6 +48,19 @@ describe("a layer badge's menu", () => {
     expect(menu("depth", "pilot", { engineUp: false })).toContain("Vision engine is off");
     expect(menu("depth", "pilot")).toContain("No data from Depth for 2 s");
     expect(menu("obstacles", "pilot", { engineUp: false })).toContain("No data from Obstacles for 2 s");
+  });
+
+  it("names the failed video as the reason a layer has no data", () => {
+    expect(menu("targets", "pilot", { videoFailed: true })).toContain("No data from Targets: the video has failed");
+    // The engine being off is the deeper cause, and says so.
+    expect(menu("targets", "pilot", { engineUp: false, videoFailed: true })).toContain("Vision engine is off");
+  });
+
+  it("sizes its items in the alert sheet's bounded type scale, 48 px tall, never in bare rem", () => {
+    const html = menu("depth", "pilot");
+    expect(html).toContain("text-[length:clamp(14px,0.6rem,18px)]");
+    expect(html).toContain("min-h-[48px]");
+    expect(html).not.toMatch(/text-\[[0-9.]+rem\]/);
   });
 
   it("offers Set up only where Settings › Vision exists", () => {

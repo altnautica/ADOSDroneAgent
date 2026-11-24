@@ -7,6 +7,8 @@
     "sensor_params": "setup",
     "firmware": "setup",
     "airframe_balance": "setup",
+    "setup_needed": "setup",
+    "supervised_liftoff": "setup",
     "flow": "sensors",
     "rangefinder": "sensors",
     "lidar": "sensors",

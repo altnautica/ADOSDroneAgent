@@ -10,34 +10,59 @@
 // the ground. Open or Later both mark the uid offered, in localStorage
 // `ados-cockpit-setup-offered` (the kiosk keeps it in its persistent profile).
 
+import { useSyncExternalStore } from "react";
+
 import { BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
 import { rerunStep } from "@/shared/setup-wizard/client";
 import { setupNeeded } from "@/shared/setup-wizard/parse";
 import type { SetupStatus } from "@/shared/setup-wizard/types";
+import type { OpenStepRequest } from "@/shared/setup-wizard/wizard-view";
 import { useNavStore } from "@/stores/nav-store";
 
 /** The registry id of the Aircraft setup screen. */
 export const AIRCRAFT_SETUP_SCREEN_ID = "aircraft-setup";
 
-/** The step the next Aircraft setup screen opens at, set by the last open
- *  that named one; read once. */
-let pendingStep: string | null = null;
+/** The step the Aircraft setup screen should open, set by the last open that
+ *  named one. Each open gets a new `seq`, so the screen opens it even when
+ *  it is already showing (an alert's "Open setup" over the open screen). */
+let pending: OpenStepRequest | null = null;
+let seq = 0;
+const listeners = new Set<() => void>();
+
+function setPending(next: OpenStepRequest | null): void {
+  pending = next;
+  for (const l of listeners) l();
+}
 
 /** Open the Aircraft setup screen (a no-op when it is already on top); with
- *  `step`, the screen opens that step (`takePendingSetupStep`). An open
+ *  `step`, the screen opens that step (`usePendingSetupStep`). An open
  *  without a step clears any step left pending. */
 export function openAircraftSetup(step?: string): void {
-  pendingStep = step ?? null;
+  seq += 1;
+  setPending(step ? { step, seq } : null);
   const nav = useNavStore.getState();
   if (nav.detailStack[nav.detailStack.length - 1] === AIRCRAFT_SETUP_SCREEN_ID) return;
   nav.openDetail(AIRCRAFT_SETUP_SCREEN_ID);
 }
 
-/** The step the last open asked for, or null; reading it clears it. */
-export function takePendingSetupStep(): string | null {
-  const step = pendingStep;
-  pendingStep = null;
-  return step;
+/** The open request in hand, or null. */
+export function pendingSetupStep(): OpenStepRequest | null {
+  return pending;
+}
+
+/** The screen acted on request `seq`: drop it, unless a newer one came. */
+export function clearPendingSetupStep(handled: number): void {
+  if (pending?.seq === handled) setPending(null);
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** The open request, live: a mounted screen sees each new one. */
+export function usePendingSetupStep(): OpenStepRequest | null {
+  return useSyncExternalStore(subscribe, pendingSetupStep, pendingSetupStep);
 }
 
 /** The battery failsafe fix: open Aircraft setup and run the ground

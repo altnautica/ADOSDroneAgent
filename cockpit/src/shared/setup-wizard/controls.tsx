@@ -7,8 +7,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, CircleDashed, Hand, Loader2, Minus, X } from "lucide-react";
 
+import { isCancelled } from "./overview";
 import { setupText } from "./strings";
-import { HOLD_CONFIRM_MS, type ActionStyle, type StepState } from "./types";
+import { HOLD_CONFIRM_MS, type ActionStyle, type SetupStep, type StepState } from "./types";
 
 export const FOCUS_RING =
   "outline-none focus-visible:outline focus-visible:outline-[0.15em] focus-visible:outline-offset-[0.1em] focus-visible:outline-ring " +
@@ -174,17 +175,20 @@ export function ProgressRing({ value, size = "5em" }: { value: number | null; si
   );
 }
 
-const STATE_TONE: Record<StepState, string> = {
+const STATE_TONE: Record<StepState | "cancelled", string> = {
   pending: "text-muted-foreground",
   running: "text-info",
   waiting_user: "text-warn",
   done: "text-ok",
   failed: "text-err",
   skipped: "text-muted-foreground",
+  cancelled: "text-muted-foreground",
 };
 
-/** The step-state icon, coloured by state. */
-export function StateIcon({ state }: { state: StepState }) {
+/** The step-state icon, coloured by state. An operator-cancelled step reads
+ *  as cancelled, neutral, not failed. */
+export function StateIcon({ step }: { step: SetupStep }) {
+  const state = isCancelled(step) ? "cancelled" : step.state;
   const cls = `h-[1.15em] w-[1.15em] shrink-0 ${STATE_TONE[state]}`;
   switch (state) {
     case "running":
@@ -196,18 +200,72 @@ export function StateIcon({ state }: { state: StepState }) {
     case "failed":
       return <X className={cls} aria-hidden />;
     case "skipped":
+    case "cancelled":
       return <Minus className={cls} aria-hidden />;
     case "pending":
       return <CircleDashed className={cls} aria-hidden />;
   }
 }
 
-/** The step state as a coloured pill. */
-export function StatePill({ state }: { state: StepState }) {
+/** The step state as a coloured pill ("Cancelled" for an operator abort). */
+export function StatePill({ step }: { step: SetupStep }) {
+  const state = isCancelled(step) ? "cancelled" : step.state;
   return (
     <span className={`inline-flex items-center gap-[0.3em] rounded-full border border-current/30 px-[0.6em] py-[0.15em] text-[0.8em] font-medium ${STATE_TONE[state]}`}>
-      <StateIcon state={state} />
+      <StateIcon step={step} />
       {setupText(`setup.state.${state}`)}
     </span>
+  );
+}
+
+/**
+ * An inline confirmation for a request that throws work away (Run again,
+ * Abort): what it does, then a hold-to-confirm button and Cancel. It takes
+ * focus when it opens so a keyboard or D-pad lands on it, and Escape cancels.
+ */
+export function ConfirmPanel({
+  title,
+  body,
+  confirmLabel,
+  cancelLabel,
+  hint,
+  disabled,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  hint: string;
+  disabled?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    root.current?.focus();
+  }, []);
+  return (
+    <div
+      ref={root}
+      role="alertdialog"
+      aria-label={title}
+      tabIndex={-1}
+      data-testid="setup-confirm"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onCancel();
+      }}
+      className={`flex flex-col gap-[0.7em] rounded-xl border-2 border-warn/60 bg-card p-[1.1em] ${FOCUS_RING}`}
+    >
+      <p className="text-[1.15em] font-semibold text-foreground">{title}</p>
+      <p className="text-[1em] text-muted-foreground">{body}</p>
+      <div className="flex flex-wrap items-center gap-[0.8em]">
+        <HoldButton style="danger" label={confirmLabel} hint={hint} disabled={disabled} onConfirm={onConfirm} />
+        <WizardButton style="secondary" onClick={onCancel}>
+          {cancelLabel}
+        </WizardButton>
+      </div>
+    </div>
   );
 }

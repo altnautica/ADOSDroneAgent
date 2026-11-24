@@ -11,6 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import "@/shared/i18n";
+import { ApiError } from "@/shared/api-fetch";
 import type * as SetupClient from "@/shared/setup-wizard/client";
 import type { SetupStep } from "@/shared/setup-wizard/types";
 import { CHROME_ALERT_SKIN, type AlertActions } from "@/shared/hud/alert-centre";
@@ -22,11 +23,12 @@ const profileStep: SetupStep = {
   step: "ados_profile",
   title_key: "setup.ados_profile.title",
   body_key: "setup.ados_profile.body",
-  args: {},
+  args: { reboots: true },
   inputs: [],
   params: [
-    { name: "MAV_GCS_SYSID", value: 1 },
-    { name: "FS_GCS_ENABLE", value: 5 },
+    { name: "MAV_GCS_SYSID", value: 1, have: 255 },
+    { name: "FS_GCS_ENABLE", value: 5, have: 5 },
+    { name: "FS_EKF_THRESH", value: 0.8, have: 0.800000011920929 },
   ],
   image: null,
   state: "waiting_user",
@@ -37,12 +39,15 @@ const profileStep: SetupStep = {
   result: null,
 };
 
-const { rerunStep } = vi.hoisted(() => ({ rerunStep: vi.fn() }));
+const { rerunStep, abortWizard, fetchSetupStatus } = vi.hoisted(() => ({ rerunStep: vi.fn(), abortWizard: vi.fn(), fetchSetupStatus: vi.fn() }));
 vi.mock("@/shared/setup-wizard/client", async (orig) => ({
   ...(await orig<typeof SetupClient>()),
   rerunStep,
+  abortWizard,
+  fetchSetupStatus,
 }));
 rerunStep.mockImplementation(async () => profileStep);
+abortWizard.mockImplementation(async () => ({}));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -88,8 +93,13 @@ const actions = (over: Partial<AlertActions> = {}): AlertActions => ({
 const q = (el: HTMLElement, id: string) => el.querySelector(`[data-testid="${id}"]`);
 const qa = (el: HTMLElement, id: string) => el.querySelectorAll(`[data-testid="${id}"]`);
 
+/** Click, then drain the microtasks of the request chain the click starts
+ *  (mocked calls resolve at once; a refusal falls back to a status read). */
 async function click(el: Element | null) {
-  await act(async () => (el as HTMLElement).click());
+  await act(async () => {
+    (el as HTMLElement).click();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  });
 }
 
 describe("alert row", () => {
@@ -104,15 +114,99 @@ describe("alert row", () => {
     expect(qa(el, "alert-param-row")).toHaveLength(9);
   });
 
-  it("an apply_profile fix reads the values it writes, then offers the hold button", async () => {
+  it("titles a row with a table by its short words, keeping the full text for screen readers", async () => {
+    const long = alert({ text: "FC parameters differ: MAV_GCS_SYSID 255 (want 1)" });
+    const el = await render(createElement("ul", null, createElement(AlertRow, { alert: long, actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
+    expect(q(el, "alert-item-text")?.textContent).toBe("FC parameters differ");
+    expect(q(el, "alert-item-text")?.getAttribute("aria-hidden")).toBe("true");
+    expect(q(el, "alert-item-fulltext")?.textContent).toBe(long.text);
+    expect(q(el, "alert-item-fulltext")?.className).toContain("sr-only");
+  });
+
+  it("an apply_profile fix shows only the changes as current → new, folds the rest, warns of the restart, then offers the hold", async () => {
     const el = await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
     expect(q(el, "alert-fix-apply")?.textContent).toBe("Apply recommended values");
     await click(q(el, "alert-fix-apply"));
     expect(rerunStep).toHaveBeenCalled();
-    expect(q(el, "alert-apply-writes")?.textContent).toBe("MAV_GCS_SYSID1FS_GCS_ENABLE5");
+    expect([...qa(el, "alert-apply-change")].map((r) => r.textContent)).toEqual(["MAV_GCS_SYSID255→1"]);
+    expect(qa(el, "alert-apply-same")).toHaveLength(0);
+    expect(q(el, "alert-apply-same-toggle")?.textContent).toBe("2 already set");
+    await click(q(el, "alert-apply-same-toggle"));
+    expect(qa(el, "alert-apply-same")).toHaveLength(2);
+    expect(q(el, "alert-apply-reboots")?.textContent).toBe("The flight controller will restart");
     const hold = q(el, "alert-apply-hold")?.querySelector("button");
     expect(hold?.getAttribute("aria-label")).toBe("Apply recommended values. Hold to confirm");
     expect(el.textContent).toContain("A snapshot is saved first");
+  });
+
+  it("hides the row's own table while the review is open, so the review list is the only one, and restores it on Cancel", async () => {
+    const el = await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
+    expect(qa(el, "alert-param-row")).toHaveLength(6);
+    await click(q(el, "alert-fix-apply"));
+    expect(q(el, "alert-params")).toBeNull();
+    expect(qa(el, "alert-apply-change").length).toBeGreaterThan(0);
+    await click(q(el, "alert-apply-cancel"));
+    expect(qa(el, "alert-param-row")).toHaveLength(6);
+  });
+
+  it("Cancel, or the row going away mid-review, aborts the ground wizard's open step", async () => {
+    abortWizard.mockClear();
+    let el = await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
+    await click(q(el, "alert-fix-apply"));
+    await click(q(el, "alert-apply-cancel"));
+    expect(abortWizard).toHaveBeenCalledWith("ground");
+    expect(q(el, "alert-fix-apply")).not.toBeNull();
+    await act(async () => root.unmount());
+    host.remove();
+    abortWizard.mockClear();
+    await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
+    await act(async () => root.unmount());
+    expect(abortWizard).not.toHaveBeenCalled();
+    host.remove();
+    el = await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
+    await click(q(el, "alert-fix-apply"));
+    await act(async () => root.unmount());
+    expect(abortWizard).toHaveBeenCalledWith("ground");
+    await render(createElement("div"));
+  });
+
+  it("picks up the review an earlier Apply left open instead of failing on wizard_running", async () => {
+    rerunStep.mockImplementationOnce(async () => {
+      throw new ApiError("409", 409, { ok: false, err: "wizard_running" });
+    });
+    fetchSetupStatus.mockImplementationOnce(async () => ({
+      uid: "u",
+      firmware: null,
+      firmware_version: null,
+      vehicle_class: null,
+      running: { wizard: "ground", step: "ados_profile" },
+      wizards: [{ id: "ground", state: "done", available: true, blockers: [], completed_at: null, steps: [profileStep] }],
+      report: null,
+    }));
+    const el = await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
+    await click(q(el, "alert-fix-apply"));
+    expect(q(el, "alert-apply-error")).toBeNull();
+    expect(q(el, "alert-apply-review")).not.toBeNull();
+    expect(q(el, "alert-apply-hold")).not.toBeNull();
+  });
+
+  it("words a refusal through setup.err, never the raw code", async () => {
+    rerunStep.mockImplementationOnce(async () => {
+      throw new ApiError("409", 409, { ok: false, err: "wizard_running" });
+    });
+    fetchSetupStatus.mockImplementationOnce(async () => ({
+      uid: "u",
+      firmware: null,
+      firmware_version: null,
+      vehicle_class: null,
+      running: { wizard: "air", step: "hover" },
+      wizards: [],
+      report: null,
+    }));
+    const el = await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false })));
+    await click(q(el, "alert-fix-apply"));
+    expect(q(el, "alert-apply-error")?.textContent).toContain("Another wizard is running");
+    expect(el.textContent).not.toContain("wizard_running");
   });
 
   it("on a node with no setup engine a setup fix reads as a hint", async () => {

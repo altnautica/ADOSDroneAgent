@@ -297,7 +297,10 @@ function VehicleStatus() {
   // A ground station has no setup engine of its own: setup fixes read as a
   // hint. The dashboard has no parameter editor.
   const actions: AlertActions = {
-    openSetup: profile === "ground_station" ? null : () => go("/settings/aircraft-setup"),
+    openSetup:
+      profile === "ground_station"
+        ? null
+        : (step) => go(step ? `/settings/aircraft-setup?step=${encodeURIComponent(step)}` : "/settings/aircraft-setup"),
     openSettings: (section) => go(`/settings/${section}`),
     openParameters: null,
     extra: (a) =>

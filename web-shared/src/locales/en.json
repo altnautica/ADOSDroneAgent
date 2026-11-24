@@ -1800,9 +1800,13 @@
       "count_other": "{{count}} detections",
       "empty": "No detections. Point the camera at people or vehicles."
     },
+    "picker": {
+      "running": "In use: {{model}}"
+    },
     "badge": {
       "engineOff": "Vision engine is off",
       "noData": "No data from {{layer}} for 2 s",
+      "noDataVideoFailed": "No data from {{layer}}: the video has failed",
       "unscaled": "No range sensor to scale depth",
       "approx": "AR placement is approximate",
       "turnOff": "Turn off",
@@ -2009,7 +2013,22 @@
       "noSteps": "No step has stored a result yet.",
       "noSnapshots": "No snapshot yet."
     },
-    "streamDown": "Live updates lost: reconnecting. The running step may be out of date."
+    "streamDown": "Live updates lost: reconnecting. The running step may be out of date.",
+    "cancel": "Cancel",
+    "details": "Details",
+    "fcId": "Flight controller ID",
+    "confirmRunAgain": {
+      "title": "Start this setup over?",
+      "body": "Every step's stored result is cleared and the steps run again from the start. The flight controller keeps its parameters until a step writes new ones.",
+      "confirm": "Start over"
+    },
+    "confirmAbort": {
+      "title": "Abort setup?",
+      "body": "The step in progress stops and reads Cancelled. Finished steps keep their results, and any card runs its step again.",
+      "confirm": "Abort setup"
+    },
+    "runningElsewhere": "Setup is on “{{step}}”. Finish it or abort it before running another step.",
+    "openRunning": "Go to {{step}}"
   },
   "alerts": {
     "title": "Alerts",
@@ -2026,6 +2045,7 @@
       "name": "Parameter",
       "current": "Current",
       "wanted": "Wanted",
+      "new": "New",
       "notReported": "not reported",
       "showAll": "Show all {{count}}",
       "showFewer": "Show fewer"
@@ -2044,7 +2064,12 @@
     "groundHint": "Fix from the drone's Aircraft setup (Mission Control or the drone's cockpit)",
     "apply": {
       "reading": "Reading the recommended values…",
-      "writes": "Values to write",
+      "changes_one": "{{count}} value changes",
+      "changes_other": "{{count}} values change",
+      "nothingToChange": "Every value is already set",
+      "alreadySet_one": "{{count}} already set",
+      "alreadySet_other": "{{count}} already set",
+      "reboots": "The flight controller will restart",
       "snapshot": "A snapshot is saved first; you can restore it from Aircraft setup › Setup report.",
       "writing": "Writing values…",
       "done": "Recommended values written",

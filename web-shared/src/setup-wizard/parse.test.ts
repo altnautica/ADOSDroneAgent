@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { fcSetupUrls } from "./client";
-import { parseAction, parseFrame, parseStep, setupNeeded } from "./parse";
+import { needsFullStatus, parseAction, parseFrame, parseStep, setupNeeded } from "./parse";
 import { formatValue, paramNote } from "./strings";
 
 const accel = {
@@ -59,10 +59,21 @@ describe("setup step parser ", () => {
     expect(setupNeeded(null)).toBe(false);
   });
 
+  it("asks for a full status read while the FC's identity is missing", () => {
+    const base = { uid: "fc", firmware: "ardupilot", firmware_version: null, vehicle_class: null, running: null, wizards: [], report: null };
+    expect(needsFullStatus(null)).toBe(true);
+    // Read while the agent was restarting: no uid, or no firmware yet.
+    expect(needsFullStatus({ ...base, uid: null })).toBe(true);
+    expect(needsFullStatus({ ...base, firmware: null })).toBe(true);
+    expect(needsFullStatus(base)).toBe(false);
+  });
+
   it("lifts the profile's parameter rows out of args and words the backstop rows", () => {
-    const params = [{ name: "AVOID_ENABLE", value: 2 }, { name: "AVOID_MARGIN", value: 1.3 }, { name: "bad" }, { value: 1 }];
-    const s = parseStep({ ...accel, step: "ados_profile", args: { params } })!;
-    expect(s.params).toEqual([{ name: "AVOID_ENABLE", value: 2 }, { name: "AVOID_MARGIN", value: 1.3 }]);
+    const params = [{ name: "AVOID_ENABLE", value: 2, have: 0 }, { name: "AVOID_MARGIN", value: 1.3, have: "x" }, { name: "bad" }, { value: 1 }];
+    const s = parseStep({ ...accel, step: "ados_profile", args: { params, reboots: true } })!;
+    // `have` is the FC's current value; anything but a number reads as unknown.
+    expect(s.params).toEqual([{ name: "AVOID_ENABLE", value: 2, have: 0 }, { name: "AVOID_MARGIN", value: 1.3, have: null }]);
+    expect(s.args.reboots).toBe(true);
     expect(s.args.params).toBeUndefined();
     expect(parseStep(accel)!.params).toEqual([]);
     for (const name of ["AVOID_ENABLE", "AVOID_MARGIN", "AVOID_BEHAVE", "PRX1_TYPE", "OA_TYPE"]) expect(paramNote("ados_profile", name)).toBeTruthy();

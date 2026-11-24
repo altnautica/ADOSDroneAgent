@@ -430,8 +430,12 @@ export function pillAlerts(i: PillInputs): PillAlert[] {
       text: specText("alert.nav_source_degraded", { source: specText(navKey) }),
     });
   }
-  if (i.prearm && i.prearm.length > 0) {
-    const text = i.prearm[i.prearm.length - 1].replace(/^(PreArm|Arm):\s*/, "");
+  // Every distinct PreArm/Arm line the FC repeats: each names its own cause.
+  const prearmSeen = new Set<string>();
+  for (const line of i.prearm ?? []) {
+    const text = line.replace(/^(PreArm|Arm):\s*/, "");
+    if (text === "" || prearmSeen.has(text)) continue;
+    prearmSeen.add(text);
     out.push({ id: `fc:${text}`, source: "fc_prearm", severity: "warning", text });
   }
   // The FC repeats a warning while its condition lasts: one alert per text,
@@ -528,15 +532,34 @@ export interface PillSummary {
   alerts: readonly PillAlert[];
 }
 
-/** The pill's face for the active alerts and the acknowledged ids. */
+/** An alert's one-line title. With parameter rows behind it the table
+ *  carries the detail, so the title is the plain words before the first
+ *  colon ("FC parameters differ"); the full text stays the accessible name. */
+export function alertTitle(a: Pick<PillAlert, "text" | "params">): string {
+  if (!a.params || a.params.length === 0) return a.text;
+  const at = a.text.indexOf(": ");
+  return at > 0 ? a.text.slice(0, at) : a.text;
+}
+
+/** The pill's face for the active alerts and the acknowledged ids. One
+ *  alert reads its title; more read the count, the blocking ones first
+ *  ("2 blocking · 5 warnings") so a warning count never hides a blocker. */
 export function pillSummary(alerts: readonly PillAlert[], acked: ReadonlySet<string>): PillSummary {
   const count = alerts.length;
-  const severity: PillSeverity = count === 0 ? "ok" : alerts.some((a) => a.severity === "critical") ? "critical" : "warning";
+  const blocking = alerts.filter((a) => a.severity === "critical").length;
+  const warnings = count - blocking;
+  const severity: PillSeverity = count === 0 ? "ok" : blocking > 0 ? "critical" : "warning";
   const text =
     count === 0
       ? specText("cockpit.status.ok")
       : count === 1
-        ? alerts[0].text || specText("cockpit.status.one")
-        : specText("cockpit.status.many", { n: count });
+        ? alertTitle(alerts[0]) || specText("cockpit.status.one")
+        : blocking === 0
+          ? specText("cockpit.status.many", { n: count })
+          : warnings === 0
+            ? specText("cockpit.status.blocking", { n: blocking })
+            : warnings === 1
+              ? specText("cockpit.status.blocking_one_warning", { n: blocking })
+              : specText("cockpit.status.blocking_warnings", { n: blocking, m: warnings });
   return { severity, text, count, flashing: alerts.some((a) => !acked.has(a.id)), alerts };
 }

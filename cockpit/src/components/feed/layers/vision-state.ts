@@ -74,3 +74,46 @@ export function layerLiveState(seenAt: number, hasData: boolean, now: number, en
   if (engineUp === false) return "engine_off";
   return hasData && now - seenAt < HIDE_AFTER_MS ? "receiving" : "no_data";
 }
+
+/** An installed vision model (`GET /api/vision/models` `installed`). A file a
+ *  registry entry names carries its `task` and `registry_id`; a file no
+ *  registry entry names (the registry was never fetched) carries neither. */
+export interface InstalledModel {
+  id: string;
+  task?: string;
+  registry_id?: string;
+}
+
+export interface ModelsList {
+  installed: InstalledModel[];
+  active: string | null;
+}
+
+/** Model names of the engine's other roles: depth (MiDaS, DPT, ZoeDepth,
+ *  Depth Anything), re-identification (OSNet), segmentation and tracking. */
+const NOT_A_DETECTOR = /depth|midas|dpt|zoe|re_?id|osnet|seg|track/i;
+
+/** The models the detector picker offers: those whose task is detection, or,
+ *  for a file with no task, whose name is not a depth, re-id, segmentation
+ *  or tracking model's. */
+export function detectorCandidates(installed: readonly InstalledModel[]): InstalledModel[] {
+  return installed.filter((m) => (m.task === undefined ? !NOT_A_DETECTOR.test(m.id) : m.task.toLowerCase() === "detection"));
+}
+
+/** The detection model the running engine reports, or null. */
+export function runningDetector(engine: VisionEngineStatus | null): string | null {
+  return engine?.models.find((m) => m.kind.toLowerCase() === "detection")?.id ?? null;
+}
+
+/** The installed id of the detector in use: the one chosen (`active`), else
+ *  the engine's running detection model, matched by id or by the registry
+ *  id; null when neither names an installed detector. */
+export function selectedDetector(list: ModelsList, running: string | null): string | null {
+  const candidates = detectorCandidates(list.installed);
+  for (const want of [list.active, running]) {
+    if (!want) continue;
+    const hit = candidates.find((m) => m.id === want || m.registry_id === want);
+    if (hit) return hit.id;
+  }
+  return null;
+}

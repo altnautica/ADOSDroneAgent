@@ -9,10 +9,13 @@
 // - compact: icon only, the label as a tooltip on hover, focus or a 500 ms
 //   long press;
 // - hidden: no rail, only a slim tab at the screen's left edge that brings it
-//   back.
-// Every entry stays at least 48 px in every state. When the entries do not
-// fit (ten ground-station tabs on a 1280×800 kiosk) the rail scrolls, and a
-// fade with a chevron at the clipped end says there is more.
+//   back. In landscape the tab sits in a 48 px slot of its own beside the
+//   screen, so its hit area never covers the Feed's flight-action column.
+// Every entry stays at least 48 px in every state, and the labelled entries
+// are sized in bounded px (about 52 px tall) so a drone's eleven tabs fit a
+// 1280×800 kiosk without scrolling. When they still do not fit (glove mode)
+// the rail scrolls, and a chevron strip at the clipped end, in the flow
+// rather than over the entries, says there is more.
 
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsLeft } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -50,49 +53,46 @@ function tipFor(el: HTMLElement, label: string): Tip {
     : { label, left: r.right + 6, top: r.top + r.height / 2, above };
 }
 
-/** The fade and chevron at a clipped end of the rail. */
+/** The chevron strip at a clipped end of the rail: in the flow beside the
+ *  entries, so it never covers a label. */
 function MoreHint({ axis, end, label }: { axis: "x" | "y"; end: "before" | "after"; label: string }) {
   const Icon = axis === "y" ? (end === "after" ? ChevronDown : ChevronUp) : end === "after" ? ChevronRight : ChevronLeft;
   return (
     <div
       role="img"
       aria-label={label}
-      className={cn(
-        "pointer-events-none absolute flex items-center justify-center text-muted-foreground",
-        axis === "y" ? "inset-x-0 h-[1.6rem]" : "inset-y-0 w-[1.6rem]",
-        axis === "y" && end === "after" && "bottom-0 bg-gradient-to-t from-surface to-transparent",
-        axis === "y" && end === "before" && "top-0 bg-gradient-to-b from-surface to-transparent",
-        axis === "x" && end === "after" && "right-0 bg-gradient-to-l from-surface to-transparent",
-        axis === "x" && end === "before" && "left-0 bg-gradient-to-r from-surface to-transparent",
-      )}
+      className={cn("pointer-events-none flex shrink-0 items-center justify-center text-muted-foreground", axis === "y" ? "h-[18px] w-full" : "h-full w-[18px]")}
       data-testid={`rail-more-${end}`}
     >
-      <Icon className="h-[1rem] w-[1rem]" aria-hidden />
+      <Icon className="h-[14px] w-[14px]" aria-hidden />
     </div>
   );
 }
 
 /** The hidden rail's edge tab: a 20 × 64 px tab at the left edge, centred,
  *  filled in the primary colour with a chevron so it reads on dark video,
- *  inside a 48 px wide hit area. */
+ *  inside a 48 px wide hit area. In landscape that hit area has a 48 px
+ *  column of its own (the slot), beside the screen rather than over it. */
 export function RailEdgeTab({ onShow }: { onShow: () => void }) {
   const { t } = useTranslation();
   return (
-    <button
-      type="button"
-      onClick={onShow}
-      aria-label={t("rail.show")}
-      className="fixed left-0 top-1/2 z-[46] flex h-[64px] w-[48px] -translate-y-1/2 items-center"
-      data-testid="rail-edge-tab"
-    >
-      <span
-        className="flex h-[64px] w-[20px] items-center justify-center rounded-r-md border border-l-0 border-primary bg-primary text-primary-foreground shadow-md"
-        data-testid="rail-edge-tab-fill"
-        aria-hidden
+    <div className="relative shrink-0 landscape:w-[48px] landscape:self-stretch portrait:h-0 portrait:w-0" data-testid="rail-edge-slot">
+      <button
+        type="button"
+        onClick={onShow}
+        aria-label={t("rail.show")}
+        className="absolute left-0 top-1/2 z-[46] flex h-[64px] w-[48px] -translate-y-1/2 items-center portrait:fixed"
+        data-testid="rail-edge-tab"
       >
-        <ChevronRight className="h-[16px] w-[16px]" strokeWidth={3} />
-      </span>
-    </button>
+        <span
+          className="flex h-[64px] w-[20px] items-center justify-center rounded-r-md border border-l-0 border-primary bg-primary text-primary-foreground shadow-md"
+          data-testid="rail-edge-tab-fill"
+          aria-hidden
+        >
+          <ChevronRight className="h-[16px] w-[16px]" strokeWidth={3} />
+        </span>
+      </button>
+    </div>
   );
 }
 
@@ -161,11 +161,12 @@ export function MenuRail() {
       )}
       data-testid="menu-rail"
     >
-      <div className="relative flex min-h-0 min-w-0 flex-1">
+      <div className="relative flex min-h-0 min-w-0 flex-1 landscape:flex-col portrait:flex-row">
+        {more.axis && more.before ? <MoreHint axis={more.axis} end="before" label={t("rail.moreAbove")} /> : null}
         <nav
           ref={navRef}
           onScroll={measure}
-          className="flex min-h-0 min-w-0 flex-1 gap-[0.2rem] overflow-auto p-[0.25rem] [scrollbar-width:none] landscape:flex-col portrait:flex-row"
+          className="flex min-h-0 min-w-0 flex-1 gap-[2px] overflow-auto p-[4px] [scrollbar-width:none] landscape:flex-col portrait:flex-row"
           aria-label={t("cockpit.shell.menu")}
         >
           {tabs.map((tab, index) => {
@@ -215,19 +216,20 @@ export function MenuRail() {
                   if (compact) e.preventDefault();
                 }}
                 className={cn(
-                  "flex flex-[1_0_auto] flex-col items-center justify-center gap-[0.15rem] rounded-md px-[0.25rem] py-[0.25rem] transition-colors",
+                  "flex shrink-0 flex-col items-center justify-center gap-[2px] rounded-md px-[4px] py-[4px] transition-colors portrait:flex-[1_0_auto]",
                   "min-h-[calc(48px*var(--touch-scale))] min-w-[calc(48px*var(--touch-scale))]",
                   active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-surface-foreground",
                 )}
                 data-testid="rail-item"
               >
-                {Icon ? <Icon className="h-[1.3rem] w-[1.3rem] shrink-0" aria-hidden /> : null}
-                {compact ? null : <span className="max-w-full truncate text-[0.72rem] font-medium leading-none">{tab.title}</span>}
+                {Icon ? <Icon className="h-[clamp(20px,1rem,26px)] w-[clamp(20px,1rem,26px)] shrink-0" aria-hidden /> : null}
+                {compact ? null : (
+                  <span className="max-w-full truncate text-[length:clamp(11px,0.5rem,14px)] font-medium leading-[1.15]">{tab.title}</span>
+                )}
               </button>
             );
           })}
         </nav>
-        {more.axis && more.before ? <MoreHint axis={more.axis} end="before" label={t("rail.moreAbove")} /> : null}
         {more.axis && more.after ? <MoreHint axis={more.axis} end="after" label={t("rail.moreBelow")} /> : null}
       </div>
       <button

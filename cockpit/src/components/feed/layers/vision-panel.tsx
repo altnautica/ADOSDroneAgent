@@ -11,8 +11,9 @@
 // - the live detection list for the on-screen camera;
 // - the detector model picker. Selecting a model writes
 //   `PUT /api/vision/detector`, which restarts the engine, so it asks for a
-//   second tap within 3 s first, lists detection models only (never the depth
-//   model), and is disabled while armed.
+//   second tap within 3 s first, lists detection models only (never a depth,
+//   re-id or tracking model), marks the one in use, and is disabled while
+//   armed.
 // The header stays put; everything under it scrolls in the panel's column.
 
 import { ChevronDown, X } from "lucide-react";
@@ -35,26 +36,17 @@ import { useLayerChipsStore, visionEngineUp } from "@/stores/layer-chips-store";
 
 import { useVisionEngine } from "./use-vision-engine";
 import { VisionEngineCard } from "./vision-engine-card";
-import { layerLiveState, type LayerLiveState } from "./vision-state";
+import { detectorCandidates, layerLiveState, runningDetector, selectedDetector, type LayerLiveState, type ModelsList } from "./vision-state";
 
 /** The second tap that restarts the engine must come within this window. */
 const CONFIRM_WINDOW_MS = 3000;
 
 const SECTION_TITLE = "text-[0.85em] uppercase tracking-wider text-white/60";
 
-/** A detector candidate: a detection model (an older agent without `task`
- *  lists detection models only). */
-function isDetectionModel(m: { task?: string }): boolean {
-  return m.task === undefined || m.task.toLowerCase() === "detection";
-}
-
-interface ModelsList {
-  installed: { id: string; task?: string }[];
-  active: string | null;
-}
-
 function ModelPicker() {
+  const { t } = useTranslation();
   const [list, setList] = useState<ModelsList | null>(null);
+  const engine = useLayerChipsStore((s) => s.vision);
   const [armed, setArmed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -71,7 +63,9 @@ function ModelPicker() {
     return () => ac.abort();
   }, []);
   if (!list) return null;
-  const models = list.installed.filter(isDetectionModel);
+  const models = detectorCandidates(list.installed);
+  const running = runningDetector(engine);
+  const selected = selectedDetector(list, running);
   const choose = (id: string) => {
     if (flying) return;
     if (armed !== id) {
@@ -97,20 +91,38 @@ function ModelPicker() {
       <h3 className={SECTION_TITLE}>{specText("vision.detector_model")}</h3>
       {models.length === 0 ? <p className="text-[0.85em] text-white/60">{specText("vision.no_models")}</p> : null}
       {flying ? <p className="text-[0.85em] text-white/60">{specText("vision.disarm_to_switch")}</p> : null}
-      {models.map((m) => (
-        <button
-          key={m.id}
-          type="button"
-          disabled={busy || flying || m.id === list.active}
-          onClick={() => choose(m.id)}
-          className="flex min-h-[48px] w-full items-center justify-between rounded-md bg-white/5 px-[12px] text-left text-[1em] disabled:opacity-60"
-        >
-          <span className="truncate">{m.id}</span>
-          <span className="text-[0.85em] text-white/60">
-            {m.id === list.active ? specText("vision.active") : armed === m.id ? specText("vision.restart_hint") : ""}
-          </span>
-        </button>
-      ))}
+      {selected === null && running ? (
+        <p className="text-[0.85em] text-white/60" data-testid="vision-model-running">
+          {t("vision.picker.running", { model: running })}
+        </p>
+      ) : null}
+      {models.map((m) => {
+        const isSelected = m.id === selected;
+        return (
+          <button
+            key={m.id}
+            type="button"
+            aria-current={isSelected || undefined}
+            disabled={busy || flying || isSelected}
+            onClick={() => choose(m.id)}
+            className={cn(
+              "flex min-h-[48px] w-full items-center justify-between gap-[8px] rounded-md border px-[12px] text-left text-[1em]",
+              isSelected ? "border-white/70 bg-white/15" : "border-transparent bg-white/5 disabled:opacity-60",
+            )}
+            data-testid="vision-model"
+          >
+            <span className="flex min-w-0 items-center gap-[8px]">
+              <span aria-hidden className={cn("w-[1em] shrink-0", isSelected ? "" : "invisible")}>
+                ✓
+              </span>
+              <span className="truncate">{m.id}</span>
+            </span>
+            <span className="shrink-0 text-[0.85em] text-white/60">
+              {isSelected ? specText("vision.active") : armed === m.id ? specText("vision.restart_hint") : ""}
+            </span>
+          </button>
+        );
+      })}
       {err ? <p className="text-[0.85em] text-red-400">{err}</p> : null}
     </section>
   );

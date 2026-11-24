@@ -1,9 +1,16 @@
 // Screenshots of the aircraft setup wizard (the shared web-shared renderer)
 // on the dashboard and on the cockpit kiosk, with `/api/v1/fc-setup` mocked by
-// realistic step frames: the overview after an agent restart (interrupted
-// banner, component cards), then the frame picture picker (reached through
-// Continue setup, which resumes the interrupted run), and the accel, outputs
-// and autotune steps (reached through Continue setup on a running wizard).
+// realistic step frames and `/api/v1/nav/status` by a pilot whose readiness
+// fails `fc_profile` (MAV_GCS_SYSID 255, want 1): the overview after an agent
+// restart (interrupted banner, component cards), a setup filed complete with
+// the Safety card flagged by that readiness item, a step run on its own and
+// left waiting (Continue still opens it), the Run again confirm, then the
+// frame picture picker (reached through Continue setup, which resumes the
+// interrupted run), and the accel, outputs and autotune steps (reached
+// through Continue setup on a running wizard). Every guided kiosk shot also
+// checks that the side stepper shows at 1920×1080 and the "Step k of n" bar
+// at 1280×800, and that every input and every picture tile is on screen with
+// nothing over its centre, without scrolling.
 //
 //   NODE_PATH=<dir containing playwright-core> CHROME=<chromium path> \
 //     DASH=http://127.0.0.1:4274/ COCKPIT=http://127.0.0.1:4273/cockpit/ \
@@ -39,8 +46,16 @@ const FRAME_INPUTS = {
   cells: { kind: "number", value: 4, min: 1, max: 14, step: 1, unit: "S", label_key: "setup.input.cells" },
 };
 
+const PROFILE_PARAMS = [
+  { name: "FS_GCS_ENABLE", value: 1, have: 1 }, { name: "FS_GCS_TIMEOUT", value: 5, have: 5 }, { name: "MAV_GCS_SYSID", value: 1, have: 255 },
+  { name: "GUID_TIMEOUT", value: 3, have: 3 }, { name: "AVOID_ENABLE", value: 2, have: 2 }, { name: "AVOID_MARGIN", value: 1.3, have: 1.3 },
+  { name: "PRX1_TYPE", value: 2, have: 0 }, { name: "OA_TYPE", value: 1, have: 1 }, { name: "BATT_FS_LOW_ACT", value: 2, have: 2 },
+];
+
 /** The ground and air wizards with `focus.step` in `focus.state` and the
- *  wizard of `focus` in `focus.wizardState` (default running). */
+ *  wizard of `focus` in `focus.wizardState` (default running). `filed`
+ *  leaves every ground step without a record (pending), as a setup filed
+ *  complete by an older agent reads. */
 function wizards(focus) {
   const steps = (wizard, ids) =>
     ids.map((id) => {
@@ -48,12 +63,14 @@ function wizards(focus) {
       const at = ids.indexOf(id);
       const cur = ids.indexOf(focus.step);
       if (id === focus.step) return step(wizard, id, focus.state, focus.over);
+      if (focus.filed) return step(wizard, id, "pending");
       return step(wizard, id, at < cur ? "done" : "pending", at < cur ? { result: RESULTS[id] ?? null } : {});
     });
   const state = (wizard) => (focus.wizard === wizard ? (focus.wizardState ?? "running") : wizard === "ground" ? "done" : "not_started");
+  const runElsewhere = focus.running && focus.running.wizard !== "air";
   return [
-    { id: "ground", state: state("ground"), available: true, blockers: [], completed_at: focus.wizard === "ground" ? null : "2026-11-07T08:12:00Z", steps: steps("ground", GROUND) },
-    { id: "air", state: state("air"), available: focus.wizard === "air", blockers: [], completed_at: null, steps: steps("air", AIR) },
+    { id: "ground", state: state("ground"), available: !focus.running, blockers: focus.running ? ["setup.blocker.wizard_running"] : [], completed_at: focus.wizard === "ground" && state("ground") !== "done" ? null : "2026-11-07T08:12:00Z", steps: steps("ground", GROUND) },
+    { id: "air", state: state("air"), available: focus.wizard === "air" && !runElsewhere, blockers: runElsewhere ? ["setup.blocker.wizard_running"] : [], completed_at: null, steps: steps("air", AIR) },
   ];
 }
 
@@ -64,18 +81,38 @@ const RESULTS = {
 };
 
 function status(focus) {
-  const running = (focus.wizardState ?? "running") === "running" ? { wizard: focus.wizard, step: focus.step } : null;
+  const running = focus.running ?? ((focus.wizardState ?? "running") === "running" ? { wizard: focus.wizard, step: focus.step } : null);
   return {
     v: 1,
     uid: "3a0021000f51373037363437",
-    firmware: "ArduCopter",
-    firmware_version: "4.5.7",
+    firmware: "ardupilot",
+    firmware_version: "4.7.3",
     vehicle_class: "multirotor",
     running,
     wizards: wizards(focus),
-    report: null,
+    report: { date: "2026-11-24T13:09:07Z", firmware: "ardupilot", firmware_version: "4.7.3", vehicle_class: "multirotor", steps: {}, snapshots: [{ file: "2026-11-24T13-09-07Z.param", ts: "2026-11-24T13-09-07Z" }] },
   };
 }
+
+/** The pilot's nav status: idle on the ground, `fc_profile` failing. */
+const NAV_STATUS = {
+  pilot: {
+    age_ms: 0,
+    data: {
+      owner: "idle",
+      owner_label: "NOT READY · FC parameters differ: MAV_GCS_SYSID 255 (want 1)",
+      armed: false,
+      landed: true,
+      readiness: [
+        { id: "fc_link", ok: true, severity: "block", msg: "Flight controller connected" },
+        {
+          id: "fc_profile", ok: false, severity: "block", msg: "FC parameters differ: MAV_GCS_SYSID 255 (want 1)",
+          params: [{ name: "MAV_GCS_SYSID", have: 255, want: "1" }], fix: { kind: "apply_profile" },
+        },
+      ],
+    },
+  },
+};
 
 const FRAME = {
   wizard: "ground",
@@ -88,10 +125,22 @@ const FRAME = {
   },
 };
 
+const PROFILE_WAITING = {
+  args: { params: PROFILE_PARAMS, reboots: true },
+  actions: [{ id: "apply", label_key: "setup.action.apply", style: "primary", confirm: "hold" }],
+};
+
 // `open`: how the shot reaches its screen. "overview" stays on the cards;
-// "continue" presses Continue setup (a resume for an interrupted wizard).
+// "continue" presses Continue setup (a resume for an interrupted wizard);
+// "run_again" presses Run again and shots its confirm.
 const CASES = {
   overview: { ...FRAME, wizardState: "interrupted", open: "overview" },
+  flagged: { wizard: "ground", step: "ados_profile", state: "pending", wizardState: "done", filed: true, flagged: true, open: "overview" },
+  confirm: { wizard: "ground", step: "ados_profile", state: "done", wizardState: "done", open: "run_again" },
+  single: {
+    wizard: "ground", step: "ados_profile", state: "waiting_user", wizardState: "done",
+    running: { wizard: "ground", step: "ados_profile" }, open: "continue", over: PROFILE_WAITING,
+  },
   frame: { ...FRAME, wizardState: "interrupted", open: "continue" },
   accel: {
     wizard: "ground",
@@ -141,22 +190,7 @@ const CASES = {
       actions: [{ id: "apply", label_key: "setup.action.apply", style: "primary", confirm: "none" }],
     },
   },
-  ados_profile: {
-    wizard: "ground",
-    step: "ados_profile",
-    state: "waiting_user",
-    open: "continue",
-    over: {
-      args: {
-        params: [
-          { name: "FS_GCS_ENABLE", value: 1 }, { name: "FS_GCS_TIMEOUT", value: 5 }, { name: "MAV_GCS_SYSID", value: 1 },
-          { name: "GUID_TIMEOUT", value: 3 }, { name: "AVOID_ENABLE", value: 2 }, { name: "AVOID_MARGIN", value: 1.3 },
-          { name: "PRX1_TYPE", value: 2 }, { name: "OA_TYPE", value: 1 }, { name: "BATT_FS_LOW_ACT", value: 2 },
-        ],
-      },
-      actions: [{ id: "apply", label_key: "setup.action.apply", style: "primary", confirm: "none" }],
-    },
-  },
+  ados_profile: { wizard: "ground", step: "ados_profile", state: "waiting_user", open: "continue", over: PROFILE_WAITING },
   autotune: {
     wizard: "air",
     step: "autotune",
@@ -183,6 +217,7 @@ async function mock(page, focus, profile) {
       const wizard = wizards({ ...focus, wizardState: "running" }).find((w) => w.id === resume[1]);
       return json({ ok: true, wizard });
     }
+    if (p === "/api/v1/nav/status") return json(NAV_STATUS);
     if (p === "/api/pairing/info") return json({ profile, name: "bench-drone", paired: true });
     if (p === "/api/config") return json({});
     return json({ detail: "not mocked" }, 404);
@@ -199,6 +234,14 @@ async function mock(page, focus, profile) {
 /** From the overview, reach the case's screen. */
 async function open(page, focus) {
   await page.getByTestId("setup-overview").waitFor({ timeout: 10_000 });
+  // The pilot's readiness arrives with the nav status (on the cockpit through
+  // its 2 Hz fallback poll once the unmocked stream has been down 5 s).
+  if (focus.flagged) await page.locator('[data-card="safety"][data-state="attention"]').waitFor({ timeout: 30_000 });
+  if (focus.open === "run_again") {
+    await page.getByRole("button", { name: "Run again" }).first().click();
+    await page.getByTestId("setup-confirm").waitFor({ timeout: 10_000 });
+    return;
+  }
   if (focus.open !== "continue") return;
   await page.getByRole("button", { name: "Continue setup" }).first().click();
   await page.getByTestId("setup-guided").waitFor({ timeout: 10_000 });
@@ -227,6 +270,60 @@ async function primaryInView(page, name) {
   }
 }
 
+/** A guided step shows the side stepper on the wide kiosk and the "Step k of
+ *  n" bar on the 1280×800 one. */
+async function stepperFits(page, name) {
+  if ((await page.getByTestId("setup-guided").count()) === 0) return;
+  const vp = page.viewportSize();
+  const stepper = (await page.getByTestId("setup-stepper").count()) > 0;
+  const want = vp.width >= 1920;
+  if (stepper !== want) throw new Error(`${name} at ${vp.width}x${vp.height}: stepper ${stepper ? "shown" : "hidden"}`);
+}
+
+/** The picture pickers: every tile at least 110×110 px, one row per picker,
+ *  and every tile fully on screen and uncovered without scrolling. */
+async function tilesFit(page, name) {
+  const tiles = page.locator('[data-testid="setup-pickers"] button[aria-pressed]');
+  if ((await tiles.count()) === 0) return;
+  const boxes = await tiles.evaluateAll((els) =>
+    els.map((e) => {
+      const r = e.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { w: r.width, h: r.height, bottom: r.bottom, right: r.right, uncovered: hit !== null && e.contains(hit) };
+    }),
+  );
+  const vp = page.viewportSize();
+  const small = boxes.filter((b) => b.w < 110 || b.h < 110);
+  if (small.length) throw new Error(`${name}: ${small.length} picture tiles under 110×110 (${JSON.stringify(small[0])})`);
+  const off = boxes.filter((b) => b.bottom > vp.height || b.right > vp.width || !b.uncovered);
+  if (off.length) throw new Error(`${name} at ${vp.width}x${vp.height}: ${off.length} picture tiles off screen or covered`);
+  const rows = await page.locator('[data-testid="setup-pickers"] fieldset').evaluateAll((sets) =>
+    sets.map((s) => new Set([...s.querySelectorAll("button[aria-pressed]")].map((b) => Math.round(b.getBoundingClientRect().top))).size),
+  );
+  if (rows.some((n) => n !== 1)) throw new Error(`${name}: picture pickers wrap (${rows.join(", ")} rows)`);
+}
+
+/** Every input of a guided step is on screen with nothing over its centre
+ *  (no action bar, banner or other control), without scrolling. */
+async function inputsUncovered(page, name) {
+  if ((await page.getByTestId("setup-guided").count()) === 0) return;
+  const covered = await page.locator('[data-testid="setup-guided"] input').evaluateAll((els) =>
+    els
+      .map((e) => {
+        const r = e.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const label = e.closest("label")?.textContent?.trim().slice(0, 40) ?? e.outerHTML.slice(0, 60);
+        const over = hit ? hit.tagName.toLowerCase() + (hit.getAttribute("data-testid") ? `[${hit.getAttribute("data-testid")}]` : "") : "nothing: off screen";
+        return hit === e ? null : `${label} (under ${over})`;
+      })
+      .filter((s) => s !== null),
+  );
+  if (covered.length) {
+    const vp = page.viewportSize();
+    throw new Error(`${name} at ${vp.width}x${vp.height}: inputs covered or off screen: ${covered.join("; ")}`);
+  }
+}
+
 const KIOSK_SIZES = [
   { width: 1280, height: 800 },
   { width: 1920, height: 1080 },
@@ -235,7 +332,10 @@ const KIOSK_SIZES = [
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME });
   const misses = [];
-  const check = (page, name) => primaryInView(page, name).catch((e) => misses.push(e.message));
+  const check = (page, name) =>
+    Promise.allSettled([primaryInView(page, name), stepperFits(page, name), tilesFit(page, name), inputsUncovered(page, name)]).then((rs) =>
+      rs.forEach((r) => r.status === "rejected" && misses.push(r.reason.message)),
+    );
   try {
     for (const [name, focus] of Object.entries(CASES)) {
       const d = await browser.newPage({ viewport: { width: 1280, height: 800 } });

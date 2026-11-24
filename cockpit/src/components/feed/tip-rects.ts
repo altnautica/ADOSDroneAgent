@@ -21,6 +21,10 @@ export const TIP_SELECTORS: Readonly<Record<string, string>> = {
 
 const NEVER_COVER: readonly string[] = tipsJson.rules.never_cover_zones;
 
+/** The Vision view's side panel: its engine card and switches are the
+ *  controls of that view, so a tip never covers it. */
+export const VISION_PANEL_SELECTOR = "[data-testid=vision-panel]";
+
 /** The element's rect when it is laid out and on screen, else null. */
 export function visibleRect(selector: string): TipRect | null {
   const el = document.querySelector(selector);
@@ -37,11 +41,15 @@ export function elementRect(el: Element): TipRect | null {
 }
 
 /** The rects a tip must stay clear of: every `never_cover_zones` entry (the
- *  top bar among them, so a tip never hides the bar's own readouts) and the
- *  flow overlays (launch step and Abort, countdowns, sticks banner).
- *  `rectOf` measures an element; exported for tests. */
+ *  top bar among them, so a tip never hides the bar's own readouts), the
+ *  flow overlays (launch step and Abort, countdowns, sticks banner) and the
+ *  Vision view's side panel. `rectOf` measures an element; exported for tests. */
 export function tipAvoidRects(rectOf: (el: Element) => TipRect | null = elementRect): TipRect[] {
-  const selectors = [...NEVER_COVER.flatMap((z) => (TIP_SELECTORS[z] ? [TIP_SELECTORS[z]] : [])), FLIGHT_OVERLAYS_SELECTOR];
+  const selectors = [
+    ...NEVER_COVER.flatMap((z) => (TIP_SELECTORS[z] ? [TIP_SELECTORS[z]] : [])),
+    FLIGHT_OVERLAYS_SELECTOR,
+    VISION_PANEL_SELECTOR,
+  ];
   return selectors.flatMap((sel) => {
     const el = document.querySelector(sel);
     const r = el ? rectOf(el) : null;

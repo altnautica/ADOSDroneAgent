@@ -64,7 +64,7 @@ function parseParams(raw: unknown): ParamRow[] {
   const out: ParamRow[] = [];
   for (const r of raw) {
     const name = isObj(r) ? str(r.name) : null;
-    if (name && isObj(r) && isScalar(r.value)) out.push({ name, value: r.value });
+    if (name && isObj(r) && isScalar(r.value)) out.push({ name, value: r.value, have: num(r.have) });
   }
   return out;
 }
@@ -289,6 +289,14 @@ export function applyFrame(status: SetupStatus, frame: SetupFrame): SetupStatus 
     case "keepalive":
       return status;
   }
+}
+
+/** Whether a stream frame should trigger a full status read: frames carry
+ *  steps and wizards only, never the FC's identity, so a status read while
+ *  the agent was still restarting (no uid or firmware yet) stays stale until
+ *  read again. */
+export function needsFullStatus(status: SetupStatus | null): boolean {
+  return !status || !status.uid || !status.firmware;
 }
 
 /** The step a wizard is on: the active one, else the first failed, else the

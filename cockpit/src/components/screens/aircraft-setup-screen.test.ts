@@ -7,7 +7,7 @@ import "@/shared/i18n";
 import { setupText } from "@/shared/setup-wizard/strings";
 import type { SetupStatus, SetupStep, StepState, Wizard } from "@/shared/setup-wizard/types";
 import type { FcSetupController } from "@/shared/setup-wizard/use-fc-setup";
-import { WizardView } from "@/shared/setup-wizard/wizard-view";
+import { WizardView, type WizardViewProps } from "@/shared/setup-wizard/wizard-view";
 
 function controller(over: Partial<FcSetupController>): FcSetupController {
   return {
@@ -61,6 +61,8 @@ function status(ground: Partial<Wizard>): SetupStatus {
 }
 
 const render = (setup: FcSetupController) => renderToStaticMarkup(createElement(WizardView, { setup }));
+const renderWith = (setup: FcSetupController, props: Partial<WizardViewProps>) =>
+  renderToStaticMarkup(createElement(WizardView, { setup, ...props }));
 
 describe("Aircraft setup screen", () => {
   it("shows the error, not the loading line, once a read failed with 503", () => {
@@ -107,6 +109,73 @@ describe("Aircraft setup screen", () => {
     );
     expect(html).toContain("The aircraft is armed");
     expect(html).not.toContain("Start setup");
+  });
+
+  it("offers Continue for a step run on its own, even with the wizard filed done and blockers", () => {
+    // An abandoned "Apply recommended values" left ados_profile waiting.
+    const s = status({
+      state: "done",
+      available: false,
+      blockers: ["setup.blocker.wizard_running"],
+      steps: [step("frame", "done"), step("ados_profile", "waiting_user")],
+    });
+    const html = render(controller({ status: { ...s, running: { wizard: "ground", step: "ados_profile" } } }));
+    expect(html).toContain("Continue setup");
+    expect(html).not.toContain("Setup cannot start yet");
+    expect(html).toContain('data-card="safety" data-state="in_progress"');
+    // The run can be aborted from the overview.
+    expect(html).toContain("Abort");
+  });
+
+  it("opens an asked-for step to read while the other wizard runs, saying why it cannot run", () => {
+    const s = status({ available: false, blockers: ["setup.blocker.wizard_running"], steps: [step("frame", "pending")] });
+    const air: Wizard = {
+      id: "air",
+      state: "running",
+      available: true,
+      blockers: [],
+      completed_at: null,
+      steps: [{ ...step("autotune", "running"), wizard: "air" }],
+    };
+    // An alert asked for the ground wizard's frame step while the air run goes on:
+    // the step opens to read, with the reason and the way to the run.
+    const html = renderWith(
+      controller({ status: { ...s, wizards: [s.wizards[0], air], running: { wizard: "air", step: "autotune" } } }),
+      { openRequest: { step: "frame", seq: 1 } },
+    );
+    expect(html).toContain('data-testid="setup-running-elsewhere"');
+    expect(html).toContain("Finish it or abort it before running another step.");
+    expect(html).toContain(`Go to ${setupText("setup.autotune.title")}`);
+  });
+
+  it("marks the Safety card from the pilot's readiness and counts a filed setup as done", () => {
+    const html = renderWith(
+      controller({ status: status({ state: "done", steps: [step("frame", "pending"), step("ados_profile", "pending")] }) }),
+      {
+        readiness: [
+          {
+            id: "fc_profile",
+            ok: false,
+            severity: "block",
+            msg: "FC parameters differ",
+            params: [{ name: "MAV_GCS_SYSID", have: 255, want: "1" }],
+            fix: { kind: "apply_profile" },
+          },
+        ],
+      },
+    );
+    expect(html).toContain('data-card="safety" data-state="attention"');
+    expect(html).toContain("MAV_GCS_SYSID 255 → 1");
+    expect(html).toContain('data-card="frame" data-state="done"');
+    expect(html).toContain("2 of 2 done");
+  });
+
+  it("names the firmware properly and keeps the FC uid behind Details", () => {
+    const s = { ...status({ steps: [step("frame", "pending")] }), firmware: "ardupilot", uid: "3a0021000f51373037363437" };
+    const html = render(controller({ status: s }));
+    expect(html).toContain("ArduPilot 4.7.3");
+    expect(html).not.toContain("capitalize");
+    expect(html).toMatch(/<details[^>]*>.*Details.*3a0021000f51373037363437/s);
   });
 });
 

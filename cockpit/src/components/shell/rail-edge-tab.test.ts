@@ -21,6 +21,14 @@ describe("the hidden rail's edge tab", () => {
     expect(button?.getAttribute("aria-label")).toBeTruthy();
   });
 
+  it("holds its hit area in a 48 px landscape column of its own, so it covers nothing on the screen beside it", () => {
+    const slot = doc.querySelector('[data-testid="rail-edge-slot"]');
+    expect(slot?.className.split(" ")).toEqual(expect.arrayContaining(["landscape:w-[48px]", "shrink-0"]));
+    expect(slot?.contains(button)).toBe(true);
+    expect(button?.className.split(" ")).toContain("absolute");
+    expect(button?.className.split(" ")).not.toContain("fixed");
+  });
+
   it("is filled in a contrasting colour and carries a chevron", () => {
     expect(fill?.className.split(" ")).toEqual(expect.arrayContaining(["bg-primary", "text-primary-foreground"]));
     expect(fill?.querySelector("svg")).not.toBeNull();

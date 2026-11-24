@@ -6,33 +6,25 @@
 // actions, the fix first and Hide (a warning) or Collapse (a critical) second.
 // The surface supplies where a fix goes and its look (`alert-centre.ts`).
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import tokens from "../cockpit-spec/tokens.json";
-import { rerunStep, runStepAction, setupErrorKey } from "../setup-wizard/client";
+import { abortWizard, fetchSetupStatus, rerunStep, runStepAction, setupErrorKey } from "../setup-wizard/client";
 import { HoldButton } from "../setup-wizard/controls";
-import { formatValue, setupText } from "../setup-wizard/strings";
-import type { SetupStep } from "../setup-wizard/types";
+import { formatValue, setupErrorText, setupText } from "../setup-wizard/strings";
+import type { ParamRow, SetupStep } from "../setup-wizard/types";
 import { useFcSetup } from "../setup-wizard/use-fc-setup";
 
-import type { AlertActions, AlertSkin } from "./alert-centre";
+import { ALERT_TEXT, splitProfileRows, type AlertActions, type AlertSkin } from "./alert-centre";
 import { BATTERY_FAILSAFE_FIX_STEP } from "./battery-failsafe-fix";
-import { groupAlerts, unsnoozedAlerts, type GroupedAlert, type ParamDiff, type PillAlert } from "./status-pill";
+import { alertTitle, groupAlerts, unsnoozedAlerts, type GroupedAlert, type ParamDiff, type PillAlert } from "./status-pill";
 import { specText } from "./spec-text";
 
 type Severity = PillAlert["severity"];
 
-// Type scale, in rem with an explicit leading at every size: the panel's own
-// `chrome-bar-text` line-height is a fixed 15 px, which overlaps wrapped
-// lines at any larger size. The cockpit's root rem tracks the viewport
-// (3.2vmin: 25.6 px at 1280×800, 34.6 px at 1920×1080) while the sheet stays
-// 440 px wide, and the dashboard's root is 16 px, so each size is clamped:
-// body 14-18 px, secondary and tables 12.5-16 px, the sheet title 15-20 px.
-const BODY = "text-[length:clamp(14px,0.6rem,18px)] leading-[1.3]";
-const SMALL = "text-[length:clamp(12.5px,0.52rem,16px)] leading-[1.3]";
-const TITLE = "text-[length:clamp(15px,0.68rem,20px)] leading-[1.3]";
+const { body: BODY, small: SMALL, title: TITLE } = ALERT_TEXT;
 
 /** The parameter rows of an alert: name (monospace), current, wanted. Past
  *  six rows the rest wait behind "Show all N". */
@@ -83,9 +75,10 @@ type ApplyPhase =
   | { phase: "done" }
   | { phase: "error"; text: string };
 
+/** A refused request in words: the engine's code through `setup.err.*`. */
 function errorText(err: unknown): string {
   const key = setupErrorKey(err);
-  return key ? setupText(key) : err instanceof Error ? err.message : String(err);
+  return key ? setupErrorText(key) : err instanceof Error ? err.message : String(err);
 }
 
 /** The step's own failure text, else the generic one. */
@@ -93,20 +86,129 @@ function stepFailure(step: SetupStep, fallback: string): string {
   return step.blockers.length > 0 ? setupText(step.blockers[0]) : fallback;
 }
 
+/** What a write of the ADOS profile changes: each changed row as current →
+ *  new, the rows already set folded behind "N already set", and the restart
+ *  line when applying reboots the FC (`args.reboots`). */
+export function ProfileReview({ step, skin }: { step: SetupStep; skin: AlertSkin }) {
+  const { t } = useTranslation();
+  const [showSame, setShowSame] = useState(false);
+  const { changes, same } = splitProfileRows(step.params);
+  const row = (p: ParamRow, testid: string) => (
+    <tr key={p.name} data-testid={testid} className={`border-t ${skin.border}`}>
+      <td className="py-[3px] pr-[8px] font-mono">{p.name}</td>
+      <td className={`py-[3px] pr-[4px] text-right ${p.have === null ? skin.dim : ""}`}>
+        {p.have === null ? t("alerts.param.notReported") : formatValue(p.have)}
+      </td>
+      <td aria-hidden className={`px-[4px] ${skin.dim}`}>
+        →
+      </td>
+      <td className="py-[3px] font-semibold">{formatValue(p.value)}</td>
+    </tr>
+  );
+  return (
+    <div className="flex flex-col gap-[6px]" data-testid="alert-apply-writes">
+      <div className="chrome-label">{changes.length > 0 ? t("alerts.apply.changes", { count: changes.length }) : t("alerts.apply.nothingToChange")}</div>
+      {changes.length > 0 ? (
+        <table className={`w-full border-collapse ${SMALL} tabular-nums`}>
+          <thead className="sr-only">
+            <tr>
+              <th>{t("alerts.param.name")}</th>
+              <th>{t("alerts.param.current")}</th>
+              <th aria-hidden />
+              <th>{t("alerts.param.new")}</th>
+            </tr>
+          </thead>
+          <tbody>{changes.map((p) => row(p, "alert-apply-change"))}</tbody>
+        </table>
+      ) : null}
+      {same.length > 0 ? (
+        <div>
+          <button
+            type="button"
+            aria-expanded={showSame}
+            onClick={() => setShowSame(!showSame)}
+            className={`${skin.control} flex items-center gap-[6px] px-[4px] ${SMALL} ${skin.dim}`}
+            data-testid="alert-apply-same-toggle"
+          >
+            {showSame ? <ChevronDown className="h-[1em] w-[1em]" aria-hidden /> : <ChevronRight className="h-[1em] w-[1em]" aria-hidden />}
+            {t("alerts.apply.alreadySet", { count: same.length })}
+          </button>
+          {showSame ? (
+            <table className={`w-full border-collapse ${SMALL} tabular-nums ${skin.dim}`}>
+              <tbody>{same.map((p) => row(p, "alert-apply-same"))}</tbody>
+            </table>
+          ) : null}
+        </div>
+      ) : null}
+      {step.args.reboots === true ? (
+        <p role="note" className={`${SMALL} font-semibold`} style={{ color: skin.text("warning") }} data-testid="alert-apply-reboots">
+          {t("alerts.apply.reboots")}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** The ADOS profile step this fix runs, when the engine already has it
+ *  waiting for the operator (an earlier review left open, here or on another
+ *  client); null otherwise. */
+async function openReview(wizard: string, stepId: string): Promise<SetupStep | null> {
+  const status = await fetchSetupStatus();
+  if (status.running?.wizard !== wizard || status.running.step !== stepId) return null;
+  const step = status.wizards.find((w) => w.id === wizard)?.steps.find((x) => x.step === stepId);
+  return step && step.state === "waiting_user" ? step : null;
+}
+
 /** "Apply recommended values": run the ground wizard's ADOS profile step
- *  (it writes nothing yet and lists what it would write), show those
- *  values, and write them on a hold. The engine refuses while armed and
- *  snapshots every parameter before the first write. */
-export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetup: ((step?: string) => void) | null }) {
+ *  (it writes nothing yet and lists what it would write), show what changes,
+ *  and write on a hold. The engine refuses while armed and snapshots every
+ *  parameter before the first write. While the review shows, the engine
+ *  holds that step open: Cancel, or the row going away, aborts it so Aircraft
+ *  setup is not left blocked by a step nothing shows. `onReview` reports
+ *  while the review (or its write) is up, so the row can hide its own table
+ *  and leave the review list the only one. */
+export function ApplyProfileFix({
+  skin,
+  openSetup,
+  onReview,
+}: {
+  skin: AlertSkin;
+  openSetup: ((step?: string) => void) | null;
+  onReview?: (open: boolean) => void;
+}) {
   const { t } = useTranslation();
   const [s, setS] = useState<ApplyPhase>({ phase: "idle" });
   const { wizard, step: stepId } = BATTERY_FAILSAFE_FIX_STEP;
+  const phase = useRef(s.phase);
+  useEffect(() => {
+    phase.current = s.phase;
+    onReview?.(s.phase === "review" || s.phase === "writing");
+  }, [s.phase, onReview]);
+  useEffect(
+    () => () => {
+      if (phase.current === "review") abortWizard(wizard).catch(() => undefined);
+    },
+    [wizard],
+  );
+  const reviewOrFail = (step: SetupStep) =>
+    setS(step.state === "failed" ? { phase: "error", text: stepFailure(step, t("alerts.apply.failed")) } : { phase: "review", step });
   const read = () => {
     setS({ phase: "reading" });
-    rerunStep(wizard, stepId).then(
-      (step) => setS(step.state === "failed" ? { phase: "error", text: stepFailure(step, t("alerts.apply.failed")) } : { phase: "review", step }),
-      (err: unknown) => setS({ phase: "error", text: errorText(err) }),
-    );
+    rerunStep(wizard, stepId).then(reviewOrFail, (err: unknown) => {
+      // The step is already waiting from an earlier review: pick it up.
+      if (setupErrorKey(err) !== "wizard_running") {
+        setS({ phase: "error", text: errorText(err) });
+        return;
+      }
+      openReview(wizard, stepId).then(
+        (step) => (step ? reviewOrFail(step) : setS({ phase: "error", text: errorText(err) })),
+        () => setS({ phase: "error", text: errorText(err) }),
+      );
+    });
+  };
+  const cancel = () => {
+    setS({ phase: "idle" });
+    abortWizard(wizard).catch(() => undefined);
   };
   const write = (step: SetupStep, actionId: string) => {
     setS({ phase: "writing", step });
@@ -141,15 +243,7 @@ export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetu
       const action = s.step.actions.find((a) => a.style === "primary") ?? s.step.actions[0];
       return (
         <div className="flex w-full flex-col gap-[6px]" data-testid="alert-apply-review">
-          <div className="chrome-label">{t("alerts.apply.writes")}</div>
-          <ul className={`flex flex-col ${SMALL} tabular-nums`} data-testid="alert-apply-writes">
-            {s.step.params.map((p) => (
-              <li key={p.name} className={`flex justify-between gap-[8px] border-t py-[3px] ${skin.border}`}>
-                <span className="font-mono">{p.name}</span>
-                <span className="font-semibold">{formatValue(p.value)}</span>
-              </li>
-            ))}
-          </ul>
+          <ProfileReview step={s.step} skin={skin} />
           <p className={`${SMALL} ${skin.dim}`}>{t("alerts.apply.snapshot")}</p>
           <div className="flex flex-wrap items-center gap-[8px]">
             {action ? (
@@ -158,7 +252,7 @@ export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetu
                 <HoldButton style="primary" label={t("alerts.action.apply")} hint={setupText("setup.confirm.hold")} onConfirm={() => write(s.step, action.id)} />
               </span>
             ) : null}
-            <button type="button" onClick={() => setS({ phase: "idle" })} className={`${btn} ${skin.button}`}>
+            <button type="button" onClick={cancel} className={`${btn} ${skin.button}`} data-testid="alert-apply-cancel">
               {t("alerts.action.cancel")}
             </button>
           </div>
@@ -220,7 +314,17 @@ function FollowApply({
 
 /** A row's fix: a button, or on a node with no setup engine the hint that
  *  names where to fix it. */
-function FixAction({ alert, actions, skin }: { alert: PillAlert; actions: AlertActions; skin: AlertSkin }) {
+function FixAction({
+  alert,
+  actions,
+  skin,
+  onReview,
+}: {
+  alert: PillAlert;
+  actions: AlertActions;
+  skin: AlertSkin;
+  onReview: (open: boolean) => void;
+}) {
   const { t } = useTranslation();
   const fix = alert.fix;
   const btn = `${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${BODY} ${skin.primary}`;
@@ -236,7 +340,7 @@ function FixAction({ alert, actions, skin }: { alert: PillAlert; actions: AlertA
           </p>
         );
       }
-      if (fix.kind === "apply_profile") return <ApplyProfileFix skin={skin} openSetup={open} />;
+      if (fix.kind === "apply_profile") return <ApplyProfileFix skin={skin} openSetup={open} onReview={onReview} />;
       return (
         <button type="button" onClick={() => open(fix.step)} className={btn} data-testid="alert-fix-setup">
           {t("alerts.action.openSetup")}
@@ -286,6 +390,9 @@ export function AlertRow({
   const { t } = useTranslation();
   const critical = alert.severity === "critical";
   const icon = critical ? tokens.chrome.severity_icon.critical : tokens.chrome.severity_icon.warning;
+  const title = alertTitle(alert);
+  // The Apply review lists what changes; the row's own table would repeat it.
+  const [reviewing, setReviewing] = useState(false);
   const btn = `${skin.control} shrink-0 rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${BODY} ${skin.button}`;
   const snoozeButton = onSnooze ? (
     <button
@@ -310,9 +417,21 @@ export function AlertRow({
       <div className="flex min-w-0 flex-1 flex-col gap-[4px]">
         <div className="flex min-w-0 items-start justify-between gap-[8px]">
           <div className="min-w-0 flex-1">
-            <div data-testid="alert-item-text" className={alert.collapsed ? "truncate" : "break-words"} style={critical ? { color: skin.text("critical") } : undefined}>
-              {alert.text}
+            {/* With a parameter table the title is the short words before the
+                colon; the full text is the accessible name. */}
+            <div
+              data-testid="alert-item-text"
+              aria-hidden={title !== alert.text || undefined}
+              className={alert.collapsed ? "truncate" : "break-words"}
+              style={critical ? { color: skin.text("critical") } : undefined}
+            >
+              {title}
             </div>
+            {title !== alert.text ? (
+              <span className="sr-only" data-testid="alert-item-fulltext">
+                {alert.text}
+              </span>
+            ) : null}
             <div data-testid="alert-item-source" className={`${SMALL} ${skin.dim}`}>
               {specText(`cockpit.status.source.${alert.source}`)}
             </div>
@@ -321,10 +440,10 @@ export function AlertRow({
         </div>
         {alert.collapsed ? null : (
           <>
-            {alert.params && alert.params.length > 0 ? <ParamTable params={alert.params} skin={skin} /> : null}
+            {alert.params && alert.params.length > 0 && !reviewing ? <ParamTable params={alert.params} skin={skin} /> : null}
             {hasFix(alert, actions) ? (
               <div className="flex flex-wrap items-center gap-[8px]">
-                <FixAction alert={alert} actions={actions} skin={skin} />
+                <FixAction alert={alert} actions={actions} skin={skin} onReview={setReviewing} />
               </div>
             ) : null}
           </>

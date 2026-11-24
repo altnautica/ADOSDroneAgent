@@ -18,7 +18,7 @@ import {
   setupErrorKey,
   startWizard,
 } from "./client";
-import { applyFrame, withStep, withWizard } from "./parse";
+import { applyFrame, needsFullStatus, withStep, withWizard } from "./parse";
 import { setupErrorText } from "./strings";
 import type { SetupStatus, SetupStep, SetupValue, Wizard } from "./types";
 
@@ -61,6 +61,14 @@ export interface UseFcSetupOptions {
   stream?: boolean;
 }
 
+/** A status read's outcome: the status, or the error it failed with. */
+type ReadOutcome = { next: SetupStatus } | { err: unknown };
+
+/** The least time between the full status reads a stream frame triggers
+ *  while the status lacks the FC's identity (`needsFullStatus`); keepalives
+ *  arrive at 1 Hz, so this holds those reads to one every 2 s. */
+const FRAME_REREAD_MS = 2000;
+
 export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupController {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,37 +77,63 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
   const [requestError, setRequestError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const mounted = useRef(true);
+  const statusRef = useRef<SetupStatus | null>(null);
+  const reading = useRef(false);
+  /** The last read failed (the engine was not up yet). */
+  const failed = useRef(false);
+  const lastRead = useRef(0);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
-  const refresh = useCallback(async () => {
-    try {
-      const next = await fetchSetupStatus();
-      if (!mounted.current) return;
-      setStatus(next);
-      setLoadError(null);
-    } catch (err) {
-      if (mounted.current) setLoadError(loadErrorText(err));
-    } finally {
-      if (mounted.current) setLoading(false);
-    }
+  // One status read: records when it ran and whether it failed, and hands
+  // its outcome to `settle`, the only place that sets state from it.
+  const read = useCallback(() => {
+    reading.current = true;
+    lastRead.current = Date.now();
+    return fetchSetupStatus()
+      .then(
+        (next): ReadOutcome => {
+          failed.current = false;
+          return { next };
+        },
+        (err: unknown): ReadOutcome => {
+          failed.current = true;
+          return { err };
+        },
+      )
+      .finally(() => {
+        reading.current = false;
+      });
   }, []);
+
+  const settle = useCallback((outcome: ReadOutcome) => {
+    if (!mounted.current) return;
+    if ("next" in outcome) {
+      setStatus(outcome.next);
+      setLoadError(null);
+    } else {
+      setLoadError(loadErrorText(outcome.err));
+    }
+    setLoading(false);
+  }, []);
+
+  const refresh = useCallback(() => read().then(settle), [read, settle]);
 
   useEffect(() => {
     mounted.current = true;
-    fetchSetupStatus()
-      .then((next) => {
-        if (!mounted.current) return;
-        setStatus(next);
-        setLoadError(null);
-      })
-      .catch((err: unknown) => {
-        if (mounted.current) setLoadError(loadErrorText(err));
-      })
-      .finally(() => {
-        if (mounted.current) setLoading(false);
-      });
+    void read().then(settle);
+    // Each (re)connect re-reads the whole status it may have missed. A frame
+    // re-reads it while the last read failed or had no FC identity (taken
+    // while the agent was restarting): frames never carry the uid or
+    // firmware, so the screen would otherwise stay stale until a reload.
     const stop = stream
       ? openSetupStream(
-          (frame) => setStatus((s) => (s ? applyFrame(s, frame) : s)),
+          (frame) => {
+            setStatus((s) => (s ? applyFrame(s, frame) : s));
+            const due = !reading.current && Date.now() - lastRead.current >= FRAME_REREAD_MS;
+            if (due && (failed.current || needsFullStatus(statusRef.current))) void refresh();
+          },
           () => void refresh(),
           (up) => {
             if (mounted.current) setStreamUp(up);
@@ -110,7 +144,7 @@ export function useFcSetup({ stream = true }: UseFcSetupOptions = {}): FcSetupCo
       mounted.current = false;
       stop?.();
     };
-  }, [refresh, stream]);
+  }, [read, refresh, settle, stream]);
 
   const request = useCallback(async <T,>(key: string, run: () => Promise<T>): Promise<T | null> => {
     setBusy(key);

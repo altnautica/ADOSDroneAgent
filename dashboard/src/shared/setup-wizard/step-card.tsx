@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next";
 import { AlertTriangle, CheckCircle2, ChevronRight, Gamepad2, Navigation, ShieldCheck, TriangleAlert } from "lucide-react";
 
 import { FOCUS_RING, HoldButton, ProgressRing, StatePill, WizardButton } from "./controls";
+import { firmwareLabel, isCancelled, resultRows, vehicleClassLabel } from "./overview";
 import { inputArgs, liveRows, outputQuestion } from "./parse";
 import { InputField } from "./step-inputs";
 import { formatValue, motorOrderMarkup, paramNote, setupImageUrl, setupLabel, setupText } from "./strings";
@@ -68,7 +69,7 @@ export function StepCard({ step, busy, error, onAction }: StepCardProps) {
   const image = motorSvg || pickers.length ? null : setupImageUrl(step.image);
   const live = liveRows(step);
   const showRing = step.progress !== null || step.state === "running";
-  const result = step.result ? Object.entries(step.result) : [];
+  const result = resultRows(step.result);
   const title = setupText(step.title_key, step.args);
   const { primary, secondary } = splitActions(step);
   const input = (i: StepInput) => (
@@ -79,126 +80,165 @@ export function StepCard({ step, busy, error, onAction }: StepCardProps) {
       onChange={(v) => setEdits((e) => ({ ...e, [i.name]: v }))}
     />
   );
-  const hasVisual = Boolean(image || motorSvg || showRing || pickers.length || live.length || result.length);
+  const hasVisual = Boolean(image || motorSvg || showRing || live.length || result.length);
+
+  const body = step.body_key ? (
+    <p className={`whitespace-pre-line leading-snug text-foreground ${pickers.length ? "text-[1em]" : "text-[1.1em]"}`}>
+      {setupText(step.body_key, step.args)}
+    </p>
+  ) : null;
+  const questionLine = question ? (
+    <p className="rounded-lg border border-warn/40 bg-warn/10 px-[0.9em] py-[0.6em] text-[1.25em] font-semibold text-foreground">
+      {setupText(question.question_key, { ...step.args, n: question.index, index: question.index, kind: question.kind })}
+    </p>
+  ) : null;
+  // An operator cancel already reads on the state pill, neutral.
+  const blockers =
+    step.blockers.length > 0 && !isCancelled(step) ? (
+      <ul className="flex flex-col gap-[0.35em] rounded-lg border border-err/40 bg-err/10 px-[0.9em] py-[0.6em] text-[0.95em] text-err">
+        {step.blockers.map((b) => (
+          <li key={b} className="flex items-start gap-[0.5em]">
+            <AlertTriangle className="mt-[0.15em] h-[1em] w-[1em] shrink-0" aria-hidden />
+            <span>{setupText(b, step.args)}</span>
+          </li>
+        ))}
+      </ul>
+    ) : null;
+  const errorLine = error ? (
+    <p className="text-[0.95em] text-err" role="alert">
+      {error}
+    </p>
+  ) : null;
+  // As many fields across as fit (prop, KV and cells on one row). A focused
+  // field scrolls clear of the action bar when that bar is stuck below it.
+  const fieldGrid = fields.length ? (
+    <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(8.5em,1fr))] gap-[0.8em] [&_input]:scroll-mb-[7em] lg:flex-1">
+      {fields.map(input)}
+    </div>
+  ) : null;
+  // The action bar sits in the flow after the fields. It sticks to the bottom
+  // of the scrolling screen only while its place is below it; beside the
+  // fields (the picker layout on a wide screen) it can only move within its
+  // own row, so it never covers an input.
+  const actionBar = step.actions.length ? (
+    <div
+      className={`sticky bottom-0 z-10 flex flex-col gap-[0.6em] bg-card ${
+        pickers.length
+          ? "pt-[0.4em] lg:shrink-0 lg:pt-0"
+          : "-mx-[0.3em] border-t border-border px-[0.3em] pb-[0.4em] pt-[0.6em] shadow-[0_-0.6em_0.8em_-0.6em_rgb(0_0_0/0.45)]"
+      }`}
+      data-testid="setup-actions"
+    >
+      {drivesMotors(step) ? (
+        <p
+          data-testid="setup-props-off"
+          className="flex items-center gap-[0.6em] rounded-lg border border-err/50 bg-err/10 px-[0.9em] py-[0.5em] text-[1.05em] font-semibold text-err"
+        >
+          <TriangleAlert className="h-[1.3em] w-[1.3em] shrink-0" aria-hidden />
+          {setupText("setup.overview.props_off")}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-[0.8em]">
+        {primary.map((a) => (
+          <ActionControl key={a.id} action={a} step={step} disabled={busy} onFire={fire} className={PRIMARY_LARGE} />
+        ))}
+        {secondary.map((a) => (
+          <ActionControl key={a.id} action={a} step={step} disabled={busy} onFire={fire} />
+        ))}
+      </div>
+    </div>
+  ) : null;
+  const changes = step.params.length ? (
+    <details className="group rounded-lg border border-border bg-muted/20" data-testid="setup-params">
+      <summary className={`flex min-h-[3.43em] cursor-pointer list-none items-center gap-[0.5em] rounded-lg px-[0.9em] text-[0.95em] font-semibold ${FOCUS_RING}`}>
+        <ChevronRight className="h-[1em] w-[1em] transition-transform group-open:rotate-90" aria-hidden />
+        {setupText("setup.overview.changes")}
+        <span className="font-normal text-muted-foreground">({step.params.length})</span>
+      </summary>
+      <ParamTable step={step.step} rows={step.params} />
+    </details>
+  ) : null;
 
   return (
-    <section className="flex flex-col gap-[0.9em] rounded-xl border border-border bg-card p-[1.1em] text-card-foreground">
-      <header className="flex flex-wrap items-start justify-between gap-[0.6em]">
-        <h2 className="text-[1.45em] font-semibold leading-tight tracking-tight">{title}</h2>
-        <StatePill state={step.state} />
+    <section className="flex flex-col gap-[0.7em] rounded-xl border border-border bg-card p-[0.9em] text-card-foreground">
+      <header className="flex flex-wrap items-center justify-between gap-[0.6em]">
+        <h2 className="text-[1.25em] font-semibold leading-tight tracking-tight">{title}</h2>
+        <StatePill step={step} />
       </header>
 
-      {/* Wide: the visual left (at most 45 %), what to do right. Narrow: stacked,
-          with the picture held to a third of the screen height. */}
-      <div
-        className={
-          hasVisual
-            ? "flex flex-col gap-[1em] lg:grid lg:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] lg:items-start lg:gap-[1.4em]"
-            : "flex flex-col gap-[1em]"
-        }
-      >
-        {hasVisual ? (
-          <div className="flex min-w-0 flex-col gap-[0.8em]" data-testid="setup-visual">
-            {image || motorSvg || showRing ? (
-              <div className="flex items-center justify-center gap-[1em]">
-                {motorSvg ? (
-                  <div
-                    role="img"
-                    aria-label={title}
-                    className="min-w-0 flex-1 rounded-lg bg-letterbox p-[0.4em] [&>svg]:mx-auto [&>svg]:h-auto [&>svg]:max-h-[35vh] [&>svg]:w-full lg:[&>svg]:max-h-[42vh]"
-                    // The spec's own motor-order picture, with one motor recoloured.
-                    dangerouslySetInnerHTML={{ __html: motorSvg }}
-                  />
-                ) : image ? (
-                  // The spec draws these as light line art for a dark surface, so
-                  // they sit on the letterbox tone in either theme.
-                  <img
-                    src={image}
-                    alt={title}
-                    className="max-h-[35vh] min-w-0 flex-1 rounded-lg bg-letterbox object-contain p-[0.4em] lg:max-h-[42vh]"
-                  />
-                ) : null}
-                {showRing ? <ProgressRing value={step.progress} size="6em" /> : null}
-              </div>
-            ) : null}
-            {pickers.map(input)}
-            {live.length ? <ValueTable title="setupWizard.live" group="live" rows={live} args={step.args} /> : null}
-            {result.length ? <ValueTable title="setupWizard.result" group="result" rows={result} args={step.args} tone="ok" /> : null}
+      {pickers.length ? (
+        // A picture step (frame class and type, wing): the pickers side by
+        // side with what to do beside them, then the fields and the action
+        // in one row, so the whole step fits one kiosk screen. Narrow, it
+        // all stacks.
+        <>
+          <div className="flex flex-col gap-[0.8em] lg:flex-row lg:items-start lg:gap-[1.2em]">
+            <div className="flex min-w-0 flex-col gap-[0.6em] lg:flex-row lg:gap-[1.2em]" data-testid="setup-pickers">
+              {pickers.map(input)}
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col gap-[0.6em]">
+              {body}
+              {questionLine}
+              {blockers}
+              {errorLine}
+            </div>
           </div>
-        ) : null}
-
-        <div className="flex min-w-0 flex-col gap-[0.9em]">
-          {step.body_key ? (
-            <p className="whitespace-pre-line text-[1.1em] leading-snug text-foreground">{setupText(step.body_key, step.args)}</p>
-          ) : null}
-
-          {question ? (
-            <p className="rounded-lg border border-warn/40 bg-warn/10 px-[0.9em] py-[0.6em] text-[1.25em] font-semibold text-foreground">
-              {setupText(question.question_key, { ...step.args, n: question.index, index: question.index, kind: question.kind })}
-            </p>
-          ) : null}
-
-          {fields.length ? (
-            // As many across as fit (prop, KV and cells on one row on the
-            // kiosk). A focused field scrolls clear of the sticky action bar.
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(8.5em,1fr))] gap-[0.8em] [&_input]:scroll-mb-[7em]">
-              {fields.map(input)}
-            </div>
-          ) : null}
-
-          {step.blockers.length ? (
-            <ul className="flex flex-col gap-[0.35em] rounded-lg border border-err/40 bg-err/10 px-[0.9em] py-[0.6em] text-[0.95em] text-err">
-              {step.blockers.map((b) => (
-                <li key={b} className="flex items-start gap-[0.5em]">
-                  <AlertTriangle className="mt-[0.15em] h-[1em] w-[1em] shrink-0" aria-hidden />
-                  <span>{setupText(b, step.args)}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {error ? <p className="text-[0.95em] text-err" role="alert">{error}</p> : null}
-
-          {step.actions.length ? (
-            // Sticks to the bottom of the scrolling screen when the inputs run
-            // past it, so the primary action (and, when motors spin, the
-            // props-off warning above it) is always in view.
-            <div
-              className="sticky bottom-0 z-10 -mx-[0.3em] flex flex-col gap-[0.6em] border-t border-border bg-card px-[0.3em] pb-[0.4em] pt-[0.6em] shadow-[0_-0.6em_0.8em_-0.6em_rgb(0_0_0/0.45)]"
-              data-testid="setup-actions"
-            >
-              {drivesMotors(step) ? (
-                <p
-                  data-testid="setup-props-off"
-                  className="flex items-center gap-[0.6em] rounded-lg border border-err/50 bg-err/10 px-[0.9em] py-[0.5em] text-[1.05em] font-semibold text-err"
-                >
-                  <TriangleAlert className="h-[1.3em] w-[1.3em] shrink-0" aria-hidden />
-                  {setupText("setup.overview.props_off")}
-                </p>
+          <div className="flex flex-col gap-[0.8em] lg:flex-row lg:items-end lg:gap-[1em]">
+            {fieldGrid}
+            {actionBar}
+          </div>
+          {changes}
+        </>
+      ) : (
+        // Wide: the visual left (at most 45 %), what to do right. Narrow:
+        // stacked, with the picture held to a third of the screen height.
+        <div
+          className={
+            hasVisual
+              ? "flex flex-col gap-[1em] lg:grid lg:grid-cols-[minmax(0,45fr)_minmax(0,55fr)] lg:items-start lg:gap-[1.4em]"
+              : "flex flex-col gap-[1em]"
+          }
+        >
+          {hasVisual ? (
+            <div className="flex min-w-0 flex-col gap-[0.8em]" data-testid="setup-visual">
+              {image || motorSvg || showRing ? (
+                <div className="flex items-center justify-center gap-[1em]">
+                  {motorSvg ? (
+                    <div
+                      role="img"
+                      aria-label={title}
+                      className="min-w-0 flex-1 rounded-lg bg-letterbox p-[0.4em] [&>svg]:mx-auto [&>svg]:h-auto [&>svg]:max-h-[35vh] [&>svg]:w-full lg:[&>svg]:max-h-[42vh]"
+                      // The spec's own motor-order picture, with one motor recoloured.
+                      dangerouslySetInnerHTML={{ __html: motorSvg }}
+                    />
+                  ) : image ? (
+                    // The spec draws these as light line art for a dark surface, so
+                    // they sit on the letterbox tone in either theme.
+                    <img
+                      src={image}
+                      alt={title}
+                      className="max-h-[35vh] min-w-0 flex-1 rounded-lg bg-letterbox object-contain p-[0.4em] lg:max-h-[42vh]"
+                    />
+                  ) : null}
+                  {showRing ? <ProgressRing value={step.progress} size="6em" /> : null}
+                </div>
               ) : null}
-              <div className="flex flex-wrap items-center gap-[0.8em]">
-                {primary.map((a) => (
-                  <ActionControl key={a.id} action={a} step={step} disabled={busy} onFire={fire} className={PRIMARY_LARGE} />
-                ))}
-                {secondary.map((a) => (
-                  <ActionControl key={a.id} action={a} step={step} disabled={busy} onFire={fire} />
-                ))}
-              </div>
+              {live.length ? <ValueTable title="setupWizard.live" group="live" rows={live} args={step.args} /> : null}
+              {result.length ? <ValueTable title="setupWizard.result" group="result" rows={result} args={step.args} tone="ok" /> : null}
             </div>
           ) : null}
 
-          {step.params.length ? (
-            <details className="group rounded-lg border border-border bg-muted/20" data-testid="setup-params">
-              <summary className={`flex min-h-[3.43em] cursor-pointer list-none items-center gap-[0.5em] rounded-lg px-[0.9em] text-[0.95em] font-semibold ${FOCUS_RING}`}>
-                <ChevronRight className="h-[1em] w-[1em] transition-transform group-open:rotate-90" aria-hidden />
-                {setupText("setup.overview.changes")}
-                <span className="font-normal text-muted-foreground">({step.params.length})</span>
-              </summary>
-              <ParamTable step={step.step} rows={step.params} />
-            </details>
-          ) : null}
+          <div className="flex min-w-0 flex-col gap-[0.9em]">
+            {body}
+            {questionLine}
+            {fieldGrid}
+            {blockers}
+            {errorLine}
+            {actionBar}
+            {changes}
+          </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }
@@ -266,19 +306,25 @@ function ActionControl({
 }
 
 /** The parameters a step will write, each with what it is for when the spec
- *  says (the obstacle backstop rows of the ADOS safety profile). */
+ *  says (the obstacle backstop rows of the ADOS safety profile), and the
+ *  FC's current value → the new one when the engine read it. A row the FC
+ *  already holds reads dim. */
 function ParamTable({ step, rows }: { step: string; rows: ParamRow[] }) {
   return (
     <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-[1.2em] gap-y-[0.25em] px-[0.9em] pb-[0.7em] text-[1em]">
       {rows.map((r) => {
         const note = paramNote(step, r.name);
+        const same = r.have !== null && r.have === r.value;
         return (
-          <div key={r.name} className="contents">
+          <div key={r.name} className={`contents ${same ? "[&>*]:opacity-60" : ""}`}>
             <dt className="min-w-0 text-muted-foreground">
               <span className="font-mono text-foreground">{r.name}</span>
               {note ? <span className="block text-[0.85em]">{note}</span> : null}
             </dt>
-            <dd className="text-right font-mono tabular-nums text-foreground">{formatValue(r.value)}</dd>
+            <dd className="text-right font-mono tabular-nums text-foreground">
+              {r.have !== null && !same ? <span className="text-muted-foreground">{formatValue(r.have)} → </span> : null}
+              {formatValue(r.value)}
+            </dd>
           </div>
         );
       })}
@@ -307,7 +353,13 @@ function ValueTable({
         {rows.map(([k, v]) => (
           <div key={k} className="contents">
             <dt className="truncate text-muted-foreground">{setupLabel(group, k, args)}</dt>
-            <dd className="text-right font-mono tabular-nums text-foreground">{formatValue(v)}</dd>
+            <dd className="text-right font-mono tabular-nums text-foreground">
+              {k === "firmware" && typeof v === "string"
+                ? firmwareLabel(v)
+                : k === "vehicle_class" && typeof v === "string"
+                  ? vehicleClassLabel(t, v)
+                  : formatValue(v)}
+            </dd>
           </div>
         ))}
       </dl>
@@ -341,7 +393,7 @@ function MeetAdosPilot({
     <section className="mx-auto flex w-full max-w-[38em] flex-col items-stretch gap-[1.2em] rounded-2xl border border-primary/40 bg-card p-[1.6em] text-card-foreground">
       <div className="flex items-start justify-between gap-[0.6em]">
         <h2 className="text-[1.8em] font-semibold leading-tight tracking-tight">{setupText(step.title_key, step.args)}</h2>
-        <StatePill state={step.state} />
+        <StatePill step={step} />
       </div>
       <ol className="flex flex-col gap-[0.8em]">
         {lines.map((line, i) => {

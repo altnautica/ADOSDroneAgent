@@ -1,16 +1,49 @@
 // The alert centre's surface contract (`alert-rows.tsx` draws it): where a
 // row's fix goes on this surface (`AlertActions`), the surface's look
-// (`AlertSkin`, one per app), and the snooze set kept in storage
-// (`useAlertSnooze` over `alert-snooze.ts`).
+// (`AlertSkin`, one per app, and the type scale `ALERT_TEXT`), the snooze set
+// kept in storage (`useAlertSnooze` over `alert-snooze.ts`), and which ADOS
+// profile rows a write would change.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import tokens from "../cockpit-spec/tokens.json";
+import type { ParamRow } from "../setup-wizard/types";
 
 import { loadSnoozed, pruneSnoozed, saveSnoozed, withSnoozed } from "./alert-snooze";
 import type { PillAlert } from "./status-pill";
 
 type Severity = PillAlert["severity"];
+
+// Type scale, in rem with an explicit leading at every size: the panel's own
+// `chrome-bar-text` line-height is a fixed 15 px, which overlaps wrapped
+// lines at any larger size. The cockpit's root rem tracks the viewport
+// (3.2vmin: 25.6 px at 1280×800, 34.6 px at 1920×1080) while the sheet stays
+// 440 px wide, and the dashboard's root is 16 px, so each size is clamped:
+// body 14-18 px, secondary and tables 12.5-16 px, the sheet title 15-20 px.
+// The cockpit's other small menus over video (the layer badge menu) use it
+// too, so they read at the same size.
+export const ALERT_TEXT = {
+  body: "text-[length:clamp(14px,0.6rem,18px)] leading-[1.3]",
+  small: "text-[length:clamp(12.5px,0.52rem,16px)] leading-[1.3]",
+  title: "text-[length:clamp(15px,0.68rem,20px)] leading-[1.3]",
+} as const;
+
+/** Whether the FC already holds the value a profile row writes. A float
+ *  read back from the FC may carry single-precision noise. */
+export function rowAlreadySet(p: ParamRow): boolean {
+  if (p.have === null) return false;
+  const want = Number(p.value);
+  if (!Number.isFinite(want)) return false;
+  return Math.abs(p.have - want) <= 1e-6 * Math.max(1, Math.abs(want));
+}
+
+/** The profile rows a write changes, and those the FC already holds. */
+export function splitProfileRows(rows: readonly ParamRow[]): { changes: ParamRow[]; same: ParamRow[] } {
+  const changes: ParamRow[] = [];
+  const same: ParamRow[] = [];
+  for (const p of rows) (rowAlreadySet(p) ? same : changes).push(p);
+  return { changes, same };
+}
 
 /** Where a row's fix action goes on this surface. */
 export interface AlertActions {

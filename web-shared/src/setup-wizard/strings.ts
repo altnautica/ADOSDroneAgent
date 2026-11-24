@@ -83,6 +83,23 @@ export function paramNote(step: string, name: string): string | null {
   return STRINGS[`setup.${step}.param.${name}`] ?? null;
 }
 
+/** The square around a motor-order picture's motors and spin arrows (every
+ *  shipped layout keeps them within x 66..254, y 12..200 of its 320×200
+ *  canvas); the corner title and CW/CCW legend fall outside it. */
+const MOTOR_TILE_VIEWBOX = "66 12 188 188";
+
+/** A motor-order picture as picker-tile markup: cropped square to its
+ *  motors, sized by its container, the motor numbers enlarged so they read
+ *  on a small tile. Null when `key` is not a motor-order picture. */
+export function motorOrderTile(key: string | null, sources: Readonly<Record<string, string>> = MOTOR_SVGS): string | null {
+  if (!key) return null;
+  const svg = sources[`../cockpit-spec/setup-images/${key}.svg`];
+  if (!svg) return null;
+  return svg
+    .replace(/viewBox="[^"]*"\s+width="[^"]*"\s+height="[^"]*"/, `viewBox="${MOTOR_TILE_VIEWBOX}" width="100%" height="100%"`)
+    .replace(/font-size="13"( font-weight="600" text-anchor="middle")/g, 'font-size="18"$1');
+}
+
 /** The bundled URL of `setup-images/<key>.svg`, or null when the spec has none. */
 export function setupImageUrl(key: string | null): string | null {
   if (!key) return null;
