@@ -9,7 +9,7 @@
 //!
 //! Enumeration is a filesystem scan, never a probe: it lists the kernel's
 //! `/dev/serial/by-id/*` USB-serial symlinks (whose names carry the vendor /
-//! product string) and the bare `/dev/tty{ACM,USB,AMA,S}*` nodes, de-duplicated
+//! product string) and the bare `/dev/tty{ACM,USB,AMA,S,AS}*` nodes, de-duplicated
 //! by their resolved device path. It opens nothing and sends nothing, so it is
 //! side-effect-free and safe to poll. An absent `/dev` (a non-Linux host) yields
 //! an empty list rather than an error.
@@ -31,9 +31,9 @@ pub async fn list_ports() -> Json<Value> {
 
 /// The device-name prefixes a flight controller commonly enumerates as: USB CDC
 /// ACM (`ttyACM*`), USB serial (`ttyUSB*`), the Pi/SoC PL011 UARTs (`ttyAMA*`),
-/// and the legacy 16550 ports (`ttyS*`). Anything else (pty, console, etc.) is
-/// not an FC candidate and is skipped.
-const TTY_PREFIXES: [&str; 4] = ["ttyACM", "ttyUSB", "ttyAMA", "ttyS"];
+/// the legacy 16550 ports (`ttyS*`), and the Allwinner SoC UARTs (`ttyAS*`).
+/// Anything else (pty, console, etc.) is not an FC candidate and is skipped.
+const TTY_PREFIXES: [&str; 5] = ["ttyACM", "ttyUSB", "ttyAMA", "ttyS", "ttyAS"];
 
 /// Build the de-duplicated port list, keyed by the resolved device path so a
 /// `by-id` symlink and its bare `/dev/tty*` target collapse to one entry (the
@@ -68,7 +68,7 @@ fn enumerate_ports_in(by_id_dir: &Path, dev_dir: &Path) -> Vec<Value> {
     }
 
     // The bare device nodes, for ports the kernel did not create a by-id link for
-    // (the SoC UARTs `ttyAMA*` / legacy `ttyS*` never get one). Keep only the
+    // (the SoC UARTs `ttyAMA*` / `ttyAS*` / legacy `ttyS*` never get one). Keep only the
     // FC-candidate prefixes. The description is the bare device path.
     if let Ok(entries) = std::fs::read_dir(dev_dir) {
         for entry in entries.flatten() {
@@ -118,6 +118,7 @@ mod tests {
         fs::write(dev.join("ttyACM0"), b"").unwrap();
         fs::write(dev.join("ttyUSB0"), b"").unwrap();
         fs::write(dev.join("ttyAMA0"), b"").unwrap();
+        fs::write(dev.join("ttyAS2"), b"").unwrap();
         // Non-candidates.
         fs::write(dev.join("tty1"), b"").unwrap();
         fs::write(dev.join("random"), b"").unwrap();
@@ -130,6 +131,7 @@ mod tests {
         assert!(paths.iter().any(|p| p.ends_with("/ttyACM0")));
         assert!(paths.iter().any(|p| p.ends_with("/ttyUSB0")));
         assert!(paths.iter().any(|p| p.ends_with("/ttyAMA0")));
+        assert!(paths.iter().any(|p| p.ends_with("/ttyAS2")));
         assert!(!paths.iter().any(|p| p.ends_with("/tty1")));
         assert!(!paths.iter().any(|p| p.ends_with("/random")));
     }

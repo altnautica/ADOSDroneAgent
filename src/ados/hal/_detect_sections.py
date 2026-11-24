@@ -209,8 +209,7 @@ class RadiosSection(BaseModel):
 class FcInterface(BaseModel):
     """A priority-ordered flight-controller link hint.
 
-    The provisioner seeds ``serial_port``/``baud_rate`` from the highest
-    priority interface; the runtime router still probes and falls back.
+    Descriptive; the router auto-detects the FC port at runtime.
     """
 
     id: str

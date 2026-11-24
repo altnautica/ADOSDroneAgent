@@ -140,6 +140,7 @@ fn candidate_gate_keeps_prefix_named_non_usb_port() {
     // A non-USB port whose name matches a prefix (e.g. an on-board UART).
     assert!(is_candidate_port(&SerialPortType::Unknown, "/dev/ttyAMA0"));
     assert!(is_candidate_port(&SerialPortType::PciPort, "/dev/ttyS0"));
+    assert!(is_candidate_port(&SerialPortType::Unknown, "/dev/ttyAS2"));
 }
 
 #[test]

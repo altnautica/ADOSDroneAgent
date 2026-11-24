@@ -233,8 +233,11 @@ impl FcConnection {
     /// (mis)configured to the same node — but ONLY while the CRSF lane is opted
     /// in (`radio.crsf.enabled`): a stale pin left over from a DISABLED lane
     /// must never drop the flight controller. A sensor hub ([`is_sensor_hub`]) is
-    /// never an FC candidate: its port belongs to the sensor-hub service. The
-    /// rig's LiDAR port is dropped after this, by [`Self::without_lidar`].
+    /// never an FC candidate: its port belongs to the sensor-hub service. A
+    /// kernel console UART (every `console=` on the kernel command line) is
+    /// dropped from the enumerated list too: it speaks boot messages and a
+    /// login prompt, never MAVLink. The rig's LiDAR port is dropped after this,
+    /// by [`Self::without_lidar`].
     pub(super) fn candidate_ports(&self) -> Vec<FcCandidate> {
         let crsf_pins = self.crsf_pins();
         let is_crsf = |port: &str| crsf_pins.iter().any(|pin| same_device(port, pin));
@@ -251,6 +254,8 @@ impl FcConnection {
                 usb: None,
             }];
         }
+        let consoles =
+            kernel_console_ports(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
         match tokio_serial::available_ports() {
             Ok(ports) => {
                 let mut candidates: Vec<FcCandidate> = ports
@@ -261,6 +266,7 @@ impl FcConnection {
                             if is_sensor_hub(info.vid, info.pid))
                     })
                     .filter(|p| !is_crsf(&p.port_name))
+                    .filter(|p| !consoles.contains(&p.port_name))
                     .map(|p| FcCandidate {
                         usb: match &p.port_type {
                             tokio_serial::SerialPortType::UsbPort(info) => {
@@ -278,6 +284,18 @@ impl FcConnection {
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// The device nodes the kernel command line names as consoles: each
+/// `console=<name>[,options]` becomes `/dev/<name>`.
+pub(super) fn kernel_console_ports(cmdline: &str) -> Vec<String> {
+    cmdline
+        .split_whitespace()
+        .filter_map(|tok| tok.strip_prefix("console="))
+        .filter_map(|v| v.split(',').next())
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("/dev/{name}"))
+        .collect()
 }
 
 /// A serial candidate for the FC link: the device path plus, when it came from
@@ -322,4 +340,19 @@ pub(super) fn candidate_rank(cand: &FcCandidate) -> u8 {
 /// a guess.
 pub(super) fn fallback_open_allowed(sole: bool, cand: &FcCandidate) -> bool {
     sole || cand.usb.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kernel_console_ports;
+
+    #[test]
+    fn kernel_console_ports_reads_every_console_arg() {
+        let cmdline = "root=UUID=x console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 quiet console=tty1";
+        assert_eq!(
+            kernel_console_ports(cmdline),
+            vec!["/dev/ttyAS0".to_string(), "/dev/tty1".to_string()]
+        );
+        assert!(kernel_console_ports("").is_empty());
+    }
 }

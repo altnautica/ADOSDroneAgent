@@ -48,8 +48,8 @@ gpio_pins:
   - 7   # PB0 / UART2-TX -> FC RX (R1)
   - 11  # PB1 / UART2-RX <- FC TX (T1)
 uart_paths:
-  - /dev/ttyS0        # UART0 debug console (pins 8/10)
-  - /dev/ttyS2        # TO-VERIFY: UART2 (pins 7/11) as the FC link; confirm the ttyS number + overlay on-rig
+  - /dev/ttyAS0       # UART0 debug console (pins 8/10)
+  - /dev/ttyAS2       # UART2 (pins 7/11), the FC link; needs overlay sun60iw2p1-uart2
 hw_video_codecs:
   - h264_enc
   - h264_dec
@@ -99,13 +99,13 @@ storage:
 buses:
   uart:
     - id: uart0
-      path: /dev/ttyS0
+      path: /dev/ttyAS0
       baud: 115200
       fc_capable: false   # debug console
     - id: uart2
-      # TO-VERIFY: verified 2026-07-20 that NO /dev/ttyS* exists until a UART
-      # overlay is enabled; the node + number are confirmed when the FC is wired.
-      path: /dev/ttyS2
+      # this BSP names its UARTs ttyAS*; uart2 appears once the
+      # sun60iw2p1-uart2 overlay is enabled.
+      path: /dev/ttyAS2
       baud: 921600
       fc_capable: true    # FC link on 30-pin pins 7 (TX) / 11 (RX)
   usb:
@@ -181,7 +181,7 @@ flight_controller:
   interfaces:
     - id: fc-uart2
       type: uart
-      path: /dev/ttyS2    # TO-VERIFY on-rig (UART2 on pins 7/11)
+      path: /dev/ttyAS2   # UART2 on pins 7/11
       baud: 921600
       priority: 1
     - id: fc-usb

@@ -65,6 +65,8 @@ const SERIAL_PREFIXES: &[&str] = &[
     "/dev/ttyAMA",
     "/dev/ttyUSB",
     "/dev/ttyS",
+    // Allwinner SoC UARTs (sunxi BSP kernels name them ttyAS*).
+    "/dev/ttyAS",
     "/dev/tty.usbmodem",
     "/dev/tty.usbserial",
 ];

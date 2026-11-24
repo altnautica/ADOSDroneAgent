@@ -69,7 +69,8 @@ use std::path::Path;
 /// device or under a name that differs between driver releases.
 pub const DEVICE_CAP_RULES: &[(&str, &[&str])] = &[
     // A UART plugin may be handed a USB serial adapter, a native UART (`ttyS`
-    // on most SoCs, `ttyAMA` on the Raspberry Pi's PL011), or a CDC ACM modem;
+    // on most SoCs, `ttyAMA` on the Raspberry Pi's PL011, `ttyAS` on Allwinner
+    // BSP kernels), or a CDC ACM modem;
     // all are the same grant to an operator. The bare `tty` group (major 4's
     // virtual consoles) is never opened, and the flight controller's own port
     // is masked separately (see [`fc_port_exclusion`]).
@@ -80,6 +81,7 @@ pub const DEVICE_CAP_RULES: &[(&str, &[&str])] = &[
             "char-ttyACM rw",
             "char-ttyS rw",
             "char-ttyAMA rw",
+            "char-ttyAS rw",
         ],
     ),
     ("hardware.i2c", &["char-i2c rw"]),
@@ -745,6 +747,7 @@ mod tests {
         let lines = sandbox_directives(&caps(&["hardware.uart"]), true, &[], &[]);
         assert!(lines.contains(&"DeviceAllow=char-ttyAMA rw".to_string()));
         assert!(lines.contains(&"DeviceAllow=char-ttyS rw".to_string()));
+        assert!(lines.contains(&"DeviceAllow=char-ttyAS rw".to_string()));
         assert!(!lines.contains(&"DeviceAllow=char-tty rw".to_string()));
         let uart = caps(&["hardware.uart"]);
         assert_eq!(
