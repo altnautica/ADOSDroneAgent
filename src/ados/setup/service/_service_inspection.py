@@ -24,6 +24,26 @@ def _cloudflared_running(service_name: str) -> bool:
     return False
 
 
+# The ground station's media server unit: running means the received video
+# is being served.
+_GS_MEDIA_UNIT = "ados-mediamtx-gs"
+# A WFB key file is exactly 64 bytes; a bound ground station holds rx.key.
+_WFB_KEY_BYTES = 64
+
+
+def _gs_radio_bound(key_dir: Path) -> bool:
+    """Whether the ground station holds a bound radio key (``rx.key``)."""
+    try:
+        return (key_dir / "rx.key").stat().st_size == _WFB_KEY_BYTES
+    except OSError:
+        return False
+
+
+def _gs_media_running() -> bool:
+    """Whether the ground station's media server unit is active."""
+    return _cloudflared_running(_GS_MEDIA_UNIT)
+
+
 def _remote_status(config: Any) -> RemoteAccessStatus:
     remote = config.remote_access
     cf = remote.cloudflare

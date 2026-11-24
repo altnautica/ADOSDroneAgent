@@ -177,17 +177,19 @@ fn default_history_seconds() -> i64 {
 /// On this native front the radio's per-heartbeat link samples flow to the store as
 /// `link.*` metrics, so the history is read from the store's aggregate and reshaped
 /// into `{samples: [{timestamp, rssi_dbm, snr_db, loss_percent, bitrate_kbps}],
-/// count}`. An unreachable store degrades to the native empty history `{"samples": [],
-/// "count": 0}`.
+/// count}`. An unreachable or empty store falls back to the in-process ring
+/// (`crate::routes::wfb_history`) sampled off the radio's status sidecar.
 pub async fn get_wfb_history(
     State(state): State<AppState>,
     Query(q): Query<HistoryQuery>,
 ) -> Json<Value> {
     let seconds = q.seconds.clamp(1, 300);
-    if let Some(hist) = latest_wfb_history(&state, seconds).await {
-        return Json(hist);
+    match latest_wfb_history(&state, seconds).await {
+        Some(hist) if hist.get("count").and_then(Value::as_u64).unwrap_or(0) > 0 => Json(hist),
+        // The store is off or holds no link metrics (always so on a ground
+        // station): serve the in-process ring the sampler fills.
+        _ => Json(crate::routes::wfb_history::ring_window(seconds)),
     }
-    Json(json!({"samples": [], "count": 0}))
 }
 
 /// The aggregate metrics that compose a history sample, paired with their sample-row
@@ -407,7 +409,7 @@ async fn latest_wfb_failover(state: &AppState) -> Option<String> {
 /// matching the Python `_iso_from_us` (`datetime.fromtimestamp(...).isoformat()`
 /// with `+00:00` replaced by `Z`). Microsecond precision is preserved when the
 /// timestamp carries a sub-second remainder, matching `isoformat()`.
-fn iso_from_us(ts_us: i64) -> String {
+pub(crate) fn iso_from_us(ts_us: i64) -> String {
     let secs = ts_us.div_euclid(1_000_000);
     let micros = ts_us.rem_euclid(1_000_000);
     let base = iso8601_from_unix_secs(secs);

@@ -82,8 +82,9 @@ pub(super) fn links_panel(frame: &mut Frame, area: Rect, core: &Core, dash: &Das
             lines.push(Line::from(""));
         }
         lines.push(Line::from(Span::styled(group.title, t.text())));
-        if !group.desc.is_empty() {
-            lines.push(Line::from(Span::styled(group.desc, t.dim())));
+        let desc = link_desc(group.title, group.desc, &dash.profile);
+        if !desc.is_empty() {
+            lines.push(Line::from(Span::styled(desc, t.dim())));
         }
         for row in &group.rows {
             let (arrow, url_style) = if row.loopback {
@@ -289,6 +290,31 @@ pub(super) fn autopilot_panel(
     render_cells(frame, t, inner, cells);
 }
 
+/// The video pipeline state in words: the raw `not_initialized` token reads
+/// as "Not started"; other tokens lose their underscores.
+fn video_state_label(state: &str) -> String {
+    match state {
+        "" | "unknown" => "unknown".to_string(),
+        "not_initialized" => "Not started".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// A link group's description, worded for the node's profile: a ground
+/// station is added to Mission Control as a ground station, and flies its
+/// paired drone through it rather than being flown itself.
+fn link_desc(title: &str, desc: &'static str, profile: &str) -> &'static str {
+    if profile != "ground_station" {
+        return desc;
+    }
+    match title {
+        "Connect to GCS" => "Add this ground station to Mission Control: paste one of these into the Add-a-Node card (LAN pairing).",
+        "Mission Control" => "Open Mission Control to fly the drone paired with this ground station.",
+        "Video" => "The received drone video in a browser (WHEP viewer).",
+        _ => desc,
+    }
+}
+
 pub(super) fn video_panel(frame: &mut Frame, area: Rect, core: &Core, dash: &Dashboard) {
     let t = &core.theme;
     let block = panel(t, core.sym, "Video");
@@ -303,11 +329,7 @@ pub(super) fn video_panel(frame: &mut Frame, area: Rect, core: &Core, dash: &Das
     } else {
         t.warning()
     };
-    let state = if dash.video_state.is_empty() {
-        "unknown".to_string()
-    } else {
-        dash.video_state.clone()
-    };
+    let state = video_state_label(&dash.video_state);
     let line = Line::from(vec![
         Span::styled("● ", Style::default().fg(dot_color)),
         Span::styled(state, t.bright()),
@@ -449,5 +471,27 @@ pub(super) fn step_dot(t: &Theme, state: &str) -> (&'static str, Color) {
         "in_progress" => ("◐", t.accent()),
         "needs_action" => ("▲", t.warning()),
         _ => ("○", t.muted()),
+    }
+}
+
+#[cfg(test)]
+mod profile_wording_tests {
+    use super::*;
+
+    #[test]
+    fn video_state_reads_in_words() {
+        assert_eq!(video_state_label("not_initialized"), "Not started");
+        assert_eq!(video_state_label(""), "unknown");
+        assert_eq!(video_state_label("running"), "running");
+    }
+
+    #[test]
+    fn link_descriptions_name_the_ground_station_on_a_ground_station() {
+        let drone = "Add this drone to Mission Control";
+        assert_eq!(link_desc("Connect to GCS", drone, "drone"), drone);
+        let gs = link_desc("Connect to GCS", drone, "ground_station");
+        assert!(gs.starts_with("Add this ground station"));
+        assert!(!link_desc("Mission Control", "x", "ground_station").contains("fly this drone"));
+        assert_eq!(link_desc("Console", "c", "ground_station"), "c");
     }
 }

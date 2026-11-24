@@ -696,3 +696,16 @@ fn status_golden_fixture_for_an_idle_direct_gs() {
     assert_eq!(body["link"]["state"], json!("connecting"));
     assert_eq!(body["link"]["channel"], Value::Null);
 }
+
+/// A bind that holds the drone in a fleet slot but never wrote the config peer
+/// still names the drone: the served slot first, else the lowest slot.
+#[test]
+fn slot_peer_names_the_served_slot_then_the_lowest() {
+    let mut registry = ados_groundlink::fleet::FleetRegistry::default();
+    assert_eq!(slot_peer(&registry, None), Value::Null);
+    let a = registry.allocate("drone-a").unwrap();
+    let b = registry.allocate("drone-b").unwrap();
+    assert_eq!(slot_peer(&registry, None), json!("drone-a"));
+    assert_eq!(slot_peer(&registry, Some(b)), json!("drone-b"));
+    assert_eq!(slot_peer(&registry, Some(a)), json!("drone-a"));
+}

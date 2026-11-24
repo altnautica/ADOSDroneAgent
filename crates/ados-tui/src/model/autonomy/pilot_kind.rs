@@ -27,6 +27,15 @@ pub(super) fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
+                // Optional detail: absent, or a shape this build does not
+                // know (a newer fix kind), reads as none.
+                params: r
+                    .get("params")
+                    .and_then(|p| serde_json::from_value(p.clone()).ok())
+                    .unwrap_or_default(),
+                fix: r
+                    .get("fix")
+                    .and_then(|f| serde_json::from_value(f.clone()).ok()),
             })
         })
         .collect();

@@ -193,7 +193,7 @@ fn slot_table_with(
 /// while it is still registered, otherwise the lowest registered slot, which
 /// is the receive chain's primary. Resolved by the same function the fan-out
 /// runs, so the roster and the stream cannot disagree.
-fn served_video_slot(registry: &FleetRegistry) -> Option<u8> {
+pub(crate) fn served_video_slot(registry: &FleetRegistry) -> Option<u8> {
     let primary = registry.slots().map(|s| s.slot).min()?;
     Some(ados_groundlink::fanout::resolve_fanout_slot(
         primary,

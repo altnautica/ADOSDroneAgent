@@ -12,6 +12,7 @@ from typing import Any
 
 from ados import __version__
 from ados.core._contracts_generated import PROFILES
+from ados.core.paths import WFB_KEY_DIR
 from ados.setup.hardware_check import run_hardware_check_cached
 from ados.setup.models import (
     MavlinkAccess,
@@ -37,7 +38,7 @@ from ._net_helpers import (
     _probe_wifi_ssid,
     _safe_host_for,
 )
-from ._service_inspection import _remote_status
+from ._service_inspection import _gs_media_running, _gs_radio_bound, _remote_status
 
 
 async def build_setup_status(
@@ -173,6 +174,7 @@ def _assemble_status(  # noqa: C901
     reg_cfg = getattr(getattr(config, "network", None), "regulatory", None)
     reg_mode = str(getattr(reg_cfg, "mode", "unrestricted") or "unrestricted")
     reg_region = getattr(reg_cfg, "region", None)
+    is_ground_profile = profile_for_check == "ground_station"
     steps = _setup_steps(
         profile=str(config.agent.profile),
         mavlink=mavlink,
@@ -186,6 +188,8 @@ def _assemble_status(  # noqa: C901
         mission_control_url=mission_control_url,
         regulatory_mode=reg_mode,
         regulatory_region=reg_region,
+        gs_radio_bound=is_ground_profile and _gs_radio_bound(WFB_KEY_DIR),
+        gs_video_running=is_ground_profile and _gs_media_running(),
     )
 
     # Apply persisted skip flags. Steps the operator chose to defer move

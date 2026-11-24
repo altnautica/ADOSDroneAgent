@@ -108,6 +108,7 @@ pub mod vision;
 pub mod vision_detector;
 pub mod vision_upload;
 pub mod wfb;
+pub mod wfb_history;
 pub mod wfb_local_bind;
 pub mod wfb_pair_write;
 pub mod wfb_write;

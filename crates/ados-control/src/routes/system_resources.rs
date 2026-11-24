@@ -85,7 +85,7 @@ fn derive_system(signals: &Map<String, Value>) -> Option<Value> {
         "disk_total_gb": round1(disk_total / BYTES_PER_GB),
         "disk_used_gb": round1(disk_used / BYTES_PER_GB),
         "disk_percent": disk_percent,
-        "temperatures": temperatures(signals),
+        "temperatures": temperatures(signals, std::path::Path::new(THERMAL_ROOT)),
     }))
 }
 
@@ -94,7 +94,11 @@ fn derive_system(signals: &Map<String, Value>) -> Option<Value> {
 /// `thermal.primary_c` (a duplicate of the first zone, surfaced separately),
 /// keyed by the sensor sub-name. A `bool` is excluded (a JSON bool is not a
 /// number, matching the Python `isinstance` guard).
-fn temperatures(signals: &Map<String, Value>) -> Value {
+///
+/// The store is off by default, and the host read carries only the primary
+/// zone, so with no per-sensor signals the map is read straight from the
+/// kernel's thermal zones under `thermal_root` (see [`thermal_zones`]).
+fn temperatures(signals: &Map<String, Value>, thermal_root: &std::path::Path) -> Value {
     let mut temps = Map::new();
     for (key, value) in signals {
         if !(key.starts_with("thermal.") && key.ends_with("_c")) {
@@ -110,7 +114,51 @@ fn temperatures(signals: &Map<String, Value>) -> Value {
             }
         }
     }
+    if temps.is_empty() {
+        temps = thermal_zones(thermal_root);
+    }
     Value::Object(temps)
+}
+
+/// The Linux thermal class directory.
+const THERMAL_ROOT: &str = "/sys/class/thermal";
+
+/// Every readable `thermal_zone<N>` under `root` in °C, keyed by the zone's
+/// `type` (`cpu-thermal`, …) with `-`/` ` folded to `_`, else `zone<N>`. Empty
+/// when no zone is readable.
+fn thermal_zones(root: &std::path::Path) -> Map<String, Value> {
+    let mut out = Map::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    let mut zones: Vec<(u32, std::path::PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let index = e
+                .file_name()
+                .to_str()?
+                .strip_prefix("thermal_zone")?
+                .parse::<u32>()
+                .ok()?;
+            Some((index, e.path()))
+        })
+        .collect();
+    zones.sort_unstable_by_key(|(i, _)| *i);
+    for (index, zone) in zones {
+        let Some(milli) = std::fs::read_to_string(zone.join("temp"))
+            .ok()
+            .and_then(|t| t.trim().parse::<i64>().ok())
+        else {
+            continue;
+        };
+        let name = std::fs::read_to_string(zone.join("type"))
+            .ok()
+            .map(|t| t.trim().replace(['-', ' '], "_"))
+            .filter(|t| !t.is_empty() && !out.contains_key(t))
+            .unwrap_or_else(|| format!("zone{index}"));
+        out.insert(name, json!(milli as f64 / 1000.0));
+    }
+    out
 }
 
 /// The most-degraded shape: the FastAPI `except ImportError` branch (store down
@@ -193,6 +241,30 @@ fn round_int(v: f64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no per-sensor store signals (the store is off by default), the
+    /// temperatures come straight from the kernel's thermal zones.
+    #[test]
+    fn temperatures_fall_back_to_the_thermal_zones() {
+        let dir = tempfile::tempdir().unwrap();
+        let zone = |name: &str, kind: Option<&str>, temp: &str| {
+            let z = dir.path().join(name);
+            std::fs::create_dir_all(&z).unwrap();
+            std::fs::write(z.join("temp"), temp).unwrap();
+            if let Some(k) = kind {
+                std::fs::write(z.join("type"), k).unwrap();
+            }
+        };
+        zone("thermal_zone0", Some("cpu-thermal\n"), "41500\n");
+        zone("thermal_zone1", None, "38000\n");
+        let only_primary = signals(&[("thermal.primary_c", 41.8)]);
+        let temps = temperatures(&only_primary, dir.path());
+        assert_eq!(temps, json!({"cpu_thermal": 41.5, "zone1": 38.0}));
+
+        // Store signals win when present.
+        let store = signals(&[("thermal.soc_c", 50.0)]);
+        assert_eq!(temperatures(&store, dir.path()), json!({"soc": 50.0}));
+    }
 
     fn signals(pairs: &[(&str, f64)]) -> Map<String, Value> {
         pairs

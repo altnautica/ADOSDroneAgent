@@ -88,6 +88,48 @@ def _sysfs_matches(node: str, wanted: dict[str, re.Pattern[str]]) -> bool:
 # device is currently disconnected.
 _PROBE_CACHE_TTL_S = 5.0
 
+# ioctl request binding an I2C file descriptor to a 7-bit target address.
+_I2C_SLAVE = 0x0703
+_I2C_BUS_RE = re.compile(r"/dev/i2c-\d+")
+
+
+def _i2c_ack(node: str, addrs: list[int]) -> bool:
+    """Whether any of ``addrs`` acknowledges a one-byte read on ``node``.
+
+    An I2C bus node exists whenever the bus is enabled, so its presence
+    says nothing about a device on it; this asks the device itself, the
+    same probe the display daemon runs before it starts. Best-effort:
+    any error is "no device".
+    """
+    import fcntl
+
+    try:
+        fd = os.open(node, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        for addr in addrs:
+            try:
+                fcntl.ioctl(fd, _I2C_SLAVE, addr)
+                os.read(fd, 1)
+                return True
+            except OSError:
+                continue
+        return False
+    finally:
+        os.close(fd)
+
+
+def _i2c_addrs(extra: dict) -> list[int]:
+    """The manifest's ``extra.i2c_addr_candidates`` as integers."""
+    out: list[int] = []
+    for raw in extra.get("i2c_addr_candidates") or []:
+        try:
+            out.append(int(str(raw), 0))
+        except ValueError:
+            continue
+    return out
+
 
 class PeripheralRegistry:
     """Process-wide peripheral manifest registry.
@@ -157,8 +199,17 @@ class PeripheralRegistry:
                     sysfs=match.sysfs,
                 )
                 return False
+            # An I2C manifest naming its addresses counts only a bus on
+            # which one of them answers: the bus node alone is not a device.
+            addrs = _i2c_addrs(manifest.extra)
             return any(
-                pattern.fullmatch(candidate) and _sysfs_matches(candidate, sysfs)
+                pattern.fullmatch(candidate)
+                and _sysfs_matches(candidate, sysfs)
+                and (
+                    not addrs
+                    or not _I2C_BUS_RE.fullmatch(candidate)
+                    or _i2c_ack(candidate, addrs)
+                )
                 for candidate in _dev_nodes()
             )
 

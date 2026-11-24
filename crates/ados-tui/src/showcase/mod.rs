@@ -11,7 +11,7 @@ mod pages;
 const EXPECT: [(&str, &str); 18] = [
     ("overview", "Overview"),
     ("vehicle", "Vehicle"),
-    ("link", "Link"),
+    ("link", "Radio link"),
     ("video", "Video"),
     ("params", "ATC_RAT_RLL_P"),
     ("params-write", "to the flight controller?"),

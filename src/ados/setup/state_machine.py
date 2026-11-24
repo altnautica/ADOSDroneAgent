@@ -91,6 +91,8 @@ def _setup_steps(
     mission_control_url: str,
     regulatory_mode: str = "unrestricted",
     regulatory_region: str | None = None,
+    gs_radio_bound: bool = False,
+    gs_video_running: bool = False,
 ) -> list[SetupStep]:
     """Emit the canonical onboarding steps in spec-39 order.
 
@@ -276,8 +278,11 @@ def _setup_steps(
         item.id == "camera" and item.state == "ok"
         for item in hardware_check.items
     )
-    if video.state == "running":
-        video_detail = "WHEP video is live"
+    # A ground station serves the video it receives through its own media
+    # server, not a camera pipeline, so that unit running is its video live.
+    video_live = video.state == "running" or (is_ground and gs_video_running)
+    if video_live:
+        video_detail = "WHEP video is live" if video.state == "running" else "Serving the received video."
     elif camera_detected:
         video_detail = "Camera detected. Click Start video to begin streaming."
     else:
@@ -287,7 +292,7 @@ def _setup_steps(
         SetupStep(
             id="video",
             label="Video",
-            state="complete" if video.state == "running" else "needs_action",
+            state="complete" if video_live else "needs_action",
             detail=video_detail,
             action_label="Open Video",
             href="/video.html",
@@ -299,10 +304,14 @@ def _setup_steps(
             SetupStep(
                 id="ground_receiver",
                 label="Ground receiver",
-                state="complete" if video.state == "running" else "needs_action",
+                # Bound to a drone (the receive key is on disk) is the step's
+                # goal; video flowing is shown in the video step.
+                state="complete" if (gs_radio_bound or video_live) else "needs_action",
                 detail=(
                     "Receiving WFB video."
-                    if video.state == "running"
+                    if video_live
+                    else "Bound to a drone."
+                    if gs_radio_bound
                     else "Configure the WFB receiver and mesh role, then bind to a drone."
                 ),
                 action_label="Open Ground station",

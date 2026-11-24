@@ -5,8 +5,10 @@
 //! point, the control mode and profile, who holds the sticks, the gimbal,
 //! obstacle avoidance (`route`), the mission progress, the link-loss action or
 //! countdown, the height above ground with its source, and the status pill's
-//! alerts (the airframe balance alert with its "I rebalanced it" key while it
-//! answers). A steady take-off shows its status line and detail under the launch.
+//! alerts grouped by section with each readiness item's parameters and fix
+//! (`alerts`; the airframe balance alert with its "I rebalanced it" key while
+//! it answers). A steady take-off shows its status line and detail under the
+//! launch.
 //! The stall overlay hides the stall's own banners while it shows.
 //! Every word is the cockpit spec's. A row from a stale pilot kind (a failed
 //! read, or a kind past the spec's stale age counting the time since the last
@@ -22,7 +24,7 @@ use crate::model::autonomy::{Follow, Pilot};
 use crate::model::flight_state::readouts::{bottom_row_agl, link_loss_action_text, link_loss_line};
 use crate::model::flight_state::{avoid_state_text, stale_after_ms, ChipView};
 use crate::model::mission_stall::{banner_text, low_battery_line, stall_keys, stall_view};
-use crate::model::pilot_alerts::{alerts_count_text, PillAlert, Severity};
+use crate::model::pilot_alerts::PillAlert;
 use crate::model::route_check::{
     other_place_class, place_label, route_check_report, stall_shadows_banner, ReportSeverity,
 };
@@ -32,9 +34,11 @@ use crate::ui::widgets::{kv, kv_text};
 
 use super::autonomy::{mark_stale, LABEL};
 
+mod alerts;
 mod fit;
 mod route;
 mod sensing;
+use alerts::alert_rows;
 pub use fit::{min_rows, render};
 
 /// A Pilot row, and whether it must show on a short terminal.
@@ -236,39 +240,6 @@ fn op_text(op: &str) -> String {
         "goto" => spec_text("map.fly_here", &[]),
         other => format!("Other ({other})"),
     }
-}
-
-/// The alert count and one line per alert. The alerts are computed now from
-/// the readings the tab holds (an aged pilot kind adds its own "not
-/// answering" item), so they never read as stale with the pilot kind. The
-/// Balance check alert carries its key on the next line (the narrow column
-/// never cuts it off) while "I rebalanced it" answers.
-fn alert_rows(core: &Core, alerts: &[PillAlert], airframe_key: bool) -> Vec<Row> {
-    let t = &core.theme;
-    let count = alerts_count_text(alerts.len()).unwrap_or_else(|| "–".into());
-    let mut out = vec![(kv_text(t, "Alerts", LABEL, count), true)];
-    for a in alerts {
-        let (sym, color) = match a.severity {
-            Severity::Critical => (core.sym.err, t.error()),
-            Severity::Warning => (core.sym.warn, t.warning()),
-        };
-        let line = Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{sym} {}", a.text), Style::default().fg(color)),
-        ]);
-        out.push((line, false));
-        if airframe_key && a.id == "pilot:airframe_balance" {
-            let key = Line::from(vec![
-                Span::raw("    "),
-                Span::styled(
-                    format!("b {}", spec_text("readiness.airframe_balance.reset", &[])),
-                    t.bright(),
-                ),
-            ]);
-            out.push((key, false));
-        }
-    }
-    out
 }
 
 /// A whole number for a count the wire sends as a JSON number.

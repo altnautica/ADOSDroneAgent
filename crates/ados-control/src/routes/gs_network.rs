@@ -172,7 +172,10 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
         return profile_mismatch();
     }
     let cfg = crate::config::load_config_object_default();
-    let active_uplink = latest_uplink_active(&state).await.unwrap_or(Value::Null);
+    let active_uplink = active_uplink_from(
+        &state.run_dir.join("uplink-active"),
+        latest_uplink_active(&state).await,
+    );
     let body = json!({
         "ap": ap_view(&cfg).await,
         "wifi_client": wifi_client_view().await,
@@ -315,6 +318,25 @@ pub(crate) async fn wifi_status(sock: &std::path::Path) -> Option<Map<String, Va
 async fn latest_uplink_active(state: &AppState) -> Option<Value> {
     let detail = state.logd.latest_event_detail("net.uplink_active").await?;
     detail.get("active_uplink").cloned()
+}
+
+/// The active uplink interface: the uplink router's live sentinel first (the
+/// same source `/status` reads, so both surfaces name one lane), else the
+/// store's last event, else null. The store is off by default, so without the
+/// sentinel read a live Ethernet uplink read as none.
+fn active_uplink_from(flag: &Path, store: Option<Value>) -> Value {
+    #[derive(serde::Deserialize)]
+    struct Flag {
+        active_uplink: String,
+    }
+    std::fs::read_to_string(flag)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Flag>(&text).ok())
+        .map(|f| f.active_uplink.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .map(Value::String)
+        .or(store)
+        .unwrap_or(Value::Null)
 }
 
 /// The store's most-recent modem cumulative-usage block, or `None` when the store is

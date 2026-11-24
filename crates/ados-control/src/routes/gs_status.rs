@@ -342,14 +342,35 @@ fn pair_identity(state: &AppState) -> (Value, Value) {
     }
 
     // The config peer (`video.wfb.paired_with_device_id`, with the legacy
-    // `ground_station.paired_drone_id` fallback), surfaced only when paired.
+    // `ground_station.paired_drone_id` fallback), surfaced only when paired. A
+    // bind that never wrote the config peer still holds the drone in the fleet
+    // registry, so the served (or lowest) slot names it.
     let device_id = if paired {
-        config_gs_peer(&state.pairing_paths.config)
+        let peer = config_gs_peer(&state.pairing_paths.config);
+        if peer.is_null() {
+            let registry = crate::routes::gs_wfb_pair::load_registry();
+            slot_peer(
+                &registry,
+                crate::routes::gs_wfb_pair::served_video_slot(&registry),
+            )
+        } else {
+            peer
+        }
     } else {
         Value::Null
     };
 
     (device_id, fingerprint)
+}
+
+/// The device id of the slot the ground station serves video from, else the
+/// lowest registered slot; `null` for an empty registry.
+fn slot_peer(registry: &ados_groundlink::fleet::FleetRegistry, served: Option<u8>) -> Value {
+    served
+        .and_then(|n| registry.slots().find(|s| s.slot == n))
+        .or_else(|| registry.slots().min_by_key(|s| s.slot))
+        .map(|s| json!(s.device_id))
+        .unwrap_or(Value::Null)
 }
 
 /// The GS peer device id from the config, preferring `video.wfb.paired_with_device_id`

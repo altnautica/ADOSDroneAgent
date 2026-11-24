@@ -121,3 +121,23 @@ def test_path_only_manifest_still_matches_by_path(
     _dev_nodes(monkeypatch, "/dev/ttyACM0")
     registry = PeripheralRegistry(glob_path=str(manifests / "*.yaml"))
     assert _connected(registry, "example.fc") is True
+
+
+def test_oled_needs_an_i2c_ack_not_just_the_bus_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sys_class: Path
+) -> None:
+    """An enabled I2C bus with no OLED on it is not a connected OLED."""
+    _dev_nodes(monkeypatch, "/dev/i2c-1")
+    probed: list[tuple[str, list[int]]] = []
+
+    def no_ack(node: str, addrs: list[int]) -> bool:
+        probed.append((node, addrs))
+        return False
+
+    monkeypatch.setattr(reg, "_i2c_ack", no_ack)
+    assert _connected(_registry(tmp_path, "oled-i2c.yaml"), "ados.oled-i2c") is False
+    assert probed == [("/dev/i2c-1", [0x3C, 0x3D])]
+
+    monkeypatch.setattr(reg, "_i2c_ack", lambda node, addrs: True)
+    (tmp_path / "again").mkdir()
+    assert _connected(_registry(tmp_path / "again", "oled-i2c.yaml"), "ados.oled-i2c") is True

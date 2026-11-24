@@ -578,3 +578,16 @@ fn priority_list_from(obj: Option<&Map<String, Value>>) -> Value {
     }
     Value::Array(arr.clone())
 }
+
+/// The router's live sentinel names the active uplink even with the store off,
+/// so a live Ethernet lane no longer reads as no uplink.
+#[test]
+fn active_uplink_reads_the_router_sentinel_before_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = dir.path().join("uplink-active");
+    assert_eq!(active_uplink_from(&flag, None), Value::Null);
+    assert_eq!(active_uplink_from(&flag, Some(json!("wlan0_client"))), json!("wlan0_client"));
+    std::fs::write(&flag, r#"{"active_uplink":"eth0","internet_reachable":true}"#).unwrap();
+    assert_eq!(active_uplink_from(&flag, None), json!("eth0"));
+    assert_eq!(active_uplink_from(&flag, Some(Value::Null)), json!("eth0"));
+}

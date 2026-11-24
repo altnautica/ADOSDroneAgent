@@ -29,6 +29,55 @@ pub struct LinkTab {
 }
 
 /// `—` for a missing value.
+/// The regulatory domain as the one name every surface uses: the raw
+/// `global` token is the "Unrestricted" setting.
+fn region_label(domain: Option<&str>) -> String {
+    match domain {
+        None => "—".into(),
+        Some(d) if d.eq_ignore_ascii_case("global") => "Unrestricted".into(),
+        Some(d) => d.to_string(),
+    }
+}
+
+/// The ground station's received video on one line: stream state, codec,
+/// viewers and the SEI glass-to-glass latency, from `GET /api/video` and
+/// `GET /api/video/latency`. A reading the agent does not give is a dash.
+fn video_receive_line(status: Option<&Value>, latency: Option<&Value>) -> String {
+    let Some(v) = status else {
+        return "—".into();
+    };
+    let mtx = v.get("mediamtx");
+    let running = mtx.and_then(|m| m.get("running")).and_then(Value::as_bool);
+    let ready = mtx.and_then(|m| m.get("ready")).and_then(Value::as_bool) == Some(true);
+    let state = if running == Some(false) {
+        "media server down"
+    } else if v.get("state").and_then(Value::as_str) == Some("running") && ready {
+        "receiving"
+    } else {
+        "no stream"
+    };
+    let tracks = mtx
+        .and_then(|m| m.get("tracks"))
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|| "—".into());
+    let viewers = mtx
+        .and_then(|m| m.get("readers"))
+        .and_then(Value::as_u64)
+        .map_or_else(|| "—".into(), |n| n.to_string());
+    let lat = latency
+        .and_then(|l| l.get("latency_ms"))
+        .and_then(Value::as_f64)
+        .map_or_else(|| "—".into(), |ms| format!("{ms:.0} ms"));
+    format!("{state} · {tracks} · {viewers} viewers · {lat}")
+}
+
 pub(super) fn or_dash<T>(v: Option<T>, f: impl Fn(T) -> String) -> String {
     v.map(f).unwrap_or_else(|| "—".into())
 }
@@ -134,7 +183,7 @@ impl LinkTab {
             t,
             "Region",
             W,
-            w.regulatory_domain.clone().unwrap_or_else(|| "—".into()),
+            region_label(w.regulatory_domain.as_deref()),
         ));
         lines.push(kv_text(
             t,
@@ -201,6 +250,17 @@ impl LinkTab {
                 t.bright()
             };
             lines.push(kv(t, "Link key", W, Span::styled(label, style)));
+        }
+        if w.ground {
+            lines.push(kv_text(
+                t,
+                "Video",
+                W,
+                video_receive_line(
+                    core.value(&ResourceId::VideoStatus),
+                    core.value(&ResourceId::VideoLatency),
+                ),
+            ));
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -304,6 +364,12 @@ impl Tab for LinkTab {
                 ResourceId::VideoConfig,
                 "/api/video/config",
                 5000,
+            ));
+            subs.push(Sub::every_ms(ResourceId::VideoStatus, "/api/video", 2000));
+            subs.push(Sub::every_ms(
+                ResourceId::VideoLatency,
+                "/api/video/latency",
+                2000,
             ));
         }
         subs
@@ -413,3 +479,33 @@ impl Tab for LinkTab {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod receive_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn region_global_reads_unrestricted() {
+        assert_eq!(region_label(Some("global")), "Unrestricted");
+        assert_eq!(region_label(Some("US")), "US");
+        assert_eq!(region_label(None), "—");
+    }
+
+    #[test]
+    fn the_received_video_reads_on_one_line() {
+        let status = json!({"state": "running", "mediamtx": {"running": true, "ready": true,
+                            "tracks": ["H264"], "readers": 2}});
+        let latency = json!({"latency_ms": 142.4});
+        assert_eq!(
+            video_receive_line(Some(&status), Some(&latency)),
+            "receiving · H264 · 2 viewers · 142 ms"
+        );
+        let idle = json!({"state": "not_initialized", "mediamtx": {"running": true}});
+        assert_eq!(
+            video_receive_line(Some(&idle), None),
+            "no stream · — · — viewers · —"
+        );
+        assert_eq!(video_receive_line(None, None), "—");
+    }
+}

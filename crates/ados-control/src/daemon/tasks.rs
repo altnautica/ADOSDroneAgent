@@ -300,6 +300,13 @@ where
         is_ground_station,
     ));
 
+    // Link-quality history: sample the radio's status sidecar into the ring
+    // `GET /api/wfb/history` serves when the store has no link metrics.
+    tokio::spawn(crate::routes::wfb_history::run_sampler(
+        paths.config_path.clone(),
+        state.run_dir.clone(),
+    ));
+
     // The proxied-route auth decision: the ported Python auth + HMAC middlewares
     // the front runs on every forwarded (non-native) route, so the front is the
     // single authenticator for the whole surface. It reads the configured key +

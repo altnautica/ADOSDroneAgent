@@ -58,6 +58,9 @@ pub enum ResourceId {
     VideoConfig,
     VideoCameras,
     VideoLatency,
+    /// `GET /api/video`: the media server's stream state (the ground
+    /// station's Link tab reads it for the received video).
+    VideoStatus,
     Params,
     Plugins,
     PluginsCatalog,

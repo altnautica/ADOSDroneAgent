@@ -114,11 +114,13 @@ pub fn header(f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
                 out.offline_chip = Some(Rect::new(x, area.y, cw, 1));
             }
         }
+        // The poll clock is UTC (`now_hms`); it says so, so it is never read as
+        // the local time the cockpit strip shows.
         None => right.push(Span::styled(
-            core.view
-                .refreshed
-                .clone()
-                .unwrap_or_else(|| "--:--:--".into()),
+            format!(
+                "{} UTC",
+                core.view.refreshed.as_deref().unwrap_or("--:--:--")
+            ),
             t.dim(),
         )),
     }
@@ -142,7 +144,7 @@ pub fn tab_bar(f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
     // Widest form that fits: icon + label, then label, then the short label
     // (always below 100 columns).
     let label = |tab: TabId, mode: u8| {
-        let icon = core.sym.tab_icons[tab.index()];
+        let icon = tab.icon(core.sym, profile);
         match mode {
             0 if !icon.is_empty() => format!(" {} {} {} ", tab.digit(), icon, tab.label(profile)),
             0 | 1 => format!(" {} {} ", tab.digit(), tab.label(profile)),

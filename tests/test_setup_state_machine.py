@@ -227,3 +227,29 @@ def test_hardware_check_required_missing_blocks_step() -> None:
 def test_build_setup_steps_alias_matches_underscore() -> None:
     """build_setup_steps is the public alias for _setup_steps."""
     assert build_setup_steps is _setup_steps
+
+
+def test_ground_station_bound_and_serving_is_ready_without_a_camera() -> None:
+    """A bound ground station serving received video needs no receiver or video action."""
+    kwargs = dict(
+        profile="ground_station",
+        mavlink=MavlinkAccess(),
+        video=VideoAccess(state="not_initialized"),
+        network=NetworkStatus(local_ips=["10.0.0.5"]),
+        remote=RemoteAccessStatus(),
+        cloud_choice=CloudChoiceStatus(mode="local"),
+        profile_suggestion=ProfileSuggestion(detected="ground_station", confirmed=True),
+        hardware_check=_ok_hc("ground_station"),
+        mission_control_url="",
+    )
+    before = {s.id: s.state for s in _setup_steps(**kwargs)}
+    assert before["ground_receiver"] == "needs_action"
+    assert before["video"] == "needs_action"
+
+    after = {
+        s.id: s
+        for s in _setup_steps(**kwargs, gs_radio_bound=True, gs_video_running=True)
+    }
+    assert after["ground_receiver"].state == "complete"
+    assert after["video"].state == "complete"
+    assert after["video"].detail == "Serving the received video."

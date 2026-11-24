@@ -60,7 +60,9 @@ impl TabId {
             TabId::Overview => "Overview",
             TabId::Vehicle if profile == "ground_station" => "Ground",
             TabId::Vehicle => "Vehicle",
-            TabId::Link => "Link",
+            // One name for the radio page on every surface (the cockpit rail,
+            // the dashboard sidebar and here).
+            TabId::Link => "Radio link",
             TabId::Video => "Video",
             TabId::Params => "Params",
             TabId::Extensions => "Extensions",
@@ -68,6 +70,20 @@ impl TabId {
             TabId::System => "System",
             TabId::Settings => "Settings",
         }
+    }
+
+    /// The tab's icon in the active glyph preset. Slot 2 on a ground station
+    /// is the station itself, so it draws a ground glyph rather than the
+    /// aircraft the Vehicle tab uses.
+    pub fn icon(self, sym: &crate::symbols::Symbols, profile: &str) -> &'static str {
+        if self == TabId::Vehicle && profile == "ground_station" {
+            return match sym.name {
+                "nerd" => "\u{f02dc}", // md-home
+                "unicode" => "⌂",
+                _ => "",
+            };
+        }
+        sym.tab_icons[self.index()]
     }
 
     /// The short label used below 100 columns.
@@ -106,5 +122,23 @@ pub fn profile_label(profile: &str) -> &str {
     match profile {
         "ground_station" => "ground station",
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::symbols::{NERD, UNICODE};
+
+    #[test]
+    fn the_radio_page_has_one_name_and_the_ground_slot_a_ground_glyph() {
+        assert_eq!(TabId::Link.label("ground_station"), "Radio link");
+        assert_eq!(TabId::Link.label("drone"), "Radio link");
+        assert_eq!(TabId::Vehicle.icon(&UNICODE, "ground_station"), "⌂");
+        assert_eq!(TabId::Vehicle.icon(&UNICODE, "drone"), "✈");
+        assert_ne!(
+            TabId::Vehicle.icon(&NERD, "ground_station"),
+            TabId::Vehicle.icon(&NERD, "drone")
+        );
     }
 }

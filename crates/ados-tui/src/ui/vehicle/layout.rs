@@ -13,6 +13,9 @@ pub(super) const TOP_ROWS: u16 = 12;
 pub(super) const CHART_ROWS: u16 = 9;
 /// Rows the Autonomy block keeps at least: its border and "… N more".
 pub(super) const AUTONOMY_MIN_ROWS: u16 = 3;
+/// Rows the Autonomy block keeps while the Pilot block's must-show rows still
+/// fit: its border, its first two rows and "… N more".
+const AUTONOMY_KEEP_ROWS: u16 = 5;
 /// Below this width the band drops to two columns.
 pub(super) const WIDE_COLS: u16 = 100;
 /// Rows of the Sensors panel when it sits below the packs.
@@ -51,12 +54,13 @@ fn right_width(w: u16) -> u16 {
     (w / 2).clamp(40, 52).min(w.saturating_sub(30))
 }
 
-/// The right column: the Pilot block first, the Autonomy block the rest.
+/// The right column: the Pilot block first, the Autonomy block the rest. A
+/// long Pilot block (many alert lines) folds its optional rows before the
+/// Autonomy block drops below its first rows; its must-show rows never fold.
 fn right_column(area: Rect, n: &Needs) -> (Rect, Rect) {
-    let pilot_h = n.pilot.min(
-        area.height
-            .saturating_sub(n.autonomy.min(AUTONOMY_MIN_ROWS)),
-    );
+    let floor = area.height.saturating_sub(n.autonomy.min(AUTONOMY_MIN_ROWS));
+    let keep = area.height.saturating_sub(n.autonomy.min(AUTONOMY_KEEP_ROWS));
+    let pilot_h = n.pilot.min(keep.max(n.pilot_min)).min(floor);
     let r = Layout::vertical([Constraint::Length(pilot_h), Constraint::Min(0)]).split(area);
     (r[0], r[1])
 }

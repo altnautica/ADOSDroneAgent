@@ -473,6 +473,11 @@ pub struct ReadinessItem {
     /// A failing blocking item refuses take-off; otherwise it only warns.
     pub block: bool,
     pub msg: String,
+    /// The parameters behind the item (what the FC has, what it wants);
+    /// empty from an older agent or an item without any.
+    pub params: Vec<ados_protocol::pilot::ParamDiff>,
+    /// Where a surface sends the operator to fix it; `None` without one.
+    pub fix: Option<ados_protocol::pilot::ReadinessFix>,
 }
 
 #[cfg(test)]
