@@ -18,7 +18,11 @@
     "failsafe": "flight_controller",
     "mission_stall": "navigation",
     "agent_unreachable": "link",
-    "pilot_not_answering": "link"
+    "pilot_not_answering": "link",
+    "preflight:link": "link",
+    "preflight:gps": "navigation",
+    "preflight:home": "navigation",
+    "preflight:battery": "power"
   },
   "source": {
     "fc_status_text": "flight_controller",

@@ -72,9 +72,10 @@ function MoreHint({ axis, end, label }: { axis: "x" | "y"; end: "before" | "afte
   );
 }
 
-/** The hidden rail's edge tab: a 12 × 64 px bar at the left edge, centred,
+/** The hidden rail's edge tab: a 20 × 64 px tab at the left edge, centred,
+ *  filled in the primary colour with a chevron so it reads on dark video,
  *  inside a 48 px wide hit area. */
-function RailEdgeTab({ onShow }: { onShow: () => void }) {
+export function RailEdgeTab({ onShow }: { onShow: () => void }) {
   const { t } = useTranslation();
   return (
     <button
@@ -84,7 +85,13 @@ function RailEdgeTab({ onShow }: { onShow: () => void }) {
       className="fixed left-0 top-1/2 z-[46] flex h-[64px] w-[48px] -translate-y-1/2 items-center"
       data-testid="rail-edge-tab"
     >
-      <span className="h-[64px] w-[12px] rounded-r-md border border-l-0 border-border bg-surface/90" aria-hidden />
+      <span
+        className="flex h-[64px] w-[20px] items-center justify-center rounded-r-md border border-l-0 border-primary bg-primary text-primary-foreground shadow-md"
+        data-testid="rail-edge-tab-fill"
+        aria-hidden
+      >
+        <ChevronRight className="h-[16px] w-[16px]" strokeWidth={3} />
+      </span>
     </button>
   );
 }

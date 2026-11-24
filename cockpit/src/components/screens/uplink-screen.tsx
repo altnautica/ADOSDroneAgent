@@ -11,12 +11,14 @@ import { useTranslation } from "react-i18next";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { Dot, EmptyNote, ErrorNote, MeterTile, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
 import { readFailed } from "@/lib/read-failed";
+import { useStatusStore } from "@/stores/status-store";
 import type { Tone } from "@/lib/tone";
 import { useResource } from "@/shared/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH } from "@/shared/format";
 import { fmtMb } from "@/lib/format-status";
-import { ethernetLaneView, laneForToken, uplinkTokenLabel, type EthernetLane } from "@/lib/uplink-lanes";
+import { activeUplinkToken, ethernetLaneView, laneForToken, laneTone, uplinkTokenLabel, type EthernetLane } from "@/lib/uplink-lanes";
+import { cn } from "@/lib/utils";
 import "@/shared/i18n";
 
 interface WifiClientLane {
@@ -50,24 +52,27 @@ interface ModemLane {
   state?: string | null;
 }
 
-/** A lane row: a status dot, the lane name, an "active" marker on the live
- *  uplink, and the lane's key detail as the hint. `up` is null when the agent
- *  has no reading for the lane, which renders a dash rather than "down". */
+/** A lane row: a status dot (ringed on the live uplink), the lane name, and
+ *  the lane's key detail as the hint. A lane that is up reads green; the
+ *  active one is amber only when degraded. `up` is null when the agent has no
+ *  reading for the lane, which renders a dash rather than "down". */
 function LaneRow({
   name,
   up,
   active,
+  reachable,
   detail,
   right,
 }: {
   name: string;
   up: boolean | null;
   active: boolean;
+  reachable: boolean | null | undefined;
   detail?: string;
   right?: string;
 }) {
   const { t } = useTranslation();
-  const tone: Tone = active ? "ok" : up ? "warn" : "muted";
+  const { tone, ring } = laneTone({ up, active, reachable });
   const state = active
     ? t("uplink.state.active")
     : up == null
@@ -75,7 +80,23 @@ function LaneRow({
       : up
         ? t("uplink.state.connected")
         : t("uplink.state.notConnected");
-  return <Row label={name} left={<Dot tone={tone} />} hint={detail} value={right ?? state} tone={tone} />;
+  return <Row label={name} left={<LaneDot tone={tone} ring={ring} />} hint={detail} value={right ?? state} tone={tone} />;
+}
+
+/** The lane's dot; the active lane's carries a ring in its tone. */
+function LaneDot({ tone, ring }: { tone: Tone; ring: boolean }) {
+  return (
+    <span
+      data-testid={ring ? "uplink-lane-active" : undefined}
+      className={cn(
+        "inline-flex shrink-0 rounded-full p-[0.12rem]",
+        ring && "ring-2",
+        ring && (tone === "warn" ? "ring-warn" : "ring-ok"),
+      )}
+    >
+      <Dot tone={tone} />
+    </span>
+  );
 }
 
 export function UplinkScreen() {
@@ -90,7 +111,10 @@ export function UplinkScreen() {
   );
 
   const n = net.data;
-  const active = n?.active_uplink ?? null;
+  // The lane composite's selection, else the status payload's uplink kind.
+  const uplinkType = useStatusStore((s) => s.status?.network?.uplink_type ?? null);
+  const reachable = useStatusStore((s) => s.status?.network?.uplink_reachable ?? null);
+  const active = activeUplinkToken(n?.active_uplink, uplinkType);
   const activeLane = laneForToken(active);
   const wifi = n?.wifi_client;
   const eth = ethernetLaneView(n?.ethernet);
@@ -104,7 +128,8 @@ export function UplinkScreen() {
   const capPct = m?.percent ?? (capMb && usedMb != null ? (usedMb / capMb) * 100 : null);
 
   // A failed read is unknown, never "no uplink".
-  const headline = n == null ? DASH : active ? uplinkTokenLabel(active) : t("uplink.active.none");
+  const headline = active ? uplinkTokenLabel(active) : n == null && uplinkType == null ? DASH : t("uplink.active.none");
+  const headTone: Tone = laneTone({ up: null, active: active != null, reachable }).tone;
 
   let body;
   if (net.status === 404) {
@@ -122,21 +147,24 @@ export function UplinkScreen() {
           name={t("uplink.leg.ethernet")}
           up={eth.up}
           active={activeLane === "ethernet"}
+          reachable={reachable}
           detail={eth.detail}
         />
         <LaneRow
           name={t("uplink.leg.wifi")}
           up={typeof wifi?.connected === "boolean" ? wifi.connected : null}
           active={activeLane === "wifi"}
+          reachable={reachable}
           detail={wifiDetail}
         />
         <LaneRow
           name={t("uplink.leg.cellular")}
           up={typeof m?.connected === "boolean" ? m.connected : null}
           active={activeLane === "modem"}
+          reachable={reachable}
           detail={modemDetail}
         />
-        <LaneRow name={t("uplink.leg.usb")} up={null} active={activeLane === "usb"} />
+        <LaneRow name={t("uplink.leg.usb")} up={null} active={activeLane === "usb"} reachable={reachable} />
 
         {n.priority?.length ? (
           <>
@@ -182,7 +210,7 @@ export function UplinkScreen() {
       title={t("uplink.matrix.title")}
       actions={
         <div className="flex items-center gap-[0.5rem]">
-          <Dot tone={active ? "ok" : n == null ? "warn" : "muted"} />
+          <Dot tone={headTone} />
           <span className="text-[0.8rem] text-surface-foreground">{headline}</span>
           <StaleBadge stale={net.stale} />
         </div>

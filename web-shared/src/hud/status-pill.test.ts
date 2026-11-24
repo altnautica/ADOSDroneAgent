@@ -386,6 +386,18 @@ describe("alert groups", () => {
     expect(alertGroup("setup_abort", "pilot")).toBe("setup");
   });
 
+  it("groups each pre-flight check with the alerts of its kind", () => {
+    const checks = ["link", "gps", "home", "battery", "something_new"].map((id) => ({ id, label: id }));
+    const alerts = pillAlerts({ ...none, armed: false, preflightFailing: checks });
+    expect(Object.fromEntries(alerts.map((a) => [a.id, a.group]))).toEqual({
+      "preflight:link": "link",
+      "preflight:gps": "navigation",
+      "preflight:home": "navigation",
+      "preflight:battery": "power",
+      "preflight:something_new": "other",
+    });
+  });
+
   it("an fc_profile critical and two FC texts group as setup, then flight controller", () => {
     const alerts = pillAlerts({ ...none, readiness: [fcProfile], fcStatus: fcTexts });
     const sections = groupAlerts(alerts, new Set());

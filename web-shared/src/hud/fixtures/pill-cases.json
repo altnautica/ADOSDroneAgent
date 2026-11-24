@@ -718,7 +718,7 @@
         "preflight:gps"
       ],
       "groups": [
-        "other"
+        "navigation"
       ]
     }
   },
@@ -753,6 +753,7 @@
         "preflight:compass"
       ],
       "groups": [
+        "navigation",
         "other"
       ]
     }

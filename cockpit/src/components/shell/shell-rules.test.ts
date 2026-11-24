@@ -52,4 +52,16 @@ describe("shell and screen rules", () => {
       expect(dims || !badges, f).toBe(true);
     }
   });
+
+  it("the Radio link header names the state with the strip's verdict chip", () => {
+    const s = src("components/screens/link-screen.tsx");
+    expect(s).toContain("const diag = linkDiagView(w?.link_diag);");
+    expect(s).toMatch(/<Dot tone=\{diag \? diag\.tone : tone\} \/>\s*\{diag \? \(\s*<VerdictChip view=\{diag\} \/>/);
+  });
+
+  it("the strip's more panel closes on Escape, a press outside, and a screen change", () => {
+    const s = src("components/shell/status-strip.tsx");
+    expect(s).toContain("usePanelDismiss(open, anchor, close);");
+    expect(s).toMatch(/if \(openedOn !== screen\) \{\s*setOpenedOn\(screen\);\s*setOpen\(false\);/);
+  });
 });

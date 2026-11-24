@@ -1,3 +1,4 @@
+import { WifiOff } from "lucide-react";
 import { describe, expect, it } from "vitest";
 
 import { adapterDetail, linkDiagView } from "@/lib/link-diag";
@@ -7,6 +8,10 @@ describe("linkDiagView", () => {
     const view = linkDiagView("no_peer");
     expect(view?.label).toBe("No ground station");
     expect(view?.actionable).toBe(false);
+  });
+
+  it("draws No RF as a crossed-out radio, not a lone dot", () => {
+    expect(linkDiagView("deaf")?.icon).toBe(WifiOff);
   });
 });
 

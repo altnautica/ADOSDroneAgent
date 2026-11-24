@@ -57,7 +57,7 @@ export function SidebarNav({ collapsed, onNavigate }: SidebarNavProps) {
   const { top, profileItems, bottom } = navGroups(profile, role);
 
   return (
-    <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto" onClick={onNavigate}>
+    <nav className="min-h-0 flex-1 py-3 px-2 space-y-0.5 overflow-y-auto" onClick={onNavigate}>
       {top.map((item) => (
         <SidebarLink key={item.to} item={item} collapsed={collapsed} />
       ))}

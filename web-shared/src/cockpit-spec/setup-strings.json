@@ -1223,6 +1223,7 @@
     "video.state.connecting": "Connecting to video…",
     "video.state.failed": "Video failed",
     "video.state.frozen": "Picture frozen",
+    "video.state.no_rf": "No video: no RF from the drone",
     "video.state.no_source": "No video source",
     "video.state.reconnecting": "Reconnecting video…",
     "video.state.retry": "Retry",

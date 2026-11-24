@@ -143,6 +143,33 @@ describe("alert row", () => {
     await click(q(el, "alert-hide"));
     expect(onSnooze).toHaveBeenCalledWith(warn.key, true);
   });
+
+  it("puts Hide or Collapse on the title line, with no action line under a row that has no fix", async () => {
+    const warn = alert({ severity: "warning", fix: undefined, params: undefined });
+    let el = await render(
+      createElement("ul", null, createElement(AlertRow, { alert: warn, actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false, onSnooze: vi.fn() })),
+    );
+    const titleLine = q(el, "alert-item-text")?.parentElement?.parentElement;
+    expect(titleLine?.contains(q(el, "alert-hide"))).toBe(true);
+    expect(titleLine?.nextElementSibling).toBeNull();
+    expect(q(el, "alert-hide")?.className).toContain("min-h-[48px]");
+    await act(async () => root.unmount());
+    host.remove();
+    el = await render(createElement("ul", null, createElement(AlertRow, { alert: alert(), actions: actions(), skin: CHROME_ALERT_SKIN, snoozed: false, onSnooze: vi.fn() })));
+    expect(q(el, "alert-item-text")?.parentElement?.parentElement?.contains(q(el, "alert-collapse"))).toBe(true);
+  });
+
+  it("sizes every word in bounded rem with its own leading, so wrapped lines never overlap", async () => {
+    const el = await render(createElement("ul", null, createElement(AlertCentre, { alerts: [alert()], snoozed: new Set<string>(), onSnooze: vi.fn(), actions: actions(), skin: CHROME_ALERT_SKIN })));
+    expect(q(el, "alert-item")?.className).toContain("text-[length:clamp(14px,0.6rem,18px)] leading-[1.3]");
+    expect(q(el, "alert-item-source")?.className).toContain("text-[length:clamp(12.5px,0.52rem,16px)] leading-[1.3]");
+    // No size without a leading beside it, and no size relative to the panel's fixed 15 px line.
+    for (const node of el.querySelectorAll("[class*='text-[']")) {
+      const cls = node.getAttribute("class") ?? "";
+      if (/text-\[length:/.test(cls)) expect(cls, cls).toMatch(/leading-\[/);
+    }
+    expect(el.innerHTML).not.toMatch(/text-\[[0-9.]+(em|rem)\]/);
+  });
 });
 
 describe("alert centre", () => {

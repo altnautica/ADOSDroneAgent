@@ -7,6 +7,7 @@
 
 import { useCallback } from "react";
 
+import { VerdictChip } from "@/components/shell/status-strip";
 import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import { Dot, EmptyNote, ErrorNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
 import { readFailed } from "@/lib/read-failed";
@@ -153,11 +154,18 @@ export function LinkScreen() {
     <ConsoleScaffold stale={wfb.stale}
       title={t("cockpit.link.title")}
       actions={
+          // The verdict names the state exactly as the status strip does, so
+          // one link state has one name and one colour; the bare state word
+          // stands in only while the agent has not classified the link.
           <div className="flex items-center gap-[0.5rem]">
-            <Dot tone={tone} />
-            <span className={cn("text-[0.8rem]", tone === "ok" ? "text-ok" : tone === "err" ? "text-err" : "text-warn")}>
-              {w?.state ? t(linkStateKey(w.state)) : DASH}
-            </span>
+            <Dot tone={diag ? diag.tone : tone} />
+            {diag ? (
+              <VerdictChip view={diag} />
+            ) : (
+              <span className={cn("text-[0.8rem]", tone === "ok" ? "text-ok" : tone === "err" ? "text-err" : "text-warn")}>
+                {w?.state ? t(linkStateKey(w.state)) : DASH}
+              </span>
+            )}
             <StaleBadge stale={wfb.stale} />
           </div>
         }

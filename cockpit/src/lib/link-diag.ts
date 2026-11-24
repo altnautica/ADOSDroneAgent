@@ -6,7 +6,7 @@
 // surface omits the chip rather than fabricating a state — a status surface
 // never invents a value it lacks.
 
-import { KeyRound, Radar, SignalHigh, SignalZero, Zap, type LucideIcon } from "lucide-react";
+import { KeyRound, Radar, SignalHigh, WifiOff, Zap, type LucideIcon } from "lucide-react";
 
 import type { Tone } from "@/lib/tone";
 
@@ -39,7 +39,8 @@ export function linkDiagView(diag: string | null | undefined): LinkDiagView | nu
         tone: "err",
         label: "No RF",
         title: "No RF reaching the receiver",
-        icon: SignalZero,
+        // A crossed-out radio reads as "nothing heard"; SignalZero drew a lone dot.
+        icon: WifiOff,
         hint: "The receiver hears nothing — check the drone radio, antenna, and channel",
         actionable: true,
       };

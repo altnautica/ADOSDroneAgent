@@ -24,6 +24,16 @@ import { specText } from "./spec-text";
 
 type Severity = PillAlert["severity"];
 
+// Type scale, in rem with an explicit leading at every size: the panel's own
+// `chrome-bar-text` line-height is a fixed 15 px, which overlaps wrapped
+// lines at any larger size. The cockpit's root rem tracks the viewport
+// (3.2vmin: 25.6 px at 1280×800, 34.6 px at 1920×1080) while the sheet stays
+// 440 px wide, and the dashboard's root is 16 px, so each size is clamped:
+// body 14-18 px, secondary and tables 12.5-16 px, the sheet title 15-20 px.
+const BODY = "text-[length:clamp(14px,0.6rem,18px)] leading-[1.3]";
+const SMALL = "text-[length:clamp(12.5px,0.52rem,16px)] leading-[1.3]";
+const TITLE = "text-[length:clamp(15px,0.68rem,20px)] leading-[1.3]";
+
 /** The parameter rows of an alert: name (monospace), current, wanted. Past
  *  six rows the rest wait behind "Show all N". */
 export function ParamTable({ params, skin }: { params: readonly ParamDiff[]; skin: AlertSkin }) {
@@ -32,7 +42,7 @@ export function ParamTable({ params, skin }: { params: readonly ParamDiff[]; ski
   const shown = all ? params : params.slice(0, 6);
   return (
     <div data-testid="alert-params">
-      <table className="w-full border-collapse text-[0.9em] tabular-nums">
+      <table className={`w-full border-collapse ${SMALL} tabular-nums`}>
         <thead className="sr-only">
           <tr>
             <th>{t("alerts.param.name")}</th>
@@ -57,7 +67,7 @@ export function ParamTable({ params, skin }: { params: readonly ParamDiff[]; ski
         </tbody>
       </table>
       {params.length > 6 ? (
-        <button type="button" onClick={() => setAll(!all)} className={`${skin.control} px-[4px] underline`} data-testid="alert-params-more">
+        <button type="button" onClick={() => setAll(!all)} className={`${skin.control} px-[4px] ${SMALL} underline`} data-testid="alert-params-more">
           {all ? t("alerts.param.showFewer") : t("alerts.param.showAll", { count: params.length })}
         </button>
       ) : null}
@@ -112,7 +122,7 @@ export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetu
       (err: unknown) => setS({ phase: "error", text: errorText(err) }),
     );
   };
-  const btn = `${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px]`;
+  const btn = `${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${BODY}`;
   switch (s.phase) {
     case "idle":
       return (
@@ -122,7 +132,7 @@ export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetu
       );
     case "reading":
       return (
-        <span className={`flex items-center gap-[6px] ${skin.dim}`} role="status">
+        <span className={`flex items-center gap-[6px] ${BODY} ${skin.dim}`} role="status">
           <Loader2 className="h-[1em] w-[1em] animate-spin" aria-hidden />
           {t("alerts.apply.reading")}
         </span>
@@ -132,7 +142,7 @@ export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetu
       return (
         <div className="flex w-full flex-col gap-[6px]" data-testid="alert-apply-review">
           <div className="chrome-label">{t("alerts.apply.writes")}</div>
-          <ul className="flex flex-col text-[0.9em] tabular-nums" data-testid="alert-apply-writes">
+          <ul className={`flex flex-col ${SMALL} tabular-nums`} data-testid="alert-apply-writes">
             {s.step.params.map((p) => (
               <li key={p.name} className={`flex justify-between gap-[8px] border-t py-[3px] ${skin.border}`}>
                 <span className="font-mono">{p.name}</span>
@@ -140,7 +150,7 @@ export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetu
               </li>
             ))}
           </ul>
-          <p className={`text-[0.9em] ${skin.dim}`}>{t("alerts.apply.snapshot")}</p>
+          <p className={`${SMALL} ${skin.dim}`}>{t("alerts.apply.snapshot")}</p>
           <div className="flex flex-wrap items-center gap-[8px]">
             {action ? (
               // 14 px base: the hold button's em floor reaches 48 px.
@@ -159,14 +169,14 @@ export function ApplyProfileFix({ skin, openSetup }: { skin: AlertSkin; openSetu
       return <FollowApply wizard={wizard} stepId={stepId} skin={skin} onEnd={setS} />;
     case "done":
       return (
-        <span role="status" data-testid="alert-apply-done" className="font-semibold">
+        <span role="status" data-testid="alert-apply-done" className={`${BODY} font-semibold`}>
           {t("alerts.apply.done")}
         </span>
       );
     case "error":
       return (
         <div className="flex flex-wrap items-center gap-[8px]" data-testid="alert-apply-error">
-          <span role="alert" style={{ color: skin.text("critical") }}>
+          <span role="alert" className={BODY} style={{ color: skin.text("critical") }}>
             {s.text}
           </span>
           {openSetup ? (
@@ -201,7 +211,7 @@ function FollowApply({
     else if (state === "failed") onEnd({ phase: "error", text: stepFailure(step, t("alerts.apply.failed")) });
   }, [state, step, onEnd, t]);
   return (
-    <span className={`flex items-center gap-[6px] ${skin.dim}`} role="status" data-testid="alert-apply-writing">
+    <span className={`flex items-center gap-[6px] ${BODY} ${skin.dim}`} role="status" data-testid="alert-apply-writing">
       <Loader2 className="h-[1em] w-[1em] animate-spin" aria-hidden />
       {t("alerts.apply.writing")}
     </span>
@@ -213,7 +223,7 @@ function FollowApply({
 function FixAction({ alert, actions, skin }: { alert: PillAlert; actions: AlertActions; skin: AlertSkin }) {
   const { t } = useTranslation();
   const fix = alert.fix;
-  const btn = `${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${skin.primary}`;
+  const btn = `${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${BODY} ${skin.primary}`;
   if (!fix) return actions.extra ? <>{actions.extra(alert)}</> : null;
   switch (fix.kind) {
     case "apply_profile":
@@ -221,7 +231,7 @@ function FixAction({ alert, actions, skin }: { alert: PillAlert; actions: AlertA
       const open = actions.openSetup;
       if (!open) {
         return (
-          <p className={`text-[0.9em] ${skin.dim}`} data-testid="alert-fix-hint">
+          <p className={`${SMALL} ${skin.dim}`} data-testid="alert-fix-hint">
             {t("alerts.groundHint")}
           </p>
         );
@@ -250,9 +260,16 @@ function FixAction({ alert, actions, skin }: { alert: PillAlert; actions: AlertA
   }
 }
 
-/** One alert: glyph, title, source; its parameter table; its fix and Hide
- *  (a warning) or Collapse (a critical). A collapsed critical shows its
- *  title and Expand only. `snoozed`: the row is shown under "Show hidden". */
+/** Whether a row has a fix to show under its title. */
+function hasFix(alert: PillAlert, actions: AlertActions): boolean {
+  if (!alert.fix) return actions.extra != null;
+  return alert.fix.kind !== "parameters" || actions.openParameters !== null;
+}
+
+/** One alert: glyph, title, source and, on the title line, Hide (a
+ *  warning) or Collapse (a critical); then its parameter table and its fix.
+ *  A collapsed critical shows its title and Expand only. `snoozed`: the row
+ *  is shown under "Show hidden". */
 export function AlertRow({
   alert,
   actions,
@@ -269,7 +286,7 @@ export function AlertRow({
   const { t } = useTranslation();
   const critical = alert.severity === "critical";
   const icon = critical ? tokens.chrome.severity_icon.critical : tokens.chrome.severity_icon.warning;
-  const btn = `${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${skin.button}`;
+  const btn = `${skin.control} shrink-0 rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${BODY} ${skin.button}`;
   const snoozeButton = onSnooze ? (
     <button
       type="button"
@@ -285,30 +302,31 @@ export function AlertRow({
       data-testid="alert-item"
       data-severity={alert.severity}
       data-collapsed={alert.collapsed ? "true" : undefined}
-      className={`flex items-start gap-[8px] px-[4px] py-[6px] ${snoozed && !critical ? skin.dim : ""}`}
+      className={`flex items-start gap-[8px] px-[4px] py-[6px] ${BODY} ${snoozed && !critical ? skin.dim : ""}`}
     >
-      <span data-testid="alert-item-icon" className="mt-[1px] flex w-[1.2em] shrink-0 items-center justify-center font-bold leading-none" style={{ color: skin.dot(alert.severity) }} aria-hidden>
+      <span data-testid="alert-item-icon" className="mt-[0.15em] flex w-[1.2em] shrink-0 items-center justify-center font-bold leading-none" style={{ color: skin.dot(alert.severity) }} aria-hidden>
         {icon}
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-[4px]">
         <div className="flex min-w-0 items-start justify-between gap-[8px]">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div data-testid="alert-item-text" className={alert.collapsed ? "truncate" : "break-words"} style={critical ? { color: skin.text("critical") } : undefined}>
               {alert.text}
             </div>
-            <div data-testid="alert-item-source" className={`text-[0.85em] ${skin.dim}`}>
+            <div data-testid="alert-item-source" className={`${SMALL} ${skin.dim}`}>
               {specText(`cockpit.status.source.${alert.source}`)}
             </div>
           </div>
-          {alert.collapsed ? snoozeButton : null}
+          {snoozeButton}
         </div>
         {alert.collapsed ? null : (
           <>
             {alert.params && alert.params.length > 0 ? <ParamTable params={alert.params} skin={skin} /> : null}
-            <div className="flex flex-wrap items-center gap-[8px]">
-              <FixAction alert={alert} actions={actions} skin={skin} />
-              {snoozeButton}
-            </div>
+            {hasFix(alert, actions) ? (
+              <div className="flex flex-wrap items-center gap-[8px]">
+                <FixAction alert={alert} actions={actions} skin={skin} />
+              </div>
+            ) : null}
           </>
         )}
       </div>
@@ -350,14 +368,14 @@ export function AlertCentre({
     .filter(Boolean)
     .join(" · ");
   return (
-    <div className="flex flex-col gap-[4px]" data-testid="alert-centre">
+    <div className={`flex flex-col gap-[4px] ${BODY}`} data-testid="alert-centre">
       <div className="flex flex-wrap items-center justify-between gap-[8px] px-[4px]">
         <div>
-          <div id={titleId} className="font-semibold" data-testid="status-pill-list-title">
+          <div id={titleId} className={`${TITLE} font-semibold`} data-testid="status-pill-list-title">
             {t("alerts.title")}
           </div>
           {counts ? (
-            <div className={`text-[0.9em] ${skin.dim}`} data-testid="alert-counts">
+            <div className={`${SMALL} ${skin.dim}`} data-testid="alert-counts">
               {counts}
             </div>
           ) : null}
@@ -367,7 +385,7 @@ export function AlertCentre({
             type="button"
             onClick={() => setShowHidden(!showHidden)}
             aria-pressed={showHidden}
-            className={`${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${skin.button}`}
+            className={`${skin.control} rounded-[var(--fs-radius-sm,0.375rem)] px-[12px] ${BODY} ${skin.button}`}
             data-testid="alert-show-hidden"
           >
             {t(showHidden ? "alerts.hideHidden" : "alerts.showHidden", { count: hiddenCount })}
@@ -400,7 +418,7 @@ export function AlertCentre({
                   <span className="h-[6px] w-[6px] shrink-0 rounded-full" style={{ background: skin.dot(worst) }} aria-hidden />
                   <span className="min-w-0 flex-1 truncate">{s.title}</span>
                   <span className="tabular-nums">{s.alerts.length}</span>
-                  {s.hidden > 0 ? <span className={`text-[0.85em] font-normal ${skin.dim}`}>{t("alerts.hiddenNote", { count: s.hidden })}</span> : null}
+                  {s.hidden > 0 ? <span className={`${SMALL} font-normal ${skin.dim}`}>{t("alerts.hiddenNote", { count: s.hidden })}</span> : null}
                 </button>
                 {isOpen ? (
                   <ul className="flex flex-col">

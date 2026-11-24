@@ -13,7 +13,7 @@ import { useStatus } from "@/hooks/use-status";
 import { postApply } from "@/shared/api/apply-actions";
 import { toast, toastFromError } from "@/shared/api/toast";
 import { getWifiStatus } from "@/shared/api/wifi";
-import { resolveHotspotSsid } from "@/shared/api/hotspot";
+import { hotspotSharesRadio, resolveHotspotSsid } from "@/shared/api/hotspot";
 import { getGsNetwork } from "@/shared/api/uplink";
 
 export function NetworkSettings() {
@@ -38,8 +38,10 @@ export function NetworkSettings() {
   }, [status.data]);
 
   // A ground station runs its AP on its own interface (never the WFB radio)
-  // under its own name; its live AP leg names both.
-  const isGround = useNodeIdentity().profile === "ground_station";
+  // under its own name; its live AP leg names both. While the profile is
+  // still loading (`auto`), nothing but that leg may name the network.
+  const profile = useNodeIdentity().profile;
+  const isGround = profile === "ground_station";
   const gsNet = useQuery({
     queryKey: ["gs-network", "ap"],
     queryFn: () => getGsNetwork(),
@@ -47,9 +49,10 @@ export function NetworkSettings() {
     enabled: isGround,
   });
   const gsAp = isGround ? gsNet.data?.ap : null;
+  const profileKnown = profile !== "auto";
   const hotspotSsid = useMemo(
-    () => resolveHotspotSsid(status.data?.network, gsAp),
-    [status.data?.network, gsAp],
+    () => resolveHotspotSsid(status.data?.network, gsAp, profileKnown ? isGround : null),
+    [status.data?.network, gsAp, profileKnown, isGround],
   );
 
   async function commitHotspot(next: boolean) {
@@ -128,9 +131,11 @@ export function NetworkSettings() {
                   </>
                 ) : null}
               </div>
-              <div className="text-xs text-warn">
-                {t("settings.network.hotspotWarning")}
-              </div>
+              {hotspotSharesRadio(gsAp) ? (
+                <div className="text-xs text-warn">
+                  {t("settings.network.hotspotWarning")}
+                </div>
+              ) : null}
             </div>
             <Switch
               checked={hotspot}

@@ -241,6 +241,7 @@ describe("words every surface shares", () => {
     for (const k of [
       "video.state.connecting",
       "video.state.no_source",
+      "video.state.no_rf",
       "video.state.failed",
       "video.state.reconnecting",
       "pilot.banner.cause.rc_or_failsafe",

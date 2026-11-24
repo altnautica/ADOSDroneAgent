@@ -25,12 +25,31 @@ export type HotspotSsid =
 /** Read the access point name the agent published, if it published one.
  *
  * On a ground station the live AP leg of `/api/v1/ground-station/network`
- * (`ap`) is the authority: it names the SSID hostapd broadcasts and the
- * interface it runs on, which is not the WFB radio. It wins over the status
- * payload's name. The interface is null when no AP leg was read. */
-export function resolveHotspotSsid(network?: NetworkStatus, ap?: GsApLeg | null): HotspotSsid {
+ * (`ap`) is the only authority: it names the SSID hostapd broadcasts and the
+ * interface it runs on, which is not the WFB radio. The status payload's
+ * `hotspot_ssid` is the drone-style template and names a network a ground
+ * station never broadcasts, so it is read only once the profile is known not
+ * to be a ground station.
+ *
+ * `ground` is null while the profile is still loading; until it resolves only
+ * the AP leg can name the network. The interface is null when no AP leg was
+ * read. */
+export function resolveHotspotSsid(
+  network: NetworkStatus | undefined,
+  ap: GsApLeg | null | undefined,
+  ground: boolean | null,
+): HotspotSsid {
   const iface = ap?.interface?.trim() || null;
-  const ssid = ap?.ssid?.trim() || network?.hotspot_ssid?.trim();
+  const published = ground === false ? network?.hotspot_ssid?.trim() : undefined;
+  const ssid = ap?.ssid?.trim() || published;
   if (!ssid) return { known: false, iface };
   return { known: true, ssid, iface };
+}
+
+/** Whether turning the access point on takes the only Wi-Fi radio away from
+ * a client link. True unless the AP guard counted two or more Wi-Fi radios,
+ * so an unread count keeps the warning. */
+export function hotspotSharesRadio(ap: GsApLeg | null | undefined): boolean {
+  const count = ap?.wifi_phy_count;
+  return !(typeof count === "number" && count >= 2);
 }

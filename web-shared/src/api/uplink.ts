@@ -17,6 +17,8 @@ export interface GsApLeg {
   gateway?: string | null;
   standing_down?: boolean;
   standdown_reason?: string | null;
+  /** Wi-Fi radios the AP guard counted; null when its sidecar has none. */
+  wifi_phy_count?: number | null;
 }
 
 export interface GsWifiClientLeg {

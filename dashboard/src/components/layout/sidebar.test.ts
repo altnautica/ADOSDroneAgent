@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { useUiStore } from "@/stores/ui-store";
 
 import { SidebarToggle } from "./sidebar";
+import { sidebarAsideClass } from "./sidebar-layout";
 
 describe("the sidebar collapse button", () => {
   it("calls toggleSidebar, which flips the collapsed state each press", () => {
@@ -29,5 +30,15 @@ describe("the sidebar collapse button", () => {
     expect(open).toContain('aria-expanded="true"');
     const shut = renderToStaticMarkup(SidebarToggle({ collapsed: true, label: "Expand sidebar" }));
     expect(shut).toContain('aria-expanded="false"');
+  });
+});
+
+describe("the desktop aside", () => {
+  it("sticks under the header at the viewport height, so the collapse button stays in view", () => {
+    for (const collapsed of [false, true]) {
+      const cls = sidebarAsideClass(collapsed).split(" ");
+      expect(cls).toEqual(expect.arrayContaining(["sticky", "top-[57px]", "h-[calc(100dvh-57px)]", "self-start", "overflow-hidden"]));
+      expect(cls).toContain(collapsed ? "w-16" : "w-56");
+    }
   });
 });

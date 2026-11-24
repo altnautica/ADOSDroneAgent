@@ -19,6 +19,7 @@ import {
   vehicleFrameAgeMs,
   videoHasSource,
   videoNote,
+  linkHasNoRf,
   classScale,
   FLIGHT_PX,
   flightLayout,
@@ -341,6 +342,16 @@ describe("the no-picture note's words", () => {
     const video = readFileSync(path.resolve(__dirname, "../components/shell/video-layer.tsx"), "utf8");
     expect(video).not.toContain("Connecting to feed");
     expect(video).toContain('specText("video.state.retry")');
+  });
+
+  it("say there is no RF from the drone instead of connecting for ever", () => {
+    for (const v of ["deaf", "no_rf", "no_peer"]) expect(linkHasNoRf(v), v).toBe(true);
+    for (const v of ["healthy", "searching", "jammed", "mis_keyed", null, undefined]) expect(linkHasNoRf(v), String(v)).toBe(false);
+    expect(videoNote("connecting", true, true)).toEqual({ text: "No video: no RF from the drone", retry: false });
+    // A picture that played and stalled keeps its own words and retry.
+    expect(videoNote("failed", true, true)).toEqual({ text: "Video failed", retry: true });
+    expect(videoNote("live", true, true)).toBeNull();
+    expect(videoNote("connecting", false, true)).toEqual({ text: "No video source", retry: false });
   });
 });
 

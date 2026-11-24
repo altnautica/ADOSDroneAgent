@@ -10,13 +10,15 @@ import { useEffect, useRef, useState } from "react";
 
 import { VideoStatsReadout } from "@/components/feed/video-stats-readout";
 import { useWidthClass } from "@/hooks/use-width-class";
-import { classScale, VIDEO_NOTE_TOP, videoNote } from "@/lib/flight-layout";
+import { classScale, linkHasNoRf, VIDEO_NOTE_TOP, videoNote } from "@/lib/flight-layout";
 import { isVideoDebug } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
 import { useVideoTransport } from "@/shared/use-video-transport";
+import { useProfile } from "@/shared/use-profile";
 import type { VideoStats } from "@/shared/video-stats";
 import type { VideoTransportSnapshot } from "@/shared/video-transport";
 import { useFeedStore } from "@/stores/feed-store";
+import { useStatusStore } from "@/stores/status-store";
 
 const ORDER: ("whep" | "hls")[] = ["whep", "hls"];
 
@@ -68,7 +70,12 @@ export function VideoLayer({
 
   const k = classScale(useWidthClass().widthClass);
 
-  const note = videoNote(snapshot.state, hasSource && (whepUrl !== "" || hlsUrl !== ""));
+  // A ground station whose radio hears nothing from the drone gets no video:
+  // say so rather than "Connecting to video…" for ever.
+  const isGround = useProfile() === "ground_station";
+  const linkDiag = useStatusStore((s) => s.status?.link?.link_diag ?? null);
+  const noRf = isGround && linkHasNoRf(linkDiag);
+  const note = videoNote(snapshot.state, hasSource && (whepUrl !== "" || hlsUrl !== ""), noRf);
 
   return (
     <div className="absolute inset-0 z-0 bg-letterbox">

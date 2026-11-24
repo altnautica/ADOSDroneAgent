@@ -167,11 +167,26 @@ export function videoHasSource(video: { state?: string | null; streams?: readonl
   return video.state === "running";
 }
 
+/** The link verdicts (`link_diag`) under which a ground station hears no RF
+ *  from the drone, so no video can arrive. */
+const NO_RF_VERDICTS: Readonly<Record<string, true>> = { deaf: true, no_rf: true, no_peer: true };
+
+/** Whether a ground station's link verdict means no RF reaches it. */
+export function linkHasNoRf(linkDiag: string | null | undefined): boolean {
+  return linkDiag != null && NO_RF_VERDICTS[linkDiag] === true;
+}
+
 /** The no-picture note in the spec's words (`video.state.*`), and whether it
- *  offers a retry; null while the picture plays. */
-export function videoNote(state: "connecting" | "live" | "frozen" | "failed", hasSource = true): { text: string; retry: boolean } | null {
+ *  offers a retry; null while the picture plays. While still connecting with
+ *  no RF from the drone (`noRf`), the note says so instead of waiting on
+ *  "Connecting to video…" for ever. */
+export function videoNote(
+  state: "connecting" | "live" | "frozen" | "failed",
+  hasSource = true,
+  noRf = false,
+): { text: string; retry: boolean } | null {
   if (!hasSource) return { text: specText("video.state.no_source"), retry: false };
-  if (state === "connecting") return { text: specText("video.state.connecting"), retry: false };
+  if (state === "connecting") return { text: specText(noRf ? "video.state.no_rf" : "video.state.connecting"), retry: false };
   if (state === "frozen") return { text: specText("video.state.frozen"), retry: true };
   if (state === "failed") return { text: specText("video.state.failed"), retry: true };
   return null;

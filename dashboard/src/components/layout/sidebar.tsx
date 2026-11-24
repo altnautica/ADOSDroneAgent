@@ -3,6 +3,7 @@ import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { SidebarNav } from "@/components/layout/sidebar-nav";
+import { sidebarAsideClass } from "@/components/layout/sidebar-layout";
 import { cn } from "@/lib/utils";
 import { ErrorBoundary } from "@/shared/error-boundary";
 import { useUiStore } from "@/stores/ui-store";
@@ -41,12 +42,7 @@ export function Sidebar() {
   return (
     <>
       {/* Desktop sidebar — always-visible at lg+, width controlled by collapsed */}
-      <aside
-        className={cn(
-          "hidden lg:flex flex-col border-r border-border bg-background/40 transition-[width]",
-          collapsed ? "w-16" : "w-56",
-        )}
-      >
+      <aside className={sidebarAsideClass(collapsed)}>
         <SidebarNav collapsed={collapsed} />
         <SidebarToggle collapsed={collapsed} label={collapsed ? t("rail.expandSidebar") : t("rail.collapseSidebar")} />
       </aside>

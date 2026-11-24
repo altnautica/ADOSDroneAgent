@@ -17,7 +17,7 @@
 // scrollbar the operator cannot reach.
 
 import { MoreHorizontal, Wifi, WifiOff } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { SignalBars } from "@/components/shell/signal-bars";
@@ -25,6 +25,7 @@ import { WallClock } from "@/components/shell/wall-clock";
 import { Dot } from "@/components/ui/data";
 import { toneClass, type Tone } from "@/lib/tone";
 import { CHROME } from "@/lib/cockpit-layout";
+import { useNavStore } from "@/stores/nav-store";
 import { useStatusStore } from "@/stores/status-store";
 import { fmtChannel, fmtDbm, fmtMbps, fmtPct, fmtTemp, DASH } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct } from "@/lib/format-status";
@@ -34,6 +35,7 @@ import type { GsStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import "@/shared/i18n";
 import { linkMeasured, stripPaired } from "./strip-view";
+import { usePanelDismiss } from "./use-panel-dismiss";
 
 /** Map a bare link state string to a tone, the fallback when the agent has not
  *  yet classified the link with a verdict. Only the states that name a fault
@@ -120,10 +122,20 @@ function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
 }
 
 /** The secondary readings (SNR, channel, rate, role, uplink, CPU), shown in a
- *  panel under the strip on tap so the strip never overflows. */
+ *  panel under the strip on tap so the strip never overflows. It closes on
+ *  Escape, on a press outside it, and when the screen changes. */
 function MoreZone({ status }: { status: GsStatus | null }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const anchor = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  usePanelDismiss(open, anchor, close);
+  const screen = useNavStore((s) => `${s.activeTabId}/${s.detailStack.join("/")}`);
+  const [openedOn, setOpenedOn] = useState(screen);
+  if (openedOn !== screen) {
+    setOpenedOn(screen);
+    setOpen(false);
+  }
   const link = status?.link;
   const measured = linkMeasured(link);
   const bitrate = !measured
@@ -136,7 +148,7 @@ function MoreZone({ status }: { status: GsStatus | null }) {
   const uplinkReachable = status?.network?.uplink_reachable;
 
   return (
-    <div className="relative shrink-0">
+    <div ref={anchor} className="relative shrink-0">
       <button
         type="button"
         className="inline-flex h-[2rem] items-center rounded px-[0.4rem] text-muted-foreground hover:text-surface-foreground"

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { fmtTq } from "@/shared/format";
-import { ethernetLaneView, laneForToken, uplinkTokenLabel } from "./uplink-lanes";
+import { activeUplinkToken, ethernetLaneView, laneForToken, laneTone, uplinkTokenLabel } from "./uplink-lanes";
 
 describe("uplink lane tokens", () => {
   it("maps the router's interface-role tokens to their lanes", () => {
@@ -18,6 +18,31 @@ describe("uplink lane tokens", () => {
     expect(laneForToken("ppp0")).toBeNull();
     expect(laneForToken(null)).toBeNull();
     expect(uplinkTokenLabel("ppp0")).toBe("ppp0");
+  });
+});
+
+describe("the active uplink", () => {
+  it("falls back to the status payload's uplink kind when the lane composite names none", () => {
+    expect(activeUplinkToken("wlan0_client", "eth")).toBe("wlan0_client");
+    expect(activeUplinkToken(null, "eth")).toBe("eth");
+    expect(laneForToken(activeUplinkToken(null, "eth"))).toBe("ethernet");
+    expect(laneForToken(activeUplinkToken(undefined, "wifi"))).toBe("wifi");
+    expect(laneForToken(activeUplinkToken(null, "cellular"))).toBe("modem");
+    expect(uplinkTokenLabel("cellular")).toBe("4G modem");
+  });
+
+  it("reads none and an absent reading as no uplink", () => {
+    expect(activeUplinkToken(null, "none")).toBeNull();
+    expect(activeUplinkToken(null, null)).toBeNull();
+  });
+
+  it("colours an up lane green, rings the active one, and keeps amber for a degraded active lane", () => {
+    expect(laneTone({ up: true, active: false, reachable: true })).toEqual({ tone: "ok", ring: false });
+    expect(laneTone({ up: true, active: true, reachable: true })).toEqual({ tone: "ok", ring: true });
+    expect(laneTone({ up: null, active: true, reachable: null })).toEqual({ tone: "ok", ring: true });
+    expect(laneTone({ up: true, active: true, reachable: false })).toEqual({ tone: "warn", ring: true });
+    expect(laneTone({ up: false, active: false, reachable: false })).toEqual({ tone: "muted", ring: false });
+    expect(laneTone({ up: null, active: false, reachable: true })).toEqual({ tone: "muted", ring: false });
   });
 });
 

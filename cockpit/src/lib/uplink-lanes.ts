@@ -1,3 +1,5 @@
+import type { Tone } from "@/lib/tone";
+
 // The ground-station uplink lanes, keyed by the tokens the agent's uplink
 // router actually reports: `active_uplink` and every `priority` entry are
 // interface-role names (eth0 / wlan0_client / wwan0 / usb0), not lane words.
@@ -9,6 +11,9 @@ const LANE_BY_TOKEN: Record<string, UplinkLane> = {
   wlan0_client: "wifi",
   wwan0: "modem",
   usb0: "usb",
+  // The kinds `/api/status` `network.uplink_type` reports (eth is a prefix).
+  wifi: "wifi",
+  cellular: "modem",
 };
 
 export const LANE_LABEL: Record<UplinkLane, string> = {
@@ -55,4 +60,24 @@ export function ethernetLaneView(eth: EthernetLane | null | undefined): { up: bo
 export function uplinkTokenLabel(token: string): string {
   const lane = laneForToken(token);
   return lane ? LANE_LABEL[lane] : token;
+}
+
+/** The selected uplink: the lane composite's `active_uplink`, else the
+ *  status payload's `network.uplink_type` (`eth`, `wifi`, `cellular`, `usb`,
+ *  or an interface name). `none` and an absent reading are no uplink. */
+export function activeUplinkToken(active: string | null | undefined, uplinkType: string | null | undefined): string | null {
+  const token = active?.trim() || uplinkType?.trim() || null;
+  return token === "none" ? null : token;
+}
+
+/** A lane's tone and whether it carries the active ring. A lane that is up
+ *  reads green; the active lane is ringed, and amber only when it is degraded
+ *  (the router could not reach the internet over it). A lane that is down or
+ *  unread is muted. */
+export function laneTone(lane: { up: boolean | null; active: boolean; reachable: boolean | null | undefined }): {
+  tone: Tone;
+  ring: boolean;
+} {
+  if (lane.active) return { tone: lane.reachable === false ? "warn" : "ok", ring: true };
+  return { tone: lane.up ? "ok" : "muted", ring: false };
 }
