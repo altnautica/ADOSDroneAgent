@@ -9,7 +9,7 @@ Mission Control sees):
   NEVER by tcpdump / queue depth / a single snapshot, and the first real break is
   named as ``video dies at``.
 * ``ados diag link`` — the WFB link diagnosis (``/api/wfb``): the one-glance
-  ``link_diag`` verdict (deaf / mis_keyed / jammed / healthy / searching) plus the
+  ``link_diag`` verdict (deaf / no_peer / mis_keyed / jammed / healthy / searching) plus the
   decode counters that separate the failure modes a bare "0 received" hides.
 * ``ados diag storage`` — the storage-wear verdict (``/api/diag/storage``): the
   write counter read as a DELTA across the retained window, the throttle
@@ -68,6 +68,7 @@ _LINK_STATE = {
     "healthy": "ok",
     "searching": "pending",
     "deaf": "fail",
+    "no_peer": "warn",
     "mis_keyed": "fail",
     "jammed": "warn",
 }
@@ -213,7 +214,7 @@ def diag_video(as_json: bool) -> None:
         click.echo(f"  {theme.dim('no hops reported (pipeline not running?)')}")
 
 
-@diag_group.command("link", help="WFB link diagnosis (deaf / mis_keyed / jammed / healthy).")
+@diag_group.command("link", help="WFB link diagnosis (deaf / no_peer / mis_keyed / jammed / healthy).")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON for scripts.")
 def diag_link(as_json: bool) -> None:
     data = _request("GET", "/api/wfb")

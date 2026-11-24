@@ -1,6 +1,6 @@
 // The one-glance WFB link diagnosis, mapped to the cockpit's semantic house
 // grammar. The agent classifies WHY a link is or is not carrying data from its
-// own decode counters (deaf / mis_keyed / jammed / healthy / searching); this
+// own decode counters (deaf / no_peer / mis_keyed / jammed / healthy / searching); this
 // turns that verdict into a colour, an icon, a short chip label, a full title,
 // and an actionable-guidance hint. An absent / unknown verdict returns null so a
 // surface omits the chip rather than fabricating a state — a status surface
@@ -19,7 +19,7 @@ export interface LinkDiagView {
   title: string;
   /** The icon that reads at a glance. */
   icon: LucideIcon;
-  /** One line of what to do about it. Present only for actionable verdicts. */
+  /** One line of what to do about it, or nothing when there is nothing to do. */
   hint?: string;
   /** True when the operator must act — the Feed shows a centre warning. */
   actionable: boolean;
@@ -42,6 +42,15 @@ export function linkDiagView(diag: string | null | undefined): LinkDiagView | nu
         icon: SignalZero,
         hint: "The receiver hears nothing — check the drone radio, antenna, and channel",
         actionable: true,
+      };
+    case "no_peer":
+      return {
+        tone: "muted",
+        label: "No ground station",
+        title: "No ground station heard",
+        icon: Radar,
+        hint: "Turn on the ground station, or bring it in range on the same channel",
+        actionable: false,
       };
     case "mis_keyed":
       return {

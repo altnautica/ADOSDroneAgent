@@ -88,6 +88,14 @@ def test_a_link_with_no_decode_reports_no_measurement_not_zero_loss(monkeypatch)
     assert "no packet-loss measurement" in out
 
 
+def test_a_drone_hearing_no_ground_station_reports_no_peer(monkeypatch):
+    quiet = _clean()
+    quiet.update(packets_received=0, link_diag="no_peer", loss_percent=0.0)
+    out = _invoke(quiet, monkeypatch)
+    assert "NO_PEER" in out
+    assert "DEAF" not in out
+
+
 def _transmit_only_drone() -> dict:
     """A drone's own reading of its downlink.
 

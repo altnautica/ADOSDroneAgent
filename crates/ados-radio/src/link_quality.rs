@@ -47,7 +47,8 @@ pub enum UplinkPlane {
 /// and `dec_err` (decrypt/session failures) separate the three failure modes that
 /// otherwise all read as "no data": a deaf radio (`all==0`, no RF arriving), a
 /// wrong-key / wrong-link_id link (`all>0` but `dec_err>0`, RF arriving but not
-/// decodable), and a healthy link (`data>0`).
+/// decodable), and a healthy link (`data>0`). On a drone, whose uplink is quiet
+/// whenever no ground station transmits, a deaf interval reads as `no_peer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkDiag {
@@ -56,6 +57,10 @@ pub enum LinkDiag {
     /// `wfb_rx` alive but 0 packets captured off-air: no RF arriving (TX power /
     /// antenna / channel / the far end not transmitting).
     Deaf,
+    /// Drone side only: the uplink receivers are alive but no frame from any
+    /// ground station arrived; the ground station is off, out of range, or on
+    /// another channel.
+    NoPeer,
     /// RF arriving (`all>0`) but 0 decoded and decrypt errors present: keys don't
     /// match, or the link_id / channel_id differs between the two ends.
     MisKeyed,
@@ -104,8 +109,8 @@ pub struct LinkStats {
     pub fec_failed: i64,
     pub bitrate_kbps: i64,
     pub loss_percent: f64,
-    /// One-glance verdict derived from the counters above (deaf / mis_keyed /
-    /// jammed / healthy / searching).
+    /// One-glance verdict derived from the counters above (deaf / no_peer /
+    /// mis_keyed / jammed / healthy / searching).
     pub link_diag: LinkDiag,
     pub timestamp: String,
     /// The uplink receiver whose decoded interval this block reports. `None`
@@ -415,7 +420,16 @@ impl UplinkAggregator {
         }
         match &self.held {
             Some(h) => h.clone(),
-            None => stats,
+            // The drone cannot tell a deaf radio from a ground station that is
+            // simply not transmitting, and the second is the common case.
+            None => LinkStats {
+                link_diag: if stats.link_diag == LinkDiag::Deaf {
+                    LinkDiag::NoPeer
+                } else {
+                    stats.link_diag
+                },
+                ..stats
+            },
         }
     }
 
@@ -753,5 +767,16 @@ mod tests {
         agg.observe(UplinkPlane::Aux, interval(40, -50.0), t0);
         let s = agg.plane_closed(UplinkPlane::Aux, t0 + Duration::from_millis(100));
         assert!(!s.is_measured());
+    }
+
+    #[test]
+    fn an_unmeasured_deaf_uplink_reads_as_no_peer() {
+        let mut agg = UplinkAggregator::new();
+        let deaf = LinkStats {
+            link_diag: LinkDiag::Deaf,
+            ..interval(0, -100.0)
+        };
+        let s = agg.observe(UplinkPlane::Control, deaf, Instant::now());
+        assert_eq!(s.link_diag, LinkDiag::NoPeer);
     }
 }

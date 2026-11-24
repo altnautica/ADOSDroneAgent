@@ -24,7 +24,7 @@ export interface LinkView {
   /** e.g. "connected" | "connecting" | "degraded" | "rf_unverified". */
   state: string;
   /** The one-glance link diagnosis the agent derives from its decode counters
-   *  ("healthy" | "searching" | "deaf" | "mis_keyed" | "jammed"). Null until the
+   *  ("healthy" | "searching" | "deaf" | "no_peer" | "mis_keyed" | "jammed"). Null until the
    *  agent classifies the link; absent on older agents. */
   link_diag?: string | null;
   /** Every frame captured off-air BEFORE decrypt (0 = a deaf radio, no RF). */

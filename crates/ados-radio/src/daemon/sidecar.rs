@@ -368,8 +368,8 @@ pub(crate) fn build_stats_value(
         // decrypt (0 = deaf radio, no RF arriving); `decrypt_errors` are wrong-key /
         // wrong-link_id failures (RF arriving, not decodable); `packets_bad` are
         // corrupt frames; `session_packets` counts valid session-key packets.
-        // `link_diag` is the one-glance verdict derived from them (deaf / mis_keyed /
-        // jammed / healthy / searching) so a dead link's CAUSE is legible.
+        // `link_diag` is the one-glance verdict derived from them (deaf / no_peer /
+        // mis_keyed / jammed / healthy / searching) so a dead link's CAUSE is legible.
         "link_diag": link.link_diag,
         "packets_all": link.packets_all,
         "decrypt_errors": link.decrypt_errors,

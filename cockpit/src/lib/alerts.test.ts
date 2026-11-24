@@ -40,6 +40,11 @@ describe("cockpit alerts", () => {
     expect(computeAlerts(inputs({ status: status(null) })).map((a) => a.id)).toEqual(["rf"]);
   });
 
+  it("raises no RF alert when the drone simply hears no ground station", () => {
+    const status = { link: { link_diag: "no_peer" } } as AlertInputs["status"];
+    expect(computeAlerts(inputs({ status })).map((a) => a.id)).not.toContain("rf");
+  });
+
   it("tells a drone's operator its delivered fleet slot applies after landing", () => {
     const full = (outcome: string) =>
       ({ radio: {}, radioFleetApply: { outcome, fleetId: 7, fleetSlot: 3, unit: "ados-wfb-drone" } }) as unknown as StatusFull;

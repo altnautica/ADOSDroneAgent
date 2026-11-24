@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { adapterDetail } from "@/lib/link-diag";
+import { adapterDetail, linkDiagView } from "@/lib/link-diag";
+
+describe("linkDiagView", () => {
+  it("reads a drone with no ground station on air as informational, not a fault", () => {
+    const view = linkDiagView("no_peer");
+    expect(view?.label).toBe("No ground station");
+    expect(view?.actionable).toBe(false);
+  });
+});
 
 // The Link tab crashed the instant it was opened: "Minified React error #31 —
 // objects are not valid as a React child", with the offending keys named in the

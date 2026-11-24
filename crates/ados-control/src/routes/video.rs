@@ -316,7 +316,7 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         "adapter_usb_speed_mbps",
         "adapter_usb_degraded",
         // Link-diagnostic verdict + its backing RX counters. `link_diag` is the
-        // one-glance cause (deaf / mis_keyed / jammed / healthy / searching); the
+        // one-glance cause (deaf / no_peer / mis_keyed / jammed / healthy / searching); the
         // counters separate the failure modes a bare "0 received" hides —
         // `packets_all` captured off-air before decrypt, `decrypt_errors`,
         // `packets_bad`, and valid `session_packets`.
