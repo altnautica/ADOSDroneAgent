@@ -6,6 +6,39 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.30] - 2026-11-24
+
+### Added
+- Aircraft setup opens on an overview of component cards (frame, sensors, radio, motors and outputs, battery, flight behaviour, safety, ADOS Pilot) with progress and a needs-attention border, then guides one step at a time: a picture, one sentence, inputs with units, one primary action, and the parameter changes behind a "What this changes" disclosure. The frame step picks the layout from pictures.
+- A setup wizard that was running when the agent restarted is marked `interrupted`, keeps its step records, and continues at the first unfinished step (`POST /api/v1/fc-setup/{wizard}/resume`, "Continue setup").
+- Readiness items carry the parameter rows behind a mismatch (`params`: name, current, wanted) and a fix hint (`fix`: apply the ADOS profile, open a setup step, a settings section, or the parameter editor). The `msg` text is unchanged.
+- The cockpit and dashboard alert list groups alerts by section with counts, shows a current → wanted parameter table and at most two actions per row: apply the recommended values behind a hold (disarmed only, a parameter snapshot is saved first), or open the setup step, settings section or a parameter list filtered to those names. Hide snoozes a warning until its condition clears; a blocking alert only folds. The flight-state chip opens the blocking rows instead of a tooltip.
+- Vision badges open a menu with the reason, Turn off and Set up. The Vision panel has a close button, an engine card that turns vision on or restarts it, and a live status per layer.
+- The cockpit rail cycles labelled, icons only and hidden (remembered per device, key `[`) and shows a cue when it scrolls; the dashboard sidebar collapses.
+- The ground station's Radio link screen, the dashboard Receive page and the TUI Link card show the received video stream.
+
+### Changed
+- Optical flow and rangefinder parameter rules accept MSP as well as MAVLink (`FLOW_TYPE` 5 or 7, `RNGFND1_TYPE` 10 or 32); the serial forwarding check applies to MAVLink flow only.
+- The TUI groups pilot alerts by section with parameter lines and a hint naming where to fix them.
+- The ground station's radio page is named "Radio link" on every surface, and region `global` reads "Unrestricted".
+- The ADOS profile setup step reports each value with the flight controller's current one and whether applying restarts the flight controller; "Apply recommended values" lists only what changes.
+- The alert pill and the flight-state chip say how many items block take-off and use a short reason ("FC parameters differ") when the item carries a parameter table; screen readers still get the full message.
+- "Aircraft setup needed" names the step to open; Aircraft setup flags the card a readiness item points at, counts a completed setup as done, and asks before Run again and Abort.
+- PreArm lines are held for 35 s, so ArduPilot's 30 s repeat no longer makes them flicker; passing checks or arming clears them.
+- The cockpit rail fits every item at 1280×800; a wide TUI gives alerts their own column.
+
+### Fixed
+- Chunked STATUSTEXT is reassembled before it reaches the pilot's FC text ring and the router's PreArm ring, so a long PreArm message is one alert instead of several fragments.
+- Pairing: a failed ground-station re-bind restores the previous key pair. The re-arm keygen overwrote `/etc/gs.key` and `/etc/drone.key` before any drone took the new pair, so the hop, presence and swarm keys diverged while video still decoded.
+- Video: the latency SEI is stamped once per picture, not once per slice; with four slices per picture the publisher split each frame and browsers painted the missing slices green.
+- Supervisor: a USB camera that enumerates during startup still starts video.
+- Installer: an upgrade restarts every unit the supervisor owns, so the router never keeps running its old binary.
+- Aircraft setup counts the parameters of the current download, not every name ever seen.
+- `ados-oled-i2c` no longer restart-loops on a board without an OLED.
+- Ground station: the status strip reads paired from the bound drone's slot, the link state `active` reads Connected, the Uplink screens show the Ethernet lane, link-quality history fills without the log store, loss reads "—" when nothing is decoded, temperatures fall back to the kernel thermal zones, the hotspot hint names the access point actually up, the setup checklist counts a bound and receiving station as ready, and the LoRa and mesh pages stop calling routes the node does not serve.
+- An I2C peripheral that lists addresses is reported connected only when one of them answers.
+- Aircraft setup is offered on the drone only; a node without a setup engine shows an error instead of loading forever.
+
 ## [0.124.29] - 2026-11-24
 
 ### Fixed
