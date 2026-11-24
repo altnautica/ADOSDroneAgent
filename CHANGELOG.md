@@ -6,6 +6,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.28] - 2026-11-24
+
+### Fixed
+- HAL: the Cubie A7S board profile names 1500000 baud for its FC UART (`/dev/ttyAS2`). Its UARTs run off a 24 MHz clock, so 921600 lands near 750000 and garbles every frame; 1500000 is exact on the board and on an STM32 flight controller (ArduPilot `SERIALn_BAUD = 1500`).
+
 ## [0.124.27] - 2026-11-24
 
 ### Changed
