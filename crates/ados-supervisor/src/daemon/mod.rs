@@ -88,6 +88,11 @@ async fn serve() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "could not publish the board fingerprint sidecar"),
     }
 
+    // The hot-plug baseline is what is present BEFORE the startup hardware
+    // pass: a device that enumerates after that pass looked (a USB camera whose
+    // driver registers a second into boot) is then an edge the poller acts on,
+    // instead of part of a baseline taken later that hides it until a replug.
+    let hotplug_baseline = hotplug::snapshot();
     let mut supervisor = Supervisor::new(config, bind_orch.clone());
     supervisor.start().await;
 
@@ -171,7 +176,7 @@ async fn serve() -> Result<()> {
     // Hot-plug poller runs on its own task and only forwards device-class
     // transitions; the supervisor state stays owned by this loop.
     let (tx, mut rx) = mpsc::channel(32);
-    tokio::spawn(hotplug::run(tx, hotplug::poll_interval()));
+    tokio::spawn(hotplug::run(tx, hotplug::poll_interval(), hotplug_baseline));
 
     let mut tick = tokio::time::interval(MONITOR_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

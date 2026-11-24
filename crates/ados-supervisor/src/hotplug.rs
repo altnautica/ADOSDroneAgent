@@ -113,7 +113,7 @@ impl HotplugCoordinator {
 
 /// One identity per present device, per class.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Presence {
+pub struct Presence {
     camera: BTreeSet<String>,
     fc: BTreeSet<String>,
     radio: BTreeSet<String>,
@@ -279,7 +279,10 @@ fn classify_serial_nodes(
     (fc, elrs)
 }
 
-fn snapshot() -> Presence {
+/// The devices present now. The daemon takes the poller's baseline with this
+/// BEFORE the startup hardware pass, so a device that enumerates after that
+/// pass looked (a USB camera registering a second into boot) is still an edge.
+pub fn snapshot() -> Presence {
     let claim = crsf_claim();
     let pin_node = pin_node_name(&claim.device);
     // A USB flight controller enumerates as a CDC-ACM / USB-serial node — but
@@ -325,10 +328,23 @@ fn low_ram() -> bool {
     false
 }
 
-/// Emit hot-plug events until the channel closes. The first snapshot is the
-/// baseline; only subsequent changes to a class's identity set fire.
-pub async fn run(tx: Sender<DevKind>, interval: Duration) {
-    let mut prev = snapshot();
+/// The device classes whose identity set differs between two snapshots.
+fn changes(prev: &Presence, cur: &Presence) -> Vec<DevKind> {
+    [
+        (cur.camera != prev.camera, DevKind::Camera),
+        (cur.fc != prev.fc, DevKind::Fc),
+        (cur.radio != prev.radio, DevKind::Radio),
+        (cur.elrs != prev.elrs, DevKind::Elrs),
+    ]
+    .into_iter()
+    .filter_map(|(changed, kind)| changed.then_some(kind))
+    .collect()
+}
+
+/// Emit hot-plug events until the channel closes. `baseline` is what the
+/// startup pass saw; only later changes to a class's identity set fire.
+pub async fn run(tx: Sender<DevKind>, interval: Duration, baseline: Presence) {
+    let mut prev = baseline;
     tracing::info!(
         camera = prev.camera.len(),
         fc = prev.fc.len(),
@@ -339,13 +355,8 @@ pub async fn run(tx: Sender<DevKind>, interval: Duration) {
     loop {
         sleep(interval).await;
         let cur = snapshot();
-        for (changed, kind) in [
-            (cur.camera != prev.camera, DevKind::Camera),
-            (cur.fc != prev.fc, DevKind::Fc),
-            (cur.radio != prev.radio, DevKind::Radio),
-            (cur.elrs != prev.elrs, DevKind::Elrs),
-        ] {
-            if changed && tx.send(kind).await.is_err() {
+        for kind in changes(&prev, &cur) {
+            if tx.send(kind).await.is_err() {
                 return; // receiver gone → supervisor shutting down
             }
         }
