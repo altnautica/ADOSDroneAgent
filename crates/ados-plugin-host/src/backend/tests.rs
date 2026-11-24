@@ -21,7 +21,6 @@ fn spec() -> UnitSpec {
             "/var/ados/plugins/com.example.x".to_string(),
             "-/usr/lib".to_string(),
         ],
-        guard_loader: Some(PathBuf::from("/opt/ados/bin/ados-plugin-host")),
         log_path: PathBuf::from("/var/log/ados/plugins/com-example-x.log"),
         restart: "on-failure".to_string(),
         resources: ResourceLimits::default(),
@@ -30,7 +29,7 @@ fn spec() -> UnitSpec {
 }
 
 #[test]
-fn a_unit_runs_as_its_own_user_after_the_guard_with_a_credential_and_no_exec_elsewhere() {
+fn a_unit_runs_as_its_own_user_with_a_credential_and_no_exec_elsewhere() {
     let unit = render_systemd(&spec());
     assert!(unit.contains("\nUser=ados-plg-0a1b2c3d\nGroup=ados-plugins\n"));
     assert!(
@@ -39,10 +38,9 @@ fn a_unit_runs_as_its_own_user_after_the_guard_with_a_credential_and_no_exec_els
     assert!(!unit.contains("EnvironmentFile="));
     assert!(unit.contains("\nRequires=ados-plugin-host.service\n"));
     assert!(unit.contains("\nAfter=ados-supervisor.service ados-plugin-host.service\n"));
-    let pre = unit
-        .find("\nExecStartPre=+/opt/ados/bin/ados-plugin-host guard-load\n")
-        .expect("guard-load pre-start");
-    assert!(pre < unit.find("\nExecStart=").unwrap());
+    // No pre-start: on systemd 247 a pre-start next to a credential and the
+    // mount namespacing fails the unit at its namespace step.
+    assert!(!unit.contains("ExecStartPre"));
     assert!(unit.contains("\nNoExecPaths=/\nExecPaths=/var/ados/plugins/com.example.x -/usr/lib\n"));
     let probe = systemd_run_argv(&ProbeSpec {
         argv: vec!["bin/check".to_string()],
@@ -55,6 +53,35 @@ fn a_unit_runs_as_its_own_user_after_the_guard_with_a_credential_and_no_exec_els
     assert!(probe.contains(&"--uid=ados-plg-0a1b2c3d".to_string()));
     assert!(probe.contains(&"--gid=ados-plugins".to_string()));
     assert!(probe.contains(&"--property=NoExecPaths=/".to_string()));
+}
+
+#[test]
+fn the_systemd_major_is_read_off_the_version_banner() {
+    assert_eq!(
+        parse_systemd_major("systemd 247 (247.3-7+deb11u8)"),
+        Some(247)
+    );
+    assert_eq!(parse_systemd_major("systemd 259 (259-1ubuntu1)"), Some(259));
+    assert_eq!(parse_systemd_major("systemd"), None);
+    assert_eq!(parse_systemd_major("systemd v2x"), None);
+}
+
+#[test]
+fn the_directives_an_older_systemd_ignores_are_named() {
+    assert_eq!(
+        unsupported_sandbox_directives(247),
+        [
+            "NoExecPaths",
+            "ExecPaths",
+            "SocketBindAllow",
+            "SocketBindDeny"
+        ]
+    );
+    assert_eq!(
+        unsupported_sandbox_directives(248),
+        ["SocketBindAllow", "SocketBindDeny"]
+    );
+    assert!(unsupported_sandbox_directives(249).is_empty());
 }
 
 type Calls = Arc<Mutex<Vec<String>>>;

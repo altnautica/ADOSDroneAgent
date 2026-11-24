@@ -16,10 +16,9 @@
 //! with `LoadCredential=`; the runner reads it from `$CREDENTIALS_DIRECTORY`
 //! and connects.
 //!
-//! `ados-plugin-host guard-load` is the privileged pre-start every plugin unit
-//! runs: it loads the loopback guard (with the current per-plugin listener
-//! exceptions) and exits non-zero when it cannot, so no plugin starts
-//! unguarded whatever the boot order.
+//! The daemon loads the loopback guard (with the current per-plugin listener
+//! exceptions) at startup, before any plugin unit can start, and reloads it
+//! whenever the served plugin set or a grant changes and on every unit refresh.
 //!
 //! Lifecycle: the served set and the minted tokens are *maintained*, not
 //! snapshotted at boot. A [`PluginReconciler`] re-reads the plugin state file
@@ -138,10 +137,6 @@ pub fn run() -> ExitCode {
 async fn serve() -> Result<()> {
     init_logging();
 
-    if std::env::args().nth(1).as_deref() == Some("guard-load") {
-        return tokio::task::spawn_blocking(guard_load).await?;
-    }
-
     // Every host path from its `ADOS_PLUGIN_*` / `ADOS_RUN_DIR` variable, so a
     // per-user install (the macOS workstation) or a test run points the whole
     // daemon at its own layout. The control socket binds in its own root-only
@@ -194,8 +189,8 @@ async fn serve() -> Result<()> {
 
     // Load the loopback guard before any plugin starts. Its verdict gates the
     // `network.outbound` grant and the rendered sandbox of every unit, so the
-    // units are refreshed against it right after. Every plugin unit also
-    // reloads it in its own pre-start.
+    // units are refreshed against it right after. The daemon reloads it on
+    // every unit refresh and whenever the served plugin set changes.
     if let Err(e) = crate::plugin_account::ensure_groups() {
         tracing::error!(error = %e, "plugin groups could not be created");
     }
@@ -203,6 +198,7 @@ async fn serve() -> Result<()> {
     let guard_state_path = paths.loopback_guard_state.clone();
     tokio::task::spawn_blocking(move || loopback_guard::install(&ruleset, &guard_state_path))
         .await?;
+    warn_unsupported_sandbox_directives();
 
     // A plugin signed by a key, or installed from an archive, revoked since it
     // was installed is stopped before anything is refreshed or served, unless

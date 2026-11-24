@@ -11,10 +11,13 @@
 //!
 //! So the rule is inverted rather than enumerated: an nftables output rule
 //! drops every TCP and UDP packet a plugin process sends to any address that
-//! is local to this node (`fib daddr type local`: loopback, the AP and USB
-//! gadget addresses, link-local, every interface address). A port list would
-//! go stale the moment an operator moved an aux port or a new service bound
-//! one; the address class cannot.
+//! is local to this node: loopback, the AP and USB gadget addresses,
+//! link-local, every interface address. The match is `oifname "lo"`: the
+//! kernel routes every locally addressed packet through the loopback device
+//! in the output hook, whatever interface carries the address, and the match
+//! needs no `fib` expression, which some vendor kernels are built without. A
+//! port list would go stale the moment an operator moved an aux port or a new
+//! service bound one; the address class cannot.
 //!
 //! The only exceptions are explicit and narrow:
 //!
@@ -33,15 +36,13 @@
 //! directory as plugins come and go, and a recreated directory would leave the
 //! rule silently matching nothing.
 //!
-//! The daemon loads the table at startup, and every plugin unit reloads it in a
-//! privileged `ExecStartPre` (`ados-plugin-host guard-load`) before its process
-//! starts, so the guard is in place for every plugin start whatever the boot
-//! order, and a load failure fails the unit closed. The daemon records its
-//! verdict in a run-dir sidecar every grant path and renderer reads; the
-//! pre-start only reloads (see [`reload`]). When the rule cannot load,
-//! `network.outbound` is refused at grant time and a unit rendered for an
-//! earlier grant keeps `IPAddressDeny=any`: without the guard, the capability
-//! is not safe to hold.
+//! The plugin-host daemon loads the table at startup, before any plugin unit
+//! can start (every plugin unit requires and orders after it), and reloads it
+//! whenever the served plugin set or a grant changes and on every unit
+//! refresh. It records its verdict in a run-dir sidecar every grant path and
+//! renderer reads. When the rule cannot load, `network.outbound` is refused at
+//! grant time and a unit rendered for an earlier grant keeps
+//! `IPAddressDeny=any`: without the guard, the capability is not safe to hold.
 
 use std::path::Path;
 
@@ -104,7 +105,7 @@ fn port_set(ports: &[u16]) -> String {
 /// byte-identical ruleset.
 pub fn render_ruleset(exceptions: &[ListenException], agent_tcp: &[u16]) -> String {
     let group = format!("meta skgid \"{PLUGIN_GROUP}\"");
-    let local = "fib daddr type local";
+    let local = "oifname \"lo\"";
     let mut rules: Vec<String> = vec![
         format!("{group} {local} udp dport {DNS_PORT} accept"),
         format!("{group} {local} tcp dport {DNS_PORT} accept"),
@@ -185,23 +186,10 @@ pub fn configured_ws_port(yaml: &str) -> u16 {
         .unwrap_or(DEFAULT_MAVLINK_WS_PORT)
 }
 
-/// Load the ruleset and record the verdict in the sidecar. Blocking; run at
-/// daemon startup, whose view of the run dir is the host's.
+/// Load the ruleset and record the verdict in the sidecar. Blocking; run by
+/// the daemon, whose view of the run dir is the host's.
 pub fn install(ruleset: &str, sidecar: &Path) -> GuardState {
     install_with(ruleset, sidecar, load)
-}
-
-/// Load the ruleset without recording the verdict. Blocking; run in every
-/// plugin unit's privileged pre-start.
-///
-/// The `+` prefix lifts the unit's privilege restrictions, but systemd still
-/// builds the pre-start's mount namespace from the unit's
-/// `TemporaryFileSystem=` and bind mounts, so the run dir it sees is the
-/// unit's private read-only tmpfs. A sidecar write there fails, and would
-/// reach no reader if it succeeded. The daemon's record stands; a failed
-/// reload fails the unit instead.
-pub fn reload(ruleset: &str) -> GuardState {
-    report(load(ruleset))
 }
 
 fn install_with(

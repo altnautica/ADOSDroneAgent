@@ -406,6 +406,22 @@ pub(super) fn guard_ruleset(supervisor: &PluginSupervisor) -> String {
     )
 }
 
+/// Log, once at startup, the plugin sandbox directives this host's systemd
+/// ignores as unknown, so a weaker sandbox is visible rather than silent.
+pub(super) fn warn_unsupported_sandbox_directives() {
+    let Some(version) = crate::backend::systemd_major() else {
+        return;
+    };
+    let directives = crate::backend::unsupported_sandbox_directives(version);
+    if !directives.is_empty() {
+        tracing::warn!(
+            systemd_version = version,
+            directives = ?directives,
+            "plugin_sandbox_directives_unsupported"
+        );
+    }
+}
+
 /// A lifecycle controller over this process's layout, with the board gates.
 pub(super) fn production_supervisor(paths: &Paths) -> PluginSupervisor {
     let (board_id, board_tier) =
@@ -426,7 +442,18 @@ impl crate::reconcile::UnitControl for DaemonUnits {
         if let Err(e) = supervisor.discover() {
             tracing::warn!(error = %e, "plugin discovery failed before a unit refresh");
         }
+        // Reassert the guard and its verdict before the units are rendered
+        // against it.
+        self.load_guard(&supervisor);
         supervisor.refresh_all_units();
+    }
+
+    fn reload_guard(&self) {
+        let mut supervisor = production_supervisor(&self.0);
+        if let Err(e) = supervisor.discover() {
+            tracing::warn!(error = %e, "plugin discovery failed; loading the guard without fresh listener exceptions");
+        }
+        self.load_guard(&supervisor);
     }
 
     fn stop_plugin_units(&self, plugin_id: &str) {
@@ -434,23 +461,13 @@ impl crate::reconcile::UnitControl for DaemonUnits {
     }
 }
 
-/// `guard-load`: ensure the plugin groups exist, reload the guard, and exit
-/// non-zero when it did not load, so the plugin unit whose pre-start this is
-/// fails closed. The verdict is not recorded here: this runs in the plugin
-/// unit's mount namespace, where the run dir is the unit's read-only tmpfs
-/// (see [`loopback_guard::reload`]); the daemon's record stands.
-pub(super) fn guard_load() -> Result<()> {
-    let paths = Paths::from_env();
-    if let Err(e) = crate::plugin_account::ensure_groups() {
-        anyhow::bail!("plugin groups unavailable: {e}");
+impl DaemonUnits {
+    /// Ensure the plugin groups exist, then load the guard for `supervisor`'s
+    /// install set and record the verdict every grant path and renderer reads.
+    fn load_guard(&self, supervisor: &PluginSupervisor) {
+        if let Err(e) = crate::plugin_account::ensure_groups() {
+            tracing::error!(error = %e, "plugin groups could not be created");
+        }
+        loopback_guard::install(&guard_ruleset(supervisor), &self.0.loopback_guard_state);
     }
-    let mut supervisor = production_supervisor(&paths);
-    if let Err(e) = supervisor.discover() {
-        tracing::warn!(error = %e, "plugin discovery failed; loading the guard without listener exceptions");
-    }
-    let state = loopback_guard::reload(&guard_ruleset(&supervisor));
-    if !state.active {
-        anyhow::bail!("plugin loopback guard did not load: {}", state.reason);
-    }
-    Ok(())
 }

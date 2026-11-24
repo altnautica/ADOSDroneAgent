@@ -50,10 +50,6 @@ pub use host_paths::*;
 /// Default path of the per-plugin runner binary a Python plugin's unit starts
 /// (`ADOS_PLUGIN_RUNNER` overrides it).
 pub const PLUGIN_RUNNER_BINARY: &str = "/opt/ados/venv/bin/ados-plugin-runner";
-/// Default path of the installed plugin-host binary whose `guard-load` every
-/// plugin unit runs as a privileged pre-start (`ADOS_PLUGIN_HOST_BIN`
-/// overrides it).
-pub const PLUGIN_HOST_BINARY: &str = "/opt/ados/bin/ados-plugin-host";
 /// Shared-library and loader directories every plugin process must map
 /// executable code from; each renders optional (`-`) so a host without one
 /// still starts the unit.
@@ -239,15 +235,6 @@ pub fn build_unit_spec(
     Ok(Some(spec))
 }
 
-/// The installed plugin-host binary (`ADOS_PLUGIN_HOST_BIN`, else
-/// [`PLUGIN_HOST_BINARY`]).
-pub fn plugin_host_binary() -> PathBuf {
-    std::env::var_os("ADOS_PLUGIN_HOST_BIN")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(PLUGIN_HOST_BINARY))
-}
-
 /// The paths a plugin's processes may execute or map executable code from:
 /// its own install tree (its binaries, the allowlisted `process.spawn` helpers
 /// it ships, a Python plugin's native extensions), the shared Python runtime
@@ -313,8 +300,6 @@ pub(crate) fn runner_context(
     let credential = token_credential_path(&manifest.id, Some(&paths.socket_dir));
     path_token("socket dir", &socket_dir)?;
     path_token("token credential", &credential)?;
-    let guard_loader = plugin_host_binary();
-    path_token("plugin host binary", &guard_loader)?;
     let mut env = vec![
         (
             ENV_PLUGIN_SOCKET.to_string(),
@@ -362,7 +347,6 @@ pub(crate) fn runner_context(
         bind_read_only,
         bind_read_write,
         exec_paths: exec_paths_for(manifest, paths)?,
-        guard_loader: Some(guard_loader),
         log_path: PathBuf::new(),
         restart: String::new(),
         resources: Default::default(),
@@ -547,7 +531,6 @@ Environment=ADOS_NODE_PROFILE=drone
 LoadCredential=ados-plugin-token:/run/ados/plugins/com.example.rustplug.token
 BindReadOnlyPaths=/run/ados/plugins/com.example.rustplug
 BindPaths=/var/ados/plugin-data/com.example.rustplug
-ExecStartPre=+/opt/ados/bin/ados-plugin-host guard-load
 ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug com.example.rustplug --socket /run/ados/plugins/com.example.rustplug/host.sock
 Restart=on-failure
 RestartSec=2s

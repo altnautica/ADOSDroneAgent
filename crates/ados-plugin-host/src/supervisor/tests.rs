@@ -8,6 +8,7 @@ use super::tests_support::paths_in;
 use crate::backend::RecordingBackend;
 
 mod accounts;
+mod legacy_units;
 
 fn build_unsigned_archive(manifest_yaml: &str) -> Vec<u8> {
     let mut buf = Vec::new();

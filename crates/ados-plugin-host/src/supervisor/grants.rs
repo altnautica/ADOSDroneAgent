@@ -92,8 +92,10 @@ impl PluginSupervisor {
     /// changed. The plugin-host daemon calls it at startup, after loading the
     /// guard, so a unit rendered while the guard was active cannot keep network
     /// access into a boot where it is not. It also re-creates each HTTP
-    /// plugin's socket dir, which lives on the run-dir tmpfs.
+    /// plugin's socket dir, which lives on the run-dir tmpfs, and removes any
+    /// unit left under an install's legacy name.
     pub fn refresh_all_units(&self) {
+        self.remove_legacy_units();
         let ids: Vec<String> = self.installs.iter().map(|i| i.plugin_id.clone()).collect();
         for plugin_id in ids {
             let result = self
@@ -103,6 +105,40 @@ impl PluginSupervisor {
             if let Err(e) = result {
                 tracing::error!(plugin_id, error = %e, "plugin_unit_refresh_failed");
             }
+        }
+    }
+
+    /// Stop, delete and clear each install's unit left under the name older
+    /// agents gave it (`ados-plugin-<sanitized id>.service`, no id hash).
+    /// Nothing renders or starts that name any more, so a leftover sits in the
+    /// unit dir listed as failed. A name some install renders today is never
+    /// touched.
+    fn remove_legacy_units(&self) {
+        let owned: BTreeSet<String> = self
+            .installs
+            .iter()
+            .filter_map(|i| self.manifest_for(&i.plugin_id).ok())
+            .flat_map(|m| Self::unit_names_of(&m))
+            .collect();
+        for install in &self.installs {
+            let plugin_id = &install.plugin_id;
+            let legacy = format!(
+                "{PLUGIN_UNIT_PREFIX}{}.service",
+                crate::systemd::sanitize_unit_name(plugin_id)
+            );
+            if owned.contains(&legacy) || !self.paths.unit_dir.join(&legacy).exists() {
+                continue;
+            }
+            // A failed unit has nothing to stop; its error changes nothing.
+            let _ = self.backend.stop_disable(&legacy);
+            if let Err(e) = self.backend.uninstall(&legacy) {
+                tracing::warn!(plugin_id = %plugin_id, unit = %legacy, error = %e, "plugin_legacy_unit_remove_failed");
+                continue;
+            }
+            if let Err(e) = self.backend.reset_failed(&legacy) {
+                tracing::debug!(unit = %legacy, error = %e, "legacy unit reset-failed refused");
+            }
+            tracing::info!(plugin_id = %plugin_id, unit = %legacy, "plugin_legacy_unit_removed");
         }
     }
 

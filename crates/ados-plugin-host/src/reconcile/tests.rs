@@ -20,10 +20,19 @@ fn the_state_poll_is_a_fixed_short_interval() {
     assert!(POLL_INTERVAL <= Duration::from_secs(5));
 }
 
-struct RecordingUnits(Mutex<Vec<String>>);
+struct RecordingUnits(Mutex<Vec<String>>, std::sync::atomic::AtomicUsize);
+
+impl RecordingUnits {
+    fn guard_reloads(&self) -> usize {
+        self.1.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 impl UnitControl for RecordingUnits {
     fn refresh_units(&self) {}
+    fn reload_guard(&self) {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     fn stop_plugin_units(&self, plugin_id: &str) {
         if let Ok(mut stopped) = self.0.lock() {
             stopped.push(plugin_id.to_string());
@@ -98,7 +107,7 @@ async fn tampered_binary_stops_plugin() {
         )
         .with_token_mint(mint.clone()),
     );
-    let units = Arc::new(RecordingUnits(Mutex::new(Vec::new())));
+    let units = Arc::new(RecordingUnits(Mutex::new(Vec::new()), Default::default()));
     let reconciler = PluginReconciler::new(server, mint, state_path.clone(), install_dir)
         .with_unit_control(
             units.clone(),
@@ -107,12 +116,15 @@ async fn tampered_binary_stops_plugin() {
         );
 
     assert_eq!(reconciler.reconcile().serving, 1);
+    // Serving a plugin its unit is about to start reloads the guard first.
+    assert_eq!(units.guard_reloads(), 1);
     // Same size, different bytes: the digest decides, not the size.
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(plugin_dir.join("bin/tool"), b"modified").unwrap();
     let report = reconciler.reconcile();
     assert_eq!(report.stopped, 1);
     assert_eq!(report.serving, 0);
+    assert_eq!(units.guard_reloads(), 2);
     let installs = state::load_state_checked(Some(&state_path)).unwrap();
     assert_eq!(installs[0].status, PluginStatus::Failed);
     assert!(installs[0]
@@ -122,4 +134,5 @@ async fn tampered_binary_stops_plugin() {
     assert_eq!(units.0.lock().map(|s| s.clone()).unwrap_or_default(), [ID]);
     // A failed plugin is not wanted, so the next pass changes nothing.
     assert_eq!(reconciler.reconcile(), ReconcileReport::default());
+    assert_eq!(units.guard_reloads(), 2);
 }

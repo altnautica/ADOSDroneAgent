@@ -5,8 +5,8 @@ use super::*;
 /// Render a [`UnitSpec`] as a systemd service unit.
 ///
 /// Every generated plugin unit shares this text: the plugin slice, no start
-/// rate limit, the ordering on the plugin host (whose guard-load pre-start
-/// runs before the plugin's own process), the runner environment and token
+/// rate limit, the ordering on the plugin host (which loads the loopback guard
+/// before any plugin unit can start), the runner environment and token
 /// credential, the binds, the resource envelope, the append logs, the plugin's
 /// own user in the plugin group, the fixed hardening and exec allowlist, then
 /// the capability sandbox (the part a grant or revoke changes).
@@ -32,13 +32,6 @@ pub fn render_systemd(spec: &UnitSpec) -> String {
     }
     for path in &spec.bind_read_write {
         service.push(format!("BindPaths={}", path.display()));
-    }
-    if let Some(loader) = &spec.guard_loader {
-        // `+` runs it with full privileges, free of the unit's privilege and
-        // path restrictions, though still inside the unit's temporary
-        // filesystems and bind mounts; a non-zero exit fails the start, so
-        // the plugin never runs unguarded.
-        service.push(format!("ExecStartPre=+{} guard-load", loader.display()));
     }
     let exec: Vec<String> = spec.argv.iter().map(|w| exec_word(w)).collect();
     service.push(format!("ExecStart={}", exec.join(" ")));
@@ -88,9 +81,44 @@ WantedBy=ados-supervisor.service
     )
 }
 
-/// The unit every plugin unit requires and orders after: its `guard-load`
-/// pre-start and its socket server both live in the plugin host.
+/// The unit every plugin unit requires and orders after: the loopback guard
+/// it loads and its socket server both live in the plugin host.
 pub const PLUGIN_HOST_UNIT: &str = "ados-plugin-host.service";
+
+/// The host's systemd major version from `systemctl --version`, or `None` when
+/// systemd is absent or its banner unreadable.
+pub fn systemd_major() -> Option<u32> {
+    let out = std::process::Command::new("systemctl")
+        .arg("--version")
+        .output()
+        .ok()?;
+    parse_systemd_major(String::from_utf8_lossy(&out.stdout).lines().next()?)
+}
+
+/// The major version in a `systemctl --version` banner line:
+/// `systemd 247 (247.3-7+deb11u8)` is 247.
+pub fn parse_systemd_major(first_line: &str) -> Option<u32> {
+    let token = first_line.split_whitespace().nth(1)?;
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
+}
+
+/// The sandbox directives a plugin unit carries that systemd `major` ignores
+/// as unknown: `ExecPaths=`/`NoExecPaths=` arrived in 248 and
+/// `SocketBindAllow=`/`SocketBindDeny=` in 249. A unit still loads without
+/// them; the plugin just runs without those restrictions.
+pub fn unsupported_sandbox_directives(major: u32) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if major < 248 {
+        out.extend(["NoExecPaths", "ExecPaths"]);
+    }
+    if major < 249 {
+        out.extend(["SocketBindAllow", "SocketBindDeny"]);
+    }
+    out
+}
 
 /// `NoExecPaths=/` plus the allowlist, so the plugin can execute (and map
 /// executable code from) only its own tree, its runtime and the shared
@@ -163,6 +191,10 @@ impl ServiceBackend for SystemdBackend {
     fn stop_disable(&self, name: &str) -> Result<(), SupervisorError> {
         self.systemctl(&["stop", name])?;
         self.systemctl(&["disable", name])
+    }
+
+    fn reset_failed(&self, name: &str) -> Result<(), SupervisorError> {
+        self.systemctl(&["reset-failed", name])
     }
 
     fn restart(&self, name: &str) -> Result<(), SupervisorError> {

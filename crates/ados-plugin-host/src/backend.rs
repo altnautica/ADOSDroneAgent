@@ -35,7 +35,10 @@ mod recording;
 mod systemd;
 
 pub use launchd::render_launchd;
-pub use systemd::{exec_allowlist, render_systemd, systemd_run_argv, PLUGIN_HOST_UNIT};
+pub use systemd::{
+    exec_allowlist, parse_systemd_major, render_systemd, systemd_major, systemd_run_argv,
+    unsupported_sandbox_directives, PLUGIN_HOST_UNIT,
+};
 
 /// How long one service-manager call may take before it is abandoned. Killing
 /// the client does not cancel a job the manager already queued; it only frees
@@ -68,10 +71,6 @@ pub struct UnitSpec {
     /// The only paths the unit may execute or map executable code from;
     /// everything else is mounted `noexec`. Optional entries carry a `-`.
     pub exec_paths: Vec<String>,
-    /// The plugin-host binary whose `guard-load` runs as a privileged
-    /// pre-start, so the loopback guard is loaded before the plugin runs and a
-    /// failed load fails the unit.
-    pub guard_loader: Option<PathBuf>,
     /// Where stdout and stderr append.
     pub log_path: PathBuf,
     /// `on-failure`, `always` or `no`.
@@ -109,6 +108,11 @@ pub trait ServiceBackend: Send + Sync {
     fn enable_start(&self, name: &str) -> Result<(), SupervisorError>;
     /// Stop the unit and disable it at boot.
     fn stop_disable(&self, name: &str) -> Result<(), SupervisorError>;
+    /// Clear a unit's failed state so it no longer lists as failed. A backend
+    /// with no such state does nothing.
+    fn reset_failed(&self, _name: &str) -> Result<(), SupervisorError> {
+        Ok(())
+    }
     /// Restart the unit so it runs the current definition.
     fn restart(&self, name: &str) -> Result<(), SupervisorError>;
     /// Whether the unit is running.

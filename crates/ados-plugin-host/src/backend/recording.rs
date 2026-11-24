@@ -82,6 +82,11 @@ impl ServiceBackend for RecordingBackend {
         Ok(())
     }
 
+    fn reset_failed(&self, name: &str) -> Result<(), SupervisorError> {
+        self.record("reset-failed", name);
+        Ok(())
+    }
+
     fn restart(&self, name: &str) -> Result<(), SupervisorError> {
         self.record("restart", name);
         Ok(())

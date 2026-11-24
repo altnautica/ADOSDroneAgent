@@ -20,10 +20,8 @@ fn every_local_destination_is_dropped_for_the_plugin_group_on_tcp_and_udp() {
     for proto in ["tcp", "udp"] {
         assert!(
             lines.contains(
-                &format!(
-                    "meta skgid \"ados-plugins\" fib daddr type local meta l4proto {proto} drop"
-                )
-                .as_str()
+                &format!("meta skgid \"ados-plugins\" oifname \"lo\" meta l4proto {proto} drop")
+                    .as_str()
             ),
             "{proto} drop missing: {rules}"
         );
@@ -53,14 +51,14 @@ fn a_plugin_reaches_only_its_own_declared_ports_and_never_an_agent_port() {
         &agent_tcp_ports(DEFAULT_MAVLINK_WS_PORT),
     );
     let lines = rule_lines(&rules);
-    assert!(lines.contains(&"meta skuid 990 fib daddr type local tcp dport { 9100 } accept"));
+    assert!(lines.contains(&"meta skuid 990 oifname \"lo\" tcp dport { 9100 } accept"));
     // A plugin whose only declared port is an agent port gets no exception.
     assert!(!lines.iter().any(|l| l.contains("skuid 991")));
     let accept_at = lines.iter().position(|l| l.contains("skuid 990")).unwrap();
     let drop_at = lines.iter().position(|l| l.ends_with("tcp drop")).unwrap();
     assert!(accept_at < drop_at);
     // DNS is the one fixed exception, for both protocols.
-    assert!(lines.contains(&"meta skgid \"ados-plugins\" fib daddr type local udp dport 53 accept"));
+    assert!(lines.contains(&"meta skgid \"ados-plugins\" oifname \"lo\" udp dport 53 accept"));
 }
 
 #[test]

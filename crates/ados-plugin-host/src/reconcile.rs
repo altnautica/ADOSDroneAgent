@@ -68,6 +68,9 @@ pub use lifecycle::spawn_loops;
 pub trait UnitControl: Send + Sync {
     /// Re-render every installed plugin's units (the FC port mask moved).
     fn refresh_units(&self);
+    /// Reload the loopback guard against the current install set and record
+    /// its verdict.
+    fn reload_guard(&self);
     /// Stop every unit of a plugin that failed its tamper check.
     fn stop_plugin_units(&self, plugin_id: &str);
 }
@@ -264,6 +267,7 @@ impl<H: HostServices> PluginReconciler<H> {
         }
 
         // ---- start what should be served -------------------------------
+        let mut regranted = false;
         for (id, caps) in &wanted {
             let already = self
                 .served
@@ -275,6 +279,7 @@ impl<H: HostServices> PluginReconciler<H> {
                 // the token the session holds was minted.
                 let current = self.minted.lock().ok().and_then(|m| m.get(id).cloned());
                 if current.as_ref() != Some(caps) {
+                    regranted = true;
                     match self.rotate_token(id) {
                         Ok(delivered) => tracing::info!(
                             plugin_id = %id,
@@ -316,6 +321,15 @@ impl<H: HostServices> PluginReconciler<H> {
             }
         }
 
+        // A plugin started or stopped being served, or its grants moved: the
+        // loopback guard's per-plugin listener exceptions follow the install
+        // set, so the guard is reloaded before the unit the caller is about to
+        // start runs.
+        if report.started > 0 || report.stopped > 0 || regranted {
+            if let Some((units, _, _)) = &self.units {
+                units.reload_guard();
+            }
+        }
         report.serving = self.serving().len();
         report
     }
