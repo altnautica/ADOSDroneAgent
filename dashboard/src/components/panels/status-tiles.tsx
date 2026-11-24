@@ -1,12 +1,12 @@
 import { ChevronDown } from "lucide-react";
-import { useId, useMemo, useState } from "react";
+import { lazy, Suspense, useId, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "react-router-dom";
 
 import { CountdownCard } from "@/components/panels/countdown-card";
 import { PlaceCard } from "@/components/panels/place-card";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { ErrorBoundary } from "@/shared/error-boundary";
 import { BATTERY_POLL_MS, useBatteryHealth } from "@/hooks/use-battery-health";
 import { useConfig } from "@/hooks/use-config";
 import { navPilot, useFlightChip } from "@/hooks/use-flight-chip";
@@ -42,8 +42,7 @@ import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
 import { severityClasses } from "@/shared/format";
-import { CARD_ALERT_SKIN, useAlertSnooze, type AlertActions } from "@/shared/hud/alert-centre";
-import { AlertCentre, AlertRow } from "@/shared/hud/alert-rows";
+import { useAlertSnooze, type AlertActions } from "@/shared/hud/alert-centre";
 import { BATTERY_FAILSAFE_FIX_KEY, BATTERY_FAILSAFE_FIX_STEP } from "@/shared/hud/battery-failsafe-fix";
 import { AIRFRAME_RESET_ACTION, AIRFRAME_RESET_KEY } from "@/shared/hud/liftoff";
 import { refusalText } from "@/shared/hud/refusal";
@@ -54,7 +53,11 @@ import type { PilotState } from "@/shared/hud/cockpit-frames";
 import type { PillAlert } from "@/shared/hud/status-pill";
 import { useProfile } from "@/shared/use-profile";
 import { placeMargins } from "@/shared/place-class";
-import { rerunStep } from "@/shared/setup-wizard/client";
+
+// The alert drawer and the chip's blocking rows bring the alert rows, the setup
+// client with its spec text and the Radix dialog; they load on first open.
+const AlertDrawer = lazy(() => import("@/components/panels/alert-drawer").then((m) => ({ default: m.AlertDrawer })));
+const BlockingRows = lazy(() => import("@/components/panels/alert-drawer").then((m) => ({ default: m.BlockingRows })));
 
 const STATUS_FULL_POLL_MS = 5_000;
 const AGL_LABEL = specText("agl.source.rangefinder");
@@ -152,11 +155,11 @@ function FlightChip({
       {open && blocking.length > 0 ? (
         <div id={detailId} className="rounded-lg border border-border bg-card p-2 text-sm" data-testid="flight-chip-detail">
           <div className="px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">{t("alerts.chip.blocking")}</div>
-          <ul className="flex flex-col">
-            {blocking.map((a) => (
-              <AlertRow key={a.key} alert={a} actions={actions} skin={CARD_ALERT_SKIN} snoozed={false} />
-            ))}
-          </ul>
+          <ErrorBoundary>
+            <Suspense fallback={null}>
+              <BlockingRows alerts={blocking} actions={actions} />
+            </Suspense>
+          </ErrorBoundary>
           {warnings > 0 ? (
             <button type="button" onClick={onOpenAlerts} className="min-h-9 px-1 text-left underline max-md:min-h-11" data-testid="flight-chip-warnings">
               {t("alerts.chip.warnings", { count: warnings })}
@@ -275,6 +278,8 @@ function VehicleStatus() {
   const { snoozed, setSnoozed } = useAlertSnooze(all, !all.some((a) => a.id === "pilot_not_answering" || a.id === "agent_unreachable"));
   const pill = homePill(homeInputs, snoozed, all);
   const [alertsOpen, setAlertsOpen] = useState(false);
+  const [alertsLoaded, setAlertsLoaded] = useState(false);
+  if (alertsOpen && !alertsLoaded) setAlertsLoaded(true);
   const alertsTitleId = useId();
   const navigate = useNavigate();
   const profile = useProfile();
@@ -317,7 +322,9 @@ function VehicleStatus() {
           to="/settings/aircraft-setup"
           onClick={() => {
             // The setup page's stream shows the step's result.
-            rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step).catch(() => undefined);
+            void import("@/shared/setup-wizard/client")
+              .then((m) => m.rerunStep(BATTERY_FAILSAFE_FIX_STEP.wizard, BATTERY_FAILSAFE_FIX_STEP.step))
+              .catch(() => undefined);
           }}
           data-testid="status-fix-battery-failsafe"
           className="inline-flex min-h-9 items-center font-semibold underline max-md:min-h-11"
@@ -375,17 +382,21 @@ function VehicleStatus() {
           {resetRefusal}
         </span>
       ) : null}
-      <Dialog open={alertsOpen} onOpenChange={setAlertsOpen}>
-        <DialogContent
-          aria-labelledby={alertsTitleId}
-          aria-describedby={undefined}
-          // A side drawer: the full height at the right edge.
-          className="left-auto right-0 top-0 h-full max-w-md translate-x-0 translate-y-0 overflow-y-auto rounded-none border-y-0 border-r-0 p-4 pt-12 text-sm data-[state=closed]:zoom-out-100 data-[state=open]:zoom-in-100"
-          data-testid="status-alerts"
-        >
-          <AlertCentre alerts={all} snoozed={snoozed} onSnooze={setSnoozed} actions={actions} skin={CARD_ALERT_SKIN} titleId={alertsTitleId} />
-        </DialogContent>
-      </Dialog>
+      {alertsLoaded ? (
+        <ErrorBoundary>
+          <Suspense fallback={null}>
+            <AlertDrawer
+              open={alertsOpen}
+              onOpenChange={setAlertsOpen}
+              alerts={all}
+              snoozed={snoozed}
+              onSnooze={setSnoozed}
+              actions={actions}
+              titleId={alertsTitleId}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      ) : null}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono text-muted-foreground">
         {lines.linkLoss ? <span className="text-warn">{lines.linkLoss}</span> : null}
         {lines.agl ? (

@@ -1,8 +1,8 @@
 // The setup wizard's small controls: the action button in its three styles,
-// the hold-to-confirm button, the progress ring and the step-state pill. Sizes
-// are in em, so the host scales the whole wizard with one font size (×1.33 on
-// a TV or kiosk); the focus ring shows on keyboard/D-pad focus, and on every
-// focus when the wizard root carries `data-focus-rings="always"`.
+// the hold-to-confirm button, the progress ring, the step-state pill and the
+// note box. Sizes are in em, so the host scales the whole wizard with one font
+// size (×1.33 on a TV or kiosk); the focus ring shows on keyboard/D-pad focus,
+// and on every focus when the wizard root carries `data-focus-rings="always"`.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, CircleDashed, Hand, Loader2, Minus, X } from "lucide-react";
@@ -268,4 +268,16 @@ export function ConfirmPanel({
       </div>
     </div>
   );
+}
+
+const NOTE_TONE = {
+  err: "border-err/40 bg-err/10 text-err",
+  warn: "border-warn/40 bg-warn/10 text-warn",
+  info: "border-info/40 bg-info/10 text-foreground",
+  none: "border-border bg-card text-muted-foreground",
+};
+
+/** A boxed note in the wizard, toned for an error, a warning or info. */
+export function Note({ children, tone }: { children: ReactNode; tone?: "err" | "warn" | "info" }) {
+  return <div className={`rounded-lg border px-[1em] py-[0.8em] text-[1em] ${NOTE_TONE[tone ?? "none"]}`}>{children}</div>;
 }

@@ -1,0 +1,1 @@
+import{t as e}from"./useQuery-DUo__mf6.js";import{n as t}from"./api-fetch-0vzK7Dco.js";function n(){return t(`/api/wfb`)}function r(e){return t(`/api/video/config`,{method:`POST`,body:e})}var i=2e3;function a({enabled:t=!0}={}){return e({queryKey:[`wfb`,`status`],queryFn:()=>n(),refetchInterval:i,enabled:t})}export{a as n,r,i as t};

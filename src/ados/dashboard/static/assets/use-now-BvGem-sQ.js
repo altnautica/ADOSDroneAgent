@@ -1,0 +1,1 @@
+import{a as e,n as t}from"./jsx-runtime-OQpaS_Dv.js";var n=e(t(),1);function r(e){let[t,r]=(0,n.useState)(()=>Date.now());return(0,n.useEffect)(()=>{let t=setInterval(()=>r(Date.now()),e);return()=>clearInterval(t)},[e]),t}export{r as t};

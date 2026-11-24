@@ -5,16 +5,7 @@
 // cannot be mistaken for UTC; it makes no claim about a synced source.
 
 import { useNow } from "@/hooks/use-now";
-
-/** "HH:MM ZONE" in local time, e.g. "17:17 IST". The zone is the short name the
- *  platform gives, or "UTC±h" when it has none. */
-export function clockText(d: Date): string {
-  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  const zone = new Intl.DateTimeFormat("en-GB", { timeZoneName: "short" })
-    .formatToParts(d)
-    .find((p) => p.type === "timeZoneName")?.value;
-  return zone ? `${hm} ${zone}` : hm;
-}
+import { clockText } from "@/lib/clock-text";
 
 export function WallClock() {
   const now = useNow(10_000);

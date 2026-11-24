@@ -1,0 +1,1 @@
+function e(e,t,n){return!e.isError&&e.dataUpdatedAt>0&&n-e.dataUpdatedAt<=2*t}function t(t,n,r){return e(t,n,r)?t.data:void 0}export{t as n,e as t};

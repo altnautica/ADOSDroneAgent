@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clockText } from "@/components/shell/wall-clock";
+import { clockText } from "@/lib/clock-text";
 import { linkStateKey, linkTone, regionLabelKey } from "./link-state";
 import { videoReceiveView } from "@/shared/api/video-receive";
 

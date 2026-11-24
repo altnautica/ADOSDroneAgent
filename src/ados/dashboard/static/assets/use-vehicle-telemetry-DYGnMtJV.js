@@ -1,0 +1,1 @@
+import{n as e}from"./use-resource-BBmgKud8.js";var t=1e3;function n(){return e(`vehicle-telemetry`,`/api/telemetry`,t)}function r(e){return typeof e==`number`&&e>0&&e<655.35?e:null}export{r as n,n as r,t};
