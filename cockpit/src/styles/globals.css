@@ -28,14 +28,11 @@
      * draws none of it. The bars holding touch targets grow with glove mode. */
     --chrome-top: 3.1rem;
     --chrome-bottom: calc(3rem * var(--touch-scale));
-    --chrome-rail: 5.6rem;
+    /* The menu rail is bounded in px, not rem: the root rem grows with the
+     * viewport. 72 px holds a short label under its icon; glove mode widens
+     * it a little, never past 76 px. */
+    --chrome-rail: clamp(64px, calc(56px * var(--touch-scale) + 16px), 76px);
     --chrome-strip: calc(3.6rem * var(--touch-scale));
-  }
-
-  /* The menu rail's icon-only state (settings store `rail`), never narrower
-   * than a 48 px entry (grown by glove mode) and its padding. */
-  [data-rail="compact"] {
-    --chrome-rail: max(4rem, calc(48px * var(--touch-scale) + 0.5rem));
   }
 
   html {

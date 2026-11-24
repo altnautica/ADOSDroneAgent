@@ -3,19 +3,19 @@
 // active tab is amber; the button/gamepad focus ring highlights the focused
 // entry so the menu is fully operable eyes-on-panel with any input source.
 //
-// Three states on one toggle at the rail's end (and the `[` key), remembered
+// Two states on one toggle at the rail's end (and the `[` key), remembered
 // per device (settings store `rail`):
-// - labelled: icon and label;
-// - compact: icon only, the label as a tooltip on hover, focus or a 500 ms
-//   long press;
+// - labelled: a narrow column, each entry a short label under its icon (the
+//   full page name stays the entry's accessible name and tooltip);
 // - hidden: no rail, only a slim tab at the screen's left edge that brings it
 //   back. In landscape the tab sits in a 48 px slot of its own beside the
 //   screen, so its hit area never covers the Feed's flight-action column.
-// Every entry stays at least 48 px in every state, and the labelled entries
-// are sized in bounded px (about 52 px tall) so a drone's eleven tabs fit a
-// 1280×800 kiosk without scrolling. When they still do not fit (glove mode)
-// the rail scrolls, and a chevron strip at the clipped end, in the flow
-// rather than over the entries, says there is more.
+// The rail, icons and labels are sized in bounded px, not rem: the cockpit's
+// root rem grows with the viewport, and a rem-sized rail grew with it. Every
+// entry stays at least 48 px tall, so a drone's eleven tabs fit a 1280×800
+// kiosk without scrolling. When they still do not fit (glove mode, a short
+// window) the rail scrolls, and a chevron strip at the clipped end, in the
+// flow rather than over the entries, says there is more.
 
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsLeft } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -30,28 +30,6 @@ import { CHROME } from "@/lib/cockpit-layout";
 import { cn } from "@/lib/utils";
 
 import { NO_OVERFLOW, railOverflow, type RailOverflow } from "./rail-overflow";
-
-/** A press held this long on a compact entry shows its label instead of
- *  opening it. */
-const LONG_PRESS_MS = 500;
-/** How long a long-press label stays up after the finger lifts. */
-const TIP_HOLD_MS = 1500;
-
-interface Tip {
-  label: string;
-  left: number;
-  top: number;
-  /** Above the entry (the portrait strip) rather than beside it. */
-  above: boolean;
-}
-
-function tipFor(el: HTMLElement, label: string): Tip {
-  const r = el.getBoundingClientRect();
-  const above = window.innerHeight > window.innerWidth;
-  return above
-    ? { label, left: r.left + r.width / 2, top: r.top - 6, above }
-    : { label, left: r.right + 6, top: r.top + r.height / 2, above };
-}
 
 /** The chevron strip at a clipped end of the rail: in the flow beside the
  *  entries, so it never covers a label. */
@@ -109,9 +87,6 @@ export function MenuRail() {
   const { t } = useTranslation();
   const navRef = useRef<HTMLElement>(null);
   const [more, setMore] = useState<RailOverflow>(NO_OVERFLOW);
-  const [tip, setTip] = useState<Tip | null>(null);
-  const press = useRef<{ timer: number | undefined; long: boolean }>({ timer: undefined, long: false });
-  const compact = rail === "compact";
 
   const measure = useCallback(() => {
     const n = navRef.current;
@@ -136,18 +111,7 @@ export function MenuRail() {
     el?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [menuFocusIndex, activeTabId]);
 
-  // The long-press timer never outlives the rail.
-  useEffect(() => {
-    const ref = press.current;
-    return () => clearTimeout(ref.timer);
-  }, []);
-
   if (rail === "hidden") return <RailEdgeTab onShow={cycleRail} />;
-
-  const endPress = () => {
-    clearTimeout(press.current.timer);
-    if (press.current.long) press.current.timer = window.setTimeout(() => setTip(null), TIP_HOLD_MS);
-  };
 
   return (
     <div
@@ -179,53 +143,23 @@ export function MenuRail() {
                 type="button"
                 data-focused={focused || undefined}
                 aria-current={active ? "page" : undefined}
-                aria-label={compact ? tab.title : undefined}
-                onClick={(e) => {
-                  if (press.current.long) {
-                    // A long press showed the label; it does not open the tab.
-                    press.current.long = false;
-                    e.preventDefault();
-                    return;
-                  }
+                aria-label={tab.title}
+                title={tab.title}
+                onClick={() => {
                   setMenuFocus(index);
                   goTab(tab.id);
                 }}
-                onPointerEnter={(e) => {
-                  if (compact && e.pointerType === "mouse") setTip(tipFor(e.currentTarget, tab.title));
-                }}
-                onPointerLeave={(e) => {
-                  if (e.pointerType === "mouse") setTip(null);
-                }}
-                onPointerDown={(e) => {
-                  press.current.long = false;
-                  clearTimeout(press.current.timer);
-                  if (!compact || e.pointerType === "mouse") return;
-                  const el = e.currentTarget;
-                  press.current.timer = window.setTimeout(() => {
-                    press.current.long = true;
-                    setTip(tipFor(el, tab.title));
-                  }, LONG_PRESS_MS);
-                }}
-                onPointerUp={endPress}
-                onPointerCancel={endPress}
-                onFocus={(e) => {
-                  if (compact) setTip(tipFor(e.currentTarget, tab.title));
-                }}
-                onBlur={() => setTip(null)}
-                onContextMenu={(e) => {
-                  if (compact) e.preventDefault();
-                }}
                 className={cn(
-                  "flex shrink-0 flex-col items-center justify-center gap-[2px] rounded-md px-[4px] py-[4px] transition-colors portrait:flex-[1_0_auto]",
+                  "flex shrink-0 flex-col items-center justify-center gap-[3px] rounded-md px-[2px] py-[5px] transition-colors portrait:flex-[1_0_auto] portrait:px-[6px]",
                   "min-h-[calc(48px*var(--touch-scale))] min-w-[calc(48px*var(--touch-scale))]",
                   active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-surface-foreground",
                 )}
                 data-testid="rail-item"
               >
-                {Icon ? <Icon className="h-[clamp(20px,1rem,26px)] w-[clamp(20px,1rem,26px)] shrink-0" aria-hidden /> : null}
-                {compact ? null : (
-                  <span className="max-w-full truncate text-[length:clamp(11px,0.5rem,14px)] font-medium leading-[1.15]">{tab.title}</span>
-                )}
+                {Icon ? <Icon className="h-[22px] w-[22px] shrink-0" aria-hidden /> : null}
+                <span className="whitespace-nowrap text-[11px] font-medium leading-tight" data-testid="rail-label" aria-hidden>
+                  {t(`rail.label.${tab.id}`, { defaultValue: tab.title })}
+                </span>
               </button>
             );
           })}
@@ -235,25 +169,13 @@ export function MenuRail() {
       <button
         type="button"
         onClick={cycleRail}
-        aria-label={rail === "labelled" ? t("rail.toCompact") : t("rail.toHidden")}
+        aria-label={t("rail.hide")}
+        title={t("rail.hide")}
         className="flex min-h-[calc(48px*var(--touch-scale))] min-w-[calc(48px*var(--touch-scale))] shrink-0 items-center justify-center text-muted-foreground hover:bg-muted hover:text-surface-foreground landscape:border-t portrait:border-l border-border"
         data-testid="rail-toggle"
       >
-        <ChevronsLeft className="h-[1.2rem] w-[1.2rem]" aria-hidden />
+        <ChevronsLeft className="h-[20px] w-[20px]" aria-hidden />
       </button>
-      {tip ? (
-        <div
-          role="tooltip"
-          className="pointer-events-none fixed z-[60] whitespace-nowrap rounded-md border border-border bg-surface px-[0.5rem] py-[0.25rem] text-[0.8rem] text-surface-foreground shadow-lg"
-          style={{
-            left: tip.left,
-            top: tip.top,
-            transform: tip.above ? "translate(-50%, -100%)" : "translateY(-50%)",
-          }}
-        >
-          {tip.label}
-        </div>
-      ) : null}
     </div>
   );
 }

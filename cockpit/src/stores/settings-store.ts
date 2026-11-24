@@ -7,7 +7,6 @@
 
 import { create } from "zustand";
 
-import { isKiosk } from "@/lib/kiosk";
 import type { MinimapPin } from "@/shared/hud/minimap-mode";
 import type { RadarScaleSetting } from "@/shared/hud/radar-scan";
 
@@ -97,22 +96,19 @@ function loadRadarScale(): RadarScaleSetting {
 
 const RAIL_KEY = "ados-cockpit-rail";
 
-/** The menu rail's three states: icons with labels, icons only, or hidden
- *  behind an edge tab. One toggle (and the `[` key) cycles them in this order. */
-export type RailState = "labelled" | "compact" | "hidden";
-export const RAIL_STATES: readonly RailState[] = ["labelled", "compact", "hidden"];
+/** The menu rail's two states: icons with short labels, or hidden behind an
+ *  edge tab. One toggle (and the `[` key) flips between them. */
+export type RailState = "labelled" | "hidden";
 
-/** The stored rail state; with none stored, icons only on the kiosk's small
- *  panel and labelled in a browser. */
+/** The stored rail state; labelled with nothing stored. A `"compact"` stored
+ *  by the earlier three-state rail reads as labelled. */
 export function loadRail(): RailState {
-  const raw = loadString(RAIL_KEY);
-  if (raw === "labelled" || raw === "compact" || raw === "hidden") return raw;
-  return isKiosk() ? "compact" : "labelled";
+  return loadString(RAIL_KEY) === "hidden" ? "hidden" : "labelled";
 }
 
-/** The state after `rail` in the cycle (hidden wraps to labelled). */
+/** The other state. */
 export function nextRail(rail: RailState): RailState {
-  return RAIL_STATES[(RAIL_STATES.indexOf(rail) + 1) % RAIL_STATES.length];
+  return rail === "hidden" ? "labelled" : "hidden";
 }
 
 interface SettingsState {

@@ -24,9 +24,9 @@ vi.mock("@/nav/registry", () => {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-/** The window is 900 px wide (expanded); the menu rail takes 106 px of it. */
+/** The window is 900 px wide (expanded); the menu rail takes 72 px of it. */
 const WINDOW_W = 900;
-const RAIL_W = 106;
+const RAIL_W = 72;
 const realRect = HTMLElement.prototype.getBoundingClientRect;
 
 let host: HTMLDivElement | null = null;

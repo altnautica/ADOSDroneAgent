@@ -128,4 +128,24 @@ describe("the shell around the Feed", () => {
     expect(life).toEqual({ mounts: 1, unmounts: 0 });
     stop();
   });
+
+  it("shows and hides the menu rail on the [ key, but not while typing", async () => {
+    kiosk.on = false;
+    await mount();
+    const { useSettingsStore } = await import("@/stores/settings-store");
+    useSettingsStore.getState().setRail("labelled");
+    const press = (target: EventTarget) =>
+      act(async () => {
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "[", bubbles: true }));
+      });
+    await press(window);
+    expect(useSettingsStore.getState().rail).toBe("hidden");
+    await press(window);
+    expect(useSettingsStore.getState().rail).toBe("labelled");
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    await press(input);
+    expect(useSettingsStore.getState().rail).toBe("labelled");
+    input.remove();
+  });
 });

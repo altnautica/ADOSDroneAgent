@@ -54,7 +54,7 @@ export function CockpitShell({ input }: { input: InputStatus }) {
     void loadExtensions();
   }, [loadExtensions]);
 
-  // `[` cycles the menu rail: labelled → icons only → hidden → labelled.
+  // `[` shows or hides the menu rail.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "[" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
