@@ -167,7 +167,7 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 # writer broadcast); keeps the live-tail handler readable.
 async-stream = "0.3"
 # Streaming compression for the export endpoint and explicit cloud-push windows.
-zstd = "0.13"
+zstd = "0.14"
 # Cross-platform host hardware read (CPU%, memory, disk, cores). The non-SBC
 # (workstation / macOS) path where `ados-logd` is not the running collector falls
 # back to this so the status surfaces report real numbers instead of zeros. Lean
