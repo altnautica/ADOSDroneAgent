@@ -169,7 +169,7 @@ sysinfo = { workspace = true }
 # publish it â€” a record pointing at a front that is not running is worse than
 # no record. Same version the groundlink advert uses, so one mDNS
 # implementation ships on the box.
-mdns-sd = "0.13"
+mdns-sd = "0.22"
 # The external-code pairing accept registers the device with the pairing
 # backend over HTTPS: an async client on rustls with the ring provider and the
 # bundled webpki roots, the same TLS posture and versions the cloud relay and the
