@@ -9,8 +9,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::app::Core;
-use crate::model::pilot_alerts::{alerts_count_text, group_alerts, PillAlert, Severity};
-use crate::model::spec_text::spec_text;
+use crate::model::pilot_alerts::{
+    alert_title, alerts_count_text, group_alerts, PillAlert, Severity,
+};
+use crate::model::spec_text::{has_spec_text, spec_text};
 use crate::ui::widgets::kv_text;
 
 use super::super::autonomy::LABEL;
@@ -34,14 +36,58 @@ fn param_line(p: &ParamDiff) -> String {
     format!("{}  {} → {}", p.name, have_text(p.have), p.want)
 }
 
-/// Where the operator fixes the item, since the terminal changes nothing.
-fn fix_hint(fix: &ReadinessFix) -> String {
+/// A cockpit settings section's title (`cockpit.settingsSections.<id>.title`
+/// in the shared locale); an unknown id reads as itself.
+fn section_title(id: &str) -> &str {
+    match id {
+        "profile" => "Profile",
+        "region" => "Region",
+        "battery" => "Battery",
+        "wifi" => "Wi-Fi",
+        "hotspot" => "Hotspot",
+        "uplink" => "Uplink",
+        "cellular" => "Cellular",
+        "macPin" => "MAC pin",
+        "cloud" => "Cloud",
+        "selfHeal" => "Self-heal",
+        "mavlink" => "MAVLink",
+        "security" => "Security",
+        "vision" => "Vision",
+        "camera" => "Camera",
+        "capture" => "Capture",
+        "sensors" => "Sensors",
+        "swarm" => "Swarm",
+        "discovery" => "Discovery",
+        "display" => "Display",
+        "advanced" => "Advanced",
+        other => other,
+    }
+}
+
+/// Setup is written from these surfaces; the terminal changes nothing.
+const SETUP_WHERE: &str = "in the cockpit or Mission Control";
+
+/// Where the operator fixes the item: one line, and for Aircraft setup a
+/// second naming the surfaces that run it, so a narrow column cuts neither.
+/// A setup step reads its spec title (`setup.<step>.title`).
+fn fix_hint(fix: &ReadinessFix) -> Vec<String> {
+    let setup = |at: Option<String>| {
+        let line = match at {
+            Some(at) => format!("Fix: Aircraft setup › {at}"),
+            None => "Fix: Aircraft setup".into(),
+        };
+        vec![line, SETUP_WHERE.into()]
+    };
     match fix {
-        ReadinessFix::ApplyProfile | ReadinessFix::SetupStep { .. } => {
-            "Fix: Aircraft setup, in the cockpit or Mission Control".into()
+        ReadinessFix::ApplyProfile => setup(Some(spec_text("setup.card.safety.title", &[]))),
+        ReadinessFix::SetupStep { step } => {
+            let key = format!("setup.{step}.title");
+            setup(has_spec_text(&key).then(|| spec_text(&key, &[])))
         }
-        ReadinessFix::Settings { section } => format!("Fix: Settings › {section}"),
-        ReadinessFix::Parameters { .. } => "Fix: Params tab".into(),
+        ReadinessFix::Settings { section } => {
+            vec![format!("Fix: Settings › {}", section_title(section))]
+        }
+        ReadinessFix::Parameters { .. } => vec!["Fix: Params tab".into()],
     }
 }
 
@@ -65,7 +111,7 @@ fn detail_rows(core: &Core, a: &PillAlert) -> Vec<Row> {
         out.push(indent(format!("… {more} more"), t.dim()));
     }
     if let Some(fix) = &a.fix {
-        out.push(indent(fix_hint(fix), t.dim()));
+        out.extend(fix_hint(fix).into_iter().map(|l| indent(l, t.dim())));
     }
     out
 }
@@ -75,9 +121,9 @@ fn detail_rows(core: &Core, a: &PillAlert) -> Vec<Row> {
 /// own "not answering" item), so they never read as stale with the pilot
 /// kind. The Balance check alert carries its key on the next line (the narrow
 /// column never cuts it off) while "I rebalanced it" answers.
-pub(super) fn alert_rows(core: &Core, alerts: &[PillAlert], airframe_key: bool) -> Vec<Row> {
+pub fn alert_rows(core: &Core, alerts: &[PillAlert], airframe_key: bool) -> Vec<Row> {
     let t = &core.theme;
-    let count = alerts_count_text(alerts.len()).unwrap_or_else(|| "–".into());
+    let count = alerts_count_text(alerts).unwrap_or_else(|| "–".into());
     let mut out = vec![(kv_text(t, "Alerts", LABEL, count), true)];
     for section in group_alerts(alerts) {
         let title = Line::from(vec![Span::raw("  "), Span::styled(section.title, t.dim())]);
@@ -89,7 +135,10 @@ pub(super) fn alert_rows(core: &Core, alerts: &[PillAlert], airframe_key: bool) 
             };
             let line = Line::from(vec![
                 Span::raw("    "),
-                Span::styled(format!("{sym} {}", a.text), Style::default().fg(color)),
+                Span::styled(
+                    format!("{sym} {}", alert_title(a)),
+                    Style::default().fg(color),
+                ),
             ]);
             out.push((line, false));
             if airframe_key && a.id == "pilot:airframe_balance" {
@@ -126,19 +175,28 @@ mod tests {
 
     #[test]
     fn each_fix_kind_names_where_to_fix_it() {
-        let step = ReadinessFix::SetupStep {
-            step: "detect".into(),
-        };
-        let settings = ReadinessFix::Settings {
-            section: "sensors".into(),
-        };
+        let step = |s: &str| ReadinessFix::SetupStep { step: s.into() };
+        let settings = |s: &str| ReadinessFix::Settings { section: s.into() };
         let params = ReadinessFix::Parameters {
             names: vec!["FLOW_TYPE".into()],
         };
-        let setup = "Fix: Aircraft setup, in the cockpit or Mission Control";
-        assert_eq!(fix_hint(&ReadinessFix::ApplyProfile), setup);
-        assert_eq!(fix_hint(&step), setup);
-        assert_eq!(fix_hint(&settings), "Fix: Settings › sensors");
-        assert_eq!(fix_hint(&params), "Fix: Params tab");
+        let hint = |f: &ReadinessFix| fix_hint(f).join(" / ");
+        let where_ = "in the cockpit or Mission Control";
+        assert_eq!(
+            hint(&ReadinessFix::ApplyProfile),
+            format!("Fix: Aircraft setup › Safety / {where_}")
+        );
+        assert_eq!(
+            hint(&step("frame")),
+            format!("Fix: Aircraft setup › Frame / {where_}")
+        );
+        assert_eq!(
+            hint(&step("no_such_step")),
+            format!("Fix: Aircraft setup / {where_}")
+        );
+        assert_eq!(hint(&settings("sensors")), "Fix: Settings › Sensors");
+        assert_eq!(hint(&settings("macPin")), "Fix: Settings › MAC pin");
+        assert_eq!(hint(&settings("later")), "Fix: Settings › later");
+        assert_eq!(hint(&params), "Fix: Params tab");
     }
 }

@@ -71,7 +71,7 @@ async fn run(
     handle: PilotHandle,
 ) {
     let mut tick = inner.clock.interval(Duration::from_millis(TICK_MS));
-    let mut needed: Option<Option<String>> = None;
+    let mut needed: Option<Option<super::SetupNeed>> = None;
     let mut step_sent: Option<Option<&'static str>> = None;
     let mut abort_sent: Option<Option<String>> = None;
     // Airframe health: the FC identity and propeller size last handed to the

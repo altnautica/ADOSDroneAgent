@@ -751,7 +751,7 @@ fn the_pilot_panel_on_a_mission_with_the_link_lost() {
         "Mission   WP 4/6",
         "Link loss Link lost: Land in 4 s",
         "AGL       8.4 m (HOME)",
-        "Alerts    3 warnings",
+        "Alerts    1 blocking · 2 warnings",
         "Battery 1: cell divergence",
         "EKF3 IMU0 yaw inconsistent",
         "▲ Compass not calibrated",
@@ -764,6 +764,39 @@ fn the_pilot_panel_on_a_mission_with_the_link_lost() {
         1,
         "{text}"
     );
+}
+
+/// At 160×50 the alerts take their own column beside the Pilot block, wide
+/// enough for a parameter row and its fix hint whole; at 120 columns they
+/// stay in the Pilot block.
+#[test]
+fn a_wide_terminal_draws_the_alerts_in_their_own_column() {
+    let mut app = live_app();
+    let mut frame = pilot_frame();
+    frame["readiness"] = json!([
+        {"id": "fc_profile", "ok": false, "severity": "block",
+         "msg": "FC parameters differ: MAV_GCS_SYSID 255 (want 1)",
+         "params": [{"name": "MAV_GCS_SYSID", "have": 255.0, "want": "1"}],
+         "fix": {"kind": "apply_profile"}},
+        {"id": "rangefinder", "ok": false, "severity": "warn", "msg": "No downward rangefinder",
+         "fix": {"kind": "settings", "section": "sensors"}},
+    ]);
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 160, 50);
+    assert!(row(&text, "▌ Pilot").contains("▌ Alerts"), "{text}");
+    for want in [
+        "✗ FC parameters differ",
+        "MAV_GCS_SYSID  255 → 1",
+        "Fix: Aircraft setup › Safety",
+        "in the cockpit or Mission Control",
+        "Fix: Settings › Sensors",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+    assert!(!text.contains("more (a taller terminal"), "{text}");
+    let narrow = draw(&mut app, 120, 40);
+    assert!(!row(&narrow, "▌ Pilot").contains("▌ Alerts"), "{narrow}");
+    assert!(narrow.contains("FC parameters differ"), "{narrow}");
 }
 
 #[test]

@@ -58,17 +58,26 @@ impl AdosProfile {
 impl Step for AdosProfile {
     step_core!("ados_profile");
 
+    /// `args.params`: every row as `{name, value, have}`, `have` the FC's
+    /// value now (null when the FC has no such parameter); `args.reboots`:
+    /// applying reboots the FC, decided as `apply` decides it.
     fn begin(&mut self, cx: &mut Cx) {
         self.core = StepCore::default();
         self.writing = false;
         let class = vehicle_class(cx.adapter.class);
         self.needs_reboot = false;
+        let mut reboots = false;
         let rows: Vec<Value> = firmware(cx.adapter.fw)
             .into_iter()
             .flat_map(|f| crate::no_rc::profile(f, class, cx.inputs.rc_receiver, margin(cx)))
-            .map(|r| json!({"name": r.name, "value": row_value(cx, &r)}))
+            .map(|r| {
+                let have = present_name(cx, &r).and_then(|n| cx.params.get(n));
+                reboots |= have.is_some() && row_reboots(cx, &r);
+                json!({"name": r.name, "value": row_value(cx, &r), "have": have})
+            })
             .collect();
         self.core.args.insert("params".into(), Value::Array(rows));
+        self.core.args.insert("reboots".into(), json!(reboots));
         self.core.wait_user(vec![Action::primary("apply")]);
     }
 
@@ -128,15 +137,10 @@ impl Step for AdosProfile {
         );
         for row in declared {
             let row = &row;
-            let name = std::iter::once(row.name)
-                .chain(row.alt_names.iter().copied())
-                .find(|n| cx.params.has(n));
-            match name {
+            match present_name(cx, row) {
                 Some(n) => {
                     let v = row_value(cx, row);
-                    self.needs_reboot |= row.reboot
-                        && check_row(row, cx.inputs.place_class, |k| cx.params.get(k))
-                            != RowCheck::Ok;
+                    self.needs_reboot |= row_reboots(cx, row);
                     cx.params.set(n, v);
                     self.applied.push(json!({"name": n, "value": v}));
                 }
@@ -154,6 +158,18 @@ fn margin(cx: &Cx) -> f32 {
     cx.inputs
         .obstacle_margin_m
         .unwrap_or_else(|| crate::config::PilotSection::default().effective_margin_m())
+}
+
+/// The name the FC holds `row` under: its own or an alternate.
+fn present_name(cx: &Cx, row: &ProfileParam) -> Option<&'static str> {
+    std::iter::once(row.name)
+        .chain(row.alt_names.iter().copied())
+        .find(|n| cx.params.has(n))
+}
+
+/// Writing `row` reboots the FC: a boot-time row the FC does not hold yet.
+fn row_reboots(cx: &Cx, row: &ProfileParam) -> bool {
+    row.reboot && check_row(row, cx.inputs.place_class, |k| cx.params.get(k)) != RowCheck::Ok
 }
 
 /// The value to write for a profile row, from the same rules the readiness

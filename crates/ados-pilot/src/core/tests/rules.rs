@@ -501,6 +501,36 @@ fn arm_and_landed_are_null_without_an_fc_link() {
     assert_eq!(v.get("landed"), Some(&serde_json::Value::Null));
 }
 
+/// `setup_needed` opens Aircraft setup at the step the engine names; the
+/// complete item carries no fix.
+#[test]
+fn setup_needed_fixes_at_its_step() {
+    let mut p = crate::core::Pilot::new(crate::config::Settings::default());
+    p.setup_needed = Some(Some(crate::setup::SetupNeed {
+        msg: "Aircraft setup not completed".into(),
+        step: "compass".into(),
+    }));
+    let item = |p: &crate::core::Pilot| {
+        p.readiness(1000)
+            .into_iter()
+            .find(|r| r.id == "setup_needed")
+            .expect("setup_needed item")
+    };
+    let r = item(&p);
+    assert!(!r.ok);
+    assert_eq!(r.msg, "Aircraft setup not completed");
+    assert_eq!(
+        r.fix,
+        Some(ados_protocol::pilot::ReadinessFix::SetupStep {
+            step: "compass".into()
+        })
+    );
+    p.setup_needed = Some(None);
+    let r = item(&p);
+    assert!(r.ok);
+    assert_eq!(r.fix, None);
+}
+
 /// Before the FC's first heartbeat the frame does not claim a mode: the
 /// mode and its name serialise as JSON `null` (unknown, never mode 0 /
 /// STABILIZE), and carry the FC's mode once its heartbeat arrives.

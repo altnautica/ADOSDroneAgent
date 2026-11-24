@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use ados_protocol::wfb_status::{build_status_from_stats_file_at, now_unix_micros, WfbStatusConfig};
+use ados_protocol::wfb_status::{
+    build_status_from_stats_file_at, now_unix_micros, WfbStatusConfig,
+};
 use serde_json::{json, Map, Value};
 
 /// How often the sampler reads the sidecar.
@@ -70,10 +72,7 @@ impl LinkHistory {
             .filter(|(ts, _)| *ts >= floor)
             .map(|(ts, vals)| {
                 let mut obj = Map::new();
-                obj.insert(
-                    "timestamp".to_string(),
-                    json!(super::wfb::iso_from_us(*ts)),
-                );
+                obj.insert("timestamp".to_string(), json!(super::wfb::iso_from_us(*ts)));
                 obj.extend(vals.clone());
                 Value::Object(obj)
             })

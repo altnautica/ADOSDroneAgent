@@ -70,6 +70,7 @@ fn readiness_prearm_and_status_texts_in_pill_order() {
             (Severity::Critical, "fc_profile"),
             (Severity::Critical, "EKF variance"),
             (Severity::Warning, "No rangefinder"),
+            (Severity::Warning, "Old"),
             (Severity::Warning, "Throttle too high"),
             (Severity::Warning, "Low disk"),
         ]
@@ -125,9 +126,48 @@ fn a_failsafe_cause_reads_its_spec_label() {
 
 #[test]
 fn the_count_reads_the_spec() {
-    assert_eq!(alerts_count_text(0), None);
-    assert_eq!(alerts_count_text(1).as_deref(), Some("1 warning"));
-    assert_eq!(alerts_count_text(3).as_deref(), Some("3 warnings"));
+    let a = |id: &str, block: bool| -> Vec<PillAlert> {
+        pilot_alerts(
+            &fresh(vec![item(id, false, block, id)], vec![]),
+            Some(100),
+            None,
+        )
+    };
+    let list = |ids: &[(&str, bool)]| -> Vec<PillAlert> {
+        ids.iter().flat_map(|(id, b)| a(id, *b)).collect()
+    };
+    assert_eq!(alerts_count_text(&[]), None);
+    assert_eq!(
+        alerts_count_text(&list(&[("flow", false)])).as_deref(),
+        Some("1 warning")
+    );
+    let three = list(&[("flow", false), ("agl", false), ("lidar", false)]);
+    assert_eq!(alerts_count_text(&three).as_deref(), Some("3 warnings"));
+    let blocking = list(&[("position", true), ("fc_profile", true)]);
+    assert_eq!(alerts_count_text(&blocking).as_deref(), Some("2 blocking"));
+    let mixed = list(&[("position", true), ("flow", false)]);
+    assert_eq!(
+        alerts_count_text(&mixed).as_deref(),
+        Some("1 blocking · 1 warning")
+    );
+    let mixed = list(&[("position", true), ("flow", false), ("agl", false)]);
+    assert_eq!(
+        alerts_count_text(&mixed).as_deref(),
+        Some("1 blocking · 2 warnings")
+    );
+}
+
+/// The pill's face (`pillSummary`): one alert reads its title, more read
+/// the count, none reads all clear.
+fn pill_text(alerts: &[PillAlert]) -> String {
+    match alerts {
+        [] => spec_text("cockpit.status.ok", &[]),
+        [one] => match alert_title(one) {
+            "" => spec_text("cockpit.status.one", &[]),
+            t => t.to_string(),
+        },
+        many => alerts_count_text(many).unwrap_or_default(),
+    }
 }
 
 /// A golden case's inputs as this port reads them. The case's
@@ -267,11 +307,7 @@ fn pill_cases_match_the_shared_rules() {
         } else {
             "warning"
         };
-        let text = match alerts.as_slice() {
-            [] => spec_text("cockpit.status.ok", &[]),
-            [one] => one.text.clone(),
-            many => alerts_count_text(many.len()).unwrap_or_default(),
-        };
+        let text = pill_text(&alerts);
         let ids: Vec<&str> = alerts.iter().map(|a| a.id.as_str()).collect();
         let e = &c["expected"];
         let name = c["name"].as_str().unwrap_or_default();
@@ -345,7 +381,10 @@ fn sections_follow_the_spec_order_and_fold_one_text_to_its_worst() {
             ("Other", vec!["Something else"]),
         ]
     );
-    assert_eq!(sections[0].alerts[0].key, "pilot:fc_profile|FC parameters differ");
+    assert_eq!(
+        sections[0].alerts[0].key,
+        "pilot:fc_profile|FC parameters differ"
+    );
 }
 
 #[test]

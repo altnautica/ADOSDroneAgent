@@ -547,9 +547,9 @@ const RETURN_ROWS: [(&str, f32); 6] = [
     ("SRTL_ACCURACY", 2.0),
 ];
 
-/// Runs `ados_profile` on a copter whose table already matches the profile
-/// except for `differ`, and returns the finished sim.
-fn apply_profile_differing(differ: &[(&str, f32)]) -> Sim {
+/// A copter whose table already matches the profile except for `differ`,
+/// with the `ados_profile` step waiting for the operator.
+fn profile_waiting(differ: &[(&str, f32)], drop: &[&str]) -> Sim {
     let mut p = ap_copter_params();
     let profile = crate::fc_profile::fc_profile(
         crate::fc_profile::Firmware::Ardupilot,
@@ -561,9 +561,36 @@ fn apply_profile_differing(differ: &[(&str, f32)]) -> Sim {
     for (n, v) in RETURN_ROWS.iter().chain(differ) {
         p.insert((*n).into(), *v);
     }
+    for n in drop {
+        p.remove(*n);
+    }
     let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
     s.e.run_step(G, "ados_profile", s.now);
     s.wait_step("ados_profile", StepState::WaitingUser);
+    s
+}
+
+/// The `params` row of the waiting `ados_profile` step named `name`.
+fn profile_row(s: &Sim, name: &str) -> Value {
+    let v = s.e.current_view().expect("ados_profile waiting");
+    v.args["params"]
+        .as_array()
+        .expect("params rows")
+        .iter()
+        .find(|r| r["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("no {name} row"))
+}
+
+/// Runs `ados_profile` on a copter whose table already matches the profile
+/// except for `differ`, and returns the finished sim. The step's `have`
+/// values are the FC's before the write, and its `reboots` the outcome.
+fn apply_profile_differing(differ: &[(&str, f32)]) -> Sim {
+    let mut s = profile_waiting(differ, &[]);
+    for (n, v) in differ {
+        assert_eq!(profile_row(&s, n)["have"], json!(v), "{n} current value");
+    }
+    let reboots = s.e.current_view().expect("waiting").args["reboots"].clone();
     s.act(G, "ados_profile", "apply", json!({}));
     s.until(|s| s.e.current_view().is_none(), 30_000);
     assert_eq!(s.step_state(G, "ados_profile"), StepState::Done);
@@ -571,7 +598,35 @@ fn apply_profile_differing(differ: &[(&str, f32)]) -> Sim {
         assert_eq!(s.param(n), v, "{n} written");
     }
     assert_eq!(s.result(G, "ados_profile")["absent"], json!([]));
+    assert_eq!(
+        s.result(G, "ados_profile")["rebooted"],
+        reboots,
+        "{differ:?}: reboots told in advance"
+    );
     s
+}
+
+/// Each row carries the FC's value; a row the FC lacks has `have: null`, and
+/// a table whose boot-time rows match does not reboot.
+#[test]
+fn ados_profile_rows_show_the_current_value() {
+    let s = profile_waiting(&[("SRTL_POINTS", 300.0)], &["OA_TYPE"]);
+    let row = profile_row(&s, "SRTL_POINTS");
+    assert_eq!(
+        (row["have"].clone(), row["value"].clone()),
+        (json!(300.0), json!(500.0))
+    );
+    assert_eq!(profile_row(&s, "OA_TYPE")["have"], Value::Null);
+    let args = s.e.current_view().expect("waiting").args;
+    assert_eq!(args["reboots"], json!(true), "SRTL_POINTS is read at boot");
+
+    let s = profile_waiting(&[], &[]);
+    let args = s.e.current_view().expect("waiting").args;
+    assert_eq!(args["reboots"], json!(false));
+    for (n, _) in RETURN_ROWS {
+        let row = profile_row(&s, n);
+        assert_eq!(row["have"], row["value"], "{row}: already set");
+    }
 }
 
 #[test]
@@ -1125,12 +1180,29 @@ fn plane_doublets_stay_in_the_box() {
     assert!(saw.0 && saw.1, "both doublet axes flown");
 }
 
+/// The item names the step that settles it: the first unfinished ground step
+/// after detection, or the calibration a PreArm text asks for. A PreArm text
+/// holds between ArduPilot's 30 s repeats.
 #[test]
 fn setup_needed_from_prearm_text() {
+    let need = |msg: &str, step: &str| {
+        Some(super::SetupNeed {
+            msg: msg.into(),
+            step: step.into(),
+        })
+    };
     let mut s = Sim::copter();
     assert_eq!(
-        s.e.setup_needed(s.now).as_deref(),
-        Some("Aircraft setup not completed")
+        s.e.setup_needed(s.now),
+        need("Aircraft setup not completed", "frame")
+    );
+    s.e.state
+        .ground
+        .steps
+        .insert("frame".into(), json!({"state": "done"}));
+    assert_eq!(
+        s.e.setup_needed(s.now),
+        need("Aircraft setup not completed", "accel")
     );
     s.e.state.ground.state = WizardState::Done;
     assert_eq!(s.e.setup_needed(s.now), None);
@@ -1140,10 +1212,10 @@ fn setup_needed_from_prearm_text() {
     });
     s.e.on_fc(1, 1, &m, s.now);
     assert_eq!(
-        s.e.setup_needed(s.now).as_deref(),
-        Some("PreArm: Compass not calibrated")
+        s.e.setup_needed(s.now + 31_000),
+        need("PreArm: Compass not calibrated", "compass")
     );
-    assert_eq!(s.e.setup_needed(s.now + 11_000), None);
+    assert_eq!(s.e.setup_needed(s.now + 36_000), None);
 }
 
 #[test]

@@ -59,13 +59,22 @@ pub const TAKEOVER_AXIS: f32 = 0.3;
 const OWN_MODE_MS: u64 = 5000;
 /// The pilot state names the last air abort for this long (ms).
 pub const ABORT_SHOW_MS: u64 = 120_000;
-/// PreArm texts count for `setup_needed` this long.
-const PREARM_WINDOW_MS: u64 = 10_000;
+/// PreArm texts count for `setup_needed` this long: ArduPilot repeats its
+/// PreArm failures every 30 s, so the item holds between repeats.
+const PREARM_WINDOW_MS: u64 = 35_000;
 /// AUTOPILOT_VERSION message id.
 const MSG_AUTOPILOT_VERSION: u32 = 148;
 /// Wait this long after AUTOPILOT_VERSION before filing under an identity, so
 /// the raw frame's `uid2` (a separate channel) is in.
 const IDENTITY_SETTLE_MS: u64 = 300;
+
+/// The `setup_needed` readiness item: its message and the ground step that
+/// settles it (the item's `fix`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupNeed {
+    pub msg: String,
+    pub step: String,
+}
 
 struct Run {
     wizard: WizardId,
@@ -1372,8 +1381,8 @@ impl Engine {
         out
     }
 
-    /// The `setup_needed` readiness message, `None` when setup is complete.
-    pub fn setup_needed(&self, now: u64) -> Option<String> {
+    /// The `setup_needed` readiness item, `None` when setup is complete.
+    pub fn setup_needed(&self, now: u64) -> Option<SetupNeed> {
         if let Some(t) = self
             .fc
             .texts
@@ -1383,11 +1392,42 @@ impl Engine {
             .map(|(_, _, s)| s)
             .find(|s| statustext::needs_calibration(s))
         {
-            return Some(t.clone());
+            let l = t.to_ascii_lowercase();
+            let want = if l.contains("compass") {
+                "compass"
+            } else if l.contains("gyro") {
+                "gyro"
+            } else {
+                "accel"
+            };
+            let step = self
+                .adapter()
+                .filter(|a| a.steps(WizardId::Ground).contains(&want))
+                .map_or_else(|| self.first_unfinished_ground_step(), |_| want);
+            return Some(SetupNeed {
+                msg: t.clone(),
+                step: step.to_string(),
+            });
         }
         self.uid.as_ref()?;
-        (self.state.ground.state != WizardState::Done)
-            .then(|| "Aircraft setup not completed".to_string())
+        (self.state.ground.state != WizardState::Done).then(|| SetupNeed {
+            msg: "Aircraft setup not completed".to_string(),
+            step: self.first_unfinished_ground_step().to_string(),
+        })
+    }
+
+    /// The first ground step after detection the records do not show done
+    /// or skipped; `frame` when none is known.
+    fn first_unfinished_ground_step(&self) -> &'static str {
+        self.adapter()
+            .and_then(|a| {
+                a.steps(WizardId::Ground)
+                    .iter()
+                    .copied()
+                    .filter(|id| *id != "detect")
+                    .find(|id| !resume::step_finished(&self.state.ground.steps, id))
+            })
+            .unwrap_or("frame")
     }
 
     pub fn wizard_state(&self, w: WizardId) -> WizardState {

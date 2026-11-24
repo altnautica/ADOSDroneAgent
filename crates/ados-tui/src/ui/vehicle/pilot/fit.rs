@@ -49,9 +49,18 @@ pub fn min_rows(rows: &[Row]) -> u16 {
     (kept + more + 2) as u16
 }
 
-pub fn render(f: &mut Frame, area: Rect, core: &Core, rows: Vec<Row>, hidden: Option<&str>) {
+/// Draw `rows` fitted into a `title` panel (the Pilot block, or the alerts
+/// in their own column).
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    core: &Core,
+    title: &str,
+    rows: Vec<Row>,
+    hidden: Option<&str>,
+) {
     let t = &core.theme;
-    let block = panel(t, core.sym, "Pilot");
+    let block = panel(t, core.sym, title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     match hidden {

@@ -293,7 +293,10 @@ fn the_tab_bar_lists_only_the_tabs_the_profile_shows() {
         fresh(),
     );
     let row = tab_row(&draw(&mut gs, 120, 40));
-    assert!(row.contains("Ground") && row.contains("Radio link"), "{row}");
+    assert!(
+        row.contains("Ground") && row.contains("Radio link"),
+        "{row}"
+    );
     assert!(
         !row.contains("Vehicle") && !row.contains("Video") && !row.contains("Params"),
         "{row}"

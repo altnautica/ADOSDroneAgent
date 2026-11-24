@@ -240,8 +240,8 @@ pub struct Pilot {
     last_tick_ms: Option<u64>,
     controller_lost_shown: bool,
     /// Setup engine verdict: `None` unknown (no item), `Some(None)` complete,
-    /// `Some(Some(msg))` incomplete.
-    pub setup_needed: Option<Option<String>>,
+    /// `Some(Some(need))` incomplete, with the step that settles it.
+    pub setup_needed: Option<Option<crate::setup::SetupNeed>>,
     /// The setup engine's active step, published while the owner is `Tuning`.
     pub setup_step: Option<&'static str>,
     /// The setup-strings key of the air wizard's last non-operator abort,

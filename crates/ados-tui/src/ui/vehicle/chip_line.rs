@@ -103,7 +103,8 @@ impl VehicleTab {
     /// The Pilot block's rows: the chip evaluated on the pilot kind aged
     /// from its last good read, with what the tab knows beside it. The rows
     /// age the same way, so a poll that hangs without failing dims them too.
-    pub(super) fn pilot_lines(&self, core: &Core) -> Vec<pilot::Row> {
+    /// With `alerts_apart` the alerts are left for their own column.
+    pub(super) fn pilot_lines(&self, core: &Core, alerts_apart: bool) -> Vec<pilot::Row> {
         let auto = self.auto.as_ref();
         let pilot = auto.and_then(|a| a.pilot.as_ref());
         let follow = auto.and_then(|a| a.follow.as_ref());
@@ -142,6 +143,7 @@ impl VehicleTab {
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as u64),
                 local_pos: tel.and_then(|t| t.local_pos),
+                alerts_apart,
             },
         )
     }
@@ -151,11 +153,11 @@ impl VehicleTab {
     /// agent's health.
     pub(crate) fn summary(&self, core: &Core) -> Vec<ratatui::text::Line<'static>> {
         let state = self
-            .pilot_lines(core)
+            .pilot_lines(core, true)
             .into_iter()
             .next()
             .map(|(line, _)| line);
-        let count = crate::model::pilot_alerts::alerts_count_text(self.alerts(core).len())
+        let count = crate::model::pilot_alerts::alerts_count_text(&self.alerts(core))
             .unwrap_or_else(|| "–".into());
         let alerts =
             crate::ui::widgets::kv_text(&core.theme, "Alerts", super::autonomy::LABEL, count);

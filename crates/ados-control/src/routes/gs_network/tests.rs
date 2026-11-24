@@ -586,8 +586,15 @@ fn active_uplink_reads_the_router_sentinel_before_the_store() {
     let dir = tempfile::tempdir().unwrap();
     let flag = dir.path().join("uplink-active");
     assert_eq!(active_uplink_from(&flag, None), Value::Null);
-    assert_eq!(active_uplink_from(&flag, Some(json!("wlan0_client"))), json!("wlan0_client"));
-    std::fs::write(&flag, r#"{"active_uplink":"eth0","internet_reachable":true}"#).unwrap();
+    assert_eq!(
+        active_uplink_from(&flag, Some(json!("wlan0_client"))),
+        json!("wlan0_client")
+    );
+    std::fs::write(
+        &flag,
+        r#"{"active_uplink":"eth0","internet_reachable":true}"#,
+    )
+    .unwrap();
     assert_eq!(active_uplink_from(&flag, None), json!("eth0"));
     assert_eq!(active_uplink_from(&flag, Some(Value::Null)), json!("eth0"));
 }

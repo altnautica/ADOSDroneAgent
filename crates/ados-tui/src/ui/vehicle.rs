@@ -397,7 +397,12 @@ impl Tab for VehicleTab {
         let stale = core.stale();
         let hidden = self.hidden(core);
         let hidden = hidden.as_deref();
-        let pilot_rows = self.pilot_lines(core);
+        let apart = layout::alerts_apart(area.width);
+        let pilot_rows = self.pilot_lines(core, apart);
+        let alert_rows = apart.then(|| {
+            let alerts = self.alerts(core);
+            pilot::alert_rows(core, &alerts, self.airframe_reset_offered(core))
+        });
         let packs_hidden = stale.then_some(HIDDEN_STALE);
         // The Pilot block takes its rows first; the trend charts go before
         // anything else, and show only while the flight readings are live.
@@ -409,6 +414,11 @@ impl Tab for VehicleTab {
                 pilot::min_rows(&pilot_rows),
                 autonomy::line_count(core, self.auto.as_ref(), self.detection.as_ref()) as u16 + 2,
             )
+        };
+        let alerts_need = match &alert_rows {
+            Some(rows) if packs_hidden.is_none() => rows.len() as u16 + 2,
+            Some(_) => 3,
+            None => 0,
         };
         let short = layout::is_short(area.height, pilot_min);
         let flight = self.flight_lines(core, hidden, short);
@@ -422,6 +432,7 @@ impl Tab for VehicleTab {
                 flight: flight.len() as u16 + 2,
                 gps: gps.len() as u16 + 2,
                 charts: hidden.is_none(),
+                alerts: alerts_need,
             },
         );
         if let Some(r) = plan.attitude {
@@ -444,7 +455,10 @@ impl Tab for VehicleTab {
             packs_hidden,
             self.bat_read.failed_note(core.now).as_deref(),
         );
-        pilot::render(f, plan.pilot, core, pilot_rows, packs_hidden);
+        pilot::render(f, plan.pilot, core, "Pilot", pilot_rows, packs_hidden);
+        if let (Some(r), Some(rows)) = (plan.alerts, alert_rows) {
+            pilot::render(f, r, core, "Alerts", rows, packs_hidden);
+        }
         autonomy::render(
             f,
             plan.autonomy,

@@ -311,7 +311,10 @@ mod tests {
                 }
                 inj.finish(&mut out);
                 let (restored, count) = strip_sei(&out, &sei);
-                assert_eq!(count, vcl, "round {round} plan {plan:?}: one SEI per picture");
+                assert_eq!(
+                    count, vcl,
+                    "round {round} plan {plan:?}: one SEI per picture"
+                );
                 assert_eq!(restored, input, "round {round}: stream otherwise unchanged");
             }
         }

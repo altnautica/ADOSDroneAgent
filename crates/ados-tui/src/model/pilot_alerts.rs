@@ -174,13 +174,25 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
     }
     if i.agent_unreachable {
         let text = spec_text("alert.agent_unreachable", &[]);
-        push(&mut out, "agent_unreachable", "link", Severity::Critical, text);
+        push(
+            &mut out,
+            "agent_unreachable",
+            "link",
+            Severity::Critical,
+            text,
+        );
     }
     let fresh = i.pilot.filter(|p| !pilot_stale(p, i.pilot_age_ms));
     match (i.pilot, fresh) {
         (Some(_), None) => {
             let text = spec_text("alert.pilot_not_answering", &[]);
-            push(&mut out, "pilot_not_answering", "pilot", Severity::Warning, text);
+            push(
+                &mut out,
+                "pilot_not_answering",
+                "pilot",
+                Severity::Warning,
+                text,
+            );
         }
         (_, Some(p)) if p.fc_failsafe => {
             let text = failsafe_text(p.failsafe_cause.as_deref());
@@ -228,7 +240,13 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
     }
     if fresh.is_some_and(controller_lost) {
         let text = spec_text("alert.controller_lost", &[]);
-        push(&mut out, "controller_lost", "controller", Severity::Warning, text);
+        push(
+            &mut out,
+            "controller_lost",
+            "controller",
+            Severity::Warning,
+            text,
+        );
     }
     let preflight = if i.arm_unknown {
         &[][..]
@@ -252,13 +270,32 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
                     "alert.nav_source_degraded",
                     &[("source", &spec_text(key, &[]))],
                 );
-                push(&mut out, "nav_source_degraded", "nav_source", severity, text);
+                push(
+                    &mut out,
+                    "nav_source_degraded",
+                    "nav_source",
+                    severity,
+                    text,
+                );
             }
         }
     }
-    if let Some(last) = i.prearm.and_then(<[String]>::last) {
-        let text = prearm_body(last).unwrap_or(last).to_string();
-        push(&mut out, format!("fc:{text}"), "fc_prearm", Severity::Warning, text);
+    // Every distinct PreArm/Arm line the FC repeats: each names its own cause.
+    let mut prearm_seen: Vec<&str> = Vec::new();
+    for line in i.prearm.unwrap_or_default() {
+        let text = prearm_body(line).unwrap_or(line);
+        if text.is_empty() || prearm_seen.contains(&text) {
+            continue;
+        }
+        prearm_seen.push(text);
+        let text = text.to_string();
+        push(
+            &mut out,
+            format!("fc:{text}"),
+            "fc_prearm",
+            Severity::Warning,
+            text,
+        );
     }
     let fc_start = out.len();
     for s in fresh.into_iter().flat_map(|p| &p.statustext) {
@@ -296,14 +333,41 @@ pub fn pill_alerts(i: &PillInputs) -> Vec<PillAlert> {
     out
 }
 
-/// The count of active alerts as the pill words it (`1 warning`,
-/// `3 warnings`); `None` with none.
-pub fn alerts_count_text(n: usize) -> Option<String> {
-    match n {
-        0 => None,
-        1 => Some(spec_text("cockpit.status.one", &[])),
-        n => Some(spec_text("cockpit.status.many", &[("n", &n.to_string())])),
+/// An alert's one-line title (`alertTitle`): with parameter rows behind it
+/// the rows carry the detail, so the title is the words before the first
+/// `": "` ("FC parameters differ").
+pub fn alert_title(a: &PillAlert) -> &str {
+    if a.params.is_empty() {
+        return &a.text;
     }
+    match a.text.find(": ") {
+        Some(at) if at > 0 => &a.text[..at],
+        _ => &a.text,
+    }
+}
+
+/// The count of active alerts as the pill words it, blockers first so a
+/// warning count never hides one (`3 warnings`, `2 blocking`,
+/// `2 blocking · 5 warnings`); `None` with none.
+pub fn alerts_count_text(alerts: &[PillAlert]) -> Option<String> {
+    let count = alerts.len();
+    let blocking = alerts
+        .iter()
+        .filter(|a| a.severity == Severity::Critical)
+        .count();
+    let warnings = count - blocking;
+    let n = |v: usize| v.to_string();
+    Some(match (count, blocking, warnings) {
+        (0, _, _) => return None,
+        (1, 0, _) => spec_text("cockpit.status.one", &[]),
+        (_, 0, _) => spec_text("cockpit.status.many", &[("n", &n(count))]),
+        (_, b, 0) => spec_text("cockpit.status.blocking", &[("n", &n(b))]),
+        (_, b, 1) => spec_text("cockpit.status.blocking_one_warning", &[("n", &n(b))]),
+        (_, b, w) => spec_text(
+            "cockpit.status.blocking_warnings",
+            &[("n", &n(b)), ("m", &n(w))],
+        ),
+    })
 }
 
 #[cfg(test)]

@@ -31,10 +31,14 @@ impl Pilot {
                 ok: v.is_none(),
                 severity: ados_protocol::pilot::Severity::Block,
                 msg: v
-                    .clone()
-                    .unwrap_or_else(|| "Aircraft setup complete".into()),
+                    .as_ref()
+                    .map_or_else(|| "Aircraft setup complete".into(), |n| n.msg.clone()),
                 params: Vec::new(),
-                fix: None,
+                fix: v
+                    .as_ref()
+                    .map(|n| ados_protocol::pilot::ReadinessFix::SetupStep {
+                        step: n.step.clone(),
+                    }),
             });
         }
         if let Some(item) = self.mission_inferred() {

@@ -51,7 +51,6 @@ fn radio_and_mesh(r: Routes<AppState>) -> Routes<AppState> {
         .get("/api/v1/ground-station/role", gs_mesh::get_role)
         .put("/api/v1/ground-station/role", gs_mesh_write::put_role)
         .get("/api/v1/ground-station/mesh", gs_mesh::get_mesh_health)
-
         .get(
             "/api/v1/ground-station/mesh/neighbors",
             gs_mesh::get_mesh_neighbors,

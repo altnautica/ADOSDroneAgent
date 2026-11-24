@@ -38,7 +38,7 @@ mod alerts;
 mod fit;
 mod route;
 mod sensing;
-use alerts::alert_rows;
+pub use alerts::alert_rows;
 pub use fit::{min_rows, render};
 
 /// A Pilot row, and whether it must show on a short terminal.
@@ -82,6 +82,8 @@ pub struct PilotInputs<'a> {
     pub now_ms: u64,
     /// The FC's fresh local position (north, east), for the nearest person.
     pub local_pos: Option<(f64, f64)>,
+    /// The alerts draw in their own column, not under the Pilot rows.
+    pub alerts_apart: bool,
 }
 
 /// The pilot's countdowns and banner, critical first: the mission stall
@@ -256,7 +258,9 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         // Nothing publishes the pilot kind: the chip's absent state.
         let state = kv_text(t, "State", LABEL, spec_text("chip.no_pilot", &[]));
         let mut out = vec![(state, true)];
-        out.extend(alert_rows(core, i.alerts, false));
+        if !i.alerts_apart {
+            out.extend(alert_rows(core, i.alerts, false));
+        }
         return out;
     };
     let p_stale = p.stale || i.age_ms >= stale_after_ms();
@@ -465,7 +469,9 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Row> {
         None => stale(kv_text(t, "AGL", LABEL, "–".to_string())),
     };
     out.push((agl, false));
-    out.extend(alert_rows(core, i.alerts, i.airframe_key));
+    if !i.alerts_apart {
+        out.extend(alert_rows(core, i.alerts, i.airframe_key));
+    }
     out
 }
 

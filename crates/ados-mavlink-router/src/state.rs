@@ -151,8 +151,10 @@ pub struct VehicleState {
 /// How long GIMBAL_DEVICE_ATTITUDE_STATUS stays preferred over
 /// MOUNT_ORIENTATION after its last frame.
 pub const GIMBAL_DEVICE_PREFERRED: std::time::Duration = std::time::Duration::from_secs(2);
-/// How long a PreArm/Arm STATUSTEXT stays in the ring.
-pub const PREARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a PreArm/Arm STATUSTEXT stays in the ring: ArduPilot repeats its
+/// PreArm failures every 30 s, so a line holds between repeats. The ring
+/// empties sooner once the checks pass or the vehicle arms.
+pub const PREARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(35);
 /// Most texts the PreArm ring holds.
 pub const PREARM_MAX: usize = 16;
 
@@ -269,6 +271,9 @@ impl VehicleState {
                 self.custom_mode = m.custom_mode as i64;
                 self.system_status = m.system_status as i64;
                 self.armed = (m.base_mode.bits() & 128) != 0;
+                if self.armed {
+                    self.prearm.clear();
+                }
                 self.last_heartbeat = now_iso.to_string();
                 self.mode = mode_name(autopilot, self.firmware, mav_type, m.custom_mode);
                 None
@@ -363,6 +368,10 @@ impl VehicleState {
                 self.battery_remaining =
                     (m.battery_remaining != -1).then_some(m.battery_remaining as i64);
                 self.sensors_health = m.onboard_control_sensors_health.bits() as i64;
+                self.on_prearm_health(
+                    m.onboard_control_sensors_present.bits(),
+                    m.onboard_control_sensors_health.bits(),
+                );
                 None
             }
             MavMessage::GPS_RAW_INT(m) => {

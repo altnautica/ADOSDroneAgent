@@ -97,17 +97,20 @@ fn the_rows_dim_once_the_pilot_ages_past_the_threshold_between_reads() {
     }
 }
 
-/// The Alerts row and every alert line under it.
-fn alert_block(text: &str) -> Vec<&str> {
+/// The Alerts row and every alert line under it, each cut from the alerts'
+/// column on (on a wide terminal the alerts draw beside the Pilot block).
+fn alert_block(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     let at = lines
         .iter()
         .position(|l| l.contains("Alerts    "))
         .unwrap_or_else(|| panic!("no Alerts row\n{text}"));
+    let byte = lines[at].find("Alerts    ").unwrap_or(0);
+    let col = lines[at][..byte].chars().count();
     lines[at..]
         .iter()
         .take_while(|l| !l.trim().is_empty())
-        .copied()
+        .map(|l| l.chars().skip(col).collect())
         .collect()
 }
 

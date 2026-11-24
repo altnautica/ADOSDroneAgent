@@ -1,7 +1,7 @@
 //! A wizard that was running when the agent stopped: marked `interrupted` on
 //! load, continued by `resume` at its first unfinished step.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::schema::{StepState, WizardId, WizardState};
 use super::{reply_err, Engine};
@@ -41,13 +41,7 @@ impl Engine {
         };
         // Without an identity detection has not settled: run it again first.
         if self.uid.is_some() {
-            let finished = |id: &str| {
-                wr.steps
-                    .get(id)
-                    .and_then(|r| r.get("state"))
-                    .and_then(|s| serde_json::from_value::<StepState>(s.clone()).ok())
-                    .is_some_and(|s| matches!(s, StepState::Done | StepState::Skipped))
-            };
+            let finished = |id: &str| step_finished(&wr.steps, id);
             run.idx = run
                 .steps
                 .iter()
@@ -66,4 +60,13 @@ impl Engine {
         self.wizard_dirty = true;
         json!({"ok": true, "wizard": self.wizard_view(w, now)})
     }
+}
+
+/// The step's record shows it done or skipped.
+pub(super) fn step_finished(steps: &Map<String, Value>, id: &str) -> bool {
+    steps
+        .get(id)
+        .and_then(|r| r.get("state"))
+        .and_then(|s| serde_json::from_value::<StepState>(s.clone()).ok())
+        .is_some_and(|s| matches!(s, StepState::Done | StepState::Skipped))
 }

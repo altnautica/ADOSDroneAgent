@@ -46,8 +46,8 @@ pub enum CoreCmd {
     SetRcAdosPosition(u8),
     /// Declare `pilot.rc_receiver` through the pilot's `rc_receiver` action.
     SetRcReceiver(ados_protocol::pilot::RcReceiver),
-    /// `Some(msg)`: setup incomplete (blocks arming); `None`: complete.
-    SetupNeeded(Option<String>),
+    /// `Some(need)`: setup incomplete (blocks arming); `None`: complete.
+    SetupNeeded(Option<crate::setup::SetupNeed>),
     /// The setup engine's active step id, `None` without a run.
     SetupStep(Option<&'static str>),
     /// The setup-strings key of the air wizard's last non-operator abort
@@ -103,7 +103,7 @@ impl PilotHandle {
         let _ = self.cmd.send(CoreCmd::SetRcReceiver(rc)).await;
     }
 
-    pub async fn setup_needed(&self, msg: Option<String>) {
+    pub async fn setup_needed(&self, msg: Option<crate::setup::SetupNeed>) {
         let _ = self.cmd.send(CoreCmd::SetupNeeded(msg)).await;
     }
 

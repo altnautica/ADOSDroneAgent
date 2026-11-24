@@ -39,7 +39,7 @@ fn frame_with_detail() -> Value {
 }
 
 /// The index of the first line in `block` holding `needle`.
-fn at(block: &[&str], needle: &str, text: &str) -> usize {
+fn at(block: &[String], needle: &str, text: &str) -> usize {
     block
         .iter()
         .position(|l| l.contains(needle))
@@ -59,7 +59,7 @@ fn alerts_list_by_section_with_parameter_and_fix_lines() {
     let fix = at(&block, "Fix: Aircraft setup", &text);
     let sensors = at(&block, "Sensors", &text);
     let range = at(&block, "No rangefinder", &text);
-    let settings = at(&block, "Fix: Settings › sensors", &text);
+    let settings = at(&block, "Fix: Settings › Sensors", &text);
     assert!(
         setup < item && item < first && first < unread && unread < more && more < fix,
         "the setup section reads title, item, parameters, fold, fix\n{text}"
@@ -68,6 +68,9 @@ fn alerts_list_by_section_with_parameter_and_fix_lines() {
         fix < sensors && sensors < range && range < settings,
         "the sensors section follows setup in the spec order\n{text}"
     );
-    assert!(!text.contains("P7  0 → 1"), "past six the rest fold\n{text}");
+    assert!(
+        !text.contains("P7  0 → 1"),
+        "past six the rest fold\n{text}"
+    );
     assert!(text.contains("P6  0 → 1"), "{text}");
 }
