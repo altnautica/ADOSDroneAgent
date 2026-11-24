@@ -6,6 +6,21 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.27] - 2026-11-24
+
+### Changed
+- `ados diag link`, the cockpit and the drone's link status report `no_peer` ("No ground station") when a drone's uplink receivers hear nothing: on a drone that usually means the ground station is off, out of range or on another channel, not a deaf radio. The cockpit shows it as a muted chip and raises no RF alert for it. A ground station still reports `deaf`.
+- The plugin-host daemon logs `plugin_sandbox_directives_unsupported` once at startup when the host's systemd ignores part of the plugin sandbox (`ExecPaths=`/`NoExecPaths=` before 248, `SocketBindAllow=`/`SocketBindDeny=` before 249).
+- The video service writes mediamtx's list-form `webrtcAllowOrigins` and `hlsAllowOrigins` keys instead of the deprecated single-value ones.
+
+### Fixed
+- Video: the encoder pipeline with the SEI latency stamp (`video.wfb.sei_latency`) failed every start with `encoder_spawn_failed: Operation not permitted`, so no camera feed ever came up. Process-group leaders now take their own group with `setpgid` in the daemon's session instead of a new session, which Linux refused a pipeline stage to join.
+- FC link: the router's serial auto-detect and the control port list now include Allwinner SoC UARTs (`ttyAS*`), and auto-detect never probes a kernel console port (every `console=` on the kernel command line). The Cubie A7S board profile names its FC UART `/dev/ttyAS2`.
+- Plugins: every plugin unit failed to start on systemd 247 (Debian 11), at its namespace step, because a privileged pre-start ran beside the token credential and the mount namespacing. The plugin-host daemon now loads the loopback guard itself, at startup and whenever the served plugin set or a grant changes, and the units carry no pre-start.
+- Plugins: the loopback guard loads on kernels built without nftables `fib` support; it matches locally addressed packets by their loopback output interface.
+- Plugins: a unit left under a plugin's older hash-free unit name is stopped, deleted and cleared of its failed state.
+- Installer: a retired unit still running or stuck stopping after the upgrade is killed and its failed state cleared. The health gate records a video pipeline that never reaches `streaming` (or settles on an error) and every failed `ados-*` unit as non-required failures, so the result reads `degraded` with the cause instead of `ok`.
+
 ## [0.124.26] - 2026-11-23
 
 ### Changed
