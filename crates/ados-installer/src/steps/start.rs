@@ -31,15 +31,24 @@ use ados_term::exec::{self, CmdResult};
 ///   still active, so a unit revived in that window survives it, and the new
 ///   supervisor never stops a unit outside its profile.
 ///
-/// The stop propagates to every `PartOf=` unit; the explicit stops cover the
-/// other profile's units that are not `PartOf=` the supervisor. The start pulls
-/// in only what is enabled, and the systemd step has already disabled them.
+/// The stop names the supervisor and every unit `PartOf=` it (its
+/// `ConsistsOf`) in one call, so it returns only once all of them are down.
+/// A stop of the supervisor alone returns when the supervisor's own job ends;
+/// the propagated stops can still be queued behind ordering (the MAVLink router
+/// waits for the units ordered after it), and the start below then enqueues a
+/// start for them that cancels the pending stop, so an upgrade left the router
+/// running its old binary. The explicit stops cover the other profile's units
+/// that are not `PartOf=` the supervisor. The start pulls in only what is
+/// enabled, and the systemd step has already disabled them.
 pub(crate) fn cycle_supervisor(
     profile: &str,
     host: ados_protocol::host_kind::HostKind,
     systemctl: &mut dyn FnMut(&[&str]) -> CmdResult,
 ) -> CmdResult {
-    let _ = systemctl(&["stop", SERVICE_NAME]);
+    let parts = systemctl(&["show", "--property=ConsistsOf", "--value", SERVICE_NAME]);
+    let mut stop = vec!["stop", SERVICE_NAME];
+    stop.extend(parts.stdout.split_whitespace());
+    let _ = systemctl(&stop);
     for unit in crate::steps::systemd::other_profile_units(profile, host) {
         let _ = systemctl(&["stop", unit]);
     }
@@ -181,9 +190,14 @@ mod tests {
         for profile in PROFILES {
             let calls = cycle_calls(profile);
             let other = crate::steps::systemd::other_profile_units(profile, HOST);
-            assert_eq!(calls.first().unwrap(), &["stop", SERVICE_NAME], "{profile}");
+            assert_eq!(
+                calls[0],
+                ["show", "--property=ConsistsOf", "--value", SERVICE_NAME],
+                "{profile}"
+            );
+            assert_eq!(calls[1], ["stop", SERVICE_NAME], "{profile}");
             assert_eq!(calls.last().unwrap(), &["start", SERVICE_NAME], "{profile}");
-            let middle: Vec<&Vec<String>> = calls[1..calls.len() - 1].iter().collect();
+            let middle: Vec<&Vec<String>> = calls[2..calls.len() - 1].iter().collect();
             assert_eq!(middle.len(), other.len(), "{profile}");
             for (call, unit) in middle.iter().zip(&other) {
                 assert_eq!(call.as_slice(), ["stop", *unit], "{profile}");
@@ -203,6 +217,39 @@ mod tests {
         ]));
         assert!(cycle_calls("ground_station")
             .contains(&vec!["stop".to_string(), "ados-video.service".to_string()]));
+    }
+
+    /// Regression: an upgrade left the MAVLink router on its old binary. The
+    /// supervisor's stop returned while the router's propagated stop was still
+    /// held back behind ordering, and the supervisor start then cancelled it.
+    /// Every unit `PartOf=` the supervisor is named in the one stop call, so
+    /// the stop returns only once each is down, before the start is issued.
+    #[test]
+    fn every_unit_part_of_the_supervisor_is_stopped_before_the_start() {
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let res = cycle_supervisor("drone", HOST, &mut |args| {
+            calls.push(args.iter().map(|a| a.to_string()).collect());
+            if args.first() == Some(&"show") {
+                CmdResult {
+                    stdout: "ados-mavlink.service ados-video.service\n".to_string(),
+                    ..ok()
+                }
+            } else {
+                ok()
+            }
+        });
+        assert!(res.success());
+        assert_eq!(
+            calls[1],
+            [
+                "stop",
+                SERVICE_NAME,
+                "ados-mavlink.service",
+                "ados-video.service"
+            ]
+        );
+        let start = calls.iter().position(|c| c[0] == "start").unwrap();
+        assert!(start > 1 && start == calls.len() - 1);
     }
 
     #[test]
