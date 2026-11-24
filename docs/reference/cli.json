@@ -55,7 +55,7 @@
     },
     {
       "arguments": [],
-      "help": "WFB link diagnosis (deaf / mis_keyed / jammed / healthy).",
+      "help": "WFB link diagnosis (deaf / no_peer / mis_keyed / jammed / healthy).",
       "options": [
         {
           "default": false,
