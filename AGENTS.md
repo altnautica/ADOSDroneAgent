@@ -179,6 +179,13 @@ as a substitute for repository changes.
 Service, installer, and HAL changes should fail safely when dependencies,
 hardware devices, interfaces, or permissions are unavailable.
 
+- To test on a device before a release, cross-build aarch64 locally
+  (`cargo zigbuild --release --target aarch64-unknown-linux-musl`, the same
+  commands CI runs) and install it with `ados-installer --artifacts <dir>`:
+  each `<asset>-aarch64` with its `<asset>-aarch64.sha256` beside it. Local
+  artifacts need no signature; any asset missing from the directory comes from
+  the release.
+
 ## Working in the Open
 
 This is a public, open-source repository. Every commit, diff, and branch is
