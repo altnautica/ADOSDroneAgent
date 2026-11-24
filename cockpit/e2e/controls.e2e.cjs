@@ -280,7 +280,7 @@ async function shellCase(browser) {
   {
     const { ctx, page } = await pilotPage(browser, { width: 1920, height: 1080 }, sim);
     assert.equal(await shell(page), "flight-framed", "a browser load frames the Feed");
-    assert.equal(await page.locator('[data-shell="flight-framed"] > nav').count(), 1, "the menu rail sits beside it");
+    assert.equal(await page.locator('[data-shell="flight-framed"] > [data-testid="menu-rail"]').count(), 1, "the menu rail sits beside it");
     await page.screenshot({ path: path.join(SHOTS, "shell-framed-1920x1080.png") });
     // Mark the Feed's top bar: the same node after the toggles proves the Feed
     // was not remounted (a remount releases the stick session).

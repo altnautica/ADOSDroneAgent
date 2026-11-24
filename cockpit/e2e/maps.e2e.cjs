@@ -219,9 +219,11 @@ async function fcCase(browser) {
 }
 
 async function layoutCase(browser) {
+  // scale = the chrome scale, root font / 16 with root = clamp(16, 10 + 1vmin, 22)
+  // (cockpit/src/lib/ui-scale.ts): 18 px at 1280x800, 20.8 px at 1920x1080.
   for (const vp of [
-    { width: 1280, height: 800, name: "1280x800", scale: 1 },
-    { width: 1920, height: 1080, name: "1920x1080", scale: 1.33 },
+    { width: 1280, height: 800, name: "1280x800", scale: 1.125 },
+    { width: 1920, height: 1080, name: "1920x1080", scale: 1.3 },
   ]) {
     const { ctx, page } = await open(browser, { pilot: FLYING, fix: 3, width: vp.width, height: vp.height });
     // The minimap's readout: one row inside the map, at chrome size.

@@ -227,7 +227,7 @@ async function tipsCase(browser) {
 
   console.log("tips: seen tips stay seen on reload");
   // (6) Settings › Reset tips, then the Feed shows the first tip again.
-  await page.getByRole("button", { name: STRINGS["cockpit.menu"] }).click();
+  await page.getByRole("button", { name: STRINGS["cockpit.menu"], exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: /Settings/ }).first().click();
   await page.getByTestId("settings-reset-tips").click();
   assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("ados-cockpit-tips") ?? "{}")), { seen: [], open_count: 0 });
