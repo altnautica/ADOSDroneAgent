@@ -150,7 +150,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 # the same listener Router is served on a unix socket and a TCP port.
 axum = "0.8"
 matchit = "0.8"
-tower = "0.4"
+tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 # hyper 1 + the tokio glue serve the same axum Router on the trusted unix
 # socket (a per-connection accept loop) and the LAN TCP port. The http /
