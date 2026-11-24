@@ -104,9 +104,11 @@ buses:
       fc_capable: false   # debug console
     - id: uart2
       # this BSP names its UARTs ttyAS*; uart2 appears once the
-      # sun60iw2p1-uart2 overlay is enabled.
+      # sun60iw2p1-uart2 overlay is enabled. Every UART runs off a 24 MHz
+      # clock, so only 1.5 MHz / n is exact: 1500000 works, while 921600
+      # lands near 750000 and garbles every frame.
       path: /dev/ttyAS2
-      baud: 921600
+      baud: 1500000
       fc_capable: true    # FC link on 30-pin pins 7 (TX) / 11 (RX)
   usb:
     - id: usb-a
@@ -182,7 +184,7 @@ flight_controller:
     - id: fc-uart2
       type: uart
       path: /dev/ttyAS2   # UART2 on pins 7/11
-      baud: 921600
+      baud: 1500000       # FC SERIAL1_BAUD = 1500; 921600 is unreachable here
       priority: 1
     - id: fc-usb
       type: usb-acm
