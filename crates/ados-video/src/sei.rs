@@ -4,10 +4,12 @@
 //! encode stage (raw Annex-B on stdout) and a publish stage (Annex-B on stdin).
 //! [`pump`] copies the bytes between them and [`SeiInjector`] puts one
 //! `user_data_unregistered` SEI NAL carrying the wall-clock time in front of
-//! every VCL slice, so every consumer of the published stream sees the same
-//! timestamp on the same frame. The payload is the one the ground-side parser
-//! (`ados.services.video.sei_parser`) reads: the ADOS latency UUID followed by
-//! the nanosecond timestamp, big-endian.
+//! the first slice of every picture, so every consumer of the published stream
+//! sees the same timestamp on the same frame. Only the first: an SEI between
+//! two slices of one picture starts a new access unit, and a multi-slice frame
+//! would reach every decoder as several partial pictures. The payload is the
+//! one the ground-side parser (`ados.services.video.sei_parser`) reads: the
+//! ADOS latency UUID followed by the nanosecond timestamp, big-endian.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,6 +69,14 @@ fn is_vcl(nal_byte: u8) -> bool {
     matches!(nal_byte & 0x1f, 1 | 5)
 }
 
+/// Whether a VCL slice whose first payload byte is `first_payload_byte` opens
+/// its picture: `first_mb_in_slice` is the payload's leading ue(v), and only
+/// a value of 0 codes as a single `1` bit. Later slices of a multi-slice
+/// picture start further in.
+fn opens_picture(first_payload_byte: u8) -> bool {
+    first_payload_byte & 0x80 != 0
+}
+
 /// The next Annex-B start code at or after `from`: `(offset, length)` where
 /// the length is 3 or 4.
 fn find_start_code(buf: &[u8], from: usize) -> Option<(usize, usize)> {
@@ -90,10 +100,11 @@ pub fn wall_clock_ns() -> u64 {
 /// Streaming SEI injector over an Annex-B byte stream.
 ///
 /// `carry` holds only bytes that come AFTER the last processed start code:
-/// either an unresolved start code still waiting for its NAL header byte, or
-/// up to three trailing zeros that may open the next start code. A start code
-/// whose NAL byte was already seen is never carried, so each VCL NAL gets
-/// exactly one SEI however the stream is chunked.
+/// either an unresolved start code still waiting for its NAL header byte and
+/// first payload byte, or up to three trailing zeros that may open the next
+/// start code. A start code whose NAL was already decided is never carried, so
+/// the first slice of each picture gets exactly one SEI however the stream is
+/// chunked.
 #[derive(Debug, Default)]
 pub struct SeiInjector {
     carry: Vec<u8>,
@@ -105,7 +116,7 @@ impl SeiInjector {
     }
 
     /// Feed `chunk`; append everything that can be committed to `out`, with a
-    /// SEI from `now_ns` in front of each VCL NAL found.
+    /// SEI from `now_ns` in front of the first slice of each picture.
     pub fn push(&mut self, chunk: &[u8], mut now_ns: impl FnMut() -> u64, out: &mut Vec<u8>) {
         self.carry.extend_from_slice(chunk);
         let buf = &self.carry;
@@ -115,12 +126,14 @@ impl SeiInjector {
         let mut unresolved: Option<usize> = None;
         while let Some((offset, len)) = find_start_code(buf, scanned) {
             let nal_idx = offset + len;
-            if nal_idx >= n {
-                // A start code with no NAL byte yet: decide on the next chunk.
+            // The NAL header byte and, for a slice, the first payload byte
+            // (which says whether it opens its picture) must both be here.
+            if nal_idx + 1 >= n {
+                // Not enough of the NAL yet: decide on the next chunk.
                 unresolved = Some(offset);
                 break;
             }
-            if is_vcl(buf[nal_idx]) {
+            if is_vcl(buf[nal_idx]) && opens_picture(buf[nal_idx + 1]) {
                 out.extend_from_slice(&buf[commit..offset]);
                 out.extend_from_slice(&build_sei_nal(now_ns()));
                 commit = offset;
@@ -145,7 +158,8 @@ impl SeiInjector {
     }
 }
 
-/// Copy `reader` to `writer`, injecting a wall-clock SEI before every VCL NAL.
+/// Copy `reader` to `writer`, injecting a wall-clock SEI before the first slice
+/// of every picture.
 /// Returns when either side closes or errors; the caller's process supervision
 /// notices the ended pipeline.
 pub async fn pump<R, W>(mut reader: R, mut writer: W)
@@ -220,8 +234,10 @@ mod tests {
         }
     }
 
-    /// An Annex-B stream of random NALs: `(bytes, vcl_count)`. Payloads never
-    /// contain two zeros in a row, so no false start code appears inside one.
+    /// An Annex-B stream of random NALs: `(bytes, pictures)`, where `pictures`
+    /// counts the VCL NALs that open a picture (first payload byte has bit 7
+    /// set). Payloads never contain two zeros in a row, so no false start code
+    /// appears inside one.
     fn stream(rng: &mut Rng, nals: usize) -> (Vec<u8>, usize) {
         let mut out = Vec::new();
         let mut vcl = 0;
@@ -232,12 +248,14 @@ mod tests {
                 out.extend_from_slice(&[0, 0, 1]);
             }
             let ty = [1u8, 5, 6, 7, 8, 9][rng.below(6) as usize];
-            if is_vcl(ty) {
+            out.push(0x60 | ty);
+            let first = rng.below(256) as u8;
+            if is_vcl(ty) && opens_picture(first) {
                 vcl += 1;
             }
-            out.push(0x60 | ty);
-            let len = 1 + rng.below(40) as usize;
-            let mut last_zero = false;
+            out.push(first);
+            let len = rng.below(40) as usize;
+            let mut last_zero = first == 0;
             for _ in 0..len {
                 let mut b = rng.below(256) as u8;
                 if b == 0 && last_zero {
@@ -293,9 +311,45 @@ mod tests {
                 }
                 inj.finish(&mut out);
                 let (restored, count) = strip_sei(&out, &sei);
-                assert_eq!(count, vcl, "round {round} plan {plan:?}: one SEI per VCL");
+                assert_eq!(count, vcl, "round {round} plan {plan:?}: one SEI per picture");
                 assert_eq!(restored, input, "round {round}: stream otherwise unchanged");
             }
+        }
+    }
+
+    /// A multi-slice picture (x264 `slices=4`) gets one SEI, in front of its
+    /// first slice. An SEI between two slices of one picture opens a new
+    /// access unit, so the publisher split every frame into four quarter
+    /// pictures and the browser painted the missing slices green.
+    #[test]
+    fn a_multi_slice_picture_gets_one_sei_before_its_first_slice() {
+        let sei = build_sei_nal(TS);
+        // first_mb_in_slice is the first ue(v) after the NAL header: a leading
+        // `1` bit is 0 (the picture's first slice); `0001...` is a later one.
+        let picture: Vec<u8> = [
+            &[0u8, 0, 0, 1, 0x65, 0x88, 0x84][..], // IDR, first_mb 0
+            &[0, 0, 0, 1, 0x65, 0x01, 0x42],       // IDR, first_mb > 0
+            &[0, 0, 0, 1, 0x41, 0x9a, 0x02],       // P, first_mb 0
+            &[0, 0, 0, 1, 0x41, 0x02, 0x9a],       // P, first_mb > 0
+        ]
+        .concat();
+        for chunk in 1..=picture.len() {
+            let mut inj = SeiInjector::new();
+            let mut out = Vec::new();
+            for part in picture.chunks(chunk) {
+                inj.push(part, || TS, &mut out);
+            }
+            inj.finish(&mut out);
+            let expected = [
+                &sei[..],
+                &picture[..7],
+                &picture[7..14],
+                &sei[..],
+                &picture[14..21],
+                &picture[21..],
+            ]
+            .concat();
+            assert_eq!(out, expected, "chunk {chunk}");
         }
     }
 
@@ -321,7 +375,7 @@ mod tests {
     async fn pump_injects_between_reader_and_writer() {
         let input: Vec<u8> = [
             &[0u8, 0, 0, 1, 0x67, 0x42][..],
-            &[0, 0, 1, 0x65, 0x11, 0x22],
+            &[0, 0, 1, 0x65, 0x88, 0x22],
         ]
         .concat();
         let mut out = Vec::new();
@@ -334,7 +388,7 @@ mod tests {
             (build_sei_nal(u64::MAX).len()..=build_sei_nal(0).len()).contains(&sei_len),
             "{sei_len}"
         );
-        assert!(out.ends_with(&[0, 0, 1, 0x65, 0x11, 0x22]));
+        assert!(out.ends_with(&[0, 0, 1, 0x65, 0x88, 0x22]));
         assert!(out.starts_with(&[0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x06]));
     }
 }
