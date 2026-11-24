@@ -175,7 +175,7 @@ mdns-sd = "0.13"
 # bundled webpki roots, the same TLS posture and versions the cloud relay and the
 # plugin host already link, so no new TLS stack ships.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-manual-roots-no-provider",
 ] }
