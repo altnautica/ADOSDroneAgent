@@ -34,7 +34,7 @@ fn config_has_exact_ports_and_main_path() {
     assert_eq!(v["webrtc"], true);
     assert_eq!(v["hls"], true);
     assert_eq!(v["logLevel"], "warn");
-    assert_eq!(v["webrtcAllowOrigin"], "*");
+    assert_eq!(v["webrtcAllowOrigins"], Value::from(vec!["*"]));
     // Upstream's own default. The 15s both profiles carried bought nothing.
     assert_eq!(v["webrtcHandshakeTimeout"], "10s");
     assert_eq!(v["webrtcSTUNGatherTimeout"], "2s");
@@ -76,7 +76,7 @@ fn config_has_exact_ports_and_main_path() {
     assert_eq!(v["hlsVariant"], "lowLatency");
     assert_eq!(v["hlsSegmentCount"], 7);
     assert_eq!(v["hlsSegmentDuration"], "1s");
-    assert_eq!(v["hlsAllowOrigin"], "*");
+    assert_eq!(v["hlsAllowOrigins"], Value::from(vec!["*"]));
     // The LL-HLS latency floor, pinned rather than inherited.
     assert_eq!(v["hlsPartDuration"], "200ms");
 
@@ -182,7 +182,7 @@ fn air_and_ground_agree_on_every_shared_key() {
         "srt",
         "webrtc",
         "webrtcAddress",
-        "webrtcAllowOrigin",
+        "webrtcAllowOrigins",
         "webrtcIPsFromInterfaces",
         "webrtcIPsFromInterfacesList",
         "webrtcHandshakeTimeout",
@@ -195,7 +195,7 @@ fn air_and_ground_agree_on_every_shared_key() {
         "hlsSegmentCount",
         "hlsSegmentDuration",
         "hlsPartDuration",
-        "hlsAllowOrigin",
+        "hlsAllowOrigins",
         "pathDefaults",
         "authInternalUsers",
         "paths",

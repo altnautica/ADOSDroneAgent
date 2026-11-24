@@ -99,8 +99,8 @@ struct MediamtxConfig {
     webrtc: bool,
     #[serde(rename = "webrtcAddress")]
     webrtc_address: String,
-    #[serde(rename = "webrtcAllowOrigin")]
-    webrtc_allow_origin: String,
+    #[serde(rename = "webrtcAllowOrigins")]
+    webrtc_allow_origins: Vec<String>,
     #[serde(rename = "webrtcIPsFromInterfaces")]
     webrtc_ips_from_interfaces: bool,
     #[serde(rename = "webrtcIPsFromInterfacesList")]
@@ -128,8 +128,8 @@ struct MediamtxConfig {
     hls_segment_duration: String,
     #[serde(rename = "hlsPartDuration")]
     hls_part_duration: String,
-    #[serde(rename = "hlsAllowOrigin")]
-    hls_allow_origin: String,
+    #[serde(rename = "hlsAllowOrigins")]
+    hls_allow_origins: Vec<String>,
     #[serde(
         rename = "webrtcAdditionalHosts",
         skip_serializing_if = "Option::is_none"
@@ -331,7 +331,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         srt: false,
         webrtc: true,
         webrtc_address: format!("{LOOPBACK_BIND}:{}", params.webrtc_port),
-        webrtc_allow_origin: "*".into(),
+        webrtc_allow_origins: vec!["*".into()],
         webrtc_ips_from_interfaces: !params.loopback_only,
         webrtc_ips_from_interfaces_list: phys_ifaces,
         webrtc_handshake_timeout: WEBRTC_HANDSHAKE_TIMEOUT.into(),
@@ -358,7 +358,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         hls_segment_count: 7,
         hls_segment_duration: "1s".into(),
         hls_part_duration: HLS_PART_DURATION.into(),
-        hls_allow_origin: "*".into(),
+        hls_allow_origins: vec!["*".into()],
         webrtc_additional_hosts: additional_hosts,
         path_defaults: PathDefaults {
             use_absolute_timestamp: false,
