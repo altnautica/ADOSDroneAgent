@@ -105,3 +105,34 @@ async fn terminate_kills_a_grandchild_in_the_group() {
     }
     drop(p);
 }
+
+/// A joined member lands in the leader's process group, and the group
+/// terminate takes it down with the leader.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn spawn_joined_member_shares_the_leader_group_and_dies_with_it() {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::{getpgid, Pid};
+
+    let a = args(&["30"]);
+    let spec = || Spec {
+        program: "sleep",
+        args: &a,
+        stdout: StdoutMode::Null,
+        stderr: StderrMode::Null,
+    };
+    let mut leader = GroupChild::spawn("t", spec()).expect("spawn leader");
+    let leader_pid = Pid::from_raw(leader.pid().expect("leader pid") as i32);
+    let mut member = leader.spawn_joined(spec(), true).expect("spawn member");
+    let member_pid = Pid::from_raw(member.id().expect("member pid") as i32);
+    assert_eq!(getpgid(Some(member_pid)), Ok(leader_pid));
+
+    leader.terminate(Duration::from_secs(2)).await;
+    // The member is the test's own child: reap it, then it must be gone.
+    tokio::time::timeout(Duration::from_secs(2), member.wait())
+        .await
+        .expect("the joined member exits with the group")
+        .expect("reap the member");
+    assert_eq!(kill(member_pid, None), Err(Errno::ESRCH));
+}

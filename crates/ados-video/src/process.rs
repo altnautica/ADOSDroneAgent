@@ -330,6 +330,22 @@ mod tests {
         assert!(!p.is_running());
     }
 
+    /// The publish stage joins the encode stage's process group from the
+    /// daemon's own session; a refused join fails the whole pipeline spawn.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_sei_pipeline_spawns_and_tears_down() {
+        let mut p = ManagedProcess::spawn_sei_pipeline(
+            "t",
+            &["sh".into(), "-c".into(), "sleep 30".into()],
+            &["cat".into()],
+        )
+        .expect("spawn the SEI pipeline");
+        assert!(p.is_running());
+        p.terminate(Duration::from_secs(1)).await;
+        assert!(!p.is_running());
+    }
+
     #[tokio::test]
     async fn stderr_is_takeable_once() {
         let mut p = ManagedProcess::spawn("test-sleep", "sleep", &["30".into()]).unwrap();

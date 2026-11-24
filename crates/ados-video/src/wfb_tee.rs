@@ -23,7 +23,7 @@
 //!   wrong ffmpeg flag re-introduces ~1.2 s of mux latency or breaks codec
 //!   discovery on the input);
 //! - a [`spawn_wfb_tee`] helper that runs that command through
-//!   [`crate::process::ManagedProcess`] (the setsid/killpg owner — no second
+//!   [`crate::process::ManagedProcess`] (the setpgid/killpg owner — no second
 //!   spawner);
 //! - the output-progress watchdog primitives: [`ProgressTracker`] (the shared
 //!   "last progress at" clock the stderr drain stamps and the orchestrator's
@@ -132,7 +132,7 @@ pub fn rtp_destination_url() -> String {
     format!("rtp://{WFB_TEE_HOST}:{WFB_TEE_PORT}?pkt_size={WFB_TEE_PKT_SIZE}")
 }
 
-/// Spawn the wfb_tee ffmpeg through [`ManagedProcess`] (setsid/killpg owner).
+/// Spawn the wfb_tee ffmpeg through [`ManagedProcess`] (setpgid/killpg owner).
 ///
 /// The orphan sweep + UDP-5600-contention defence is the caller's job before
 /// the (re)spawn: call [`crate::process::kill_orphans`] with a pattern matching

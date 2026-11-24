@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "WFB-ng radio link manager: adapter selection, monitor-mode, TX subprocess with setsid/killpg, FHSS hop supervisor, liveness watchdogs."
+description = "WFB-ng radio link manager: adapter selection, monitor-mode, TX subprocess with setpgid/killpg, FHSS hop supervisor, liveness watchdogs."
 
 [[bin]]
 name = "ados-radio"

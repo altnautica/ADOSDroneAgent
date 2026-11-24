@@ -117,7 +117,7 @@ futures-core = "0.3"
 # so the pure-logic core still builds and tests on a non-Linux host.
 sd-notify = "0.5"
 tracing-journald = "0.3"
-# Unix process-group management (setsid + killpg) — the structural fix for
+# Unix process-group management (setpgid + killpg) — the structural fix for
 # the orphaned-wfb_tx bug class. Linux-only; consuming crates target-gate it.
 # `term` adds sys::termios so the installer's onboarding wizard can put the
 # controlling terminal (/dev/tty) into raw mode and restore it on exit.

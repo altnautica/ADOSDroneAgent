@@ -1,7 +1,7 @@
 //! The `ados-radio` service — the WFB TX service for the drone profile.
 //!
 //! Waits for the WFB TX key, selects the injection adapter, sets monitor mode,
-//! spawns `wfb_tx` in its own process group (setsid + killpg, so a wfb binary
+//! spawns `wfb_tx` in its own process group (setpgid + killpg, so a wfb binary
 //! never outlives the service), runs the liveness watchdogs and the FHSS hop
 //! supervisor UDP tasks, writes Contract E sidecars, and shuts down cleanly on
 //! SIGTERM/SIGINT. The `[[bin]]` is a thin wrapper over [`run`].

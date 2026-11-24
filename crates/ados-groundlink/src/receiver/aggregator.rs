@@ -39,7 +39,7 @@ pub fn aggregate_args(
 /// carries only diagnostics, and a file never fills the way an unread pipe does.
 pub(super) const AGGREGATOR_LOG: &str = "/run/ados/wfb-gs-aggregator.log";
 
-/// Spawn the FEC-combine aggregator in its own process group (setsid/killpg).
+/// Spawn the FEC-combine aggregator in its own process group (setpgid/killpg).
 /// stdout is piped: `wfb_rx` prints its per-interval `PKT` stats line there
 /// (`vendor/wfb-ng/src/rx.cpp` `Aggregator::dump_stats`, `IPC_MSG` = stdout).
 pub async fn spawn_aggregator(

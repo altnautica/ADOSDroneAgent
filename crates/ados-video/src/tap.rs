@@ -119,7 +119,7 @@ pub fn frame_format_from_str(pixel_format: &str) -> FrameFormat {
 }
 
 /// Spawn the decoupled vision tap ffmpeg through [`ManagedProcess`]
-/// (setsid/killpg owner — no second spawner), capturing stdout so the reframer
+/// (setpgid/killpg owner — no second spawner), capturing stdout so the reframer
 /// can read the raw frames. The caller composes the source URL from the live
 /// mediamtx RTSP port.
 ///

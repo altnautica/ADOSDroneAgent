@@ -8,7 +8,7 @@
 //!   predecessor generated (ports, WebRTC ICE binding, STUN list, the `main`
 //!   publisher path);
 //! - a [`MediamtxManager`] that spawns `mediamtx <config>` through
-//!   [`crate::process::ManagedProcess`] (the setsid/killpg owner — no second
+//!   [`crate::process::ManagedProcess`] (the setpgid/killpg owner — no second
 //!   spawner), gates startup on the RTSP listener actually accepting, and
 //!   answers the two watchdog queries: per-path `ready` and per-path
 //!   `bytesReceived`.

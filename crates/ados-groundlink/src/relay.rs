@@ -163,7 +163,7 @@ pub fn forward_args(
 }
 
 /// Spawn the FEC forwarder for `(receiver_ip, receiver_port)` on the
-/// drone-facing adapters, in its own process group (setsid/killpg). The
+/// drone-facing adapters, in its own process group (setpgid/killpg). The
 /// forwarder prints no stats; stderr goes to its log file.
 pub async fn spawn_forwarder(
     drone_ifaces: &[String],

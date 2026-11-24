@@ -5,8 +5,11 @@
 //! slot, an orphaned `wfb_rx` holds its UDP port, an orphaned `dnsmasq` holds
 //! a lease socket. [`GroupChild`] makes the cleanup structural:
 //!
-//! - `setsid()` in the pre-exec hook makes the child its own process-group
-//!   leader (PGID == PID), so one `killpg` reaches every member it forks;
+//! - `setpgid(0, 0)` in the pre-exec hook makes the child its own
+//!   process-group leader (PGID == PID), so one `killpg` reaches every member
+//!   it forks. The leader stays in the caller's session, because Linux refuses
+//!   a group join across sessions: [`spawn_joined`](GroupChild::spawn_joined)
+//!   members join from the caller's session too;
 //! - [`terminate`](GroupChild::terminate) is `SIGTERM` to the group, a bounded
 //!   wait, then `SIGKILL` to the group, and a final `SIGKILL` sweep for any
 //!   member that outlived the leader;
@@ -116,10 +119,11 @@ impl GroupChild {
         let mut cmd = spec.command()?;
         configure(&mut cmd);
         #[cfg(target_os = "linux")]
-        // Safety: setsid() is async-signal-safe and is the only call in the hook.
+        // Safety: setpgid() is async-signal-safe and is the only call in the hook.
         unsafe {
             cmd.pre_exec(|| {
-                nix::unistd::setsid().map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+                nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
+                    .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
                 Ok(())
             });
         }
@@ -129,7 +133,7 @@ impl GroupChild {
             let raw = inner
                 .id()
                 .ok_or_else(|| io::Error::other("group child has no PID yet"))?;
-            // After setsid the child leads its own group: PGID == PID.
+            // After setpgid(0, 0) the child leads its own group: PGID == PID.
             nix::unistd::Pid::from_raw(raw as i32)
         };
         Ok(Self {

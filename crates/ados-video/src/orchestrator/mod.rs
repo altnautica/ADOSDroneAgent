@@ -13,7 +13,7 @@
 //! The sequencing follows the Python `VideoPipeline` orchestrator
 //! (`services/video/pipeline/pipeline.py`): the same start order and the same
 //! grace / inbound-stall / wfb-stale health rules. The process-group ownership
-//! (setsid + killpg) that the Python
+//! (setpgid + killpg) that the Python
 //! version did by hand lives structurally in [`crate::process::ManagedProcess`]
 //! now, so a dropped future can never orphan a publish-bridge ffmpeg onto the
 //! mediamtx `/main` slot.

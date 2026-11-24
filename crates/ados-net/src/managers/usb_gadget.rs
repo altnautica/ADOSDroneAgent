@@ -6,7 +6,7 @@
 //! and binds to the first `/sys/class/udc`; after bind, usb0 gets
 //! 192.168.7.1/24 and a single-host `dnsmasq` serves the tethered host.
 //!
-//! The dnsmasq fork goes through [`GroupChild`] (setsid + killpg)
+//! The dnsmasq fork goes through [`GroupChild`] (setpgid + killpg)
 //! so a teardown can never orphan a dnsmasq holding a bound socket on usb0.
 //! Posture: requires root + configfs; off-Linux or unprivileged, the configfs
 //! writes fail cleanly and `setup` returns false without panicking.

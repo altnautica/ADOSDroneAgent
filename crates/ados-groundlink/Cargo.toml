@@ -71,7 +71,7 @@ chacha20poly1305 = "0.11"
 # `recv_async()` the browse loop awaits.
 mdns-sd = "0.13"
 
-# Linux-only edges (systemd notify + journald + setsid/killpg + flock).
+# Linux-only edges (systemd notify + journald + setpgid/killpg + flock).
 # Confined to a target section so the pure-logic core still builds and
 # `cargo test`s on a non-Linux dev host; the edge call sites are cfg-gated
 # with inert fallbacks.

@@ -4,7 +4,7 @@
 //! spawn/teardown the orchestrator drives — the wfb radio tap, the decoupled
 //! vision tap, the headless SEI tap, and the cloud-relay push. Each spawn
 //! carries the
-//! setsid/killpg process-group ownership (via [`crate::process::ManagedProcess`])
+//! setpgid/killpg process-group ownership (via [`crate::process::ManagedProcess`])
 //! so a dropped future can never orphan a child onto a mediamtx publisher slot.
 //!
 //! The supervision policy (the health ticks, the restart ladders, the run
