@@ -3,16 +3,19 @@
 //!
 //! Every tick, on a rig whose supervisor is up and has no bind call in flight:
 //! the normal radio unit runs, the bind unit is stopped, the bind sentinel
-//! reads inactive and no socat is left. At the end: the bind is either bound
-//! on both rigs (the drone runs the key the ground station generated for it,
-//! the ground station its half of the same keypair, the drone holds the slot it
-//! was issued, auto-pair disarmed on both) or aborted on both (keys and pair
-//! config exactly as before), and a rig's last bind reports `paired` exactly
-//! when its key changed.
+//! reads inactive, no socat is left, and a ground station's shared key file
+//! (`/etc/drone.key`) is the drone half of the keypair its radio key belongs
+//! to. At the end: the bind is either bound on both rigs (the drone runs the
+//! key the ground station generated for it, the ground station its half of
+//! the same keypair, the drone holds the slot it was issued, auto-pair
+//! disarmed on both) or aborted on both (keys and pair config exactly as
+//! before), and a rig's last bind reports `paired` exactly when its key
+//! changed.
 
 use std::time::Duration;
 
 use ados_supervisor::bind::keys::FleetIdentity;
+use ados_supervisor::bind::{BindRole, UPSTREAM_DRONE_KEY};
 use serde_norway::{Mapping, Value};
 
 use crate::world::{key_origin, lock, Rig, Shared, World, DRONE, GS};
@@ -72,7 +75,31 @@ fn at_rest(r: &Rig) -> Vec<String> {
     if r.socats > 0 || r.listening {
         out.push(format!("{}: a bind socat is still alive", r.name));
     }
+    out.extend(shared_key_break(r));
     out
+}
+
+/// A ground station's `/etc/drone.key` is the secret its drone holds: the
+/// hop, presence and swarm keys derive from it on both rigs. It must be the
+/// drone half of the keypair the station's radio key belongs to. A bind that
+/// never reached its key apply leaves the pair it found; one that minted a
+/// fresh pair and stopped there leaves a station decoding its drone's video
+/// while every authenticated control frame between them fails.
+fn shared_key_break(r: &Rig) -> Option<String> {
+    if r.role != BindRole::Gs {
+        return None;
+    }
+    let (generation, _) = r.key().and_then(key_origin)?;
+    let shared = r
+        .files
+        .get(UPSTREAM_DRONE_KEY)
+        .and_then(|f| key_origin(&f.data));
+    (shared != Some((generation, 0))).then(|| {
+        format!(
+            "{}: shared key {shared:?} is not the drone half of its radio key's pair {generation}",
+            r.name
+        )
+    })
 }
 
 /// Record a break once per message.

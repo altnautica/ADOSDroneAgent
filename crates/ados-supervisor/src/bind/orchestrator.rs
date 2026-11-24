@@ -27,6 +27,7 @@ mod prep;
 mod session;
 mod stages;
 mod state;
+mod upstream;
 
 pub use host::{BindHost, SocatFailure, SystemHost};
 pub use state::read_sentinel_active;
@@ -93,6 +94,10 @@ pub struct BindOrchestrator {
     /// Every other effect the bind sequence has on the host: files, socat,
     /// keygen, interfaces, the regulatory domain and the sentinel.
     host: Arc<dyn BindHost>,
+    /// A ground station's upstream key pair as this session found it, saved
+    /// before its keygen and restored unless the session reaches its key
+    /// apply (see [`upstream`]).
+    upstream_pair: std::sync::Mutex<Option<upstream::UpstreamPair>>,
 }
 
 /// The peer-evidence verdict for a completed wire exchange. Pure so the

@@ -14,8 +14,10 @@ use crate::bind::BindRole;
 
 impl BindOrchestrator {
     /// Restart the normal wfb unit after a failed/aborted session so the rig is
-    /// never left with both bind and normal profiles stopped.
+    /// never left with both bind and normal profiles stopped, and put back a
+    /// ground station's upstream key pair unless the new one went live.
     pub(super) async fn cleanup(&self, role: BindRole) {
+        self.settle_upstream_pair();
         self.host.kill_stale_socats().await;
         self.pm.stop(role.bind_unit()).await;
         self.pm.start(role.normal_unit()).await;
@@ -28,10 +30,12 @@ impl BindOrchestrator {
         if video_nudge_after_failed_bind(role, key_held) {
             self.pm.try_restart("ados-video.service").await;
         }
-        // A bind attempt cycles the adapter's monitor mode and, on a ground
-        // station, regenerates the shared key file the swarm bus derives its key
-        // from. Restart it with the radio so it is back on the live adapter and
-        // the key on disk — if it is running; a stopped bus stays stopped.
+        // A bind attempt cycles the adapter's monitor mode, and a ground-station
+        // bind rewrites the shared key file the swarm bus derives its key from
+        // (the keygen replaced it; the settle above put it back unless the new
+        // pair went live). Restart it with the radio so it is back on the
+        // live adapter and the key on disk — if it is running; a stopped bus
+        // stays stopped.
         self.pm.try_restart(crate::bind::ADOS_SWARMBUS_UNIT).await;
         // Heal the global reg domain on the way out: a failed/cancelled/watchdog
         // retry cycled the bind unit's monitor mode and may have left the baked

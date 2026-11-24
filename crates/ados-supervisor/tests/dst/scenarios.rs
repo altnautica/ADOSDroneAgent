@@ -19,6 +19,7 @@ pub const ALL: &[(&str, Scenario)] = &[
     ("concurrent", concurrent),
     ("slow_systemd", slow_systemd),
     ("ground_misses_ok", ground_misses_ok),
+    ("ground_rebinds_alone", ground_rebinds_alone),
     ("unissued_drone", crate::unissued::unissued_drone),
 ];
 
@@ -87,6 +88,22 @@ fn no_peer(seed: u64) -> (Run, &'static [Outcome]) {
         gs_present: false,
         first_bind_s: [(0.0, 5.0), (0.0, 0.0)],
         attempts: [2, 0],
+        ..Plan::default()
+    };
+    (simulate(seed, Faults::clean(), plan), &[Outcome::Aborted])
+}
+
+/// The paired ground station opens bind windows while its drone runs normally
+/// and never opens one (the re-arm latch on a station whose drone sent nothing
+/// to decode for the confirm hold): every attempt mints a fresh keypair and
+/// times out in the key transfer. The station must come out on the pair it
+/// had, its shared key file included, or it keeps decoding its drone's video
+/// while every hop and presence frame between them fails authentication.
+fn ground_rebinds_alone(seed: u64) -> (Run, &'static [Outcome]) {
+    let plan = Plan {
+        gs_present: true,
+        first_bind_s: [(0.0, 0.0), (0.0, 5.0)],
+        attempts: [0, 2],
         ..Plan::default()
     };
     (simulate(seed, Faults::clean(), plan), &[Outcome::Aborted])

@@ -9,7 +9,7 @@ use std::time::Duration;
 use ados_protocol::logd::emitter::EventEmitter;
 use ados_supervisor::bind::keys::{apply_pair_fields, FleetIdentity};
 use ados_supervisor::bind::orchestrator::{BindOrchestrator, BindStartError};
-use ados_supervisor::bind::BindRole;
+use ados_supervisor::bind::{BindRole, UPSTREAM_DRONE_KEY, UPSTREAM_GS_KEY};
 use ados_supervisor::process_manager::ProcessManager;
 use tokio::task::JoinHandle;
 
@@ -172,12 +172,15 @@ async fn reconcile_pair(
 
 /// A freshly flashed drone (no key, auto-pair armed) and a ground station
 /// holding the key of an earlier pairing that worked (disarmed, fleet slot
-/// 0). Returns the fleet addressing each rig's operator passes: the ground
-/// station's registry issues the drone a slot, the ground station itself takes
-/// slot 0. An `unissued` drone is told nothing, so it must end on the radio's
-/// default fleet and the registry's first slot, whatever fleet the ground is
-/// on (drawn: the default fleet on about half the seeds, another on the rest);
-/// a ground on another fleet hears it there through its provisional link.
+/// 0), with that pairing's `wfb_keygen` output still in `/etc`: its own
+/// `gs.key` and the `drone.key` it handed that drone, the shared secret its
+/// hop, presence and swarm keys derive from. Returns the fleet addressing each
+/// rig's operator passes: the ground station's registry issues the drone a
+/// slot, the ground station itself takes slot 0. An `unissued` drone is told
+/// nothing, so it must end on the radio's default fleet and the registry's
+/// first slot, whatever fleet the ground is on (drawn: the default fleet on
+/// about half the seeds, another on the rest); a ground on another fleet hears
+/// it there through its provisional link.
 fn setup(w: &Shared, unissued: bool) -> [FleetIdentity; 2] {
     use ados_radio::config::{DEFAULT_FLEET_ID, FIRST_DRONE_SLOT};
     let mut g = lock(w);
@@ -208,13 +211,19 @@ fn setup(w: &Shared, unissued: bool) -> [FleetIdentity; 2] {
         Some(false),
         Some(ground),
     );
-    gs.files.insert(
-        gs.role.key_path().to_string(),
-        File {
-            data: key_blob(0, 1),
-            mtime,
-        },
-    );
+    for (path, which) in [
+        (gs.role.key_path(), 1),
+        (UPSTREAM_GS_KEY, 1),
+        (UPSTREAM_DRONE_KEY, 0),
+    ] {
+        gs.files.insert(
+            path.to_string(),
+            File {
+                data: key_blob(0, which),
+                mtime,
+            },
+        );
+    }
     g.log(format!(
         "ground fleet {ground_fleet}, drone fleet {} slot {}",
         drone.0, drone.1

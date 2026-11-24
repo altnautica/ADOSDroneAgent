@@ -36,6 +36,10 @@ pub const UPSTREAM_BIND_YAML: &str = "/etc/bind.yaml";
 pub const UPSTREAM_DRONE_KEY: &str = "/etc/drone.key";
 /// Where `wfb_keygen` (GS side) / `wfb_bind_client.sh` deposits the gs key.
 pub const UPSTREAM_GS_KEY: &str = "/etc/gs.key";
+/// Ground station: the `gs.key` + `drone.key` pair a bind's keygen replaces,
+/// saved before it and put back unless the bind reaches its key apply. Mode
+/// 0600: it holds the shared secret.
+pub const UPSTREAM_PAIR_BACKUP: &str = "/etc/ados/wfb/upstream-pair-prev.json";
 
 /// Upstream shell script that owns the drone-side bind wire protocol.
 pub const WFB_BIND_SERVER_SH: &str = "/usr/bin/wfb_bind_server.sh";

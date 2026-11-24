@@ -83,6 +83,7 @@ impl BindOrchestrator {
             events,
             pm,
             host,
+            upstream_pair: std::sync::Mutex::new(None),
         }
     }
 
@@ -142,8 +143,20 @@ impl BindOrchestrator {
     /// peer-evidence gate and recorded its key apply (`pending_apply`) had
     /// committed, and its peer may already run the new key, so the apply is
     /// finished from the deposited upstream key; anything earlier rolls back to
-    /// the pair state the rig had, which a bind before its apply never touched.
+    /// the pair state the rig had. A bind before its apply never touched the
+    /// radio key, and a ground station's upstream pair, which its keygen
+    /// replaced, is put back from the copy the session saved. That copy is
+    /// settled even with no sentinel to go by: a bind can die in its setup
+    /// window, before the sentinel reads active, or with the rig's power,
+    /// which empties `/run`.
     pub async fn recover_interrupted(&self) {
+        self.close_interrupted_window().await;
+        self.recover_upstream_pair();
+    }
+
+    /// Close the bind window the sentinel records as still open, finishing a
+    /// committed apply.
+    async fn close_interrupted_window(&self) {
         let Some(body) = self.host.read_sentinel() else {
             return;
         };

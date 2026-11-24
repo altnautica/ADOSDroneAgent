@@ -315,3 +315,20 @@ async fn start_local_bind_clears_session_active_when_it_returns() {
         "session_active must be false once start_local_bind returns"
     );
 }
+
+#[test]
+fn the_saved_upstream_pair_round_trips_and_a_damaged_record_restores_nothing() {
+    use super::upstream::UpstreamPair;
+    let body = br#"{"gs_key":"0a0b","drone_key":null}"#;
+    let pair = UpstreamPair::from_bytes(body).expect("a well-formed record");
+    assert_eq!(UpstreamPair::from_bytes(&pair.to_bytes()), Some(pair));
+    // A record that cannot be read must never be written over real keys.
+    for bad in [
+        &b"not json"[..],
+        br#"{"gs_key":"0a0b"}"#,
+        br#"{"gs_key":"zz","drone_key":null}"#,
+        br#"{"gs_key":7,"drone_key":null}"#,
+    ] {
+        assert_eq!(UpstreamPair::from_bytes(bad), None, "{bad:?}");
+    }
+}

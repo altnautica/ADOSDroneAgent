@@ -39,7 +39,8 @@ pub trait BindHost: Send + Sync {
     fn on_path(&self, bin: &str) -> bool;
 
     /// Ground station: produce a fresh `/etc/gs.key` + `/etc/drone.key` pair,
-    /// removing any leftovers first so a half-written pair never ships.
+    /// removing any leftovers first so a half-written pair never ships. It
+    /// overwrites the pair in place; the caller saves the old one first.
     async fn generate_keypair(&self) -> Result<(), String>;
 
     /// Reload the injection driver onto the configured region options while
@@ -78,6 +79,9 @@ pub trait BindHost: Send + Sync {
 
     /// Atomically write a key file, mode 0600.
     fn write_key(&self, path: &str, blob: &[u8]) -> Result<(), String>;
+
+    /// Remove a file; an absent file is not an error.
+    fn remove_file(&self, path: &str) -> Result<(), String>;
 
     /// The 16-hex fingerprint of the key file at `path`.
     fn read_public_fingerprint(&self, path: &str) -> Result<String, String>;
@@ -199,6 +203,14 @@ impl BindHost for SystemHost {
 
     fn write_key(&self, path: &str, blob: &[u8]) -> Result<(), String> {
         write_atomic(Path::new(path), blob, 0o600).map_err(|e| e.to_string())
+    }
+
+    fn remove_file(&self, path: &str) -> Result<(), String> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn read_public_fingerprint(&self, path: &str) -> Result<String, String> {

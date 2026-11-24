@@ -173,6 +173,18 @@ impl BindHost for SimHost {
         Ok(())
     }
 
+    fn remove_file(&self, path: &str) -> Result<(), String> {
+        if !self.alive() {
+            return Err("process killed".to_string());
+        }
+        let mut g = lock(&self.w);
+        if g.rigs[self.rig].files.remove(path).is_some() {
+            let name = g.rigs[self.rig].name;
+            g.log(format!("{name} removes {path}"));
+        }
+        Ok(())
+    }
+
     fn read_public_fingerprint(&self, path: &str) -> Result<String, String> {
         match lock(&self.w).rigs[self.rig].files.get(path) {
             Some(f) if f.data.len() == 64 => Ok(hex::encode(&f.data[32..40])),

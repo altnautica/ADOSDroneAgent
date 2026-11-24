@@ -57,7 +57,10 @@ impl BindOrchestrator {
 
         // GS-only: generate the fresh keypair BEFORE stopping the wfb unit so a
         // keygen failure leaves the rig with its normal service still running.
+        // The keygen writes over the pair the station holds, so that pair is
+        // saved first and comes back on any exit that leaves it in use.
         if role == BindRole::Gs {
+            self.save_upstream_pair()?;
             self.host.generate_keypair().await.map_err(BindError::new)?;
         }
 
@@ -297,6 +300,7 @@ impl BindOrchestrator {
         // Best-effort fingerprint of the freshly applied key.
         let fp = self.host.read_public_fingerprint(role.key_path()).ok();
         self.set_fingerprint(fp).await;
+        self.settle_upstream_pair();
 
         self.set_state(BindState::Paired).await;
         tracing::info!(role = role.as_str(), "bind_session_paired");
